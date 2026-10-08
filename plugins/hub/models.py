@@ -430,7 +430,8 @@ def desired_bundle_for_identity(identity: str, default_bundle: str = "default") 
     hub-spawn/hub-stop/hub-queue tools) belongs ONLY to the elected
     coordinator, i.e. the agent whose identity is ``koordinator``. Every
     pool gem runs its declared ``agent_type`` (``coder`` by default in
-    ``pool.json``); anything unrecognised falls back to ``default_bundle``.
+    ``pool.json``), and so does a numbered one (``lapis-2``); anything
+    unrecognised falls back to ``default_bundle``.
 
     This is the single source of truth used by the hub to reconcile a plain
     ``kollab`` launch's loaded bundle to its assigned mesh role, so it is a
@@ -446,6 +447,10 @@ def desired_bundle_for_identity(identity: str, default_bundle: str = "default") 
     if identity == COORDINATOR_IDENTITY:
         return COORDINATOR_IDENTITY
     pool = POOL_BY_NAME.get(identity)
+    base, _, number = identity.rpartition("-")
+    if pool is None and number.isdigit():
+        # lapis-2: what the pool hands out once all its gems are live
+        pool = POOL_BY_NAME.get(base)
     if pool and pool.agent_type:
         return pool.agent_type
     return default_bundle

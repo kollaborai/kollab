@@ -192,6 +192,9 @@ function Sidebar({
             } as React.CSSProperties
           }
           side={side}
+          // Focusing the first control on open popped its tooltip (New
+          // Session), and the first Escape closed the tooltip, not the sheet.
+          onOpenAutoFocus={(event) => event.preventDefault()}
         >
           <SheetHeader className="sr-only">
             <SheetTitle>Sidebar</SheetTitle>

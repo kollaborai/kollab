@@ -528,7 +528,17 @@ export function drawEffects(f: FaceFrame) {
     star(ctx, tx, ty, s * 0.08 * Math.sin(ps * Math.PI));
   }
 
-  if (work.bubble) {
+  if (f.bubble > 0.01) {
+    // The bubble opens and closes instead of popping: it fades and grows out
+    // of the small trailing circle by the gem.
+    ctx.save();
+    ctx.globalAlpha *= f.bubble;
+    const ox = rx - 0.14 * s;
+    const oy = ry + 0.2 * s;
+    const grow = 0.55 + 0.45 * f.bubble;
+    ctx.translate(ox, oy);
+    ctx.scale(grow, grow);
+    ctx.translate(-ox, -oy);
     ctx.fillStyle = "rgba(255,255,255,0.95)";
     ctx.strokeStyle = "rgba(0,0,0,0.25)";
     ctx.lineWidth = Math.max(0.6, s * 0.006);
@@ -551,6 +561,7 @@ export function drawEffects(f: FaceFrame) {
       ctx.arc(rx + i * s * 0.045, ry - bounce, s * 0.016, 0, TAU);
       ctx.fill();
     }
+    ctx.restore();
   }
   if (activity === "error") {
     // Anger mark and steam puffs.

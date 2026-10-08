@@ -35,6 +35,32 @@ logger = logging.getLogger(__name__)
 
 PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 
+# The profile a POST /sessions builds from request credentials. No saved
+# profile has this name, so the daemon builds it from KOLLAB_APP_INLINE_* vars
+# (ProfileManager._try_create_profile_from_env).
+INLINE_PROFILE = "app-inline"
+
+
+def inline_profile_env(profile: Any) -> Dict[str, str]:
+    """The env vars that carry an inline profile to its daemon; {} for a saved one."""
+    if getattr(profile, "name", None) != INLINE_PROFILE:
+        return {}
+    fields = {
+        "PROVIDER": profile.provider,
+        "MODEL": profile.model,
+        "API_KEY": profile.api_key,
+        "BASE_URL": profile.base_url,
+        "MAX_TOKENS": profile.max_tokens,
+        "STREAMING": profile.streaming,
+        "SUPPORTS_TOOLS": profile.supports_tools,
+    }
+    prefix = "KOLLAB_" + INLINE_PROFILE.replace("-", "_").upper() + "_"
+    return {
+        prefix + key: str(value).lower() if isinstance(value, bool) else str(value)
+        for key, value in fields.items()
+        if value not in (None, "")
+    }
+
 _APPROVAL_MODE_MAP = {
     "confirm_all": ApprovalMode.CONFIRM_ALL,
     "default": ApprovalMode.DEFAULT,
@@ -129,6 +155,10 @@ class EngineSession:
         self.total_turns = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        # Why the last turn failed, if it did: the terminal prints it once,
+        # but the conversation keeps no trace, so a reloaded page asks here.
+        # ``history_length`` places it after that turn's messages.
+        self.last_turn_error: Optional[Dict[str, Any]] = None
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -161,6 +191,7 @@ class EngineSession:
             system_prompt=self.system_prompt or None,
             user_token=self.user_token,
             solo=self.solo,
+            profile_env=inline_profile_env(self.profile),
         )
 
         if self.approval_mode:
@@ -333,16 +364,26 @@ class EngineSession:
         which permission prompts are outstanding.
         """
         queue = self.subscribe()
+        turn_error = ""
         try:
             while True:
                 event = await queue.get()
                 etype = event.get("type")
 
-                if etype == "turn_complete":
+                if etype == "error":
+                    turn_error = str(event.get("message") or "") or "engine error"
+
+                elif etype == "turn_complete":
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
                     await self.refresh_history()
+                    self.last_turn_error = (
+                        {"message": turn_error, "history_length": len(self.history)}
+                        if turn_error
+                        else None
+                    )
+                    turn_error = ""
 
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw

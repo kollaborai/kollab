@@ -16,7 +16,7 @@ from pathlib import Path
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey, VerifyKey
 
-from .device_names import validate_device_name, validate_network_name, validate_trust
+from .device_names import default_device_name, validate_device_name, validate_network_name, validate_trust
 from .dns.discovery import normalize_target
 
 KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -129,7 +129,7 @@ def parse_invite(token: str) -> dict:
         payload = strict_json(raw, limit=2048)
     except (ValueError, UnicodeError) as exc:
         raise RelayError("invalid relay invitation") from exc
-    if set(payload) != {"v", "origin", "room", "inviter"} or type(payload["v"]) is not int or payload["v"] != 1:
+    if not payload.keys() >= {"v", "origin", "room", "inviter"} or type(payload["v"]) is not int or payload["v"] != 1:
         raise RelayError("unsupported invitation")
     return {
         "origin": canonical_origin(payload["origin"]),
@@ -164,16 +164,9 @@ class RelayState:
     # Devices revoked on this network, by this device or announced by a member:
     # a vouch for one of them counts for nothing until a member accepts it anew.
     revoked: list[str] = field(default_factory=list)
-    # Knocks this device sent that nobody answered yet: the knocked device's key
-    # -> when the knock was sent (epoch seconds). What a knock leaves behind is
-    # cleared if nothing comes of it (docs/specs/agent-network-simple-flow.md).
-    knocks: dict[str, int] = field(default_factory=dict)
-    # The request id of each knock above, so the directory can be asked how it was
-    # decided (POST /relay/v1/contact/status).
-    knock_requests: dict[str, str] = field(default_factory=dict)
-    # Ids (`join:<id>`, `knock:<receipt>`) of the join requests and knocks the
-    # human was already told about in the main pane, pruned to what is still
-    # pending, so a restart announces only what is new.
+    # Ids (`join:<id>`) of the join requests the human was already told about
+    # in the main pane, pruned to what is still pending, so a restart announces
+    # only what is new. Knocks live in plugins/hub/knocks.py.
     announced: list[str] = field(default_factory=list)
     # What the sealed-config sync last told the human in the main pane, so a
     # restart repeats nothing: a digest of the skipped MCP server names ("" for
@@ -225,13 +218,35 @@ class RelayStateStore:
             # device_name/trust/peer_devices/peer_trust is missing those
             # keys, and the dataclass defaults fill them in. Any key outside
             # the dataclass is still rejected.
+            # Knocks became calls: a knock no longer leaves state behind.
+            for gone in ("knocks", "knock_requests"):
+                payload.pop(gone, None)
             if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
             self.state = RelayState(**payload)
             self._validate()
         else:
             self.state = RelayState()
+        if not self.state.device_name:
+            # Pin the name once, so two checkouts of one repo are not both
+            # <host>-<folder>. A joined device keeps the name its network knows.
+            # ponytail: no lock across workspaces; two created in the same
+            # instant can still match, and one network still refuses the second.
+            taken = () if self.state.origin else self._names_in_use()
+            self.state.device_name = default_device_name(workspace, taken)
             self.save()
+
+    def _names_in_use(self) -> set[str]:
+        """Device names the other workspaces on this computer have pinned."""
+        names = set()
+        for other in self.path.parent.glob("*/state.json"):
+            if other.parent == self.path:
+                continue
+            try:
+                names.add(json.loads(self._read_private(other, 65536)).get("device_name") or "")
+            except (OSError, ValueError, AttributeError, RelayError):
+                continue  # unreadable or not ours: it pins no name
+        return names - {""}
 
     @staticmethod
     def _read_private(path: Path, limit: int) -> str:
@@ -313,27 +328,6 @@ class RelayStateStore:
             for voucher in vouchers:
                 validate_public_key(voucher)
         for key in value.revoked:
-            validate_public_key(key)
-        if (
-            not isinstance(value.knocks, dict)
-            or len(value.knocks) > MAX_APPROVALS
-            or any(type(sent) is not int or sent < 0 for sent in value.knocks.values())
-        ):
-            raise RelayError("invalid knock times")
-        for key in value.knocks:
-            validate_public_key(key)
-        if (
-            not isinstance(value.knock_requests, dict)
-            or len(value.knock_requests) > MAX_APPROVALS
-            or any(
-                not isinstance(item, str)
-                or len(item) != 32
-                or not set(item) <= set("0123456789abcdef")
-                for item in value.knock_requests.values()
-            )
-        ):
-            raise RelayError("invalid knock requests")
-        for key in value.knock_requests:
             validate_public_key(key)
         if (
             not isinstance(value.announced, list)

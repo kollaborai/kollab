@@ -1821,6 +1821,9 @@ class QueueProcessor:
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
             self.message_display_service.display_error_message(error_msg)
+            # Web clients follow the turn through semantic events, not the
+            # terminal's red line; without this a failed turn ends silently.
+            publish_semantic(self.renderer, "error", message=error_msg)
             self.last_turn_error = error_msg
             self.turn_completed = True
 

@@ -18,17 +18,13 @@ from plugins.altview.connect_altview import (
     ConnectSubmission,
     PrivateCode,
 )
-from plugins.hub.contact_requests import (
-    ContactDecision,
-    PendingContactRequest,
-    PrivateMessage,
-)
 from plugins.hub.enrollment_client import (
     EnrollmentApprovalRequest,
     _ActiveEnrollmentOffer,
     _LiveEnrollmentRequest,
 )
 from plugins.hub.enrollment_codes import EnrollmentEnvelopeKey
+from plugins.hub.knocks import Call, Ringing
 from plugins.hub.relay_agent import ActiveRelayTask
 from plugins.hub.relay_commands import ConnectSnapshot, JoinRequestRow
 
@@ -47,18 +43,18 @@ def _assert_clean(value, *secrets):
     return text
 
 
-def test_pending_contact_request_repr_is_the_name_and_the_expiry_only():
-    request = PendingContactRequest(
-        RECEIPT, KEY, 1_800_000_000, PrivateMessage("a private introduction"), "ana-laptop"
-    )
+def test_a_ringing_knock_repr_is_the_name_and_the_ring_end_only():
+    ringing = Ringing(RECEIPT, KEY, "ana-laptop", "a private introduction", {"sig": "f" * 128}, 1_800_000_000.0)
 
-    text = _assert_clean(request, RECEIPT, "a private introduction")
+    text = _assert_clean(ringing, RECEIPT, "a private introduction", "f" * 128)
 
     assert "ana-laptop" in text and "1800000000" in text
 
 
-def test_contact_decision_repr_hides_the_receipt():
-    _assert_clean(ContactDecision(RECEIPT, "accepted"), RECEIPT)
+def test_a_placed_call_repr_hides_the_key_the_id_and_the_text():
+    call = Call("kollabor.ai", "8f3a2c1d9e4b7a60", "a private introduction", "ops", 1.0, key=KEY, id=RECEIPT)
+
+    _assert_clean(call, RECEIPT, "a private introduction")
 
 
 def test_connect_outcome_repr_hides_the_receipt_id():

@@ -10,6 +10,7 @@ import json
 import pytest
 from nacl.signing import SigningKey
 
+from plugins.hub.device_names import default_device_name
 from plugins.hub.relay_state import ID, RelayError, RelayStateStore
 
 PEER_KEY = SigningKey.generate().verify_key.encode().hex()
@@ -22,8 +23,8 @@ def store(tmp_path):
     return RelayStateStore(workspace, tmp_path / "state")
 
 
-def test_fresh_state_defaults_to_open_trust_and_no_device_name(store):
-    assert store.state.device_name == ""
+def test_fresh_state_defaults_to_open_trust_and_pins_the_default_name(store):
+    assert store.state.device_name == default_device_name(store.path.parent / "workspace")
     assert store.state.trust == "open"
     assert store.state.peer_devices == {}
     assert store.state.peer_trust == {}
@@ -113,7 +114,7 @@ def test_older_state_file_missing_device_name_and_trust_still_loads(tmp_path):
     first.state_path.write_text(json.dumps(old_payload))
 
     reloaded = RelayStateStore(workspace, state_dir)
-    assert reloaded.state.device_name == ""
+    assert reloaded.state.device_name == default_device_name(workspace)  # pinned on load
     assert reloaded.state.trust == "open"
     assert ID.fullmatch(reloaded.state.workspace_id)
 

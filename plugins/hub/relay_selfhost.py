@@ -6,7 +6,7 @@ proxy at the port; nothing touches kollabor.ai.
 
 The relay is one worker on its in-memory backend. The managed Valkey sidecar
 never persisted anything either: presence rebuilds when devices reconnect, and
-a join code or knock that was waiting ends with the process. What has to survive
+a join code that was waiting ends with the process (a knock is never stored). What has to survive
 a restart is the publisher identity, so the signing key and the revision counter
 live in the state directory and are reused by ``publish`` unchanged. For several
 workers or hosts keep using ``kollab relay run --config``.
@@ -45,13 +45,13 @@ from .relay_service import (
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 9078
 PUBLISH_SECONDS = 60
-# The five routes a TLS proxy forwards. Nothing else (metrics included) is public.
+# The four routes a TLS proxy forwards. Nothing else (metrics included) is public.
+# Knocks ride the websocket.
 ROUTES = (
     ("GET", WELL_KNOWN, "key file"),
     ("GET", "/relay/v1/health", "health"),
     ("WS", "/relay/v1/ws", "websocket"),
     ("POST", "/relay/v1/enrollment/*", "join codes"),
-    ("POST", "/relay/v1/contact/*", "knocks"),
 )
 
 
@@ -149,7 +149,7 @@ def setup_text(settings: Settings, *, created: bool) -> str:
 
 _NGINX = """\
 # Kollab directory for @DOMAIN@. Put these inside the TLS server block for that name.
-# Only these five routes are forwarded; /relay/v1/metrics and everything else stay private.
+# Only these four routes are forwarded; /relay/v1/metrics and everything else stay private.
 location = /.well-known/agent-keys.json {
     proxy_pass http://@UPSTREAM@;
     proxy_set_header Host $host;
@@ -175,19 +175,13 @@ location /relay/v1/enrollment/ {
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }
-location /relay/v1/contact/ {
-    limit_except POST { deny all; }
-    proxy_pass http://@UPSTREAM@;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-}
 """
 
 _CADDY = """\
-# Kollab directory for @DOMAIN@. Only these five routes are forwarded;
+# Kollab directory for @DOMAIN@. Only these four routes are forwarded;
 # /relay/v1/metrics and everything else stay private.
 @DOMAIN@ {
-    @kollab path /.well-known/agent-keys.json /relay/v1/health /relay/v1/ws /relay/v1/enrollment/* /relay/v1/contact/*
+    @kollab path /.well-known/agent-keys.json /relay/v1/health /relay/v1/ws /relay/v1/enrollment/*
     handle @kollab {
         reverse_proxy @UPSTREAM@ {
             header_up X-Real-IP {remote_host}

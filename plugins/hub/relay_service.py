@@ -2,9 +2,11 @@
 
 The service authenticates room possession with an Ed25519 challenge, exposes
 only pseudonymous online peer keys/sessions, and routes bounded ciphertext to
-an online peer in the same room, or in another room when both keys signed a
-declaration naming the other (`/relay/v1/contact/links`). It never decrypts
-messages, fetches caller URLs, executes agent tools, or stores an offline queue.
+an online peer in the same room, or in another room when both keys declared
+each other (a `links` frame). A knock from outside a device's rooms rings that
+device and its answer travels back under the knocker's signed ticket; the
+service stores no knock. It never decrypts messages, fetches caller URLs,
+executes agent tools, or stores an offline queue.
 """
 
 from __future__ import annotations
@@ -26,13 +28,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from aiohttp import WSCloseCode, WSMsgType, web
-from nacl.exceptions import BadSignatureError, CryptoError
+from aiohttp import WSCloseCode, WSMsgType, hdrs, web
+from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
+from . import knock_wire
 from .device_names import NAME_RE
 from .relay_backend import (
-    CONTACT_REQUEST_TTL_MS,
     ENROLLMENT_MAX_NONCES,
     ENROLLMENT_MAX_NONCES_PER_PRINCIPAL,
     ENROLLMENT_MAX_RATE_SOURCES,
@@ -40,7 +42,6 @@ from .relay_backend import (
     ENROLLMENT_RATE_WINDOW_MS,
     LINK_TTL_SECONDS,
     MAX_ACTIVE_ENROLLMENT_OFFERS,
-    MAX_CONTACT_REQUESTS_PER_RECIPIENT,
     MAX_LINK_PEERS,
     InMemoryBackend,
     PeerRecord,
@@ -51,6 +52,13 @@ from .relay_backend import (
 )
 
 PROTOCOL = "kollab-relay/1"
+# The relay protocol versions this relay serves, newest first. A client names
+# the ones it speaks in the WebSocket subprotocol header; naming none means
+# kollab-relay/1. Within a version both sides ignore fields and frames they do
+# not know; a breaking change adds a version and keeps the old one for a while
+# (docs/specs/agent-public-beacon.md#versioning).
+PROTOCOLS = (PROTOCOL,)
+PROTOCOLS_HEADER = "X-Kollab-Relay-Protocols"
 HEALTH_PATH = "/relay/v1/health"
 WEBSOCKET_PATH = "/relay/v1/ws"
 MAX_FRAME_BYTES = 64 * 1024
@@ -100,10 +108,12 @@ ENROLLMENT_MAX_ENVELOPE_CHARS = 4 * ENROLLMENT_MAX_ENVELOPE_BYTES // 3
 ENROLLMENT_TIMESTAMP_SKEW_SECONDS = 120
 ENROLLMENT_NONCE_TTL_MS = 2 * ENROLLMENT_TIMESTAMP_SKEW_SECONDS * 1000
 ENROLLMENT_MAX_ROUNDS = 4
-CONTACT_SIGNATURE_DOMAIN = b"kollab-relay-contact-http/1\x00"
-CONTACT_MAX_ENVELOPE_BYTES = 6 * 1024
-CONTACT_MAX_ENVELOPE_CHARS = (4 * CONTACT_MAX_ENVELOPE_BYTES + 2) // 3
-CONTACT_TIMESTAMP_SKEW_SECONDS = ENROLLMENT_TIMESTAMP_SKEW_SECONDS
+# Knocks and route lookups each get this many a minute per connection and per
+# sending address block (a /24 for IPv4, a /56 for IPv6). The directory keeps no
+# knock, so these are the only knock state it holds.
+KNOCKS_PER_CONNECTION = 6
+KNOCKS_PER_ADDRESS_BLOCK = 60
+KNOCK_WINDOW_SECONDS = 60
 
 # Client-facing schema: each endpoint enforces these exact properties and types.
 # The code is 100 random Crockford Base32 bits, grouped 4-4-4-4-4. The HTTP API
@@ -219,94 +229,6 @@ ENROLLMENT_JSON_SCHEMAS = {
     ),
     "poll_install_ack": _schema(_ISSUER_PROPERTIES),
 }
-
-_CONTACT_ENVELOPE_SCHEMA = {
-    "type": "string",
-    "pattern": "^[A-Za-z0-9_-]+$",
-    "maxLength": CONTACT_MAX_ENVELOPE_CHARS,
-}
-_CONTACT_RECIPIENT_PROPERTIES = {
-    "recipient_identity": {
-        "type": "string",
-        "pattern": "^ed25519:[0-9a-f]{64}$",
-    },
-    "recipient_key": _HEX64,
-}
-_CONTACT_SENDER_PROPERTIES = {
-    "sender_key": _HEX64,
-    "request_id": _HEX32,
-    "issued_at": _INTEGER,
-    "expires_at": _INTEGER,
-    "nonce": _HEX32,
-    "signature": _HEX128,
-}
-CONTACT_JSON_SCHEMAS = {
-    "submit": _schema(
-        {
-            "v": {"const": 1},
-            **_CONTACT_RECIPIENT_PROPERTIES,
-            **_CONTACT_SENDER_PROPERTIES,
-            "envelope": _CONTACT_ENVELOPE_SCHEMA,
-        }
-    ),
-    "inbox": _schema(
-        {
-            "v": {"const": 1},
-            **_CONTACT_RECIPIENT_PROPERTIES,
-            "issued_at": _INTEGER,
-            "nonce": _HEX32,
-            "signature": _HEX128,
-        }
-    ),
-    "decision": _schema(
-        {
-            "v": {"const": 1},
-            **_CONTACT_RECIPIENT_PROPERTIES,
-            "request_id": _HEX32,
-            "decision": {"type": "string", "pattern": "^(accept|reject)$"},
-            "issued_at": _INTEGER,
-            "nonce": _HEX32,
-            "signature": _HEX128,
-        }
-    ),
-    # The sender of a knock asking how it was decided.
-    "status": _schema(
-        {
-            "v": {"const": 1},
-            **_CONTACT_RECIPIENT_PROPERTIES,
-            "sender_key": _HEX64,
-            "request_id": _HEX32,
-            "issued_at": _INTEGER,
-            "nonce": _HEX32,
-            "signature": _HEX128,
-        }
-    ),
-    # A key's consent to link with other keys: `peers` replaces what it declared
-    # before. Two keys reach each other across rooms only while each names the other.
-    "links": _schema(
-        {
-            "v": {"const": 1},
-            "key": _HEX64,
-            "peers": {"type": "array", "items": _HEX64, "maxItems": MAX_LINK_PEERS},
-            "issued_at": _INTEGER,
-            "nonce": _HEX32,
-            "signature": _HEX128,
-        }
-    ),
-    # Public route -> key lookup. Unsigned: knowing a route is the whole
-    # point (it is copied, never typed), and the client never trusts the
-    # answer without recomputing the route from the returned key.
-    "lookup": _schema(
-        {"v": {"const": 1}, "route": {"type": "string", "pattern": "^[0-9a-f]{16}$"}}
-    ),
-}
-
-CONTACT_REQUESTS_PATH = "/relay/v1/contact/requests"
-CONTACT_INBOX_PATH = "/relay/v1/contact/inbox"
-CONTACT_DECISIONS_PATH = "/relay/v1/contact/decisions"
-CONTACT_LOOKUP_PATH = "/relay/v1/contact/lookup"
-CONTACT_LINKS_PATH = "/relay/v1/contact/links"
-CONTACT_STATUS_PATH = "/relay/v1/contact/status"
 
 
 def generate_enrollment_code(offer_id: str) -> str:
@@ -445,52 +367,6 @@ def verify_enrollment_request_signature(
         return False
 
 
-def contact_signature_message(
-    origin: str, method: str, path: str, body: dict[str, Any]
-) -> bytes:
-    if not isinstance(body, dict):
-        raise ValueError("signed request must be a JSON object")
-    signed_body = {key: value for key, value in body.items() if key != "signature"}
-    canonical_json = json.dumps(
-        signed_body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return (
-        CONTACT_SIGNATURE_DOMAIN
-        + method.upper().encode("ascii")
-        + b"\n"
-        + origin.encode("ascii")
-        + b"\n"
-        + path.encode("ascii")
-        + b"\n"
-        + canonical_json
-    )
-
-
-def verify_contact_request_signature(
-    public_key: str,
-    origin: str,
-    method: str,
-    path: str,
-    body: dict[str, Any],
-) -> bool:
-    signature = body.get("signature")
-    if (
-        not isinstance(public_key, str)
-        or not _HEX_64.fullmatch(public_key)
-        or not isinstance(signature, str)
-        or not _HEX_128.fullmatch(signature)
-    ):
-        return False
-    try:
-        VerifyKey(bytes.fromhex(public_key)).verify(
-            contact_signature_message(origin, method, path, body),
-            bytes.fromhex(signature),
-        )
-        return True
-    except (BadSignatureError, CryptoError, ValueError, TypeError, UnicodeEncodeError):
-        return False
-
-
 def _base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -519,14 +395,6 @@ def _validate_enrollment_schema(name: str, frame: dict[str, Any]) -> None:
             raise ValueError("invalid envelope")
     if "code_verifier" in frame:
         _base64url_decode(frame["code_verifier"], expected_bytes=32)
-
-
-def _validate_contact_schema(name: str, frame: dict[str, Any]) -> None:
-    _validate_json_schema(CONTACT_JSON_SCHEMAS[name], frame)
-    if "envelope" in frame:
-        envelope = _base64url_decode(frame["envelope"])
-        if not envelope or len(envelope) > CONTACT_MAX_ENVELOPE_BYTES:
-            raise ValueError("invalid envelope")
 
 
 def _validate_json_schema(schema: dict[str, Any], frame: dict[str, Any]) -> None:
@@ -667,6 +535,12 @@ class PeerConnection:
     key: str | None = None
     session: str | None = None
     announced: bool = False
+    knock_times: list[float] = field(default_factory=list)
+    lookup_times: list[float] = field(default_factory=list)
+    # Set by the first lookup, knock, knock_answer or links frame. Only such a
+    # client is rung: a 0.11 client drops its connection on a frame it does not
+    # know, so ringing it would let any stranger knock it offline.
+    speaks_knocks: bool = False
 
 
 class RelayState:
@@ -697,6 +571,9 @@ class RelayState:
             "relay_forward_errors_total": 0,
             "relay_registration_rejections_total": 0,
             "relay_rate_rejections_total": 0,
+            "relay_knocks_rung_total": 0,
+            "relay_knocks_unavailable_total": 0,
+            "relay_knocks_busy_total": 0,
         }
 
     async def start(self) -> None:
@@ -855,16 +732,19 @@ class RelayState:
             return False
         if not await self.backend.owner_valid():
             return False
-        delivered = await _send_json(
-            client,
-            {
-                "type": "message",
-                "from": route["from"],
-                "session": route["session"],
-                "id": route["id"],
-                "ciphertext": route["ciphertext"],
-            },
-        )
+        kind = route.get("kind", "message")
+        if kind == "knock" and not client.speaks_knocks:
+            return False  # the knocker hears unavailable
+        payload: dict[str, Any] = {
+            "type": kind,
+            "from": route["from"],
+            "session": route["session"],
+            "id": route["id"],
+            "ciphertext": route["ciphertext"],
+        }
+        if kind == "knock":
+            payload["ticket"] = json.loads(route["ticket"])
+        delivered = await _send_json(client, payload)
         if not delivered:
             await _disconnect_peer(self, client)
         return delivered
@@ -1016,12 +896,6 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_post(ENROLLMENT_REPLY_POLL_PATH, enrollment_reply_poll_handler)
     app.router.add_post(ENROLLMENT_ACK_PATH, enrollment_install_ack_handler)
     app.router.add_post(ENROLLMENT_ACK_POLL_PATH, enrollment_install_ack_poll_handler)
-    app.router.add_post(CONTACT_REQUESTS_PATH, contact_request_handler)
-    app.router.add_post(CONTACT_INBOX_PATH, contact_inbox_handler)
-    app.router.add_post(CONTACT_DECISIONS_PATH, contact_decision_handler)
-    app.router.add_post(CONTACT_LOOKUP_PATH, contact_lookup_handler)
-    app.router.add_post(CONTACT_LINKS_PATH, contact_links_handler)
-    app.router.add_post(CONTACT_STATUS_PATH, contact_status_handler)
     app.on_startup.append(start_relay)
     app.on_shutdown.append(shutdown_relay)
     app.on_cleanup.append(cleanup_relay)
@@ -1067,6 +941,7 @@ async def health_handler(request: web.Request) -> web.Response:
         {
             "status": "ok" if healthy else "unavailable",
             "protocol": PROTOCOL,
+            "protocols": list(PROTOCOLS),
             "origin": state.config.origin,
             "node_id": state.config.node_id,
         },
@@ -1118,8 +993,22 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
     source_ip = _source_ip(request, state.config.trusted_proxies)
     if source_ip is None:
         raise web.HTTPForbidden(text="could not determine a literal source IP")
+    offered = {
+        name.strip()
+        for name in request.headers.get(hdrs.SEC_WEBSOCKET_PROTOCOL, "").split(",")
+        if name.strip()
+    }
+    if offered and not offered & set(PROTOCOLS):
+        # The client speaks only versions this relay does not serve: say which
+        # it does, so the client can tell its human which side to update.
+        raise web.HTTPUpgradeRequired(
+            text=json.dumps({"error": "unsupported_protocol", "protocols": list(PROTOCOLS)}),
+            content_type="application/json",
+            headers={PROTOCOLS_HEADER: ",".join(PROTOCOLS)},
+        )
 
     ws = web.WebSocketResponse(
+        protocols=PROTOCOLS,
         max_msg_size=MAX_FRAME_BYTES,
         heartbeat=HEARTBEAT_SECONDS,
         autoping=True,
@@ -1235,56 +1124,278 @@ async def websocket_handler(request: web.Request) -> web.StreamResponse:
                 break
             try:
                 frame = _strict_json(message.data)
-                recipient_key, message_id, ciphertext = _parse_send_shape(frame)
             except (ValueError, TypeError, KeyError):
                 await _send_error(client, "invalid_frame")
                 continue
-
             if client.room_hash is None or client.key is None or client.session is None:
-                await _send_error(client, "not_registered", message_id)
+                await _send_error(client, "not_registered")
                 await ws.close(code=WSCloseCode.POLICY_VIOLATION)
                 break
-            state.metrics["relay_forward_attempts_total"] += 1
-            route_room = client.room_hash
-            try:
-                recipient = await state.destination(client.room_hash, recipient_key)
-                if recipient is None:
-                    # Not in this room: reachable only through a link both
-                    # keys consented to. Anything else looks like an offline peer.
-                    linked = await state.linked_destination(client.key, recipient_key)
-                    if linked is not None:
-                        recipient, route_room = linked
-            except RelayBackendError:
-                state.metrics["relay_forward_errors_total"] += 1
-                await _send_error(client, "backend_unavailable", message_id)
-                await state.backend_failed()
+            handler = _FRAME_HANDLERS.get(frame.get("type"))
+            if handler is None:
+                await _send_error(client, "invalid_frame")
                 continue
-            if recipient is None:
-                state.metrics["relay_forward_errors_total"] += 1
-                await _send_error(client, "peer_offline", message_id)
-                continue
-            route = {
-                "room_hash": route_room,
-                "from": client.key,
-                "session": client.session,
-                "id": message_id,
-                "ciphertext": ciphertext,
-            }
-            try:
-                delivered = await state.forward(recipient, route)
-            except RelayBackendError:
-                state.metrics["relay_forward_errors_total"] += 1
-                await _send_error(client, "backend_unavailable", message_id)
-                await state.backend_failed()
-                continue
-            if not delivered:
-                state.metrics["relay_forward_errors_total"] += 1
-                await _send_error(client, "peer_offline", message_id)
-            else:
-                state.metrics["relay_forward_delivered_total"] += 1
+            if handler is not _handle_send:
+                client.speaks_knocks = True
+            await handler(state, client, frame)
         return ws
     finally:
         await state.release(client)
+
+
+async def _handle_send(
+    state: RelayState, client: PeerConnection, frame: dict[str, Any]
+) -> None:
+    try:
+        recipient_key, message_id, ciphertext = _parse_send_shape(frame)
+    except (ValueError, TypeError, KeyError):
+        await _send_error(client, "invalid_frame")
+        return
+    state.metrics["relay_forward_attempts_total"] += 1
+    route_room = client.room_hash
+    try:
+        recipient = await state.destination(client.room_hash, recipient_key)
+        if recipient is None:
+            # Not in this room: reachable only through a link both
+            # keys consented to. Anything else looks like an offline peer.
+            linked = await state.linked_destination(client.key, recipient_key)
+            if linked is not None:
+                recipient, route_room = linked
+    except RelayBackendError:
+        state.metrics["relay_forward_errors_total"] += 1
+        await _send_error(client, "backend_unavailable", message_id)
+        await state.backend_failed()
+        return
+    if recipient is None:
+        state.metrics["relay_forward_errors_total"] += 1
+        await _send_error(client, "peer_offline", message_id)
+        return
+    route = {
+        "room_hash": route_room,
+        "from": client.key,
+        "session": client.session,
+        "id": message_id,
+        "ciphertext": ciphertext,
+    }
+    try:
+        delivered = await state.forward(recipient, route)
+    except RelayBackendError:
+        state.metrics["relay_forward_errors_total"] += 1
+        await _send_error(client, "backend_unavailable", message_id)
+        await state.backend_failed()
+        return
+    if not delivered:
+        state.metrics["relay_forward_errors_total"] += 1
+        await _send_error(client, "peer_offline", message_id)
+    else:
+        state.metrics["relay_forward_delivered_total"] += 1
+
+
+_ROUTE_HEX = re.compile(r"[0-9a-f]{16}\Z")
+_CIPHERTEXT_B64 = re.compile(r"[A-Za-z0-9+/]+={0,2}\Z")
+
+
+def _address_block(source_ip: str) -> str:
+    address = ipaddress.ip_address(source_ip)
+    prefix = 24 if address.version == 4 else 56
+    return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+
+
+def _within_window(times: list[float], limit: int, now: float) -> bool:
+    """Record one more event if fewer than `limit` happened in the last window."""
+    times[:] = [t for t in times if t > now - KNOCK_WINDOW_SECONDS]
+    if len(times) >= limit:
+        return False
+    times.append(now)
+    return True
+
+
+async def _admit_knock(state: RelayState, client: PeerConnection, kind: str) -> bool:
+    """Admit one knock or route lookup (`kind`), each with its own budget."""
+    times = client.knock_times if kind == "knock" else client.lookup_times
+    if not _within_window(times, KNOCKS_PER_CONNECTION, time.monotonic()):
+        return False
+    bucket = hashlib.sha256(
+        f"{kind}\0{_address_block(client.source_ip)}".encode("ascii")
+    ).hexdigest()
+    return await state.backend.consume_enrollment_rate(
+        bucket, limit=KNOCKS_PER_ADDRESS_BLOCK, window_ms=KNOCK_WINDOW_SECONDS * 1000
+    )
+
+
+def _check_knock_ciphertext(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= knock_wire.MAX_CIPHERTEXT_CHARS
+        or not _CIPHERTEXT_B64.fullmatch(value)
+    ):
+        raise ValueError("invalid knock ciphertext")
+    return value
+
+
+async def _handle_lookup(
+    state: RelayState, client: PeerConnection, frame: dict[str, Any]
+) -> None:
+    """Route -> key of the one device online under it; "" for none or several."""
+    route = frame.get("route")
+    if not frame.keys() >= {"type", "route"} or not isinstance(route, str) or not _ROUTE_HEX.fullmatch(route):
+        await _send_error(client, "invalid_frame")
+        return
+    result, key = "unavailable", ""
+    try:
+        if not await _admit_knock(state, client, "lookup"):
+            result = "busy"
+        else:
+            keys = await state.backend.lookup_contact_route(route)
+            if len(keys) == 1 and keys[0] != client.key:
+                result, key = "found", keys[0]
+    except RelayBackendError:
+        result = "busy"
+    await _send_json(
+        client, {"type": "lookup_result", "route": route, "result": result, "key": key}
+    )
+
+
+async def _handle_knock(
+    state: RelayState, client: PeerConnection, frame: dict[str, Any]
+) -> None:
+    """Ring the device behind `to`, or tell the knocker it is unavailable or busy."""
+    knock_id = frame.get("id")
+    if not frame.keys() >= {"type", "to", "id", "ticket", "ciphertext"} or not (
+        isinstance(knock_id, str) and _HEX_32.fullmatch(knock_id)
+    ):
+        await _send_error(client, "invalid_frame")
+        return
+    try:
+        ticket = knock_wire.check_ticket(frame["ticket"], state.config.origin)
+        if (
+            ticket["from"] != client.key
+            or ticket["to"] != frame["to"]
+            or ticket["id"] != knock_id
+        ):
+            raise ValueError("the ticket does not bind this knock")
+        ciphertext = _check_knock_ciphertext(frame["ciphertext"])
+    except ValueError:
+        await _send_error(client, "invalid_frame", knock_id)
+        return
+    result = "unavailable"
+    try:
+        if not await _admit_knock(state, client, "knock"):
+            result = "busy"
+        else:
+            located = await state.backend.locate(ticket["to"])
+            if located is not None:
+                recipient, room_hash = located
+                route = {
+                    "kind": "knock",
+                    "room_hash": room_hash,
+                    "from": client.key,
+                    "session": client.session,
+                    "id": knock_id,
+                    "ticket": json.dumps(ticket, sort_keys=True, separators=(",", ":")),
+                    "ciphertext": ciphertext,
+                }
+                if await state.forward(recipient, route):
+                    state.metrics["relay_knocks_rung_total"] += 1
+                    return
+    except RelayBackendError:
+        result = "busy"
+    state.metrics[f"relay_knocks_{result}_total"] += 1
+    await _send_json(client, {"type": "knock_result", "id": knock_id, "result": result})
+
+
+async def _handle_knock_answer(
+    state: RelayState, client: PeerConnection, frame: dict[str, Any]
+) -> None:
+    """Carry the rung device's sealed answer back to the knocker, under its ticket.
+
+    The answering device hears `answered`, or `unavailable` when the knocker
+    hung up, so it never binds a peer that will not hear the accept.
+    """
+    knock_id = frame.get("id")
+    if not frame.keys() >= {"type", "id", "ticket", "ciphertext"} or not (
+        isinstance(knock_id, str) and _HEX_32.fullmatch(knock_id)
+    ):
+        await _send_error(client, "invalid_frame")
+        return
+    try:
+        ticket = knock_wire.check_ticket(frame["ticket"], state.config.origin)
+        if ticket["to"] != client.key or ticket["id"] != knock_id:
+            raise ValueError("the ticket does not bind this answer")
+        ciphertext = _check_knock_ciphertext(frame["ciphertext"])
+    except ValueError:
+        await _send_error(client, "invalid_frame", knock_id)
+        return
+    result = "unavailable"
+    try:
+        located = await state.backend.locate(ticket["from"])
+        if located is not None:
+            knocker, room_hash = located
+            delivered = await state.forward(
+                knocker,
+                {
+                    "kind": "knock_answer",
+                    "room_hash": room_hash,
+                    "from": client.key,
+                    "session": client.session,
+                    "id": knock_id,
+                    "ticket": "",
+                    "ciphertext": ciphertext,
+                },
+            )
+            if delivered:
+                result = "answered"
+    except RelayBackendError:
+        result = "busy"
+    await _send_json(client, {"type": "knock_result", "id": knock_id, "result": result})
+
+
+async def _handle_links(
+    state: RelayState, client: PeerConnection, frame: dict[str, Any]
+) -> None:
+    """Replace which other keys this key consents to link with.
+
+    Two devices in different rooms reach each other only while each one's
+    declaration names the other, so neither side can create a link alone. The
+    session already proved the key; `issued_at` keeps a delayed declaration from
+    undoing a later one. The reply says nothing about the other side.
+    """
+    peers, issued_at = frame.get("peers"), frame.get("issued_at")
+    if (
+        not frame.keys() >= {"type", "peers", "issued_at"}
+        or not isinstance(peers, list)
+        or len(peers) > MAX_LINK_PEERS
+        or any(not isinstance(peer, str) or not _HEX_64.fullmatch(peer) for peer in peers)
+        or peers != sorted(set(peers))
+        or client.key in peers
+        or type(issued_at) is not int
+        or abs(int(time.time()) - issued_at) > ENROLLMENT_TIMESTAMP_SKEW_SECONDS
+    ):
+        await _send_error(client, "invalid_frame")
+        return
+    try:
+        result, changed = await state.backend.sync_links(
+            client.key, peers, issued_at=issued_at, ttl_ms=LINK_TTL_SECONDS * 1000
+        )
+    except RelayBackendError:
+        result, changed = "busy", []
+    if changed:
+        try:
+            await state.links_changed(client.key, changed)
+        except RelayBackendError:
+            pass  # stored; the next room reconciliation tells the devices
+    await _send_json(
+        client, {"type": "links_result", "issued_at": issued_at, "result": result}
+    )
+
+
+_FRAME_HANDLERS = {
+    "send": _handle_send,
+    "lookup": _handle_lookup,
+    "knock": _handle_knock,
+    "knock_answer": _handle_knock_answer,
+    "links": _handle_links,
+}
 
 
 async def shutdown_relay(app: web.Application) -> None:
@@ -1406,7 +1517,7 @@ def _strict_json(raw: str) -> dict[str, Any]:
 
 
 def _parse_registration_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
-    if set(frame) != {"type", "key", "room", "session", "signature"}:
+    if not frame.keys() >= {"type", "key", "room", "session", "signature"}:
         raise ValueError("registration has an unexpected shape")
     if frame.get("type") != "register":
         raise ValueError("first client frame must register")
@@ -1426,7 +1537,7 @@ def _parse_registration_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _parse_send_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
-    if set(frame) != {"type", "to", "id", "ciphertext"}:
+    if not frame.keys() >= {"type", "to", "id", "ciphertext"}:
         raise ValueError("send frame has an unexpected shape")
     if frame.get("type") != "send":
         raise ValueError("only send frames are supported")
@@ -1548,51 +1659,6 @@ async def _read_enrollment_frame(
     return frame
 
 
-async def _read_contact_frame(request: web.Request, schema_name: str) -> dict[str, Any]:
-    if request.query_string or "Origin" in request.headers:
-        raise _EnrollmentHTTPError(400, "invalid_request")
-    if request.content_type != "application/json":
-        raise _EnrollmentHTTPError(400, "invalid_request")
-    try:
-        raw = await request.read()
-        frame = _strict_json(raw.decode("utf-8"))
-        _validate_contact_schema(schema_name, frame)
-    except web.HTTPRequestEntityTooLarge:
-        raise
-    except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
-        raise _EnrollmentHTTPError(400, "invalid_request") from exc
-    return frame
-
-
-def _verify_contact_frame(
-    state: RelayState,
-    request: web.Request,
-    frame: dict[str, Any],
-    key_field: str,
-) -> None:
-    issued_at = frame["issued_at"]
-    if abs(int(time.time()) - issued_at) > CONTACT_TIMESTAMP_SKEW_SECONDS:
-        raise _EnrollmentHTTPError(401, "invalid_contact")
-    try:
-        VerifyKey(bytes.fromhex(frame["recipient_key"])).to_curve25519_public_key()
-    except (ValueError, CryptoError) as exc:
-        raise _EnrollmentHTTPError(400, "invalid_request") from exc
-    if frame["recipient_identity"] != "ed25519:" + frame["recipient_key"]:
-        raise _EnrollmentHTTPError(400, "invalid_request")
-    if not verify_contact_request_signature(
-        frame[key_field],
-        state.config.origin,
-        request.method,
-        request.path,
-        frame,
-    ):
-        raise _EnrollmentHTTPError(401, "invalid_contact")
-
-
-def _contact_recipient_hash(public_key: str) -> str:
-    return hashlib.sha256(bytes.fromhex(public_key)).hexdigest()
-
-
 async def _consume_enrollment_request_rate(
     request: web.Request, state: RelayState, *, endpoint: str
 ) -> None:
@@ -1609,8 +1675,6 @@ async def _consume_enrollment_request_rate(
             "enrollment_issuer_poll_handler",
             "enrollment_reply_poll_handler",
             "enrollment_install_ack_poll_handler",
-            "contact_inbox_handler",
-            "contact_status_handler",
         }
         else ENROLLMENT_RATE_LIMIT
     )
@@ -1979,179 +2043,6 @@ async def enrollment_install_ack_poll_handler(
     if result["status"] != "pending":
         raise RelayBackendError("enrollment install receipt state is invalid")
     return web.json_response({"status": "pending"})
-
-
-@_enrollment_endpoint
-async def contact_request_handler(request: web.Request) -> web.Response:
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "submit")
-    _verify_contact_frame(state, request, frame, "sender_key")
-    now = int(time.time())
-    expires_at = frame["expires_at"]
-    if (
-        expires_at <= now
-        or expires_at > now + CONTACT_REQUEST_TTL_MS // 1000
-        or expires_at <= frame["issued_at"]
-    ):
-        raise _EnrollmentHTTPError(400, "invalid_request")
-    await _consume_enrollment_nonce(state, frame, "sender_key")
-    digest = _content_digest(frame)
-    recipient_hash = _contact_recipient_hash(frame["recipient_key"])
-    result = await state.backend.store_contact_request(
-        recipient_hash,
-        frame["request_id"],
-        {
-            "request_id": frame["request_id"],
-            "frame": frame,
-            "content_digest": digest,
-            "expires_at": str(expires_at),
-        },
-        ttl_ms=(expires_at - now) * 1000,
-    )
-    if result in {"capacity", "recipient_capacity"}:
-        raise _EnrollmentHTTPError(429, "capacity")
-    if result == "conflict":
-        raise _EnrollmentHTTPError(409, "conflict")
-    status = 200 if result == "duplicate" else 202
-    return web.json_response(
-        {"status": "queued", "receipt": frame["request_id"]}, status=status
-    )
-
-
-@_enrollment_endpoint
-async def contact_inbox_handler(request: web.Request) -> web.Response:
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "inbox")
-    _verify_contact_frame(state, request, frame, "recipient_key")
-    await _consume_enrollment_nonce(state, frame, "recipient_key")
-    recipient_hash = _contact_recipient_hash(frame["recipient_key"])
-    rows = await state.backend.list_contact_requests(
-        recipient_hash, limit=MAX_CONTACT_REQUESTS_PER_RECIPIENT
-    )
-    if any(
-        not isinstance(row, dict)
-        or not isinstance(row.get("frame"), dict)
-        or row["frame"].get("recipient_key") != frame["recipient_key"]
-        or row["frame"].get("recipient_identity") != frame["recipient_identity"]
-        for row in rows
-    ):
-        raise RelayBackendError("contact request inbox returned malformed data")
-    return web.json_response(
-        {"status": "ok", "requests": [row["frame"] for row in rows]}
-    )
-
-
-@_enrollment_endpoint
-async def contact_decision_handler(request: web.Request) -> web.Response:
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "decision")
-    _verify_contact_frame(state, request, frame, "recipient_key")
-    await _consume_enrollment_nonce(state, frame, "recipient_key")
-    recipient_hash = _contact_recipient_hash(frame["recipient_key"])
-    result = await state.backend.decide_contact_request(
-        recipient_hash,
-        frame["request_id"],
-        "accepted" if frame["decision"] == "accept" else "rejected",
-    )
-    if result == "unavailable":
-        raise _EnrollmentHTTPError(404, "unavailable")
-    if result == "conflict":
-        raise _EnrollmentHTTPError(409, "conflict")
-    status = "accepted" if frame["decision"] == "accept" else "rejected"
-    return web.json_response(
-        {"status": status, "receipt": frame["request_id"]}
-    )
-
-
-@_enrollment_endpoint
-async def contact_status_handler(request: web.Request) -> web.Response:
-    """Tell the sender of a knock how it was decided; nobody else learns anything.
-
-    Signed by the key that sent that request. An unknown, expired or someone
-    else's id gets the same 404 `unavailable`, so the route says nothing about
-    which ids exist. A decided request is readable for the rest of its 24-hour
-    lifetime (CONTACT_REQUEST_TTL_MS), like a pending one.
-    """
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "status")
-    _verify_contact_frame(state, request, frame, "sender_key")
-    await _consume_enrollment_nonce(state, frame, "sender_key")
-    status = await state.backend.contact_request_status(
-        _contact_recipient_hash(frame["recipient_key"]),
-        frame["request_id"],
-        frame["sender_key"],
-    )
-    if status not in {"pending", "accepted", "rejected"}:
-        raise _EnrollmentHTTPError(404, "unavailable")
-    return web.json_response({"status": status})
-
-
-@_enrollment_endpoint
-async def contact_lookup_handler(request: web.Request) -> web.Response:
-    """Resolve a contact route to the key currently registered under it.
-
-    Public and unsigned by design: the whole point of a route is that a
-    stranger who has only ever seen `<domain>/c/<hex>` can look it up. The
-    relay only answers for keys presently connected to a room; it never
-    stores or serves anything else here.
-    """
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "lookup")
-    keys = await state.backend.lookup_contact_route(frame["route"])
-    if not keys:
-        raise _EnrollmentHTTPError(404, "unknown_route")
-    if len(keys) > 1:
-        raise _EnrollmentHTTPError(409, "ambiguous_route")
-    return web.json_response({"key": keys[0]})
-
-
-def _verify_links_frame(
-    state: RelayState, request: web.Request, frame: dict[str, Any]
-) -> None:
-    if abs(int(time.time()) - frame["issued_at"]) > CONTACT_TIMESTAMP_SKEW_SECONDS:
-        raise _EnrollmentHTTPError(401, "invalid_contact")
-    peers = frame["peers"]
-    if peers != sorted(set(peers)) or frame["key"] in peers:
-        raise _EnrollmentHTTPError(400, "invalid_request")
-    if not verify_contact_request_signature(
-        frame["key"], state.config.origin, request.method, request.path, frame
-    ):
-        raise _EnrollmentHTTPError(401, "invalid_contact")
-
-
-@_enrollment_endpoint
-async def contact_links_handler(request: web.Request) -> web.Response:
-    """Record which other keys this key consents to link with.
-
-    The signed body replaces the signer's earlier declaration. Two devices in
-    different rooms reach each other only while each one's declaration names the
-    other, so neither side can create a link alone. The reply says nothing about
-    the other side.
-    """
-    state: RelayState = request.app["relay_state"]
-    frame = await _read_contact_frame(request, "links")
-    _verify_links_frame(state, request, frame)
-    # Only a key that is registered right now may declare, which ties the
-    # stored declarations to live, connection-limited devices.
-    if await state.backend.locate(frame["key"]) is None:
-        raise _EnrollmentHTTPError(403, "unauthorized")
-    await _consume_enrollment_nonce(state, frame, "key")
-    result, changed = await state.backend.sync_links(
-        frame["key"],
-        frame["peers"],
-        issued_at=frame["issued_at"],
-        ttl_ms=LINK_TTL_SECONDS * 1000,
-    )
-    if result == "capacity":
-        raise _EnrollmentHTTPError(429, "capacity")
-    if result == "stale":
-        raise _EnrollmentHTTPError(409, "conflict")
-    if changed:
-        try:
-            await state.links_changed(frame["key"], changed)
-        except RelayBackendError:
-            pass  # stored; the next room reconciliation tells the devices
-    return web.json_response({"status": "stored"})
 
 
 def _parse_trusted_proxy(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:

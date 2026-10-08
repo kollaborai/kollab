@@ -43,10 +43,7 @@ ENROLLMENT_INDEX_CLEANUP_BATCH = 256
 ENROLLMENT_MAX_FAILED_CODES = 5
 ENROLLMENT_MAX_NONCES_PER_PRINCIPAL = 4096
 ENROLLMENT_MAX_NONCES = 131_072
-MAX_ACTIVE_CONTACT_REQUESTS = 4096
-MAX_CONTACT_REQUESTS_PER_RECIPIENT = 32
-CONTACT_REQUEST_TTL_MS = 24 * 60 * 60 * 1000
-CONTACT_INDEX_CLEANUP_BATCH = 256
+LINK_INDEX_CLEANUP_BATCH = 256
 # Cross-room links: each key declares which other keys it consents to reach;
 # a link is active only when both sides declared each other.
 MAX_LINK_PEERS = 64
@@ -115,7 +112,6 @@ class InMemoryBackend:
         self.enrollment_rate: dict[str, tuple[int, float]] = {}
         self.enrollment_nonces: dict[str, dict[str, float]] = {}
         self.enrollment_nonce_count = 0
-        self.contact_requests: dict[str, dict[str, dict[str, Any]]] = {}
         # route hex -> keys currently registered in any room under it. A
         # normal key has exactly one entry; more than one is a (practically
         # impossible) hash collision, reported to callers as "ambiguous"
@@ -673,83 +669,6 @@ class InMemoryBackend:
             return {"status": "pending"}
         return {"status": "ready", "frame": dict(frame)}
 
-    def _prune_contact_requests(self, now: float) -> None:
-        for recipient_hash, requests in list(self.contact_requests.items()):
-            for request_id, row in list(requests.items()):
-                if row["_expires_monotonic"] <= now:
-                    requests.pop(request_id, None)
-            if not requests:
-                self.contact_requests.pop(recipient_hash, None)
-
-    async def store_contact_request(
-        self,
-        recipient_hash: str,
-        request_id: str,
-        fields: dict[str, Any],
-        *,
-        ttl_ms: int,
-    ) -> str:
-        now = time.monotonic()
-        self._prune_contact_requests(now)
-        requests = self.contact_requests.get(recipient_hash, {})
-        existing = requests.get(request_id)
-        if existing is not None:
-            return (
-                "duplicate"
-                if existing["content_digest"] == fields["content_digest"]
-                else "conflict"
-            )
-        if len(requests) >= MAX_CONTACT_REQUESTS_PER_RECIPIENT:
-            return "recipient_capacity"
-        if sum(len(rows) for rows in self.contact_requests.values()) >= MAX_ACTIVE_CONTACT_REQUESTS:
-            return "capacity"
-        row = dict(fields)
-        row.update(
-            {
-                "decision": "pending",
-                "_expires_monotonic": now + ttl_ms / 1000,
-            }
-        )
-        requests[request_id] = row
-        self.contact_requests[recipient_hash] = requests
-        return "stored"
-
-    async def list_contact_requests(
-        self, recipient_hash: str, *, limit: int
-    ) -> list[dict[str, Any]]:
-        self._prune_contact_requests(time.monotonic())
-        rows = self.contact_requests.get(recipient_hash, {})
-        return [
-            dict(row)
-            for row in list(rows.values())[:limit]
-            if row["decision"] == "pending"
-        ]
-
-    async def decide_contact_request(
-        self, recipient_hash: str, request_id: str, decision: str
-    ) -> str:
-        self._prune_contact_requests(time.monotonic())
-        row = self.contact_requests.get(recipient_hash, {}).get(request_id)
-        if row is None:
-            return "unavailable"
-        current = row["decision"]
-        if current == decision:
-            return "duplicate"
-        if current != "pending":
-            return "conflict"
-        row["decision"] = decision
-        return "stored"
-
-    async def contact_request_status(
-        self, recipient_hash: str, request_id: str, sender_key: str
-    ) -> str:
-        """The decision on one request, only for the key that sent it."""
-        self._prune_contact_requests(time.monotonic())
-        row = self.contact_requests.get(recipient_hash, {}).get(request_id)
-        if row is None or row["frame"]["sender_key"] != sender_key:
-            return "unavailable"
-        return row["decision"]
-
 
 _RESERVE_LEASE = """
 local t = redis.call('TIME')
@@ -919,95 +838,6 @@ redis.call('PEXPIRE', KEYS[1], ttl)
 redis.call('ZADD', KEYS[2], now + ttl, ARGV[5] .. ':' .. ARGV[1])
 redis.call('PEXPIRE', KEYS[2], ttl * 2)
 return 1
-"""
-
-_STORE_CONTACT_REQUEST = """
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local request_id = ARGV[1]
-local global_member = ARGV[2] .. ':' .. request_id
-local existing = redis.call('HGET', KEYS[1], request_id)
-if existing then
-  local expiry = redis.call('ZSCORE', KEYS[2], request_id)
-  if expiry and tonumber(expiry) > now then
-    local decoded = cjson.decode(existing)
-    if decoded['content_digest'] == ARGV[3] then return 'duplicate' end
-    return 'conflict'
-  end
-  redis.call('HDEL', KEYS[1], request_id)
-  redis.call('HDEL', KEYS[4], request_id)
-  redis.call('ZREM', KEYS[2], request_id)
-  redis.call('ZREM', KEYS[3], global_member)
-end
-local stale_global = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', now, 'LIMIT', 0, tonumber(ARGV[7]))
-for _, member in ipairs(stale_global) do redis.call('ZREM', KEYS[3], member) end
-local stale_recipient = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[7]))
-for _, expired_id in ipairs(stale_recipient) do
-  redis.call('HDEL', KEYS[1], expired_id)
-  redis.call('HDEL', KEYS[4], expired_id)
-  redis.call('ZREM', KEYS[2], expired_id)
-  redis.call('ZREM', KEYS[3], ARGV[2] .. ':' .. expired_id)
-end
-if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[5]) then return 'recipient_capacity' end
-if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[6]) then return 'capacity' end
-local expires_at = now + tonumber(ARGV[4])
-redis.call('HSET', KEYS[1], request_id, ARGV[8])
-redis.call('HSET', KEYS[4], request_id, 'pending')
-redis.call('ZADD', KEYS[2], expires_at, request_id)
-redis.call('ZADD', KEYS[3], expires_at, global_member)
-redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]) * 2)
-redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[4]) * 2)
-redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[4]) * 2)
-redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[4]) * 2)
-return 'stored'
-"""
-
-_LIST_CONTACT_REQUESTS = """
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[3]))
-for _, request_id in ipairs(expired) do
-  redis.call('HDEL', KEYS[1], request_id)
-  redis.call('HDEL', KEYS[4], request_id)
-  redis.call('ZREM', KEYS[2], request_id)
-  redis.call('ZREM', KEYS[3], ARGV[1] .. ':' .. request_id)
-end
-local ids = redis.call('ZRANGE', KEYS[2], 0, tonumber(ARGV[2]) - 1)
-local rows = {}
-for _, request_id in ipairs(ids) do
-  if redis.call('HGET', KEYS[4], request_id) == 'pending' then
-    local payload = redis.call('HGET', KEYS[1], request_id)
-    if payload then
-      table.insert(rows, request_id)
-      table.insert(rows, payload)
-    end
-  end
-end
-return rows
-"""
-
-_DECIDE_CONTACT_REQUEST = """
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
-if not expiry or tonumber(expiry) <= now or not redis.call('HGET', KEYS[1], ARGV[1]) then
-  return 'unavailable'
-end
-local current = redis.call('HGET', KEYS[3], ARGV[1]) or 'pending'
-if current == ARGV[2] then return 'duplicate' end
-if current ~= 'pending' then return 'conflict' end
-redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
-return 'stored'
-"""
-
-_CONTACT_REQUEST_STATUS = """
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
-local payload = redis.call('HGET', KEYS[1], ARGV[1])
-if not expiry or tonumber(expiry) <= now or not payload then return 'unavailable' end
-if cjson.decode(payload)['frame']['sender_key'] ~= ARGV[2] then return 'unavailable' end
-return redis.call('HGET', KEYS[3], ARGV[1]) or 'pending'
 """
 
 _CREATE_ENROLLMENT_OFFER = """
@@ -1737,7 +1567,7 @@ class RedisRelayBackend:
                 issued_at,
                 key,
                 MAX_ACTIVE_LINK_DECLARATIONS,
-                CONTACT_INDEX_CLEANUP_BATCH,
+                LINK_INDEX_CLEANUP_BATCH,
                 encoded,
                 len(peers),
                 LINK_WITHDRAWAL_SECONDS * 1000,
@@ -2191,106 +2021,6 @@ class RedisRelayBackend:
                 "enrollment installation receipt poll is unavailable"
             ) from exc
 
-    async def store_contact_request(
-        self,
-        recipient_hash: str,
-        request_id: str,
-        fields: dict[str, Any],
-        *,
-        ttl_ms: int,
-    ) -> str:
-        try:
-            encoded = json.dumps(
-                fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            )
-            result = await self._redis.eval(
-                _STORE_CONTACT_REQUEST,
-                4,
-                self._contact_data_key(recipient_hash),
-                self._contact_recipient_index_key(recipient_hash),
-                self._contact_global_index_key(),
-                self._contact_decisions_key(recipient_hash),
-                request_id,
-                recipient_hash,
-                fields["content_digest"],
-                ttl_ms,
-                MAX_CONTACT_REQUESTS_PER_RECIPIENT,
-                MAX_ACTIVE_CONTACT_REQUESTS,
-                CONTACT_INDEX_CLEANUP_BATCH,
-                encoded,
-            )
-            return str(result)
-        except Exception as exc:
-            if isinstance(exc, RelayBackendError):
-                raise
-            raise RelayBackendError("contact request storage is unavailable") from exc
-
-    async def list_contact_requests(
-        self, recipient_hash: str, *, limit: int
-    ) -> list[dict[str, Any]]:
-        if not 1 <= limit <= MAX_CONTACT_REQUESTS_PER_RECIPIENT:
-            raise RelayBackendError("contact request list bound is invalid")
-        try:
-            result = await self._redis.eval(
-                _LIST_CONTACT_REQUESTS,
-                4,
-                self._contact_data_key(recipient_hash),
-                self._contact_recipient_index_key(recipient_hash),
-                self._contact_global_index_key(),
-                self._contact_decisions_key(recipient_hash),
-                recipient_hash,
-                limit,
-                CONTACT_INDEX_CLEANUP_BATCH,
-            )
-            values = [str(value) for value in result]
-            if len(values) % 2:
-                raise RelayBackendError("contact request storage returned invalid data")
-            rows = []
-            for offset in range(0, len(values), 2):
-                row = json.loads(values[offset + 1])
-                if not isinstance(row, dict) or row.get("request_id") != values[offset]:
-                    raise RelayBackendError("contact request storage returned invalid data")
-                rows.append(row)
-            return rows
-        except Exception as exc:
-            if isinstance(exc, RelayBackendError):
-                raise
-            raise RelayBackendError("contact request inbox is unavailable") from exc
-
-    async def decide_contact_request(
-        self, recipient_hash: str, request_id: str, decision: str
-    ) -> str:
-        try:
-            result = await self._redis.eval(
-                _DECIDE_CONTACT_REQUEST,
-                3,
-                self._contact_data_key(recipient_hash),
-                self._contact_recipient_index_key(recipient_hash),
-                self._contact_decisions_key(recipient_hash),
-                request_id,
-                decision,
-            )
-            return str(result)
-        except Exception as exc:
-            raise RelayBackendError("contact request decision is unavailable") from exc
-
-    async def contact_request_status(
-        self, recipient_hash: str, request_id: str, sender_key: str
-    ) -> str:
-        try:
-            result = await self._redis.eval(
-                _CONTACT_REQUEST_STATUS,
-                3,
-                self._contact_data_key(recipient_hash),
-                self._contact_recipient_index_key(recipient_hash),
-                self._contact_decisions_key(recipient_hash),
-                request_id,
-                sender_key,
-            )
-            return str(result)
-        except Exception as exc:
-            raise RelayBackendError("contact request status is unavailable") from exc
-
     async def notify_room_change(self, room_hash: str, node_ids: set[str]) -> None:
         payload = {"type": "room_changed", "room_hash": room_hash}
         for node_id in sorted(node_ids):
@@ -2330,6 +2060,8 @@ class RedisRelayBackend:
             "session": route["session"],
             "id": route["id"],
             "ciphertext": route["ciphertext"],
+            "kind": route.get("kind", "message"),
+            "ticket": route.get("ticket", ""),
         }
         try:
             await self._publish_node(destination.node_id, payload)
@@ -2494,8 +2226,18 @@ class RedisRelayBackend:
             "session",
             "id",
             "ciphertext",
+            "kind",
+            "ticket",
         }
         if set(message) != required:
+            return None
+        kind, ticket = message["kind"], message["ticket"]
+        if (
+            kind not in ("message", "knock", "knock_answer")
+            or not isinstance(ticket, str)
+            or len(ticket) > 2048
+            or (kind == "knock") != bool(ticket)
+        ):
             return None
         if (
             not _is_id(message["route_id"])
@@ -2651,22 +2393,6 @@ class RedisRelayBackend:
     @staticmethod
     def _enrollment_nonce_index_key() -> str:
         return "kollab:relay:enrollment:{mailbox}:nonce-index"
-
-    @staticmethod
-    def _contact_data_key(recipient_hash: str) -> str:
-        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:data"
-
-    @staticmethod
-    def _contact_recipient_index_key(recipient_hash: str) -> str:
-        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:requests"
-
-    @staticmethod
-    def _contact_decisions_key(recipient_hash: str) -> str:
-        return f"kollab:relay:contact:{{mailbox}}:recipient:{recipient_hash}:decisions"
-
-    @staticmethod
-    def _contact_global_index_key() -> str:
-        return "kollab:relay:contact:{mailbox}:active-requests"
 
     @staticmethod
     def _contact_route_key(route_hex: str) -> str:

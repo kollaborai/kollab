@@ -19,8 +19,19 @@ SNAP = {
                   "categories": []}],
 }
 OFFER = {"status": "offered", "offer_id": "a" * 32, "expires_at": "4102444800", "code": CODE}
-KNOCK = {"receipt_id": "1" * 32, "sender_key": SENDER, "expires_at": 4102444800,
-         "introduction": "hi,\nit is  me", "device_name": "other-box"}
+KNOCK = {"id": "1" * 32, "device": "other-box", "fingerprint": "ab12…ef01",
+         "route": "8f3a2c1d9e4b7a60", "text": "hi,\nit is  me", "left": 271}
+KNOCKS_SNAPSHOT = {
+    "online": True, "domain": "kollabor.ai", "mode": "everyone", "mode_until": 0,
+    "ringing": [KNOCK],
+    "missed": [{**{k: v for k, v in KNOCK.items() if k != "left"}, "id": "2" * 32,
+                "device": "bob-desk", "at": 1_800_000_000}],
+    "missed_limit": 20,
+    "calls": [{"route": "1a2b3c4d5e6f7a8b", "target": "kollabor.ai/c/1a2b3c4d5e6f7a8b",
+               "state": "redialing", "left": 60}],
+    "blocked": [{"route": "0123456789abcdef", "device": "spam-box"}],
+    "contacts": [{"route": "fedcba9876543210", "expected": True}],
+}
 
 
 class Hub:
@@ -53,15 +64,14 @@ class Hub:
             raise out
         return out
 
-    async def hub_contact_pending(self, domain):
-        out = self.over.get("pending", [KNOCK])
+    async def hub_knocks(self, action, args):
+        self.calls.append(("knocks", action, args))
+        out = self.over.get("knocks", KNOCKS_SNAPSHOT)
         if isinstance(out, Exception):
             raise out
-        return out
-
-    async def hub_contact_decide(self, *args):
-        self.calls.append(("contact", *args))
-        return ""
+        if action == "list":
+            return {"snapshot": out}
+        return {"text": self.over.get("line", f"{action} done")}
 
     async def hub_connect(self, command):
         self.calls.append(("connect", command))
@@ -167,7 +177,8 @@ async def test_rename_trust_validate_then_call_hub_connect():
 async def test_join_and_knocks_open_the_other_panels():
     assert (await CONNECT.act(Hub(), "join", {}))["open"]["panel"] == "connect-join"
     opened = (await CONNECT.act(Hub(), "knocks", {}))["open"]
-    assert opened["panel"] == "connect-knocks" and ids(opened["rows"]) == [KNOCK["receipt_id"]]
+    assert opened["panel"] == "connect-knocks" and opened["title"] == "Knocks"
+    assert ids(opened["rows"])[0] == "ringing:" + KNOCK["id"]
 
 
 @pytest.mark.asyncio
@@ -207,26 +218,66 @@ async def test_join_status_outcomes(status, ok, poll, text):
 
 
 @pytest.mark.asyncio
-async def test_knocks_list_and_decide_by_receipt_with_server_side_sender_key():
+async def test_the_knocks_panel_lists_every_kind_with_only_its_own_actions():
     hub = Hub()
     panel = await KNOCKS.describe(hub, {})
-    row = panel["rows"][0]
-    assert row["label"] == "other-box" and "hi, it is me" in row["detail"] and SENDER not in json.dumps(panel)
-    assert ids(panel["row_actions"]) == ["allow", "deny"]
-    assert [a["payload_key"] for a in panel["row_actions"]] == ["receipt_id", "receipt_id"]
-    result = await KNOCKS.act(hub, "allow", {"id": KNOCK["receipt_id"]})
-    await KNOCKS.act(hub, "deny", {"id": KNOCK["receipt_id"]})
-    assert result["ok"] and hub.calls == [
-        ("contact", "", KNOCK["receipt_id"], "accept", SENDER, "other-box"),
-        ("contact", "", KNOCK["receipt_id"], "reject", SENDER, "other-box")]
-    with pytest.raises(PanelError) as err:
-        await KNOCKS.act(hub, "allow", {"id": "f" * 32})
-    assert err.value.status == 404
-    down = Hub(pending=ValueError("unavailable"))
-    assert (await KNOCKS.describe(down, {}))["notice"]
-    with pytest.raises(PanelError) as err:
-        await KNOCKS.act(down, "allow", {"id": KNOCK["receipt_id"]})
-    assert err.value.status == 503
+    json.dumps(panel)
+    rows = {row["id"]: row for row in panel["rows"]}
+    assert list(rows) == [
+        "ringing:" + "1" * 32, "call:1a2b3c4d5e6f7a8b", "missed:" + "2" * 32,
+        "blocked:0123456789abcdef", "contact:fedcba9876543210",
+    ]
+    ringing = rows["ringing:" + "1" * 32]
+    assert ringing["label"] == "other-box" and ringing["group"] == "Ringing"
+    assert "hi, it is me" in ringing["detail"] and "4:31 left" in ringing["detail"]
+    assert [row["actions"] for row in rows.values()] == [
+        ["accept", "reject", "block"], ["stop"], ["block", "delete"], ["unblock"], ["unexpect"],
+    ]
+    assert [row["group"] for row in rows.values()] == ["Ringing", "Knocking", "Missed", "Blocked", "Contacts"]
+    summary = {row["label"]: row["value"] for row in panel["summary"]}
+    assert summary == {"Missed": "1 of 20", "Who May Knock": "Everyone"}
+    assert [(c["path"], c["action"]) for c in panel["controls"]] == [
+        ("mode", "mode"), ("expect_route", "expect"), ("block_route", "block_route"),
+    ]
+    assert ids(panel["toolbar_actions"]) == ["clear"]
+
+
+@pytest.mark.asyncio
+async def test_knock_actions_go_to_the_daemon_by_id_or_route():
+    hub = Hub()
+    result = await KNOCKS.act(hub, "accept", {"id": "ringing:" + "1" * 32})
+    await KNOCKS.act(hub, "delete", {"id": "missed:" + "2" * 32})
+    await KNOCKS.act(hub, "unblock", {"id": "blocked:0123456789abcdef"})
+    await KNOCKS.act(hub, "mode", {"mode": "contacts"})
+    await KNOCKS.act(hub, "expect", {"expect_route": "kollabor.ai/c/FEDCBA9876543210"})
+    await KNOCKS.act(hub, "block_route", {"block_route": "0123456789abcdef"})
+    assert result["ok"] and result["message"] == "Accept done."
+    actions = [call[1:] for call in hub.calls if call[1] != "list"]
+    assert actions == [
+        ("accept", {"id": "1" * 32}),
+        ("delete", {"id": "2" * 32}),
+        ("unblock", {"route": "0123456789abcdef"}),
+        ("mode", {"mode": "contacts", "minutes": 0}),
+        ("expect", {"route": "fedcba9876543210"}),
+        ("block_route", {"route": "0123456789abcdef"}),
+    ]
+    # an action a row of that kind does not have, or a gone row, is a 404
+    for action, row_id in (("accept", "missed:" + "2" * 32), ("stop", "nonsense")):
+        with pytest.raises(PanelError) as err:
+            await KNOCKS.act(hub, action, {"id": row_id})
+        assert err.value.status == 404
+    bad = await KNOCKS.act(hub, "expect", {"expect_route": "ana-laptop"})
+    assert bad["ok"] is False and "expect_route" in bad["errors"]
+    gone = Hub(line="connect: that knock is no longer ringing")
+    refused = await KNOCKS.act(gone, "accept", {"id": "ringing:" + "1" * 32})
+    assert refused["ok"] is False and refused["message"] == "That knock is no longer ringing"
+
+
+@pytest.mark.asyncio
+async def test_the_knocks_panel_says_when_knocks_are_unavailable():
+    down = Hub(knocks=ValueError("unavailable"))
+    panel = await KNOCKS.describe(down, {})
+    assert panel["notice"] == "Knocks are unavailable right now." and panel["rows"] == []
 
 
 def test_registry_lists_the_three_network_panels():

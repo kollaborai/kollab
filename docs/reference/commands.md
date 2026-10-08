@@ -36,6 +36,7 @@ keep this folder's agent running (systemd at boot, launchd at login):
 
 attach to a running agent:
   kollab --attach ruby                  full TUI proxy
+  kollab --attach lapis@devbox          same, to an agent on devbox over ssh
   kollab --attach lapis --context bug-fix  attach to context
 
   boots the full kollabor app (banner, input bar, status bar, plugins)
@@ -202,13 +203,16 @@ Shown in the palette and in `/connect help`:
 /connect                           the screen: network, this device, join code, requests, online agents
 /connect <domain>                  join another directory, e.g. kollabor.ai
 /connect code                      a private screen with just the join code (small terminals)
-/connect accept <device>           accept a join or knock request by name
-/connect reject <device>           reject a join or knock request by name
+/connect accept <device>           accept a join request by name
+/connect reject <device>           reject a join request by name
 /connect status                    network, this device, contact route, online agents
 /connect name <name>               name this device
 /connect trust open|agents|manual  trust level for this network
-/connect knock <route> "text"      introduce yourself to a stranger's contact route
-/connect knocks                    review introductions you received
+/connect knock <route> "text"      ring a stranger's contact route; redials for an hour
+/connect knocks [everyone|contacts|nobody]  the knock screen, or set who may knock [for 30m|2h|1d]
+/connect expect <route>            put a route on the contact list; its first knock is accepted
+/connect block <route>             refuse a route's knocks
+/connect unblock <route>           allow a blocked route's knocks again
 /connect allow <device> <agent>    let a device's agent message a local agent
 /connect deny <device> [agent]     revoke a device's access, cancel affected work
 /connect revoke <device>           remove a device or peer
@@ -254,7 +258,7 @@ Removed. Each prints its redirect for one release instead of running:
  network      laptop-kollab-net  via kollabor.ai   trust: open
  this device  laptop-kollab
  join code    7QK4-M2XP   one device, expires in 4:58
- requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
+ requests     home-server wants to join   device ID abcd…ef01   [a]ccept [r]eject
  knocks       1 waiting   /connect knocks
  online       koordinator (this device)
               koordinator@home-server
@@ -293,11 +297,10 @@ Removed. Each prints its redirect for one release instead of running:
   there says the same line, and so does a workspace with no network. An
   attached window whose daemon lost the workspace to a single-process window
   gets the same screen, read from the daemon.
-  `/connect knocks` opens the review for the joined directory: up/down select a
-  knock and `a`/`r` act on the marked row. In an attached window the daemon
-  sends `/connect knock` and holds the knocks, so the review lists its knocks
-  and `a`/`r` decide there; a daemon older than the window answers `attached
-  daemon does not support private contact requests`.
+  `/connect knocks` opens the knock screen (below). In an attached window the
+  daemon places and answers knocks, so the screen shows the daemon's knocks and
+  its keys act there; a daemon older than the window answers `connect: the
+  attached daemon needs an update for knocks`.
 - On the joining device the code form answers as soon as the relay has the
   request: `request sent to kollabor.ai; waiting for approval on another
   device`. It then watches, and shows `joined <network> as <device>. trust:
@@ -314,33 +317,63 @@ human-gated model — every first message needs `/connect authorize` or
 waits for `/connect answer`; that is what the `help all` commands are for.
 
 `/connect accept` and `/connect reject` take a device name; when two pending
-requests share a name, add the start of the fingerprint the Connect screen
+requests share a name, add the start of the device ID the Connect screen
 shows (`/connect accept ana-laptop abcd`). `/connect allow`, `/connect deny`,
 and `/connect revoke` take a device name (see `/connect status`). Under `open`
 trust `allow` and `deny` have no effect and say so.
 
-A stranger outside your network knocks. `/connect status` shows this device's
-contact route, `<domain>/c/<16 hex>`, derived from its key; hand it out
-(copied, never typed). A stranger runs `/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60
-"Ana from Acme. Can your ops agent review a config?"`, and the sealed
-introduction carries the sender's device name. `/connect knocks` lists what you
-received as `1. ana-laptop  fingerprint 1234…5678  "Ana from Acme. Can your
-ops agent…"  [a]ccept [r]eject`. Accepting makes that device a peer with
-`agents` trust and nothing allowed until `/connect allow ana-laptop <agent>`;
-it is never `open`. A name already on the network fails the accept with
-`could not accept <device>: <reason>` and the knock stays pending.
+A stranger outside your network knocks, and a knock is a call: it rings your
+device for 5 minutes while it is online, and the directory keeps nothing.
+`/connect status` shows this device's contact route, `<domain>/c/<16 hex>`,
+derived from its key; hand it out (copied, never typed). A stranger runs
+`/connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Acme. Can your ops
+agent review a config?"` and reads `knocking on kollabor.ai/c/8f3a2c1d9e4b7a60,
+rings for 5:00`. Your main pane says `ana-laptop is knocking. /connect knocks
+to answer (4:58)` once, never while the knock screen is open, and never with the
+stranger's text: that shows on the knock screen only.
+
+```text
+ Knocks
+ ringing        > 1. ana-laptop   device ID 1234…5678   4:51
+                     "Ana from Acme. Can your ops agent review a config?"
+                     [a]ccept [r]eject [b]lock
+ missed         0 of 20
+ blocked        0
+ contacts       0
+ who may knock  everyone   [w] change
+```
+
+Up/down select a row; the selected row prints its keys. `a` accepts: that
+device becomes a peer with `agents` trust and nothing allowed until `/connect
+allow ana-laptop <agent>`; it is never `open`. A device name already on the
+network fails the accept and the knock keeps ringing. `r` rejects (and mutes
+that route for an hour), `b` blocks it. Only an accept is ever answered: a
+refused knock rings out on the stranger's side like an unanswered one, and every
+outcome but accept reads `unavailable` there. The stranger's device redials
+after 1, 2, 4, 8 and 15 minutes, then every 15, for an hour
+(`plugins.hub.knock_redial_minutes`; `[s]` on its own knock screen stops it).
+
+A knock that rings out lands under `missed` (20 at most,
+`plugins.hub.knock_missed_limit`; a full list turns new knocks away): `k` knocks
+back with a line you type, `b` blocks, `d` deletes, `c` clears all. `w`, or
+`/connect knocks everyone|contacts|nobody [for 30m|2h|1d]`, sets who may knock.
+`/connect expect <route>` puts a route on the contact list: its knocks ring
+under `contacts` and its first knock is accepted without asking.
+`/connect block <route>` and `/connect unblock <route>` work by route. The web
+UI has the same rows and actions under Settings → Network → Knocks.
 
 The stranger stays in its own network; it never joins yours. The directory
 routes between the two devices only while each one has told it, with a signed
-message, that it consents to reach the other: the knocking device does so when
-it knocks (it must be on the directory it knocked), yours when you accept.
+message, that it consents to reach the other: yours when you accept, the
+knocking device's when the accept reaches it (it knocks through its own
+directory only).
 Once linked, the stranger's agents see and can message only the agents you
 `/connect allow`, and the allowed agents can answer the agent that knocked. It
 appears in your roster as `agent@device`, with `trust agents` next to it in
 `/connect status`. `/connect deny <device> [agent]` refuses at once;
 `/connect revoke <device>` also removes the link at the directory. A directory
-that predates links (older than 0.11.0) still records the knock and the accept,
-but delivers nothing between the two networks.
+that cannot carry knocks answers `connect: <domain> needs an update to carry
+knocks`.
 
 `/connect status` never shows keys, workspace ids, or `relay:` addresses —
 only names.

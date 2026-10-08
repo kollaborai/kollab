@@ -228,16 +228,20 @@ type ToolGroupComponent = FC<ToolGroupProps> & {
   Content: typeof ToolGroupContent;
 };
 
-const ToolGroupImpl: FC<ToolGroupProps> = ({ children, group }) => (
-  <ToolGroupRoot variant="ghost" defaultOpen>
-    <ToolGroupTrigger
-      count={group.indices.length}
-      indices={group.indices}
-      active={group.status.type === "running"}
-    />
-    <ToolGroupContent>{children}</ToolGroupContent>
-  </ToolGroupRoot>
-);
+const ToolGroupImpl: FC<ToolGroupProps> = ({ children, group }) =>
+  // One call needs no "1 tool call" header: its row shows name, state and time.
+  group.indices.length === 1 ? (
+    <>{children}</>
+  ) : (
+    <ToolGroupRoot variant="ghost" defaultOpen>
+      <ToolGroupTrigger
+        count={group.indices.length}
+        indices={group.indices}
+        active={group.status.type === "running"}
+      />
+      <ToolGroupContent>{children}</ToolGroupContent>
+    </ToolGroupRoot>
+  );
 
 /** The `ToolGroup` slot of `ThreadComponents` (see `Thread.tsx`). */
 const ToolGroup = memo(ToolGroupImpl) as unknown as ToolGroupComponent;

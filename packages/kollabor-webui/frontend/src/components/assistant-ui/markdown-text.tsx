@@ -14,11 +14,13 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 
 const MarkdownTextImpl = () => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
+      preprocess={terminalDialectToMarkdown}
       className="aui-md"
       components={defaultComponents}
       defer
@@ -164,11 +166,31 @@ const defaultComponents = memoizeMarkdownComponents({
     <ul
       className={cn(
         "aui-md-ul marker:text-muted-foreground my-3 ms-5 list-disc [&>li]:mt-1",
+        // A checklist's boxes replace the bullets.
+        "[&.contains-task-list]:ms-0 [&.contains-task-list]:list-none",
         className,
       )}
       {...props}
     />
   ),
+  input: ({ className, type, checked, ...props }) =>
+    type === "checkbox" ? (
+      <span
+        role="img"
+        aria-label={checked ? "Done" : "Not done"}
+        className={cn(
+          "aui-md-checkbox me-2 inline-flex size-3.5 translate-y-0.5 items-center justify-center rounded-[4px] border",
+          checked
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-muted-foreground/60",
+          className,
+        )}
+      >
+        {checked ? <CheckIcon className="size-2.5" strokeWidth={3} /> : null}
+      </span>
+    ) : (
+      <input className={className} type={type} checked={checked} {...props} />
+    ),
   ol: ({ className, ...props }) => (
     <ol
       className={cn(

@@ -50,8 +50,11 @@ human-only-answer rule, the `invite`/`join` file pairing, and the `K1-…`
 - A cron job, a ticket or an error can message any agent on the network.
 - "everything in one config file that is sealed … shared against all of my
   instances securely."
-- Strangers can knock but never get tool access. Some people want a human on
-  every message; that stays available as a setting, not as the default.
+- Strangers can knock but never get tool access. A knock is a phone call, not
+  a letter: "If I knock at your door and you don't answer, I leave. I can see
+  who knocked." The knocker's device redials; the directory never stores a knock.
+- Some people want a human on every message; that stays available as a
+  setting, not as the default.
 - "as easy but as secure as possible."
 
 ## 3. Decisions
@@ -63,7 +66,7 @@ human-only-answer rule, the `invite`/`join` file pairing, and the `K1-…`
 | Addressing | `agent@device`. Keys and `relay:` addresses never appear in the UI. |
 | Device | One identity per workspace, as today, with a human name. |
 | Join code | 8 characters, `XXXX-XXXX`, one device, 5 minutes. See section 8. |
-| Strangers | Kept and shown as `knock` / `knocks`. A stranger never gets `open`. |
+| Strangers | A knock rings the device for 5 minutes, like a call; the directory passes it through and stores none. Every answer but accept reads `unavailable`. Missed knocks stay on the device, 20 at most. Who may knock: everyone, contacts or nobody. A stranger never gets `open`. Story 5. |
 | Automation | `kollab --hub msg agent@device "text"` from any shell. `hub_cron_add` on top. |
 | Sealed config | Everything but OAuth logins and machine-local settings, continuously, primary wins. |
 | Shared login | A human shares the ChatGPT login with chosen devices (`s` at accept, `/connect share`). The device that made the newest record refreshes it; the rest take its result. Section 9, milestone 5. |
@@ -107,11 +110,12 @@ and drops devices only it named. A revoked device stays out until a person on a
 member accepts it again. Approval is not a grant: `agents` and `manual` trust
 work exactly as before. Accepted strangers, below, are not members.
 
-**Strangers.** A device outside your network can send a sealed introduction to
-your contact route. Accepting makes it a peer with `agents` trust and nothing
-allowed until you `/connect allow`. Never `open`. The stranger stays in its own
-network: the directory links its device key to yours across rooms only while
-both devices consented (Story 5).
+**Strangers.** A device outside your network can knock on your contact route.
+The knock rings your device while it is online; the directory passes it
+through and keeps nothing. Accepting makes the knocker a peer with `agents`
+trust and nothing allowed until you `/connect allow`. Never `open`. The
+stranger stays in its own network: the directory links its device key to yours
+across rooms only while both devices consented (Story 5).
 
 **Directory.** kollabor.ai, or any domain that runs `kollab relay serve` and
 adds one DNS TXT record. See section 11.
@@ -162,7 +166,7 @@ Server, over SSH, in kollab:
 Mac, five seconds later, same screen refreshes:
 
 ```
- requests     home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject
+ requests     home-server wants to join   device ID abcd…ef01   [a]ccept [r]eject
 ```
 
 Marco presses `a`.
@@ -353,6 +357,21 @@ He gives Ana that route. Ana:
 /connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Acme. Can your ops agent review a nginx config for me this week?"
 ```
 
+```
+ knocking on kollabor.ai/c/8f3a2c1d9e4b7a60, rings for 5:00
+```
+
+A knock is a call, not a letter. The directory passes it to the device behind
+the route while that device is online, and the device does the ringing. On
+Marco's device a ringing knock shows in the main pane, once, even when no
+Connect screen is open, and never while the knock screen is open. It names the
+device only: the text a stranger wrote reaches the knock screen and nothing a
+model reads.
+
+```
+ ana-laptop is knocking. /connect knocks to answer (4:58)
+```
+
 Marco:
 
 ```
@@ -360,11 +379,26 @@ Marco:
 ```
 
 ```
- 1. ana-laptop  fingerprint 1234…5678   "Ana from Acme. Can your ops agent…"   [a]ccept [r]eject
+ Knocks
+ ringing        > 1. ana-laptop   device ID 1234…5678   4:51
+                     "Ana from Acme. Can your ops agent review a nginx config for me this week?"
+                     [a]ccept [r]eject [b]lock
+ missed         0 of 20
+ blocked        0
+ contacts       0
+ who may knock  everyone   [w] change
+
+ w who may knock   esc close
 ```
 
+The screen uses the Connect screen's lowercase labels. Up/down select a row,
+and the selected row prints its keys. Ana's own screen lists the calls she
+placed under `knocking` (ringing, or redialing with the time to the next try);
+`[s]` stops one.
+
 He accepts. Ana's device becomes a peer with `agents` trust and nothing
-allowed. Marco:
+allowed, and Ana sees `laptop-kollab accepted. Its agents appear once it
+allows them.` Marco:
 
 ```
 /connect allow ana-laptop ops
@@ -374,23 +408,72 @@ Now Ana's agents can message `ops@laptop-kollab` and nothing else. Marco can
 `/connect deny ana-laptop` at any time, and `/connect revoke ana-laptop` to
 remove the peer.
 
+**When nobody answers.** Ana hears `unavailable` when Marco's device is
+offline, when nobody answers within 5 minutes, and when Marco rejects, has
+blocked her, has a full missed list, or lets nobody knock. Only an accept is
+ever answered: a refused or rejected knock rings out like one nobody picked
+up, so Ana cannot tell a reject from a busy afternoon. What does show is
+whether his device is online at all, as with a phone that is switched off: an
+offline device is `unavailable` at once. A reject also mutes her route on his
+device for an hour. Ana's device redials after 1, 2, 4, 8 and 15 minutes, then
+every 15 minutes, and stops an hour after the first try
+(`plugins.hub.knock_redial_minutes`, default 60; 0 rings once):
+
+```
+ kollabor.ai/c/8f3a2c1d9e4b7a60 unavailable. redialing for 1h, next in 1:00. /connect knocks to stop
+ no answer from kollabor.ai/c/8f3a2c1d9e4b7a60 after 1h. try again later
+```
+
+Ana's device prepares nothing for Marco until he accepts, so a knock that never
+connects leaves nothing to clean up.
+
+**Missed knocks.** A knock that rang out while Marco's device was online stays
+on his device, not on the directory: device name, device ID, contact route,
+text and time, newest first, up to `plugins.hub.knock_missed_limit` (default
+20). With the list full, new knocks go unanswered until he clears one (`[d]`
+deletes one, `[c]` clears all). `[k]` knocks back: Marco types a line and his
+device knocks on the route that knocked him. At most 5 knocks ring at once; a
+sixth goes unanswered. A knock that arrives while his device
+is offline is kept nowhere; Ana's redial finds him if he comes back within her
+hour.
+
+**Who may knock.** `/connect knocks everyone|contacts|nobody [for <time>]`, or
+`[w]` on the knock screen. `contacts` lets only the routes on Marco's contact
+list and the peers he accepted knock; `nobody` is do not disturb. `for 30m` or
+`for 2h` switches back to `everyone` afterwards; without it the setting stays.
+Every refused knock reads `unavailable`. `/connect block <route>` (`[b]` on a
+ringing or missed knock) refuses one route for good, and `/connect unblock
+<route>` undoes it. Blocks go by device key, never by the name a knocker chose.
+
+**Expected knocks.** `/connect expect <route>` puts a route on the contact
+list: its knocks ring even under `contacts`, and its first knock is accepted
+without asking, as if Marco had pressed `a`. Ana sends her route along with
+"I'll knock tomorrow". A route is 16 hex characters of her device key, so no
+other key can pass for it. The contact list shows on the knock screen, where
+`[x]` removes a route.
+
+**The web UI** shows the same rows and actions under Settings → Network →
+Knocks, and a ringing knock as a notice with Accept, Reject and Block.
+
+**What the directory does.** It looks up the route, passes the knock to that
+device's live connection, and answers `unavailable` when there is none. It
+keeps no knock. Marco's accept travels back under a reply ticket Ana's device
+signed into the knock (both keys and the time the ring ends), and that
+signature is all the directory checks. Each device key may knock 6 times a
+minute and each sending address block (a /24 for IPv4, a /56 for IPv6) 60
+times; past that, or when the directory is overloaded, the knocker hears
+`busy` and its redial waits longer. A knock costs the directory two websocket
+frames, so load costs bandwidth and connections, never stored knocks. A
+directory that cannot route knocks answers with its name and `needs an update`.
+
 How the message gets there. Ana's device stays in her own network; it never
 joins Marco's. The directory routes between the two device keys across rooms
 only while both consented, and it learns that from two signed declarations,
-never from one side's word: Ana's device declares Marco's key when it
-knocks (it has to be on the directory it knocked), and Marco's declares Ana's
-when he accepts. The declaration is refreshed while each device is online and
-withdrawn by `/connect revoke` or `/connect leave`. The relay still sees
-sealed frames only, and now also which two keys agreed to be linked.
-
-A rejected knock is cleared at once: Ana's device asks the directory once a
-minute how each knock was decided (`POST /relay/v1/contact/status`, answered
-only to the key that sent it, for the knock's 24 hours) and drops what it
-prepared on a rejection. A knock nobody answers within seven days is forgotten
-too, which covers an older directory and an answer that expired while Ana was
-offline: her device drops the approval, trust, link and reply grant it
-prepared, unless the link is live both ways or Marco's device has ever reached
-hers.
+never from one side's word: Marco's device declares Ana's key when he accepts,
+and Ana's declares Marco's when the accept reaches her. The declaration is
+refreshed while each device is online and withdrawn by `/connect revoke` or
+`/connect leave`. The relay still sees sealed frames only, and now also which
+two keys agreed to be linked.
 
 What each side sees. Ana's roster lists exactly the agents Marco allowed, as
 `ops@laptop-kollab`; a message to any other agent on his device does not resolve.
@@ -400,11 +483,7 @@ message. `ops` answers with `hub_msg` to `lapis@ana-laptop`: the agent that
 knocked stays reachable by Marco's device, and nothing else on Ana's side is.
 A stranger is not on the network: it gets no mesh records, is left out of
 `hub_broadcast scope="network"`, and its device appears in `/connect status`
-with `trust agents`. A directory older than 0.11.0 has no link route: the
-knock and the accept still work and nothing is delivered between the two
-networks.
-
-A knock shows in the main pane, once, as `<device> knocked. /connect knocks to review`, even when neither the Connect screen nor the knock screen is open, and never while one of them is. It names the device only.
+with `trust agents`.
 
 ### Story 6: a company runs its own directory
 
@@ -429,7 +508,6 @@ still to do, once:
        GET   /relay/v1/health                 health
        WS    /relay/v1/ws                     websocket
        POST  /relay/v1/enrollment/*           join codes
-       POST  /relay/v1/contact/*              knocks
      paste-ready: kollab relay serve --domain agents.acme.com --print nginx   (or --print caddy)
   3. keep it running: kollab relay serve --domain agents.acme.com --install   (systemd; --print systemd shows the unit)
 
@@ -518,8 +596,9 @@ Shown in the palette and in `/connect help`:
 | `/connect status` | Text: networks, this device, contact route, online `agent@device`, trust | kept, output redesigned |
 | `/connect name <name>` | Name this device | new |
 | `/connect trust open\|agents\|manual` | Trust level for this network | new |
-| `/connect knock <route> "text"` | Introduce yourself to a stranger's contact route | renamed from `contact` |
-| `/connect knocks` | Review introductions you received | renamed from `contacts` |
+| `/connect knock <route> "text"` | Ring a stranger's contact route; redials for an hour while it hears `unavailable` | renamed from `contact` |
+| `/connect knocks [everyone\|contacts\|nobody] [for <time>]` | The knock screen: ringing, missed, blocked, contacts. With an argument, who may knock | renamed from `contacts` |
+| `/connect expect <route>`, `block <route>`, `unblock <route>` | Put a route on the contact list (its first knock is accepted); refuse or allow a route's knocks | new |
 | `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers; under `open` they say they have no effect | kept; argument was a 64-hex key |
 | `/connect revoke <device>` | Remove a device or peer | kept; argument was a 64-hex key |
 | `/connect share <device>` | Share this computer's ChatGPT login with a device on the network (milestone 5, section 9) | new |
@@ -560,9 +639,9 @@ Removed, with the message the router prints for one release:
 | `disconnect` | `use /connect leave` |
 | `grants` | `use /connect status` |
 
-Count: 29 today. 14 kept (7 shown, 7 advanced), 4 renamed, 11 removed, 3 new
-(`name`, `trust`, and `share` from milestone 5). 21 subcommands after, 14 of
-them shown. The `kollab --hub`
+Count: 29 today. 14 kept (7 shown, 7 advanced), 4 renamed, 11 removed, 6 new
+(`name`, `trust`, `share` from milestone 5, and `expect`, `block`, `unblock`
+for knocks). 24 subcommands after, 17 of them shown. The `kollab --hub`
 CLI gains `status` rows and `msg` targets for remote agents; it gains no
 `--connect` family.
 
@@ -615,7 +694,8 @@ Tools. No new tool names. XML tag and native tool go through one handler each:
 | task, scratchpad, vault, state tags | local | unchanged |
 
 Human only, never tools, never in the model's reach: join, code, accept,
-reject, trust, name, knock, allow, deny, revoke, rotate, leave. An agent
+reject, trust, name, knock, knocks, expect, block, unblock, allow, deny,
+revoke, rotate, leave. An agent
 cannot enrol a device or widen trust.
 
 Receiving side, `open` and `agents`: a remote message is a normal hub turn for
@@ -676,7 +756,7 @@ How it stays secure with 40 bits:
 - The relay burns an offer after 5 failed proofs from any source. A failed
   lookup names no offer, so lookups are bounded by the per-source rate limit
   and the 2^40 tag space inside the five-minute window.
-- The issuing human sees the joining device's fingerprint on the accept line
+- The issuing human sees the joining device's ID on the accept line
   and accepts by hand. A guessed code still needs a human to press `a`.
 - The code never enters a command, chat, or a log; the private form keeps
   that guarantee. `/connect code` shows it on a private screen only. The
@@ -772,7 +852,7 @@ and the rest take its result.
 Who gets it:
 
 - A human shares it. `s` on a join request (`home-server wants to join
-  fingerprint abcd…ef01   [a]ccept [s]hare login [r]eject`) accepts the device
+  device ID abcd…ef01   [a]ccept [s]hare login [r]eject`) accepts the device
   and shares the login; `/connect share <device>` shares it with a device
   already on the network; `a` accepts without it. Never by vouch, link or
   knock, and never with a stranger accepted from one (Story 5). In a company
@@ -992,7 +1072,7 @@ and how C is made relay-less are in `tests/live/m3/README.md`.
 `kollab relay serve --domain <domain>` is the whole setup (Story 6). One process
 runs the relay, keeps the signed discovery document published and serves it as
 the key file, all on one local port. What stays with the operator is one
-`_agent.<domain>` TXT record and a TLS proxy with five routes; the command
+`_agent.<domain>` TXT record and a TLS proxy with four routes; the command
 prints both. Operator detail is in
 [kollabor-ai-discovery-publication.md](../operations/kollabor-ai-discovery-publication.md).
 
@@ -1001,8 +1081,8 @@ prints both. Operator detail is in
   directory. This is the published identity. Restarts reuse it; lose it and every
   device that pinned the old key refuses the new one, so it gets backed up. A
   directory that runs the standalone publisher today is adopted as it is.
-- **What it prints.** The TXT record value and the five routes (key file, health,
-  websocket, `enrollment/*`, `contact/*`). `--print nginx|caddy` prints that
+- **What it prints.** The TXT record value and the four routes (key file, health,
+  websocket, `enrollment/*`); knocks ride the websocket. `--print nginx|caddy` prints that
   proxy config and `--print systemd` a unit that runs the same command as the
   same user on the same state directory. `--install` writes that unit (sudo when
   not root), enables and starts it, after creating the state directory the unit
@@ -1012,8 +1092,9 @@ prints both. Operator detail is in
   `--trusted-proxy <ip>`; an office behind one address needs
   `--max-connections-per-source`.
 - **Backend.** One worker on the in-memory backend. The managed Valkey sidecar
-  never persisted either: a join code or knock that is waiting at a restart ends,
-  everything else is rebuilt as devices reconnect. Several workers or hosts keep
+  never persisted either: a join code that is waiting at a restart ends, a knock
+  is never on the directory to lose, and everything else is rebuilt as devices
+  reconnect. Several workers or hosts keep
   `kollab relay run --config`, which is what kollabor.ai runs; it and the bare
   worker `kollab relay serve --origin` are unchanged.
 
@@ -1063,6 +1144,18 @@ prints both. Operator detail is in
    - Once, on a separate `/login` chain, reuse a spent refresh token and record
      whether the newer pair still refreshes. The answer goes into Known limits.
 
+6. **Knocks as calls.** Story 5. Proven on the Mac and server from installed
+   packages (`tests/live/m6`): a knock rings and is accepted; an offline device
+   answers `unavailable` at once and the redial reaches it when it comes back
+   within the hour; a knock left to ring out lands in Missed, the twenty-first
+   goes unanswered, and `[k]` knocks back; a reject and a block ring out on the
+   knocker's side like an unanswered knock; block, `contacts`, `nobody` with
+   `for`, and an expected route accepted without asking; the same rows under
+   Settings → Network → Knocks in the web UI. The relay's process memory stays flat
+   through a load run of 2,000 knocks a second for 10 minutes against a test
+   directory, reported with the artifact hash, workers, offered and completed
+   knocks, latency and errors.
+
 "Proven" means the live run, not unit tests. Every milestone updates this
 document before it merges.
 
@@ -1085,13 +1178,15 @@ document before it merges.
 
 - **hub**: agents on one machine and workspace, open channel.
 - **network**: a hub across machines, with a name, a directory and a trust level.
-- **directory**: kollabor.ai or a self-hosted domain: signed key file, relay, enrollment and contact mailboxes.
+- **directory**: kollabor.ai or a self-hosted domain: signed key file, relay, enrollment mailbox and knock routing.
 - **relay**: the directory's forwarder for machines that cannot reach each other directly. It sees sealed frames only.
 - **device**: one workspace identity with a human name.
 - **agent@device**: how any agent on the network is addressed.
 - **join code**: `XXXX-XXXX`, one device, five minutes.
 - **trust**: `open`, `agents`, `manual`, per network.
-- **knock**: a sealed introduction from outside the network.
+- **knock**: a call from outside the network: it rings an online device for 5 minutes, and the directory stores none.
+- **missed knock**: a knock that rang out while the device was online; kept on that device, 20 at most.
+- **contact list**: routes whose knocks ring under `contacts` and whose first knock is accepted (`/connect expect`).
 - **link**: the directory's record that two device keys in different rooms each signed a consent to reach the other; how an accepted stranger's messages cross rooms.
 - **primary**: the device whose config the network follows.
 - **shared login**: the ChatGPT login a human shared with chosen devices; the device that made the newest record refreshes it (section 9).
@@ -1119,3 +1214,13 @@ document before it merges.
 - Whether observed remote messages should be shown dimmed on every device in
   large networks, or only on the two devices involved. Hub behaviour says
   everyone; kept until it hurts.
+- Ring time under load. Marco asked for a ring time that shrinks with load,
+  never under 10 to 20 seconds. The directory keeps nothing per knock, so load
+  costs it bandwidth and connections, not memory; an overloaded directory
+  answers `busy` and redials wait longer. The shrinking ring time comes back if
+  `busy` shows up in practice.
+- A reputation score for knockers. A device key costs nothing, so a score per
+  key starts clean with every new key; a score per address block or per
+  network would hold. Not built; after launch.
+- Blocks and the contact list are per device. The sealed config (section 9)
+  could carry them to every device on the network.

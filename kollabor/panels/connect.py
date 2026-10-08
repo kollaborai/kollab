@@ -2,8 +2,8 @@
 
 They call the same daemon ``state.*`` methods an attached terminal calls
 (``hub_connect_snapshot``, ``hub_connect_decide``, ``hub_enrollment_offer``,
-``hub_enroll``, ``hub_enroll_status``, ``hub_contact_pending``,
-``hub_contact_decide``, ``hub_connect``), so there is no new network logic.
+``hub_enroll``, ``hub_enroll_status``, ``hub_knocks``, ``hub_connect``), so
+there is no new network logic.
 
 Join codes: an issued code leaves only in the ``new_code`` action's ``reveal``;
 ``describe()`` never mints one. An entered code arrives only in the
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Optional
 
 from plugins.hub.connect_guide import (
@@ -23,8 +24,6 @@ from plugins.hub.connect_guide import (
 )
 from plugins.hub.device_names import (
     TRUST_LEVELS,
-    device_key_fingerprint,
-    short_fingerprint,
     validate_device_name,
     validate_trust,
 )
@@ -156,7 +155,7 @@ class ConnectPanel:
             panel["notice"] = _READ_ONLY_NOTE
             return panel
         panel["summary"].append(
-            {"label": "Relay", "value": "Online" if snap["relay_online"] else "Offline"}
+            {"label": "Connection", "value": "Connected" if snap["relay_online"] else "Offline"}
         )
         if snap["config_from"]:
             panel["summary"].append({"label": "Config From", "value": snap["config_from"]})
@@ -166,14 +165,12 @@ class ConnectPanel:
             {"label": "Offline Devices", "value": names(snap["offline_devices"])},
         ]
         if snap["knocks"]:
-            panel["summary"].append(
-                {"label": "Introductions", "value": f"{snap['knocks']} waiting"}
-            )
+            panel["summary"].append({"label": "Knocks", "value": f"{snap['knocks']} waiting"})
         panel["rows"] = [
             {
                 "id": row["enrollment_id"],
                 "label": row["device"] or "Unknown Device",
-                "detail": f"fingerprint {row['fingerprint']}",
+                "detail": f"device ID {row['fingerprint']}",
                 "group": "Join Requests",
                 "current": False,
                 "badges": [],
@@ -186,7 +183,7 @@ class ConnectPanel:
         ]
         panel["toolbar_actions"] = [
             {"id": "new_code", "label": "New Join Code"},
-            {"id": "knocks", "label": "Review Introductions"},
+            {"id": "knocks", "label": "Knocks"},
         ]
         panel["controls"] = [
             make_field(
@@ -348,79 +345,143 @@ class ConnectJoinPanel:
         return error_result(JOIN_FAILURE_REASONS.get(reason, reason) or "The join request failed.")
 
 
-def _intro(text: str) -> str:
+def _quote(text: str) -> str:
     text = " ".join(str(text).split())
     text = "".join(c for c in text if c.isprintable())
     return text[:197] + "…" if len(text) > 200 else text
 
 
+def _clock(seconds: int) -> str:
+    return f"{max(0, seconds) // 60}:{max(0, seconds) % 60:02d}"
+
+
+_KNOCK_ROW_ACTIONS = {
+    "ringing": ["accept", "reject", "block"],
+    "call": ["stop"],
+    "missed": ["block", "delete"],
+    "blocked": ["unblock"],
+    "contact": ["unexpect"],
+}
+
+
 class ConnectKnocksPanel:
-    """Introductions other devices sent to this one; allow or deny each."""
+    """Knocks: ringing, the calls this device placed, missed, blocked, contacts.
+
+    The same snapshot and actions as the terminal's knock screen
+    (plugins/hub/knocks.py). Row ids are `<kind>:<knock id or route>`.
+    """
 
     name = "connect-knocks"
     kind = "picker"
 
-    async def _pending(self, ctx: Any) -> list[dict]:
-        rows = await ctx.hub_contact_pending("")
-        if not isinstance(rows, list):
-            raise ValueError("invalid pending list")
-        return [
-            r for r in rows
-            if isinstance(r, dict)
-            and re.fullmatch(r"[0-9a-f]{32}", str(r.get("receipt_id", "")))
-            and re.fullmatch(r"[0-9a-f]{64}", str(r.get("sender_key", "")))
-        ]
+    async def _snapshot(self, ctx: Any) -> dict:
+        result = await ctx.hub_knocks("list", {})
+        snapshot = result.get("snapshot") if isinstance(result, dict) else None
+        if not isinstance(snapshot, dict):
+            raise ValueError((result or {}).get("text") or "knocks unavailable")
+        return snapshot
 
     async def describe(self, ctx: Any, params: dict) -> dict:
-        panel = _picker(self.name, "Introductions")
+        panel = _picker(self.name, "Knocks")
         try:
-            rows = await self._pending(ctx)
+            snap = await self._snapshot(ctx)
         except Exception as exc:  # noqa: BLE001
             logger.debug("connect: knocks unavailable: %s", type(exc).__name__)
-            panel["notice"] = "Introductions are unavailable right now."
+            panel["notice"] = "Knocks are unavailable right now."
             return panel
+        who = snap["mode"].title()
+        if snap["mode_until"]:
+            who += " (for now)"
+        panel["summary"] = [
+            {"label": "Missed", "value": f"{len(snap['missed'])} of {snap['missed_limit']}"},
+            {"label": "Who May Knock", "value": who},
+        ]
+        if not snap["online"]:
+            panel["notice"] = "This device is offline: knocks cannot reach it."
+        rows = []
+        for row in snap["ringing"]:
+            rows.append(("ringing", row["id"], row["device"], f"device ID {row['fingerprint']}"
+                         f" · {_clock(row['left'])} left · \"{_quote(row['text'])}\"", "Ringing"))
+        for row in snap["calls"]:
+            state = (f"Ringing {_clock(row['left'])}" if row["state"] == "ringing"
+                     else f"Redialing, next in {_clock(row['left'])}")
+            rows.append(("call", row["route"], row["target"], state, "Knocking"))
+        for row in snap["missed"]:
+            when = time.strftime("%b %d %H:%M", time.localtime(row["at"]))
+            rows.append(("missed", row["id"], row["device"], f"device ID {row['fingerprint']}"
+                         f" · {when} · \"{_quote(row['text'])}\"", "Missed"))
+        for row in snap["blocked"]:
+            rows.append(("blocked", row["route"], row["route"], row["device"], "Blocked"))
+        for row in snap["contacts"]:
+            rows.append(("contact", row["route"], row["route"],
+                         "First knock accepted" if row["expected"] else "", "Contacts"))
         panel["rows"] = [
             {
-                "id": r["receipt_id"],
-                "label": r.get("device_name") or "Unknown Device",
-                "detail": f"fingerprint {short_fingerprint(device_key_fingerprint(r['sender_key']))}"
-                f" · \"{_intro(r.get('introduction', ''))}\"",
-                "group": "Introductions",
+                "id": f"{kind}:{key}",
+                "label": label or "Unknown Device",
+                "detail": detail,
+                "group": group,
                 "current": False,
                 "badges": [],
+                "actions": _KNOCK_ROW_ACTIONS[kind],
             }
-            for r in rows
+            for kind, key, label, detail, group in rows
         ]
         panel["row_actions"] = [
-            {"id": "allow", "label": "Allow", "payload_key": "receipt_id"},
-            {"id": "deny", "label": "Deny", "confirm": True, "payload_key": "receipt_id"},
+            {"id": "accept", "label": "Accept"},
+            {"id": "reject", "label": "Reject", "confirm": True},
+            {"id": "block", "label": "Block", "confirm": True},
+            {"id": "stop", "label": "Stop"},
+            {"id": "delete", "label": "Delete"},
+            {"id": "unblock", "label": "Unblock"},
+            {"id": "unexpect", "label": "Remove"},
+        ]
+        if snap["missed"]:
+            panel["toolbar_actions"] = [{"id": "clear", "label": "Clear Missed"}]
+        panel["controls"] = [
+            make_field(
+                "mode", "dropdown", "Who May Knock", action="mode",
+                value=snap["mode"], options=["everyone", "contacts", "nobody"],
+            ),
+            make_field(
+                "expect_route", "text_input", "Expect A Knock From", action="expect", value="",
+                help="A contact route (domain/c/16 hex): its first knock is accepted.",
+            ),
+            make_field(
+                "block_route", "text_input", "Block A Route", action="block_route", value="",
+                help="A contact route (domain/c/16 hex): its knocks are refused.",
+            ),
         ]
         if not rows:
-            panel["notice"] = "No introductions waiting."
+            panel["notice"] = panel.get("notice") or "No knocks."
         return panel
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
-        if action not in ("allow", "deny"):
+        if action in ("mode", "clear", "expect", "block_route"):
+            args: dict = {}
+            if action == "mode":
+                args = {"mode": str(payload.get("mode") or ""), "minutes": 0}
+            elif action in ("expect", "block_route"):
+                field = "expect_route" if action == "expect" else "block_route"
+                route = str(payload.get(field) or "").strip()
+                match = re.fullmatch(r"(?:[^\s/]+/c/)?([0-9a-fA-F]{16})", route)
+                if match is None:
+                    return error_result("That is not a contact route.", {field: "domain/c/16 hex"})
+                args = {"route": match.group(1).lower()}
+        elif action in ("accept", "reject", "block", "stop", "delete", "unblock", "unexpect"):
+            kind, _, key = str(payload.get("id") or "").partition(":")
+            if action not in _KNOCK_ROW_ACTIONS.get(kind, ()):
+                raise PanelError("that knock is gone", status=404)
+            args = {"id": key} if kind in ("ringing", "missed") else {"route": key}
+        else:
             raise unknown_action(self.name, action)
-        receipt = str(payload.get("receipt_id") or payload.get("id") or "")
-        try:
-            rows = await self._pending(ctx)
-        except Exception as exc:  # noqa: BLE001
-            raise PanelError("Introductions are unavailable right now.", status=503) from exc
-        row = next((r for r in rows if r["receipt_id"] == receipt), None)
-        if row is None:
-            raise PanelError("that introduction is no longer pending", status=404)
-        decision = "accept" if action == "allow" else "reject"
-        who = row.get("device_name") or "that device"
-        reason = await ctx.hub_contact_decide(
-            "", receipt, decision, row["sender_key"], row.get("device_name") or ""
-        )
+        result = await ctx.hub_knocks(action, args)
+        text = result.get("text") if isinstance(result, dict) else None
         fresh = await self.describe(ctx, {})
-        if reason:
-            return error_result(f"Could not {action} {who}: {reason}", panel=fresh)
-        return ok_result(
-            f"Allowed {who}." if action == "allow" else f"Denied {who}.", panel=fresh
-        )
+        if not isinstance(text, str) or text.startswith("connect:"):
+            reason = (text or "").removeprefix("connect:").strip() or "Try again."
+            return error_result(reason[:1].upper() + reason[1:], panel=fresh)
+        return ok_result(text[:1].upper() + text[1:] + ".", panel=fresh)
 
 
 PANELS = {

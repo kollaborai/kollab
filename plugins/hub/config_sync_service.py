@@ -312,7 +312,7 @@ class ConfigSyncService:
             return {"error": "not_primary"}
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"v", "op", "bundle"}
+            or not payload.keys() >= {"v", "op", "bundle"}
             or payload["v"] != 1
             or payload["op"] not in ("core", "sync", "put")
             or not isinstance(payload["bundle"], str)

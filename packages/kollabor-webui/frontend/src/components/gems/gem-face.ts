@@ -210,6 +210,8 @@ export type FaceFrame = {
   talk: number;
   /** 0..1: how far the gem has turned side-on to its laptop. */
   desk: number;
+  /** 0..1: how far the thought bubble is open. */
+  bubble: number;
   /** Stable per-gem value in [0, 2π), for variety across a roster. */
   seed: number;
   still: boolean;

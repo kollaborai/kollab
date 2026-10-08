@@ -156,6 +156,27 @@ class TestQueueProcessor(unittest.TestCase):
         self.streaming_handler.call_llm.assert_not_awaited()
         self.api_service.call_llm.assert_not_awaited()
 
+    def test_a_failed_turn_tells_web_clients_why(self):
+        """The error goes out as a semantic event before turn_complete, so the
+        web UI can show it; the terminal draws its own red line."""
+        self.streaming_handler.call_llm.side_effect = RuntimeError(
+            "LLM provider not available"
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="turn",
+            )
+        )
+
+        tap = self.renderer.get_service.return_value
+        events = [call.args[0] for call in tap.publish.call_args_list]
+        self.assertEqual([e["type"] for e in events[-2:]], ["error", "turn_complete"])
+        self.assertEqual(events[-2]["message"], "LLM provider not available")
+        self.message_display_service.display_error_message.assert_called_once_with(
+            "LLM provider not available"
+        )
+
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]
         self.event_bus.emit_with_hooks.return_value = {

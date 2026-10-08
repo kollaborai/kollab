@@ -162,7 +162,7 @@ def verify_peer_locator(
 ) -> dict[str, Any] | None:
     """Verify the two-key binding in a privacy-minimal signed locator."""
     current = int(time.time()) if now is None else now
-    if not isinstance(value, dict) or set(value) != _LOCATOR_WIRE_FIELDS:
+    if not isinstance(value, dict) or not value.keys() >= _LOCATOR_WIRE_FIELDS:
         return None
     if type(value.get("v")) is not int or value["v"] != 1:
         return None
@@ -424,7 +424,7 @@ def _candidate_dict(candidate: object) -> dict[str, Any]:
     else:
         value = candidate
     fields = (_LOCATOR_PAYLOAD_FIELDS - {"v"}) | {"digest"}
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict) or not value.keys() >= fields:
         raise PeerRouteError("invalid peer locator candidate")
     if (
         not isinstance(value.get("digest"), str)
@@ -973,7 +973,7 @@ class PeerMeshRuntime:
                 response = json.loads(response_line.decode("utf-8"))
                 if (
                     not isinstance(response, dict)
-                    or set(response) != {"type", "response"}
+                    or not response.keys() >= {"type", "response"}
                     or response.get("type") != result_type
                     or not isinstance(response.get("response"), dict)
                 ):
@@ -1345,7 +1345,7 @@ class PeerMeshRuntime:
         fields = {"v", "record", "records", "links", "link"}
         if (
             not isinstance(value, dict)
-            or set(value) != fields
+            or not value.keys() >= fields
             or type(value["v"]) is not int
             or value["v"] != 1
             or _encoded_size(value) > MAX_PEER_EXCHANGE_BYTES
@@ -1384,7 +1384,7 @@ class PeerMeshRuntime:
         fields = {"v", "record", "records", "links", "link_signature"}
         if (
             not isinstance(value, dict)
-            or set(value) != fields
+            or not value.keys() >= fields
             or type(value["v"]) is not int
             or value["v"] != 1
             or _encoded_size(value) > MAX_PEER_EXCHANGE_BYTES
@@ -1421,7 +1421,7 @@ class PeerMeshRuntime:
         *,
         now: int,
     ) -> PeerLink:
-        if not isinstance(value, dict) or set(value) != {"payload", "signature"}:
+        if not isinstance(value, dict) or not value.keys() >= {"payload", "signature"}:
             raise PeerRouteError("invalid peer link signature proposal")
         payload, signature = value["payload"], value["signature"]
         if not isinstance(payload, dict) or not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature):
@@ -1662,7 +1662,7 @@ class PeerMeshRuntime:
         )
 
     def _route_material(self, value: object, ingress_peer_key: str):
-        if not isinstance(value, dict) or set(value) != _FORWARD_FIELDS:
+        if not isinstance(value, dict) or not value.keys() >= _FORWARD_FIELDS:
             raise PeerRouteError("invalid peer forwarding frame")
         if type(value.get("v")) is not int or value["v"] != 1:
             raise PeerRouteError("unsupported peer forwarding frame")
@@ -1956,7 +1956,7 @@ class PeerMeshRuntime:
             value = json.loads(plaintext.decode("utf-8"))
             if (
                 not isinstance(value, dict)
-                or set(value) != {"v", "method", "payload"}
+                or not value.keys() >= {"v", "method", "payload"}
                 or type(value["v"]) is not int
                 or value["v"] != 1
                 or value["method"] not in {"secure_identity", "secure_packet"}
@@ -2103,7 +2103,7 @@ class PeerMeshRuntime:
                 raise TransientPeerDeliveryError("peer route is unavailable")
             if (
                 not isinstance(response, dict)
-                or set(response) != {"v", "receipt"}
+                or not response.keys() >= {"v", "receipt"}
                 or response.get("v") != 1
                 or not isinstance(response.get("receipt"), dict)
             ):
@@ -2127,7 +2127,7 @@ class PeerMeshRuntime:
         if not isinstance(receipt, dict):
             raise RelayError("peer route delivery did not return a secure response")
         if (
-            set(receipt) != {"v", "message_id", "ciphertext"}
+            not receipt.keys() >= {"v", "message_id", "ciphertext"}
             or type(receipt["v"]) is not int
             or receipt["v"] != 1
             or receipt["message_id"] != envelope.message_id
@@ -2148,7 +2148,7 @@ class PeerMeshRuntime:
             raise RelayError("peer route response authentication failed") from exc
         if (
             not isinstance(result, dict)
-            or set(result) != {"v", "result"}
+            or not result.keys() >= {"v", "result"}
             or type(result["v"]) is not int
             or result["v"] != 1
             or not isinstance(result["result"], dict)

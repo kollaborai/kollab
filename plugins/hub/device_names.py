@@ -11,6 +11,7 @@ import hashlib
 import re
 import socket
 import unicodedata
+from collections.abc import Collection
 from pathlib import Path
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -52,12 +53,25 @@ def default_network_name(first_device: str) -> str:
     return f"{first_device[:59].rstrip('-') or 'device'}-net"
 
 
-def default_device_name(workspace: Path | str | None) -> str:
-    """`<hostname>-<workspace folder>`; the home folder is `<hostname>-home`."""
+def default_device_name(workspace: Path | str | None, taken: Collection[str] = ()) -> str:
+    """`<hostname>-<workspace folder>`; the home folder is `<hostname>-home`.
+
+    A name in `taken` (another workspace on this computer has it, as two
+    checkouts of one repo would) gets the parent folder in it,
+    `<hostname>-<parent>-<folder>`, then a number.
+    """
     host = slug(socket.gethostname().split(".")[0]) or "device"
     path = Path(workspace).expanduser() if workspace else Path.home()
     folder = "home" if path == Path.home() else (slug(path.name) or "workspace")
-    return f"{host}-{folder}"[:63].rstrip("-")
+    base = f"{host}-{folder}"[:63].rstrip("-")
+    parent = slug(path.parent.name) if path != Path.home() else ""
+    for name in (base, f"{host}-{parent}-{folder}"[:63].rstrip("-") if parent else base):
+        if name not in taken:
+            return name
+    number = 2
+    while (name := f"{base[:62 - len(str(number))].rstrip('-')}-{number}") in taken:
+        number += 1
+    return name
 
 
 def parse_handle(value: str) -> tuple[str, str] | None:
@@ -86,7 +100,7 @@ def device_key_fingerprint(public_key_hex: str) -> str:
     """Full sha256 device fingerprint of a 64-hex Ed25519 key.
 
     Shared by join requests (enrollment_client.py) and knock rows
-    (contact_requests.py); humans see it through short_fingerprint().
+    (knocks.py); humans see it through short_fingerprint().
     """
     return hashlib.sha256(
         b"kollab-relay-enrollment-device-fingerprint-v1\0" + _require_key(public_key_hex)

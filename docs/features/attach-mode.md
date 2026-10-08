@@ -133,9 +133,32 @@ kollab --hub user [name]            set/show hub username
 kollab --hub on                    enable hub plugin
 kollab --hub off                   disable hub plugin
 kollab --hub org <name> [mission]  launch an organization from JSON chart
+kollab --hub where <name>          print a local agent's live socket path (read-only)
 ```
 
 Presence files live at ~/.kollab/hub/presence/<agent_id>.json (plugins/hub/presence.py:23-27). Agents announce themselves via heartbeat; discovery scans this directory.
+
+## Attach Over SSH
+
+`kollab --attach <identity>@<host>` attaches to an agent on another computer. `<host>` is anything `ssh` accepts: a `~/.ssh/config` alias or `user@host`.
+
+```
+kollab --attach lapis@devbox
+```
+
+- `ssh devbox kollab --hub where lapis` prints the socket of the newest live `lapis` on devbox, in any project there.
+- `ssh -N -L <private socket>:<agent socket> devbox` forwards it with OpenSSH. The TUI attaches to the local end.
+- Ctrl+Z or exit stops the ssh forward and removes the private socket dir (mode 0700).
+
+Requirements:
+- `ssh devbox` works without a prompt (key or ssh-agent). A password prompt fails the attach at once instead of hanging.
+- Devbox's host key is already trusted. Unknown host keys are refused, never accepted automatically.
+- `kollab` is on the PATH of non-interactive ssh sessions on devbox.
+- The agent is live on devbox.
+
+No new port or relay: ssh is the only transport and its keys are the only auth. `kollab --attach lapis` (no host) is unchanged.
+
+Known gap: if kollab is killed with SIGKILL, its ssh forward can keep running. Find it with `pgrep -fl kollab-attach` and kill it.
 
 ## Detaching and Reattaching
 

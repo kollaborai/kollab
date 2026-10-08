@@ -131,7 +131,8 @@ Profiles, MCP, and hub routes:
 | `GET` | `/sessions/{session_id}/mcp` | session MCP connection status |
 | `POST` | `/sessions/{session_id}/mcp/{server_name}/connect` | intended session connect endpoint |
 | `POST` | `/sessions/{session_id}/mcp/{server_name}/disconnect` | disconnect session server |
-| `GET` | `/agents` | gem identity pool: name, caste, `color` as `[r, g, b]`, live state and task |
+| `GET` | `/agents` | gem identity pool: name, caste, `color` as `[r, g, b]`, live state and task; a gem listed alive for the first time is born (gets its random look) |
+| `GET`/`PUT` | `/agents/appearance` | gem looks: `season`, `born.<name>` (`face`, `hat`: rolled once, the first time `GET /agents` lists the gem alive; PUT never changes them) and the user's `gems.<name>` (`face`, `hat`, `color`); PUT normalizes (unknown keys dropped, at most 256 gems) and writes `~/.kollab/hub/appearance.json` atomically |
 | `GET` | `/hub/agents` | list active hub agents |
 | `GET` | `/hub/feed` | snapshot SSE feed |
 | `WS` | `/ws/hub/feed?token=<engine token>` | polling WebSocket feed (closed with 1008 without a valid token): `hub_snapshot` on connect, then `agent_joined`, `agent_left` and `agent_state_changed` (fires on a state or `current_task` change; carries `identity`, `state`, `old_state`, `current_task`) |

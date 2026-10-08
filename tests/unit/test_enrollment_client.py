@@ -315,6 +315,22 @@ async def test_http_client_reads_bounded_retry_after_header():
 
 
 @pytest.mark.asyncio
+async def test_a_retired_route_tells_the_human_to_update_kollab():
+    # Versioning: a relay that retired this version's route answers 410.
+    from plugins.hub.connect_guide import join_failure_reason
+
+    path = "/relay/v1/enrollment/offers/" + "a" * 32 + "/request"
+    client = EnrollmentHTTPClient("https://example.test")
+    client._session = _FakeSession(_FakeResponse("https://example.test" + path, b"gone", status=410))
+
+    with pytest.raises(EnrollmentProtocolError) as captured:
+        await client.post(path, {})
+
+    assert captured.value.code == "update_required"
+    assert "kollab --upgrade" in join_failure_reason("update_required")
+
+
+@pytest.mark.asyncio
 async def test_phase_retry_observes_server_retry_after(monkeypatch):
     client = EnrollmentHTTPClient("https://example.test")
     calls = 0
@@ -2077,3 +2093,83 @@ async def test_enroll_device_short_code_looks_up_then_submits_the_request(tmp_pa
     assert journaled_record["offer_id"] == offer_id
     assert journaled_record["code_verifier"] == expected_verifier
     assert journaled_record["device_name"]
+
+
+@pytest.mark.asyncio
+async def test_new_code_retires_the_older_codes_nobody_typed(tmp_path, monkeypatch):
+    # Every open code polls the relay, and the polls share one per-IP budget:
+    # the code New Code replaced must stop polling and give up its delegation.
+    origin = "https://kollabor.ai"
+    owner_signing_key = SigningKey.generate()
+    relay = RelayClient(tmp_path / "owner-workspace", state_dir=tmp_path / "owner-network", label="owner")
+    relay.state.origin = origin
+    relay._store.save()
+    relay._state = "online"
+    relay._session_id = "1" * 32
+    discovery = SimpleNamespace(origin=origin, publisher_principal_id="did:key:z6MkExample", manifest={})
+    polls: dict[str, int] = {}
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post_signed_retry(self, _key, _path, offer_id, fields, **_kwargs):
+            return {"status": "offered", "offer_id": offer_id, "expires_at": fields["expires_at"]}
+
+        async def post_signed(self, _key, path, offer_id, _fields, **_kwargs):
+            assert path == f"/relay/v1/enrollment/offers/{offer_id}/poll"
+            polls[offer_id] = polls.get(offer_id, 0) + 1
+            return {"status": "empty"}
+
+    real_sleep = asyncio.sleep
+
+    async def yield_sleep(_delay):
+        await real_sleep(0)
+
+    async def until(condition):
+        deadline = time.monotonic() + 5.0
+        while not condition():
+            assert time.monotonic() < deadline, "timed out"
+            await real_sleep(0.001)
+
+    monkeypatch.setattr(enrollment_client, "EnrollmentHTTPClient", lambda *_args, **_kwargs: FakeTransport())
+    monkeypatch.setattr(enrollment_client.asyncio, "sleep", yield_sleep)
+    bridge = SimpleNamespace(
+        _turn=SimpleNamespace(get=lambda: None),
+        commands=SimpleNamespace(
+            client=relay,
+            _discover=AsyncMock(return_value=(discovery, "", (), False)),
+            _relay_url=lambda _result: "wss://kollabor.ai/relay/v1/ws",
+        ),
+        identity=SimpleNamespace(is_coordinator=True, identity="owner-agent", agent_id="owner-agent", profile=None),
+        plugin=SimpleNamespace(
+            _dns_identity=SimpleNamespace(
+                get_or_create_keypair=lambda _designation: (
+                    owner_signing_key.encode().hex(),
+                    owner_signing_key.verify_key.encode().hex(),
+                )
+            ),
+            event_bus=SimpleNamespace(get_service=lambda _name: None),
+        ),
+        owner=SimpleNamespace(state_dir=tmp_path),
+        _closed=False,
+    )
+    issuer = EnrollmentIssuer(bridge)
+    try:
+        first = (await issuer.create_offer("kollabor.ai"))["offer_id"]
+        await until(lambda: polls.get(first))
+        second = (await issuer.create_offer("kollabor.ai"))["offer_id"]
+        await until(lambda: first not in issuer._tasks)
+
+        stopped_at = polls[first]
+        seen = polls.get(second, 0)
+        await until(lambda: polls.get(second, 0) >= seen + 3)
+        assert polls[first] == stopped_at
+        assert list(issuer._offers) == [second]
+        delegations = json.loads((tmp_path / "enrollment-delegations.json").read_text())["delegations"]
+        assert sorted(record["revoked"] for record in delegations.values()) == [False, True]
+    finally:
+        await issuer.close()

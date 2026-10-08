@@ -22,6 +22,19 @@ export type Session = {
   actions_supported?: string[];
 };
 
+/** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
+export type GemLook = { face?: string; hat?: string; color?: number[] };
+
+/** The Gem Studio's saved looks (engine: ~/.kollab/hub/appearance.json). */
+export type GemAppearance = {
+  /** "auto" follows the calendar (Halloween in October, Christmas in December). */
+  season?: string;
+  /** The random eyes and hat each gem got the first time it came alive; the engine rolls them. */
+  born?: Record<string, Omit<GemLook, "color">>;
+  /** What the user dressed each gem in, over its born look. */
+  gems?: Record<string, GemLook>;
+};
+
 export type HistoryMessage = {
   role: "system" | "user" | "assistant" | string;
   content?: unknown;
@@ -29,6 +42,9 @@ export type HistoryMessage = {
   metadata?: Record<string, unknown>;
   thinking?: string | null;
 };
+
+/** Why the session's last turn failed; it goes after `history_length` messages. */
+export type TurnError = { message: string; history_length: number };
 
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -124,6 +140,12 @@ export type AgentPoolEntry = {
   color?: number[];
   /** Live hub agent id; empty when nothing runs this identity. */
   agent_id?: string;
+  /** Live but off the hub mesh: peers do not see it (Properties → Chat). */
+  solo?: boolean;
+  /** The folder the live agent runs in, on this computer. */
+  project?: string;
+  /** False for a live agent the pool does not name (koordinator, lapis-2): listed, never launched as. */
+  pool?: boolean;
 };
 
 export type AgentBundleEntry = {
@@ -133,6 +155,18 @@ export type AgentBundleEntry = {
   skills?: string[];
 };
 
+
+/** A gem on another computer in the agent network (the relay directory). */
+export type NetworkAgent = {
+  name: string;
+  device: string;
+  handle?: string;
+  state?: string;
+  is_coordinator?: boolean;
+};
+
+/** This computer's relay name and the agents on other computers; `remote` is empty off a network. */
+export type AgentNetwork = { device: string; remote: NetworkAgent[] };
 
 export type SlashParameter = {
   name: string;
@@ -555,7 +589,7 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[] }>("/sessions");
+    return this.json<{ sessions: Session[]; network?: AgentNetwork }>("/sessions");
   }
 
   getSession(sessionId: string) {
@@ -646,7 +680,7 @@ export class EngineApi {
 
   getHistory(sessionId: string, limit?: number) {
     const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-    return this.json<{ history: HistoryMessage[] }>(
+    return this.json<{ history: HistoryMessage[]; last_turn_error?: TurnError | null }>(
       `/sessions/${encodeURIComponent(sessionId)}/history${query}`,
     );
   }
@@ -746,6 +780,14 @@ export class EngineApi {
     );
   }
 
+  /** Puts the session's agent on the hub mesh, or takes it off, live. */
+  setSessionHub(sessionId: string, enabled: boolean) {
+    return this.json<{ ok: boolean; hub?: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ hub: enabled }),
+    });
+  }
+
   cancel(sessionId: string) {
     return this.json<{ ok: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/cancel`,
@@ -799,6 +841,17 @@ export class EngineApi {
       available?: string[];
       active?: string[];
     }>(`/agents${refresh ? "?refresh=true" : ""}`);
+  }
+
+  getGemAppearance() {
+    return this.json<GemAppearance>("/agents/appearance");
+  }
+
+  saveGemAppearance(appearance: GemAppearance) {
+    return this.json<GemAppearance>("/agents/appearance", {
+      method: "PUT",
+      body: JSON.stringify(appearance),
+    });
   }
 
   /**

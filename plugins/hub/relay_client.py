@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import inspect
 import json
@@ -36,7 +37,13 @@ from kollabor_config.managed_config import (
     read_managed_config,
 )
 
-from .device_names import NAME_RE, default_device_name, default_network_name, key_label
+from .device_names import (
+    NAME_RE,
+    contact_route_hex,
+    default_device_name,
+    default_network_name,
+    key_label,
+)
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -60,6 +67,16 @@ __all__ = ["PeerSessionEvent", "RelayClient", "RelayError", "parse_invite"]
 _LOGGER = logging.getLogger(__name__)
 
 PROTOCOL = "kollab-relay/1"
+# The relay protocol versions this client speaks, offered newest first in the
+# WebSocket subprotocol header. Within a version both sides ignore fields and
+# frames they do not know (docs/specs/agent-public-beacon.md#versioning).
+PROTOCOLS = (PROTOCOL,)
+# On a 426 the directory names the versions it serves here.
+PROTOCOLS_HEADER = "X-Kollab-Relay-Protocols"
+# Frames the knock service answers (plugins/hub/knocks.py).
+KNOCK_FRAMES = frozenset({"knock", "knock_answer", "knock_result"})
+# A route lookup or a links declaration waits this long for the directory.
+CONTROL_TIMEOUT = 10.0
 MAX_FRAME = 65536
 MAX_CIPHERTEXT = 49152
 MAX_PEERS = 256
@@ -87,6 +104,20 @@ APPLICATION_ERRORS = frozenset(
 )
 RequestHandler = Callable[[str, str, dict], Awaitable[dict]]
 LINK_BINDING_DOMAIN = b"kollab-relay-link/1\x00"
+
+
+def _version(protocol: str) -> int:
+    """`kollab-relay/2` -> 2; 0 for anything else."""
+    number = protocol.strip().rpartition("/")[2]
+    return int(number) if number.isdigit() else 0
+
+
+def _version_refused(headers, domain: str) -> str:
+    """A relay's 426: it serves none of our versions. Which side updates?"""
+    served = (headers.get(PROTOCOLS_HEADER) or "").split(",")
+    if max(map(_version, served), default=0) > _version(PROTOCOL):
+        return f"this version of kollab is too old for {domain}; run kollab --upgrade"
+    return f"{domain} needs an update for this version of kollab"
 
 
 def link_binding(first: str, second: str) -> str:
@@ -181,6 +212,12 @@ class RelayClient:
         self._ws_url = ""
         self._ca = ""
         self._private_cidrs: tuple[str, ...] = ()
+        self._knock_handler: Callable[[dict], Awaitable[None]] | None = None
+        self._knock_tasks: set[asyncio.Task] = set()
+        # One id-less request (a lookup or a links declaration) at a time:
+        # (the reply type, what it must echo, its future).
+        self._control_lock = asyncio.Lock()
+        self._control: tuple[str, tuple[str, object], asyncio.Future] | None = None
 
     def status(self) -> dict:
         return {
@@ -294,8 +331,6 @@ class RelayClient:
         self.state.links = []
         self.state.vouched_by = {}
         self.state.revoked = []
-        self.state.knocks = {}
-        self.state.knock_requests = {}
         self._store.save()
 
     async def leave(self) -> None:
@@ -326,8 +361,6 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
-            "knocks",
-            "knock_requests",
         ):
             setattr(self.state, name, getattr(disk, name))
 
@@ -634,6 +667,8 @@ class RelayClient:
             if not pending.future.done():
                 pending.future.set_exception(RelayError("relay disconnected"))
         self._application_pending.clear()
+        if self._control is not None and not self._control[2].done():
+            self._control[2].set_exception(RelayError("relay disconnected"))
         for task in tuple(self._dispatch.values()):
             task.cancel()
         for key in sorted(previous_peers):
@@ -706,17 +741,24 @@ class RelayClient:
             trace_configs=[trace],
         ) as session:
             async with asyncio.timeout(12):
-                ws = await session.ws_connect(
-                    self._ws_url,
-                    heartbeat=20,
-                    max_msg_size=MAX_FRAME,
-                    compress=0,
-                    timeout=aiohttp.ClientWSTimeout(ws_close=3),
-                )
+                try:
+                    ws = await session.ws_connect(
+                        self._ws_url,
+                        protocols=PROTOCOLS,
+                        heartbeat=20,
+                        max_msg_size=MAX_FRAME,
+                        compress=0,
+                        timeout=aiohttp.ClientWSTimeout(ws_close=3),
+                    )
+                except aiohttp.WSServerHandshakeError as exc:
+                    if exc.status != 426:
+                        raise
+                    domain = urlsplit(self.state.origin).hostname or "the relay"
+                    raise RelayError(_version_refused(exc.headers, domain)) from None
                 self._ws = ws
                 challenge = await self._receive_frame(ws)
                 if (
-                    set(challenge) != {"type", "protocol", "origin", "nonce"}
+                    not challenge.keys() >= {"type", "protocol", "origin", "nonce"}
                     or challenge["type"] != "challenge"
                     or challenge["protocol"] != PROTOCOL
                     or challenge["origin"] != self.state.origin
@@ -745,12 +787,13 @@ class RelayClient:
                     }
                 )
                 registered = await self._receive_frame(ws)
-                if registered != {
+                expected = {
                     "type": "registered",
                     "protocol": PROTOCOL,
                     "key": self.public_key,
                     "session": self._session_id,
-                }:
+                }
+                if any(registered.get(field) != value for field, value in expected.items()):
                     raise RelayError("relay registration rejected")
                 self._set_peers(await self._receive_frame(ws))
                 self._state, self._error = "online", ""
@@ -775,7 +818,7 @@ class RelayClient:
 
     def _set_peers(self, frame):
         if (
-            set(frame) != {"type", "peers"}
+            not frame.keys() >= {"type", "peers"}
             or frame["type"] != "peers"
             or not isinstance(frame["peers"], list)
             or len(frame["peers"]) > MAX_PEERS
@@ -783,7 +826,7 @@ class RelayClient:
             raise RelayError("invalid peer snapshot")
         peers = {}
         for peer in frame["peers"]:
-            if not isinstance(peer, dict) or set(peer) != {"key", "session"}:
+            if not isinstance(peer, dict) or not peer.keys() >= {"key", "session"}:
                 raise RelayError("invalid peer entry")
             key = validate_key(peer["key"])
             if (
@@ -1095,7 +1138,7 @@ class RelayClient:
             code = frame.get("code")
             request_id = frame.get("id")
             if (
-                set(frame) not in ({"type", "code"}, {"type", "code", "id"})
+                not frame.keys() >= {"type", "code"}
                 or not isinstance(code, str)
                 or not code.isascii()
                 or not code.replace("_", "").isalnum()
@@ -1116,16 +1159,126 @@ class RelayClient:
                 application.future.set_exception(
                     RelayError("relay transport error: " + code)
                 )
+            control = self._control
+            if request_id is None and control is not None and not control[2].done():
+                # A directory without lookup and links answers them with an
+                # id-less invalid_frame: it needs an update.
+                if code == "invalid_frame":
+                    control[2].set_result({"type": control[0], "result": "outdated"})
+                else:
+                    control[2].set_exception(RelayError("relay transport error: " + code))
+            if request_id is not None and not pending and not application:
+                # The directory refused a knock or an answer this device sent.
+                self._dispatch_knock(
+                    {"type": "knock_result", "id": request_id, "result": "refused"}
+                )
+        elif frame.get("type") in ("lookup_result", "links_result"):
+            control = self._control
+            echo = control[1] if control else None
+            if (
+                control is not None
+                and frame["type"] == control[0]
+                and echo is not None
+                and frame.get(echo[0]) == echo[1]
+                and not control[2].done()
+            ):
+                control[2].set_result(frame)
+        elif frame.get("type") in KNOCK_FRAMES:
+            self._dispatch_knock(frame)
         elif frame.get("type") == "message":
             try:
                 await self._receive_encrypted(frame)
             except (RelayError, CryptoError, ValueError, TypeError):
                 self._counts["rejected_messages"] += 1
         else:
-            raise RelayError("unsupported relay frame")
+            # A frame from a newer directory: ignored, never a reason to drop
+            # the connection.
+            self._counts["ignored_frames"] += 1
+
+    def set_knock_handler(self, handler: Callable[[dict], Awaitable[None]] | None) -> None:
+        """Where knocks, answers and knock results go (plugins/hub/knocks.py)."""
+        self._knock_handler = handler
+
+    def _dispatch_knock(self, frame: dict) -> None:
+        """Hand a knock frame to the knock service without holding up the socket.
+
+        It runs in a fresh context, never inside a model turn, and in its own
+        task because answering waits for a reply this socket has to read.
+        """
+        handler = self._knock_handler
+        if handler is None:
+            return
+
+        def done(task: asyncio.Task) -> None:
+            self._knock_tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                _LOGGER.warning("knock handling failed: %s", type(task.exception()).__name__)
+
+        task = asyncio.create_task(handler(frame), context=contextvars.Context())
+        self._knock_tasks.add(task)
+        task.add_done_callback(done)
+
+    async def _control_request(self, frame: dict, reply: str, echo: tuple[str, object]) -> dict:
+        async with self._control_lock:
+            if self._state != "online":
+                raise RelayError("relay is not connected")
+            future = asyncio.get_running_loop().create_future()
+            self._control = (reply, echo, future)
+            try:
+                await self._send_frame(frame)
+                return await asyncio.wait_for(future, timeout=CONTROL_TIMEOUT)
+            except TimeoutError:
+                return {"type": reply, "result": "busy"}
+            finally:
+                self._control = None
+
+    async def lookup(self, route: str) -> tuple[str, str]:
+        """The key online under a contact route: (`found`, key), or (`unavailable`
+        | `busy` | `outdated`, "").
+
+        Never trusts the directory: a key that does not hash to the route reads
+        as unavailable, so a directory cannot point a knock at another device.
+        """
+        reply = await self._control_request(
+            {"type": "lookup", "route": route}, "lookup_result", ("route", route)
+        )
+        result, key = reply.get("result"), reply.get("key", "")
+        if result in ("unavailable", "busy", "outdated"):
+            return result, ""
+        if (
+            result != "found"
+            or not isinstance(key, str)
+            or not KEY.fullmatch(key)
+            or key == self.public_key
+            or contact_route_hex(key) != route
+        ):
+            _LOGGER.warning("the directory answered a route lookup with a key that does not fit")
+            return "unavailable", ""
+        return "found", key
+
+    async def declare_links(self, peers: list[str]) -> str:
+        """Replace the keys this device consents to link with; the directory's result."""
+        issued_at = int(time.time())
+        reply = await self._control_request(
+            {"type": "links", "peers": sorted(set(peers)), "issued_at": issued_at},
+            "links_result",
+            ("issued_at", issued_at),
+        )
+        result = reply.get("result")
+        return result if isinstance(result, str) else "busy"
+
+    async def send_knock(self, to: str, knock_id: str, ticket: dict, ciphertext: str) -> None:
+        await self._send_frame(
+            {"type": "knock", "to": to, "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+        )
+
+    async def send_knock_answer(self, knock_id: str, ticket: dict, ciphertext: str) -> None:
+        await self._send_frame(
+            {"type": "knock_answer", "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+        )
 
     async def _receive_encrypted(self, frame):
-        if set(frame) != {"type", "from", "session", "id", "ciphertext"}:
+        if not frame.keys() >= {"type", "from", "session", "id", "ciphertext"}:
             raise RelayError("invalid encrypted frame")
         key = validate_key(frame["from"])
         if key not in self.state.approvals:
@@ -1161,7 +1314,7 @@ class RelayClient:
             "payload",
         }
         if (
-            set(body) != fields
+            not body.keys() >= fields
             or type(body["v"]) is not int
             or body["v"] != 1
             or body["from"] != key
@@ -1203,12 +1356,13 @@ class RelayClient:
             )
             self._counts["received_pings"] += 1
         elif body["kind"] == "pong":
-            if not isinstance(payload, dict) or set(payload) != {
+            if not isinstance(payload, dict) or not payload.keys() >= {
                 "reply_to",
                 "label",
                 "workspace_id",
             }:
                 raise RelayError("invalid pong")
+            payload = {name: payload[name] for name in ("reply_to", "label", "workspace_id")}
             if (
                 not isinstance(payload["label"], str)
                 or not 1 <= len(payload["label"]) <= 80
@@ -1230,18 +1384,19 @@ class RelayClient:
         elif body["kind"] == "request":
             if (
                 not isinstance(payload, dict)
-                or set(payload) != {"method", "arguments", "timeout_ms"}
+                or not payload.keys() >= {"method", "arguments", "timeout_ms"}
                 or not isinstance(payload["method"], str)
-                or payload["method"] not in APPLICATION_METHODS
+                or not 1 <= len(payload["method"]) <= 64
                 or type(payload["timeout_ms"]) is not int
                 or not 1 <= payload["timeout_ms"] <= MAX_REQUEST_TIMEOUT * 1000
             ):
                 raise RelayError("invalid application request")
-            arguments = self._application_payload(payload["arguments"])
             method = payload["method"]
             handler = self._request_handler
             error = ""
-            if handler is None:
+            if handler is None or method not in APPLICATION_METHODS:
+                # A newer device's method is answered at once, not left to
+                # wait out its timeout.
                 error = "not_supported"
             elif (
                 len(self._dispatch) >= MAX_DISPATCH
@@ -1259,6 +1414,7 @@ class RelayClient:
                     error=error,
                 )
                 return
+            arguments = self._application_payload(payload["arguments"])
             identity = (key, frame["session"], body["id"], method)
             if identity in self._dispatch:
                 # A callback may outlive its envelope's replay retention. A
@@ -1285,7 +1441,7 @@ class RelayClient:
         elif body["kind"] == "response":
             if (
                 not isinstance(payload, dict)
-                or set(payload) != {"reply_to", "method", "result", "error"}
+                or not payload.keys() >= {"reply_to", "method", "result", "error"}
                 or not isinstance(payload["reply_to"], str)
                 or not ID.fullmatch(payload["reply_to"])
                 or not isinstance(payload["method"], str)
@@ -1319,7 +1475,7 @@ class RelayClient:
         elif body["kind"] == "request_cancel":
             if (
                 not isinstance(payload, dict)
-                or set(payload) != {"reply_to", "method"}
+                or not payload.keys() >= {"reply_to", "method"}
                 or not isinstance(payload["reply_to"], str)
                 or not ID.fullmatch(payload["reply_to"])
                 or not isinstance(payload["method"], str)
@@ -1333,4 +1489,5 @@ class RelayClient:
                 task.cancel()
                 self._counts["cancelled_requests"] += 1
         else:
-            raise RelayError("unsupported encrypted message kind")
+            # A kind from a newer device: ignored, like an unknown field.
+            self._counts["ignored_messages"] += 1

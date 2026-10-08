@@ -181,6 +181,27 @@ async def test_no_handler_fixed_failure_and_no_unapproved_callback(pair):
 
 
 @pytest.mark.asyncio
+async def test_a_newer_devices_method_or_kind_never_breaks_this_one(pair, monkeypatch):
+    # Versioning: a newer device may call a method or send a kind this version
+    # does not know, with fields it does not know. The method is answered
+    # not_supported at once; the kind is ignored; neither counts as rejected.
+    left, right, _ = pair
+    right.set_request_handler(lambda *args: None)
+    answered = []
+
+    async def respond(*args, **kwargs):
+        answered.append((args[4], kwargs))
+
+    monkeypatch.setattr(right, "_application_response", respond)
+    request = {"method": "newer.method", "arguments": {"x": 1}, "timeout_ms": 1000, "newer": True}
+    await right._handle_frame(encrypted(left, right, "request", request))
+    await right._handle_frame(encrypted(left, right, "newer_kind", {}))
+    assert answered == [("newer.method", {"error": "not_supported"})]
+    counters = right.status()["counters"]
+    assert counters["ignored_messages"] == 1 and counters.get("rejected_messages", 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_only_correlated_authenticated_response_succeeds(pair):
     left, right, wire = pair
     wire.drop = True
@@ -468,8 +489,9 @@ async def test_application_response_cannot_complete_ping_and_relay_ack_cannot_co
     request = asyncio.create_task(left.request(right.public_key, "message", {}))
     await until(lambda: left._application_pending)
     request_id = next(iter(left._application_pending))
-    with pytest.raises(RelayError, match="unsupported relay frame"):
-        await left._handle_frame({"type": "ack", "id": request_id})
+    # A frame this version does not know is ignored: it completes nothing.
+    await left._handle_frame({"type": "ack", "id": request_id})
+    assert left._counts["ignored_frames"] == 1
     assert not request.done()
     for task in (ping, request):
         task.cancel()

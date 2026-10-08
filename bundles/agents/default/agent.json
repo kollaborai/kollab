@@ -1,5 +1,5 @@
 {
-  "description": "Specialized agent for fixing linting errors and code quality issues",
+  "description": "General-purpose agent - investigates first, then acts",
   "tools": ["*"],
   "skills": [
     "dead-code",

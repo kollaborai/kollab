@@ -87,7 +87,7 @@ async def test_two_requests_with_one_name_are_told_apart_by_fingerprint_not_rece
     ambiguous = await commands._run("accept ana-laptop", source_agent="k1")
 
     assert "more than one pending request is named 'ana-laptop'" in ambiguous
-    assert "fingerprint" in ambiguous and "receipt" not in ambiguous
+    assert "device ID" in ambiguous and "receipt" not in ambiguous
     assert decided == []
 
     accepted = await commands._run("accept ana-laptop 1234", source_agent="k1")
@@ -101,10 +101,10 @@ async def test_accept_usage_names_the_device_not_a_receipt(tmp_path):
     commands = _relay_commands(tmp_path, agent_bridge=_accepting_bridge([], []))
 
     assert await commands._run("accept", source_agent="k1") == (
-        "usage: /connect accept <device> [fingerprint]"
+        "usage: /connect accept <device> [device ID]"
     )
     assert await commands._run("reject", source_agent="k1") == (
-        "usage: /connect reject <device> [fingerprint]"
+        "usage: /connect reject <device> [device ID]"
     )
 
 
@@ -368,27 +368,55 @@ def _plugin(*, origin="", attach=False, owner=True):
 
 
 @pytest.mark.asyncio
-async def test_bare_knocks_reads_the_joined_directory_not_kollabor_ai():
+async def test_bare_knocks_opens_the_knock_screen():
     plugin = _plugin(origin="https://agents.acme.com")
-    plugin._open_contact_review_altview = AsyncMock(return_value="")
+    plugin._open_knocks_screen = AsyncMock(return_value="")
 
-    await plugin._handle_connect_command("knocks")
-    await plugin._handle_connect_command("knocks other.example")
+    assert await plugin._handle_connect_command("knocks") == ""
 
-    assert [call.args for call in plugin._open_contact_review_altview.await_args_list] == [
-        ("agents.acme.com",),
-        ("other.example",),
-    ]
+    plugin._open_knocks_screen.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_bare_knocks_with_no_network_falls_back_to_kollabor_ai():
-    plugin = _plugin(origin="")
-    plugin._open_contact_review_altview = AsyncMock(return_value="")
+async def test_knocks_with_an_argument_sets_who_may_knock():
+    plugin = _plugin(origin="https://agents.acme.com")
+    plugin._knock_line = AsyncMock(return_value="only contacts may knock for 2h")
 
-    await plugin._handle_connect_command("knocks")
+    assert await plugin._handle_connect_command("knocks contacts for 2h") == (
+        "only contacts may knock for 2h"
+    )
+    await plugin._handle_connect_command("knocks NOBODY")
+    await plugin._handle_connect_command("knocks everyone for 1d")
 
-    plugin._open_contact_review_altview.assert_awaited_once_with("kollabor.ai")
+    assert [call.args for call in plugin._knock_line.await_args_list] == [
+        ("mode", {"mode": "contacts", "minutes": 120}),
+        ("mode", {"mode": "nobody", "minutes": 0}),
+        ("mode", {"mode": "everyone", "minutes": 1440}),
+    ]
+    for wrong in ("knocks other.example", "knocks nobody 2h", "knocks nobody for 9d", "knocks nobody for 0m"):
+        assert await plugin._handle_connect_command(wrong) == (
+            "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
+        )
+    assert plugin._knock_line.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_expect_block_and_unblock_take_a_route_or_its_hex():
+    plugin = _plugin(origin="https://agents.acme.com")
+    plugin._knock_line = AsyncMock(return_value="ok")
+    route = "8f3a2c1d9e4b7a60"
+
+    await plugin._handle_connect_command(f"expect agents.acme.com/c/{route}")
+    await plugin._handle_connect_command(f"block {route.upper()}")
+    await plugin._handle_connect_command(f"unblock https://agents.acme.com/c/{route}")
+
+    assert [call.args for call in plugin._knock_line.await_args_list] == [
+        ("expect", {"route": route}),
+        ("block_route", {"route": route}),
+        ("unblock", {"route": route}),
+    ]
+    assert await plugin._handle_connect_command("block ana-laptop") == "connect: use /connect block <route>"
+    assert await plugin._handle_connect_command("expect") == "connect: use /connect expect <route>"
 
 
 @pytest.mark.asyncio

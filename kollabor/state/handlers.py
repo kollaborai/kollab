@@ -13,6 +13,7 @@ interface, only the transport differs.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -47,6 +48,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.get_permission_state
         state.get_mcp_state
         state.get_hub_state
+        state.set_hub_participation   (hub on/off without a restart)
         state.get_processing_state
         state.get_system_info
         state.list_commands
@@ -81,9 +83,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.hub_enroll_status       (where a submitted join request stands)
         state.hub_connect_snapshot    (Connect screen data for an attached window)
         state.hub_connect_decide      (accept or reject one join request)
-        state.hub_contact_knock       (send a knock through the relay's owner)
-        state.hub_contact_pending     (knocks waiting for this device)
-        state.hub_contact_decide      (accept or reject one knock)
+        state.hub_knocks              (one knock action on the relay's owner)
         state.get_panel               (describe a kollabor.panels panel)
         state.panel_action            (run one panel action)
     """
@@ -128,6 +128,15 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     async def _get_hub_state(params: dict[str, Any]) -> dict[str, Any]:
         snapshot = await state_service.get_hub_state()
         return snapshot.to_dict()
+
+    async def _set_hub_participation(params: dict[str, Any]) -> dict[str, Any]:
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            return {"error": "enabled must be true or false"}
+        try:
+            return await state_service.set_hub_participation(enabled)
+        except ValueError as e:
+            return {"error": str(e)}
 
     async def _get_processing_state(params: dict[str, Any]) -> dict[str, Any]:
         snapshot = await state_service.get_processing_state()
@@ -512,73 +521,23 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": "connect decision could not be sent"}
         return {"reason": reason if isinstance(reason, str) else "try again"}
 
-    def _knock_domain(domain: Any) -> bool:
-        """A relay domain, or "" for the daemon's own network."""
-        return (
-            isinstance(domain, str)
-            and len(domain) <= 253
-            and not any(ord(char) < 32 or ord(char) == 127 for char in domain)
-        )
-
-    async def _hub_contact_knock(params: dict[str, Any]) -> dict[str, Any]:
-        domain = params.get("domain")
-        route = params.get("route")
-        introduction = params.get("introduction")
+    async def _hub_knocks(params: dict[str, Any]) -> dict[str, Any]:
+        action, args = params.get("action"), params.get("args")
         if (
-            set(params) != {"domain", "route", "introduction"}
-            or not _knock_domain(domain)
-            or not domain
-            or not isinstance(route, str)
-            or not re.fullmatch(r"[0-9a-f]{16}", route)
-            or not isinstance(introduction, str)
-            or not 0 < len(introduction) <= 2048
+            set(params) != {"action", "args"}
+            or not isinstance(action, str)
+            or not 0 < len(action) <= 32
+            or not isinstance(args, dict)
+            or len(json.dumps(args)) > 8192
         ):
             return {"error": "invalid knock request"}
         try:
-            text = await state_service.hub_contact_knock(domain, route, introduction)
+            result = await state_service.hub_knocks(action, args)
         except Exception:
-            return {"error": "knock could not be sent"}
-        return {"text": text}
-
-    async def _hub_contact_pending(params: dict[str, Any]) -> dict[str, Any]:
-        domain = params.get("domain")
-        if set(params) != {"domain"} or not _knock_domain(domain):
-            return {"error": "invalid knock inbox request"}
-        try:
-            rows = await state_service.hub_contact_pending(domain)
-        except Exception:
-            return {"error": "knock inbox is unavailable"}
-        if not isinstance(rows, list):
-            return {"error": "knock inbox is unavailable"}
-        return {"requests": rows}
-
-    async def _hub_contact_decide(params: dict[str, Any]) -> dict[str, Any]:
-        domain = params.get("domain")
-        receipt_id = params.get("receipt_id")
-        decision = params.get("decision")
-        sender_key = params.get("sender_key")
-        device_name = params.get("device_name")
-        if (
-            set(params)
-            != {"domain", "receipt_id", "decision", "sender_key", "device_name"}
-            or not _knock_domain(domain)
-            or not isinstance(receipt_id, str)
-            or not re.fullmatch(r"[0-9a-f]{32}", receipt_id)
-            or not isinstance(decision, str)
-            or decision not in {"accept", "reject"}
-            or not isinstance(sender_key, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", sender_key)
-            or not isinstance(device_name, str)
-            or len(device_name) > 256
-        ):
-            return {"error": "invalid knock decision"}
-        try:
-            reason = await state_service.hub_contact_decide(
-                domain, receipt_id, decision, sender_key, device_name
-            )
-        except Exception:
-            return {"error": "knock decision could not be sent"}
-        return {"reason": reason if isinstance(reason, str) else "try again"}
+            return {"error": "knocks are unavailable"}
+        if not isinstance(result, dict) or set(result) not in ({"text"}, {"snapshot"}):
+            return {"error": "knocks are unavailable"}
+        return result
 
     async def _hub_enrollment_offer(params: dict[str, Any]) -> dict[str, Any]:
         domain = params.get("domain")
@@ -728,6 +687,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.get_permission_state": _get_permission_state,
         "state.get_mcp_state": _get_mcp_state,
         "state.get_hub_state": _get_hub_state,
+        "state.set_hub_participation": _set_hub_participation,
         "state.get_processing_state": _get_processing_state,
         "state.get_system_info": _get_system_info,
         # Goal layer: attach clients execute /goal daemon-side where the
@@ -778,9 +738,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_enrollment_offer": _hub_enrollment_offer,
         "state.hub_connect_snapshot": _hub_connect_snapshot,
         "state.hub_connect_decide": _hub_connect_decide,
-        "state.hub_contact_knock": _hub_contact_knock,
-        "state.hub_contact_pending": _hub_contact_pending,
-        "state.hub_contact_decide": _hub_contact_decide,
+        "state.hub_knocks": _hub_knocks,
         "state.get_panel": _get_panel,
         "state.panel_action": _panel_action,
         "state.hub_connect": _hub_connect,

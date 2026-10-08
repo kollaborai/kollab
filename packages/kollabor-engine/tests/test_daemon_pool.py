@@ -117,6 +117,44 @@ async def test_spawn_exports_session_env(user_token, solo, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_inline_credentials_reach_the_daemon(monkeypatch):
+    # POST /sessions with credentials builds a profile no config holds; the
+    # daemon gets `--llm app-inline` and must rebuild it from its env, or it
+    # fails "Profile not found" and the request times out 45s later.
+    from kollabor_engine.session import INLINE_PROFILE, inline_profile_env
+
+    from kollabor_ai.profile_manager import LLMProfile, ProfileManager
+
+    inline = LLMProfile(
+        name=INLINE_PROFILE, provider="openai", model="gpt-test", api_key="sk-test",
+        base_url="http://127.0.0.1:9/v1", max_tokens=512, streaming=False,
+    )
+    assert inline_profile_env(LLMProfile(name="openai-oauth", provider="openai")) == {}
+    pool = daemon_pool.DaemonPool()
+    handle = SimpleNamespace(connect=AsyncMock(), identity="web-inline")
+    with (
+        patch.object(daemon_pool.subprocess, "Popen", return_value=SimpleNamespace()) as popen,
+        patch.object(daemon_pool, "DaemonHandle", return_value=handle),
+        patch.object(pool, "_await_socket", AsyncMock(return_value="/tmp/k.sock")),
+    ):
+        await pool.spawn(
+            "sess_inline", workspace="/tmp", profile=INLINE_PROFILE,
+            profile_env=inline_profile_env(inline),
+        )
+
+    argv, env = popen.call_args.args[0], popen.call_args.kwargs["env"]
+    assert argv[argv.index("--llm") + 1] == INLINE_PROFILE
+    for key, value in env.items():
+        if key.startswith("KOLLAB_APP_INLINE_"):
+            monkeypatch.setenv(key, value)
+    manager = SimpleNamespace(_profiles={})
+    assert ProfileManager._try_create_profile_from_env(manager, INLINE_PROFILE)
+    rebuilt = manager._profiles[INLINE_PROFILE]
+    for field in ("provider", "model", "api_key", "base_url", "max_tokens", "streaming", "supports_tools"):
+        assert getattr(rebuilt, field) == getattr(inline, field), field
+
+
+@pytest.mark.asyncio
 async def test_spawn_retries_a_socket_that_is_not_listening_yet():
     # A dead daemon of the same gem can leave its socket file behind, and the
     # new daemon publishes presence before it binds: the first connect is refused.

@@ -30,12 +30,32 @@ if Node/npm is unavailable.
   click; the options button next to it opens Agent, Gem, Model and Workspace.
   Each session row shows its gem as a live 3D avatar that acts out what the
   agent is doing (thinking, typing, searching, messaging, error).
+- **Agents by computer**: the sidebar lists every agent under the computer it
+  runs on. This computer comes first (its chats, then agents running in a
+  terminal), then each of your other computers. Agents on other computers show
+  while a chat runs here and this computer is connected to your network; open
+  them from that computer.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
+  Messages from other agents show as messages from their gems ("Aquamarine →
+  Lapis"), the way the terminal draws its hub boxes; one the agent only
+  overheard is dimmed. Turns the page did not run (a hub message that woke the
+  agent, a turn typed in the terminal) appear without a reload. A failed turn
+  shows its error under your message, also after a reload.
 - **Trajectory**: every turn, request and tool call as a Table, or as a
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
+- **Gem Studio** (sidebar footer): every agent is born with a random look (eyes
+  and hat) that sticks; dress any gem over it (eyes, hat, color) and set the
+  season for all, previewed live. Random Look rolls a new outfit, Reset goes
+  back to the born look. The engine keeps the looks, so every browser and every
+  gem in the app (session rows, chat, Who Is Online) follows.
+- **Session Properties**: right-click a session row (long-press on a phone) or
+  double-click its gem to dress that one gem in place. The Chat tab takes the
+  agent off the hub (your other agents stop seeing it; your chat keeps working)
+  or puts it back, with no restart. `/hub leave` and `/hub join` do the same in
+  the terminal.
 
 ## Usage
 
@@ -67,6 +87,15 @@ Then open:
 
 ```text
 http://127.0.0.1:8080
+```
+
+To open it from another device, such as a phone on your VPN, list the extra
+addresses in `KOLLAB_WEBUI_HOSTS` (comma-separated; it also works with
+`kollab --web-ui`). Pages opened there reach the engine through the web UI's
+`/engine` proxy, and they get the engine token, so list private addresses only:
+
+```bash
+KOLLAB_WEBUI_HOSTS=10.8.0.1 kollab --web-ui
 ```
 
 For an editable checkout without installed console scripts:
@@ -105,11 +134,12 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 - `POST /sessions/{session_id}/permission`
 - `GET /sessions/{session_id}/permissions`
 - `POST /sessions/{session_id}/permissions/mode`
-- `GET/DELETE /sessions/{session_id}/history`
+- `GET/DELETE /sessions/{session_id}/history` (with `last_turn_error`, why the last turn failed)
 - `GET/POST/PUT/DELETE /profiles...`
 - `GET/POST/PUT/DELETE /mcp/servers...`
 - `GET/POST /sessions/{session_id}/mcp...`
 - `GET /agents` (gem pool: colors, live state, hub agent ids)
+- `GET/PUT /agents/appearance` (Gem Studio looks)
 - `GET /hub/agents`
 - `POST /hub/messages`
 

@@ -12,12 +12,18 @@
     {
       "action": "shell",
       "description": "throwaway HOME with a workspace on an offline network",
-      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'laptop-kollab'; s.state.network_name = 'laptop-kollab-net'; s.save()\""
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-request-names\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'laptop-kollab'; s.state.network_name = 'laptop-kollab-net'; s.save()\"; touch \"$H/.kollab/connect-guide-seen\""
     }
   ],
   "steps": [
     {
       "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 15,
+      "description": "the prompt is up before /connect is typed"
     },
     {
       "action": "section",
@@ -71,8 +77,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "fingerprint abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
-      "description": "the fingerprint and the whole hint sit under the name"
+      "pattern": "device ID abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
+      "description": "the device ID and the whole hint sit under the name"
     },
     {
       "action": "assert_not_contains",
@@ -151,7 +157,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "ana-laptop wants to join +fingerprint abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
+      "pattern": "ana-laptop wants to join +device ID abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
       "description": "a short row fits on one line at 120"
     },
     {
@@ -177,8 +183,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on laptop-kollab-net\\. *$",
-      "description": "the whole notice fits at 120"
+      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on laptop-kollab-… *$",
+      "description": "the whole name shows; the 123-column notice is cut at 120"
     },
     {
       "action": "escape"

@@ -126,18 +126,17 @@ def locations(config: str) -> list[str]:
     return [line.split()[-2] for line in config.splitlines() if line.startswith("location ")]
 
 
-def test_nginx_forwards_the_five_routes_and_nothing_else(tmp_path):
+def test_nginx_forwards_the_four_routes_and_nothing_else(tmp_path):
     config = selfhost.nginx_config(make_settings(tmp_path))
     assert locations(config) == [
         "/.well-known/agent-keys.json",
         "/relay/v1/health",
         "/relay/v1/ws",
         "/relay/v1/enrollment/",
-        "/relay/v1/contact/",
     ]
-    assert config.count("proxy_pass http://127.0.0.1:9078;") == 5
-    assert config.count("limit_except POST") == 2
-    assert config.count("proxy_set_header X-Real-IP $remote_addr;") == 3
+    assert config.count("proxy_pass http://127.0.0.1:9078;") == 4
+    assert config.count("limit_except POST") == 1
+    assert config.count("proxy_set_header X-Real-IP $remote_addr;") == 2
     assert 'proxy_set_header Connection "upgrade";' in config
     assert "\nlocation / " not in config
 
@@ -160,7 +159,7 @@ def test_the_nginx_snippet_passes_nginx_t(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_caddy_forwards_the_same_five_routes(tmp_path):
+def test_caddy_forwards_the_same_four_routes(tmp_path):
     config = selfhost.caddy_config(make_settings(tmp_path, bind="::1"))
     matcher = next(line for line in config.splitlines() if line.strip().startswith("@kollab path"))
     assert matcher.split()[2:] == [path for _, path, _ in selfhost.ROUTES]
@@ -340,8 +339,8 @@ async def test_the_key_file_and_the_relay_answer_on_one_port(running):
     health = await client.get("/relay/v1/health")
     assert health.status == 200
     assert (await health.json())["origin"] == f"https://{DOMAIN}"
-    for route in ("enrollment", "contact"):
-        assert (await client.post(f"/relay/v1/{route}/lookup", json={})).status == 400  # served, and strict
+    assert (await client.post("/relay/v1/enrollment/lookup", json={})).status == 400  # served, and strict
+    assert (await client.post("/relay/v1/contact/lookup", json={})).status == 404  # knocks ride the websocket
 
 
 @pytest.mark.asyncio

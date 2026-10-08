@@ -16,10 +16,13 @@ import type {
   HistoryMessage,
   PermissionPrompt,
   Session,
+  TurnError,
 } from "./api";
-import { isToolOutputBatch, stripAgentHud } from "./api";
+import { isToolOutputBatch } from "./api";
+import { splitAgentHud, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
+  historyTurnTiming,
   newTurnClock,
   observeRun,
   turnTimings,
@@ -31,6 +34,12 @@ export type EngineState = {
   sessionId: string;
   sessions: Session[];
   messages: ThreadMessageLike[];
+  /**
+   * The first `messages` entries show the daemon history's first `history`
+   * messages. Set when the history loads, and by the engine when a turn this
+   * page ran ends; a later reload appends only what lies past it.
+   */
+  synced?: { history: number; messages: number };
   error?: string;
   usage?: {
     inputTokens: number;
@@ -78,20 +87,34 @@ function historyContentToThreadContent(content: unknown): ThreadMessageLike["con
   return parts.length ? parts : "";
 }
 
-function withoutAgentHud(
-  content: ThreadMessageLike["content"],
-): ThreadMessageLike["content"] {
-  if (typeof content === "string") return stripAgentHud(content);
-  return content
-    .map((part) =>
-      part.type === "text" ? { ...part, text: stripAgentHud(part.text) } : part,
-    )
-    .filter((part) => part.type !== "text" || part.text);
+/**
+ * A user turn's hub messages (the agent HUD the daemon puts on top of it, see
+ * hub-notes.ts) and what is left: what the user typed. The HUD rides on the
+ * first text part.
+ */
+function withHubNotes(content: ThreadMessageLike["content"]): {
+  notes: HubNote[];
+  content: ThreadMessageLike["content"];
+} {
+  if (typeof content === "string") {
+    const { notes, rest } = splitAgentHud(content);
+    return { notes, content: rest };
+  }
+  const first = content.findIndex((part) => part.type === "text");
+  if (first < 0) return { notes: [], content };
+  const { notes, rest } = splitAgentHud((content[first] as TextMessagePart).text);
+  return {
+    notes,
+    content: content
+      .map((part, index) => (index === first ? { ...part, text: rest } : part))
+      .filter((part) => part.type !== "text" || part.text),
+  };
 }
 
 function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
+  turnError?: TurnError | null,
 ): ThreadMessageLike[] {
   type RestoredToolCall = {
     type: "tool-call";
@@ -217,7 +240,45 @@ function historyToMessages(
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
 
+  // The reply time survives a reload: each turn is timed by the history's own
+  // timestamps, from the user's message to the final reply. assistant-ui joins
+  // a turn's adjacent assistant messages and keeps only the first one's
+  // metadata, so the timing goes on the turn's first assistant message.
+  let turnStartedAt: string | null | undefined;
+  let turnTools = 0;
+  let firstReply: number | undefined;
+  let finalReplyAt: string | null | undefined;
+  const closeTurn = () => {
+    const timing = historyTurnTiming(turnStartedAt, finalReplyAt, turnTools);
+    const first = firstReply === undefined ? undefined : messages[firstReply];
+    if (firstReply !== undefined && first && timing) {
+      messages[firstReply] = { ...first, metadata: { ...first.metadata, timing } };
+    }
+    turnStartedAt = undefined;
+    turnTools = 0;
+    firstReply = undefined;
+    finalReplyAt = undefined;
+  };
+  // The failed turn's reply carries the error (assistant-ui keeps the first
+  // status of the replies it joins); a turn that failed before replying gets
+  // a reply of its own.
+  const showTurnError = () => {
+    if (!turnError) return;
+    const status = { type: "incomplete", reason: "error", error: turnError.message } as const;
+    const reply = firstReply === undefined ? undefined : messages[firstReply];
+    if (firstReply !== undefined && reply) messages[firstReply] = { ...reply, status };
+    else {
+      messages.push({
+        id: `history-${turnError.history_length}-error`,
+        role: "assistant",
+        content: "",
+        status,
+      });
+    }
+  };
+
   history.forEach((message, sourceIndex) => {
+    if (sourceIndex === turnError?.history_length) showTurnError();
     const metadata = asRecord(message.metadata);
     if (
       metadata?.context_compaction === true ||
@@ -235,9 +296,21 @@ function historyToMessages(
     if (isToolOutputBatch(message)) return;
 
     if (message.role === "user") {
-      const content = withoutAgentHud(
+      // Before the HUD check: a status-only turn still ends the one before.
+      closeTurn();
+      turnStartedAt = message.timestamp;
+      const { notes, content } = withHubNotes(
         historyContentToThreadContent(message.content),
       );
+      // What other agents sent this one, as messages from their gems.
+      notes.forEach((note, noteIndex) => {
+        messages.push({
+          id: `history-${sourceIndex}-hub-${noteIndex}`,
+          role: "system",
+          content: note.text,
+          metadata: { custom: { hub: note } },
+        });
+      });
       // A turn that was only agent status stays in the Trajectory tab.
       if (!content.length) return;
       messages.push({
@@ -251,14 +324,23 @@ function historyToMessages(
     if (message.role === "assistant") {
       const calls = restoredCalls(message, sourceIndex);
       if (!calls.length) {
+        const content = historyContentToThreadContent(message.content);
+        // Nothing to show: the agent chose not to answer (e.g. a hub message
+        // that was only an acknowledgement).
+        if (!content.length) return;
         messages.push({
           id: `history-${sourceIndex}`,
           role: "assistant",
-          content: historyContentToThreadContent(message.content),
+          content,
           status: { type: "complete", reason: "stop" },
         });
+        firstReply ??= messages.length - 1;
+        finalReplyAt = message.timestamp;
         return;
       }
+      // A step with tool calls; the turn's final reply comes after it.
+      turnTools += calls.length;
+      finalReplyAt = undefined;
 
       const content: Array<
         | { type: "text"; text: string }
@@ -285,6 +367,7 @@ function historyToMessages(
         content,
         status: { type: "complete", reason: "stop" },
       });
+      firstReply ??= messages.length - 1;
       return;
     }
 
@@ -326,6 +409,8 @@ function historyToMessages(
       });
     }
   });
+  if (turnError && turnError.history_length >= history.length) showTurnError();
+  closeTurn();
 
   // A daemon does not re-emit permission_request after a browser reload. Keep
   // the prompt as a pending tool call so assistant-ui can render it and its
@@ -406,6 +491,7 @@ const converter = (
 type ThreadReadyRuntime = {
   thread: {
     getState: () => { messages: readonly ThreadMessageLike[] };
+    subscribe: (callback: () => void) => () => void;
   };
 };
 
@@ -421,30 +507,32 @@ function InitialMessagesGate({
   const [ready, setReady] = useState(messages.length === 0);
 
   useEffect(() => {
-    let attempts = 0;
-    let retry: number | undefined;
-    const hydrate = () => {
-      if (
-        runtime.thread.getState().messages.length >= messages.length ||
-        attempts >= 20
-      ) {
-        // Give the provider's assistant-ui adapter one commit to publish the
-        // bound thread state before Thread reads its empty-state selector.
-        retry = window.setTimeout(() => setReady(true), 50);
-        return;
-      }
-      attempts += 1;
-      retry = window.setTimeout(hydrate, 10);
+    if (ready) return;
+    let commit: number | undefined;
+    const finish = () => {
+      if (commit !== undefined) return;
+      // Give the provider's assistant-ui adapter one commit to publish the
+      // bound thread state before Thread reads its empty-state selector.
+      commit = window.setTimeout(() => setReady(true), 50);
+    };
+    const check = () => {
+      if (runtime.thread.getState().messages.length >= messages.length) finish();
     };
 
     // The remote thread runtime is bound by AssistantRuntimeProvider after
     // this component mounts. Wait for that binding before mounting Thread so
     // its initial empty-state selector cannot stick after a full reload.
-    hydrate();
+    // Event-driven, not polled: a hidden tab clamps each chained timer to
+    // ~1 s, so the old 20-step poll kept a reloaded session blank for 20 s.
+    const unsubscribe = runtime.thread.subscribe(check);
+    const fallback = window.setTimeout(finish, 250);
+    check();
     return () => {
-      if (retry !== undefined) window.clearTimeout(retry);
+      unsubscribe();
+      window.clearTimeout(fallback);
+      if (commit !== undefined) window.clearTimeout(commit);
     };
-  }, [messages.length, runtime]);
+  }, [messages.length, runtime, ready]);
 
   return ready ? children : null;
 }
@@ -510,13 +598,45 @@ export function EngineRuntimeProvider({
     onError: async (error, { updateState }) => {
       updateState((state) => ({ ...state, error: error.message }));
     },
-    onCancel: ({ updateState }) => {
+    onCancel: ({ updateState, error }) => {
+      // A failed request lands here too, after onError: keep the error it
+      // set, and leave the daemon's turn alone (a dropped phone connection
+      // must not stop the agent's work).
+      if (error) return;
       // The transport aborts its request, but the daemon is independent of
       // that HTTP stream. Explicitly cancel its active turn as well.
       void api.cancel(sessionId).catch(() => undefined);
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
   });
+
+  // Turns this page did not run (a hub message that woke the agent, a turn
+  // typed in the terminal) reach the open thread when App reloads the history
+  // after them. Only the history past what the thread shows is appended:
+  // assistant-ui keeps every message it was given, so swapping in reloaded
+  // copies of turns already on screen would show those turns twice.
+  const reloaded = useRef(initialState.messages);
+  useEffect(() => {
+    if (initialState.messages === reloaded.current) return;
+    reloaded.current = initialState.messages;
+    const thread = runtime.thread.getState();
+    const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+    const from = shown?.synced;
+    // A run that ended without a sync point (an older engine, a dropped
+    // stream) leaves the thread to its next full load.
+    if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
+    const tail = initialState.messages.filter((message) => {
+      const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
+      return index !== undefined && Number(index) >= from.history;
+    });
+    if (!tail.length || !initialState.synced) return;
+    const messages = [...shown.messages, ...tail];
+    runtime.thread.importExternalState({
+      ...shown,
+      messages,
+      synced: { history: initialState.synced.history, messages: messages.length },
+    });
+  }, [initialState, runtime]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -558,10 +678,13 @@ export function buildInitialState(
   sessions: Session[],
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[] = [],
+  lastTurnError: TurnError | null = null,
 ): EngineState {
+  const messages = historyToMessages(history, pendingPermissions, lastTurnError);
   return {
     sessionId,
     sessions,
-    messages: historyToMessages(history, pendingPermissions),
+    messages,
+    synced: { history: history.length, messages: messages.length },
   };
 }

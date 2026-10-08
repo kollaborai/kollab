@@ -1,5 +1,6 @@
 """Tests for the agent pool colors and the hub feed's live state events."""
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -96,6 +97,51 @@ class TestAgentPoolColor:
         assert by_name["ruby"]["state"] == "available"
         assert body["active"] == ["lapis"]
         assert body["available"] == ["ruby"]
+
+    async def test_a_solo_agent_is_live_but_off_the_hub(self, client, pool, monkeypatch):
+        solo = {**presence("a1", "lapis", "idle"), "solo": True}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([solo]))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["lapis"]["active"] is True
+        assert by_name["lapis"]["solo"] is True
+        assert by_name["ruby"]["solo"] is False
+
+    async def test_a_live_agent_names_its_folder(self, client, pool, monkeypatch):
+        live = {**presence("a1", "lapis", "idle"), "project": "/home/dev/kollab"}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live]))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["lapis"]["project"] == "/home/dev/kollab"
+        assert by_name["ruby"]["project"] == ""
+
+    async def test_every_live_agent_is_listed_but_only_pool_gems_launch(self, client, pool, monkeypatch):
+        live = [presence("a1", "koordinator", "idle"), presence("a2", "lapis-2", "working")]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(live))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["koordinator"]["active"] and by_name["koordinator"]["pool"] is False
+        assert by_name["koordinator"]["color"] == [128, 128, 128]
+        assert by_name["lapis-2"]["color"] == by_name["lapis"]["color"]  # wears its base gem
+        assert by_name["lapis-2"]["state"] == "working"
+        assert by_name["lapis"]["pool"] is True and by_name["lapis"]["available"]
+        assert "koordinator" not in body["available"]
+
+    async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
+
+        await client.get("/agents")
+        born = json.loads(appearance_store.read_text())["born"]
+        await client.get("/agents")
+
+        assert set(born) == {"lapis"}
+        assert json.loads(appearance_store.read_text())["born"] == born
 
     async def test_missing_color_falls_back_to_neutral_gray(self, client, monkeypatch):
         monkeypatch.setattr(

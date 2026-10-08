@@ -39,7 +39,7 @@ from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
 from .network_members import METHOD as MEMBERS_METHOD
 from .network_members import MembershipSync
-from .relay_commands import RelayCommands, directory_origin
+from .relay_commands import RelayCommands
 from .relay_conversations import (
     CONVERSATION_REJECTION_REASONS,
     EVENT_KINDS,
@@ -67,16 +67,16 @@ MAX_REMOTE_PEERS = 8
 DIRECTORY_STALE_SECONDS = 45
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
-# A knock nobody answered in a week is forgotten. A rejection is asked of the
-# directory; one that cannot say (older, or the answer expired) leaves silence.
-KNOCK_EXPIRY_SECONDS = 7 * 24 * 3600
-# How often the directory is asked how one knock was decided.
-KNOCK_STATUS_SECONDS = 60
 # The directory forgets a device's consent after a day; repeating it well inside that.
 LINK_REFRESH_SECONDS = 6 * 60 * 60
+KNOCK_ACTIONS = frozenset(
+    {
+        "list", "knock", "accept", "reject", "block", "delete", "clear", "knock_back",
+        "stop", "mode", "block_route", "unblock", "expect", "unexpect",
+    }
+)
 LINK_RETRY_SECONDS = 60
 _SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
-_REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -93,39 +93,23 @@ _ENROLLMENT_ERRORS = {
     "transport",
     "invalid_response",
     "internal",
+    "update_required",
 }
-_CONTACT_ERRORS = {
-    "invalid_request",
-    "invalid_contact",
-    "unauthorized",
-    "unavailable",
-    "conflict",
-    "capacity",
-    "rate_limited",
-    "replayed",
-    "backend_unavailable",
-    "transport",
-    "invalid_response",
-    "discovery",
-    "unknown_route",
-    "ambiguous_route",
-    "name_taken",
-    "already_named",
-}
+
 
 
 def _safe_enrollment_result(value) -> dict[str, str]:
     if not isinstance(value, dict):
         return {"error": "transport"}
-    if set(value) == {"status"} and value["status"] in {"approved", "rejected"}:
+    if value.get("status") in {"approved", "rejected"}:
         return {"status": value["status"]}
-    if set(value) == {"error"} and value["error"] in _ENROLLMENT_ERRORS:
+    if value.get("error") in _ENROLLMENT_ERRORS:
         return {"error": value["error"]}
     return {"error": "transport"}
 
 
 def _safe_enrollment_offer_result(value) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or not value.keys() >= {
         "status",
         "offer_id",
         "expires_at",
@@ -210,8 +194,7 @@ class RelayAgentBridge:
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
         self._wall_clock = time.time  # epoch seconds; tests swap it
-        self._knock_asked: dict[str, float] = {}  # knock key -> when its answer was last asked
-        self._no_knock_status = ""  # origin of a directory without the status route
+        self._next_knock_tick = 0.0
         self._links_lock = asyncio.Lock()
         self._links_declared: tuple[str, tuple[str, ...]] | None = None
         self._links_due = 0.0
@@ -271,127 +254,26 @@ class RelayAgentBridge:
             raise
         return undo
 
-    def _bind_knocked_peer(
-        self, recipient_key: str, agent_name: str, request_id: str = ""
-    ) -> None:
-        """The knocking side of an introduction: get ready to hear back.
+    def _bind_knocked_peer(self, recipient_key: str, agent_name: str) -> None:
+        """The knocking side of an accepted knock: open the path back.
 
-        Nothing flows until the other device accepts: the directory links two
-        devices in different rooms only when both declared each other, and
-        only this device's `sync_links` declares for it. The knocked device is
-        treated as a stranger (`agents` trust) and may answer the agent that
-        knocked; that is the whole of what it can reach here until an explicit
-        `/connect allow`.
+        Runs when the other device's accept arrives, never before, so a knock
+        that never connects leaves nothing behind. The knocked device is a
+        stranger (`agents` trust) that may answer the agent that knocked; that
+        is the whole of what it can reach here until an explicit `/connect allow`.
         """
         client = self.commands.client
-        if recipient_key == client.public_key:
-            return
-        if recipient_key in client.state.approvals:
-            if recipient_key in self._state().state.knocks:
-                # knocked again: the week starts over
-                self._record_knock(recipient_key, request_id)
+        if recipient_key == client.public_key or recipient_key in client.state.approvals:
             return
         try:
             self.set_peer_trust(recipient_key, "agents")
             self.set_peer_link(recipient_key)
             client.approve(recipient_key)
             self.store.grant(client.state.room, recipient_key, agent_name)
-            self._record_knock(recipient_key, request_id)
         except Exception:
-            self._clear_knock(recipient_key)
+            client.revoke(recipient_key)  # also drops the trust and the link
+            self.store.revoke(client.state.room, recipient_key)
             raise
-
-    def _record_knock(self, key: str, request_id: str = "") -> None:
-        store = self._state()
-        store.state.knocks[key] = int(self._wall_clock())
-        if _REQUEST_ID.match(request_id):  # the id the directory can be asked about
-            store.state.knock_requests[key] = request_id
-        else:
-            store.state.knock_requests.pop(key, None)
-        store.save()
-
-    def _clear_knock(self, key: str) -> None:
-        """Take back everything a knock left: approval, name, trust, link, grant."""
-        client = self.commands.client
-        client.revoke(key)
-        self.store.revoke(client.state.room, key)
-        store = self._state()
-        known = store.state.knocks.pop(key, None) is not None
-        if store.state.knock_requests.pop(key, None) is not None or known:
-            store.save()
-        self._knock_asked.pop(key, None)
-
-    def expire_knocks(self) -> None:
-        """Forget knocks nobody answered for KNOCK_EXPIRY_SECONDS.
-
-        A knock the other device accepted never expires: its link is live both
-        ways, or it already reached this device (`_receive` drops the record
-        then). A device that has since become a member, or was removed, is no
-        stranger any more and keeps whatever it now is. While offline no live
-        link is visible, so nothing is judged.
-        """
-        client = self.commands.client
-        store = self._state()
-        knocks = store.state.knocks
-        if not knocks or client.status().get("state") != "online":
-            return
-        live = {row["key"] for row in client.peers()}
-        now = self._wall_clock()
-        expired = []
-        for key, sent in tuple(knocks.items()):
-            if key in live or key not in store.state.links:
-                del knocks[key]  # answered, or no longer a stranger
-            elif now - sent > KNOCK_EXPIRY_SECONDS:
-                expired.append(key)
-        store.save()
-        for key in expired:
-            self._clear_knock(key)
-
-    async def ask_knock_answers(self) -> None:
-        """Ask the directory how one outstanding knock was decided.
-
-        A rejection clears what the knock left at once, as the week's expiry
-        would. Accepted, or an answer the directory no longer holds, ends the
-        asking for that knock; a directory without the route ends it for the
-        directory. The expiry stays the backstop either way. A knock is asked
-        at most once a minute, and one knock per beat so a slow directory
-        cannot hold up the refresh (ponytail: raise if many knocks matter).
-        """
-        client = self.commands.client
-        store = self._state()
-        requests = store.state.knock_requests
-        origin = client.state.origin
-        if not requests or not origin or origin == self._no_knock_status:
-            return
-        if client.status().get("state") != "online":
-            return
-        for key in [key for key in requests if key not in store.state.knocks]:
-            del requests[key]  # answered or cleared meanwhile
-        now = self._wall_clock()
-        due = [
-            key
-            for key in requests
-            if now - self._knock_asked.get(key, float("-inf")) >= KNOCK_STATUS_SECONDS
-        ]
-        if not due:
-            return
-        key = min(due, key=lambda item: self._knock_asked.get(item, 0.0))
-        self._knock_asked[key] = now
-        try:
-            status = await self.commands.contact_request_status(
-                origin.removeprefix("https://"), key, requests[key]
-            )
-        except Exception as exc:
-            if getattr(exc, "code", "") == "no_route":
-                self._no_knock_status = origin  # an older directory: the expiry decides
-            else:
-                logger.debug("could not ask how a knock was answered")  # next minute
-            return
-        if status == "rejected":
-            self._clear_knock(key)
-        elif status != "pending":  # accepted, or gone from the directory
-            del requests[key]
-            store.save()
 
     def is_stranger(self, address: str) -> bool:
         """Whether an agent lives on an accepted stranger's device, not on this network."""
@@ -429,12 +311,10 @@ class RelayAgentBridge:
                 if self._links_failed:
                     if now < self._links_due:
                         return  # back off after a failure
-                elif not wanted and not (self._links_declared or ("", ()))[1]:
-                    return  # nothing declared, nothing to declare
                 elif marker == self._links_declared and now < self._links_due:
-                    return
+                    return  # an empty set is declared too: it tells the directory this device takes knocks
             try:
-                await sync(client.state.origin.removeprefix("https://"), wanted)
+                await sync(wanted)
             except (RelayError, OSError, TimeoutError, ValueError) as exc:
                 logger.debug(
                     "cross-directory links not updated: %s",
@@ -710,9 +590,7 @@ class RelayAgentBridge:
             "relay.status": self._rpc_status,
             "relay.enroll_device": self._rpc_enroll_device,
             "relay.enrollment_offer": self._rpc_enrollment_offer,
-            "relay.contact_submit": self._rpc_contact_submit,
-            "relay.contact_pending": self._rpc_contact_pending,
-            "relay.contact_decide": self._rpc_contact_decide,
+            "relay.knocks": self._rpc_knocks,
         }.items():
             rpc.register(name, handler)
         await self._ensure_owner()
@@ -886,6 +764,9 @@ class RelayAgentBridge:
                 if self.commands and time.monotonic() >= self._next_outbox:
                     self._next_outbox = time.monotonic() + 1
                     await self._flush_outbound()
+                if self.commands and time.monotonic() >= self._next_knock_tick:
+                    self._next_knock_tick = time.monotonic() + 1
+                    await self.commands.knocks.tick()
                 await self._tick()
             except asyncio.CancelledError:
                 raise
@@ -908,14 +789,6 @@ class RelayAgentBridge:
             show(line)
 
     async def _refresh_directory(self):
-        try:
-            self.expire_knocks()
-        except Exception:
-            logger.warning("could not expire unanswered knocks")
-        try:
-            await self.ask_knock_answers()
-        except Exception:
-            logger.debug("could not ask how knocks were answered", exc_info=True)
         try:
             self.store.expire_queued(TASK_TIMEOUT)
             local = await asyncio.to_thread(self.directory.agents, self.workspace)
@@ -1005,274 +878,55 @@ class RelayAgentBridge:
         )
         return _safe_enrollment_offer_result(result)
 
-    async def submit_contact_request(
-        self,
-        domain: str,
-        route: str,
-        introduction: str,
-        *,
-        source_agent: str,
-    ) -> dict[str, str]:
-        """Resolve a knock's route and submit a sealed introduction.
+    async def knocks(
+        self, action: str, args: dict, *, source_agent: str
+    ) -> dict:
+        """One knock action from a human, in the process that owns the relay.
 
-        The raw recipient key never leaves this bridge: it is resolved from
-        `route` here (or in the owner process) and only used to seal and post
-        the request.
+        `list` answers {"snapshot": ...} (plugins/hub/knocks.py), every other
+        action {"text": the line to show}. Keys never cross this call.
         """
-        self._require_human_network_context(
-            "remote model turns cannot submit contact requests"
-        )
+        self._require_human_network_context("remote model turns cannot use knocks")
         await self._ensure_owner()
-        params = {
-            "agent_id": source_agent,
-            "domain": domain,
-            "route": route,
-            "introduction": introduction,
-            "device_name": self.device_name(),
-        }
+        params = {"agent_id": source_agent, "action": action, "args": args}
         if self.commands is not None:
-            return await self._rpc_contact_submit(params)
+            return await self._rpc_knocks(params)
         record = self.owner.owner()
         if record is None:
             raise RelayError("workspace relay owner is starting; retry shortly")
         result = await local_relay_rpc(
-            record["socket_path"],
-            "relay.contact_submit",
-            params,
-            timeout=30,
-            auth=self._auth(),
+            record["socket_path"], "relay.knocks", params, timeout=30, auth=self._auth()
         )
-        return self._safe_contact_result(result)
+        # The daemon may run a newer kollab than this window: only what this
+        # version reads is kept.
+        if not isinstance(result, dict) or not ("text" in result or "snapshot" in result):
+            raise RelayError("knocks are unavailable")
+        return {"snapshot": result["snapshot"]} if "snapshot" in result else {"text": result["text"]}
 
-    async def pending_contact_requests(
-        self, domain: str, *, source_agent: str
-    ) -> list[dict[str, str | int]]:
-        self._require_human_network_context(
-            "remote model turns cannot review contact requests"
-        )
-        await self._ensure_owner()
-        params = {"agent_id": source_agent, "domain": domain}
-        if self.commands is not None:
-            result = await self._rpc_contact_pending(params)
-        else:
-            record = self.owner.owner()
-            if record is None:
-                raise RelayError("workspace relay owner is starting; retry shortly")
-            result = await local_relay_rpc(
-                record["socket_path"],
-                "relay.contact_pending",
-                params,
-                timeout=30,
-                auth=self._auth(),
-            )
-        if not isinstance(result, dict) or set(result) != {"requests"}:
-            raise RelayError("contact inbox is unavailable")
-        rows = result["requests"]
-        if not isinstance(rows, list) or len(rows) > 32:
-            raise RelayError("contact inbox is unavailable")
-        return rows
-
-    async def decide_contact_request(
-        self,
-        domain: str,
-        request_id: str,
-        *,
-        decision: str,
-        source_agent: str,
-        sender_key: str,
-        device_name: str,
-    ) -> dict[str, str]:
-        self._require_human_network_context(
-            "remote model turns cannot decide contact requests"
-        )
-        await self._ensure_owner()
-        params = {
-            "agent_id": source_agent,
-            "domain": domain,
-            "request_id": request_id,
-            "decision": decision,
-            "sender_key": sender_key,
-            "device_name": device_name,
-        }
-        if self.commands is not None:
-            result = await self._rpc_contact_decide(params)
-        else:
-            record = self.owner.owner()
-            if record is None:
-                raise RelayError("workspace relay owner is starting; retry shortly")
-            result = await local_relay_rpc(
-                record["socket_path"],
-                "relay.contact_decide",
-                params,
-                timeout=30,
-                auth=self._auth(),
-            )
-        return self._safe_contact_result(result)
-
-    @staticmethod
-    def _safe_contact_result(value) -> dict[str, str]:
-        if not isinstance(value, dict):
-            return {"error": "transport"}
-        if set(value) == {"status", "receipt_id"} and value.get("status") in {
-            "queued",
-            "accepted",
-            "rejected",
-        }:
-            receipt = value.get("receipt_id")
-            if isinstance(receipt, str) and re.fullmatch(r"[0-9a-f]{32}", receipt):
-                return {"status": value["status"], "receipt_id": receipt}
-            return {"error": "invalid_response"}
-        if set(value) == {"error"} and value.get("error") in _CONTACT_ERRORS:
-            return {"error": value["error"]}
-        return {"error": "transport"}
-
-    async def _rpc_contact_submit(self, params):
-        self._require_human_network_context(
-            "remote model turns cannot submit contact requests"
-        )
-        if self.commands is None or set(params) != {
-            "agent_id",
-            "domain",
-            "route",
-            "introduction",
-            "device_name",
-        }:
-            raise RelayError("invalid local contact request")
-        try:
-            introduction_size = (
-                len(params["introduction"].encode("utf-8"))
-                if isinstance(params["introduction"], str)
-                else 0
-            )
-        except UnicodeError:
-            raise RelayError("invalid local contact request") from None
+    async def _rpc_knocks(self, params):
+        self._require_human_network_context("remote model turns cannot use knocks")
         if (
-            not isinstance(params["domain"], str)
-            or not params["domain"]
-            or len(params["domain"]) > 253
-            or not isinstance(params["route"], str)
-            or not re.fullmatch(r"[0-9a-f]{16}", params["route"])
-            or not isinstance(params["introduction"], str)
-            or introduction_size > 2048
-            or not isinstance(params["device_name"], str)
+            self.commands is None
+            or not isinstance(params, dict)
+            or not params.keys() >= {"agent_id", "action", "args"}
+            or params["action"] not in KNOCK_ACTIONS
+            or not isinstance(params["args"], dict)
+            or len(json.dumps(params["args"])) > 8192
         ):
-            raise RelayError("invalid local contact request")
+            raise RelayError("invalid local knock request")
         agent = self._local_agent(params["agent_id"])
+        service = self.commands.knocks
+        if params["action"] == "list":
+            return {"snapshot": service.snapshot()}
         try:
-            key = await self.commands.resolve_contact_route(
-                params["domain"], params["route"]
+            text = await service.act(params["action"], params["args"], agent=agent.name)
+        except (ValueError, KeyError, TypeError):
+            text = (
+                'connect: use /connect knock <route> "text"'
+                if params["action"] in ("knock", "knock_back")
+                else "connect: that is not a valid knock action"
             )
-            receipt = await self.commands.submit_contact_request(
-                params["domain"],
-                key,
-                params["introduction"],
-                params["device_name"],
-            )
-        except Exception as exc:
-            code = getattr(exc, "code", None)
-            return {"error": code if code in _CONTACT_ERRORS else "transport"}
-        # The knock is sent. If this device is on the knocked directory, get
-        # ready for the answer: the other side's accept then opens the path.
-        try:
-            client = self.commands.client
-            if directory_origin(params["domain"]) == client.state.origin:
-                self._bind_knocked_peer(key, agent.name, receipt)
-                await self.sync_links(force=True)
-        except Exception:
-            logger.warning("knock sent, but a reply path could not be prepared")
-        return {"status": "queued", "receipt_id": receipt}
-
-    async def _rpc_contact_pending(self, params):
-        self._require_human_network_context(
-            "remote model turns cannot review contact requests"
-        )
-        if self.commands is None or set(params) != {"agent_id", "domain"}:
-            raise RelayError("invalid local contact inbox request")
-        if (
-            not isinstance(params["domain"], str)
-            or not params["domain"]
-            or len(params["domain"]) > 253
-        ):
-            raise RelayError("invalid local contact inbox request")
-        self._local_agent(params["agent_id"])
-        try:
-            self.commands.screen_polled()
-            requests = await self.commands.pending_contact_requests(params["domain"])
-            if not isinstance(requests, list) or len(requests) > 32:
-                raise RelayError("contact inbox unavailable")
-            rows = []
-            for item in requests:
-                try:
-                    introduction = item.introduction.reveal()
-                    rows.append(
-                        {
-                            "receipt_id": item.receipt_id,
-                            "sender_key": item.sender_key,
-                            "expires_at": item.expires_at,
-                            "introduction": introduction,
-                            "device_name": item.device_name,
-                        }
-                    )
-                finally:
-                    item.introduction.clear()
-            return {"requests": rows}
-        except Exception as exc:
-            code = getattr(exc, "code", None)
-            raise RelayError(
-                "contact inbox unavailable"
-                if code not in _CONTACT_ERRORS
-                else f"contact inbox unavailable ({code})"
-            ) from None
-
-    async def _rpc_contact_decide(self, params):
-        self._require_human_network_context(
-            "remote model turns cannot decide contact requests"
-        )
-        if self.commands is None or set(params) != {
-            "agent_id",
-            "domain",
-            "request_id",
-            "decision",
-            "sender_key",
-            "device_name",
-        }:
-            raise RelayError("invalid local contact decision")
-        if (
-            not isinstance(params["domain"], str)
-            or not params["domain"]
-            or len(params["domain"]) > 253
-            or not isinstance(params["request_id"], str)
-            or not re.fullmatch(r"[0-9a-f]{32}", params["request_id"])
-            or not isinstance(params["decision"], str)
-            or params["decision"] not in {"accept", "reject"}
-            or not isinstance(params["sender_key"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", params["sender_key"])
-            or not isinstance(params["device_name"], str)
-        ):
-            raise RelayError("invalid local contact decision")
-        self._local_agent(params["agent_id"])
-        try:
-            # Bind before the relay records the decision, like a join accept:
-            # a name collision fails the accept and the knock stays pending.
-            undo = params["decision"] == "accept" and self._bind_knock_peer(
-                params["sender_key"], params["device_name"]
-            )
-            try:
-                result = await self.commands.decide_contact_request(
-                    params["domain"], params["request_id"], params["decision"]
-                )
-            except Exception:
-                if undo:
-                    undo()
-                raise
-            if undo:
-                # Accepted: this device now consents to the link, which opens
-                # once the knocking device has declared this one too.
-                await self.sync_links(force=True)
-            return {"status": result.status, "receipt_id": result.receipt_id}
-        except Exception as exc:
-            code = getattr(exc, "code", None)
-            return {"error": code if code in _CONTACT_ERRORS else "transport"}
+        return {"text": text}
 
     def _ensure_enrollment_issuer(self):
         if self._enrollment_issuer is None:
@@ -1328,7 +982,7 @@ class RelayAgentBridge:
 
     async def _rpc_enroll_device(self, params, on_submitted=None):
         self._require_human_network_context("remote model turns cannot enroll devices")
-        if self.commands is None or set(params) != {"agent_id", "domain", "code"}:
+        if self.commands is None or not isinstance(params, dict) or not params.keys() >= {"agent_id", "domain", "code"}:
             raise RelayError("invalid local enrollment request")
         from .enrollment_codes import is_short_enrollment_code
 
@@ -1356,7 +1010,7 @@ class RelayAgentBridge:
         self._require_human_network_context(
             "remote model turns cannot issue device enrollment offers"
         )
-        if self.commands is None or set(params) != {"agent_id", "domain"}:
+        if self.commands is None or not isinstance(params, dict) or not params.keys() >= {"agent_id", "domain"}:
             raise RelayError("invalid local enrollment offer")
         if (
             not isinstance(params["domain"], str)
@@ -1375,7 +1029,11 @@ class RelayAgentBridge:
         )
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
-        if set(params) != {"value", "agent_id"} or not isinstance(params["value"], str):
+        if (
+            not isinstance(params, dict)
+            or not params.keys() >= {"value", "agent_id"}
+            or not isinstance(params["value"], str)
+        ):
             raise RelayError("invalid local relay command")
         self._local_agent(params["agent_id"])
         return {
@@ -1827,8 +1485,6 @@ class RelayAgentBridge:
             raise RelayError("peer is not approved")
         store = self._state()
         stranger = peer in store.state.links
-        if store.state.knocks.pop(peer, None) is not None:
-            store.save()  # it reached us: the knock was accepted
         if stranger and method in {"peer.forward", "peer.exchange", MEMBERS_METHOD}:
             # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")
@@ -1977,7 +1633,7 @@ class RelayAgentBridge:
             return receipt
         if method in {"status", "cancel"}:
             if (
-                set(payload) != {"id", "to"}
+                not isinstance(payload, dict) or not payload.keys() >= {"id", "to"}
                 or not isinstance(payload["id"], str)
                 or not ID.fullmatch(payload["id"])
             ):
@@ -2035,7 +1691,7 @@ class RelayAgentBridge:
             }
 
     async def _rpc_deliver(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local delivery")
         self._state()
         record = self.store.task(params["id"])
@@ -2048,7 +1704,7 @@ class RelayAgentBridge:
         return {"id": record["id"], "state": record["state"]}
 
     async def _rpc_event(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local conversation event")
         state_store = self._state()
         state = state_store.state
@@ -2487,7 +2143,7 @@ class RelayAgentBridge:
                 continue
 
     async def _rpc_cancel(self, params):
-        if set(params) != {"id"}:
+        if not isinstance(params, dict) or not params.keys() >= {"id"}:
             raise RelayError("invalid local cancellation")
         self._state()
         record = self.store.task(params["id"])

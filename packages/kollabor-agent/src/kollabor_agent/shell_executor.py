@@ -180,11 +180,13 @@ class ShellExecutor:
             stdout_text = self._decode_output(stdout, max_output_bytes)
             stderr_text = self._decode_output(stderr, max_output_bytes)
 
+            returncode = self._current_process.returncode
             return ShellResult(
-                success=(self._current_process.returncode == 0),
+                success=(returncode == 0),
                 stdout=stdout_text,
                 stderr=stderr_text,
-                exit_code=self._current_process.returncode or 1,
+                # `returncode or 1` reported every success as exit 1.
+                exit_code=1 if returncode is None else returncode,
                 execution_time=time.time() - start_time,
             )
 

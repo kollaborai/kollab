@@ -345,6 +345,7 @@ Examples:
   kollab --agent coder --as lapis --detached  # Same, detached (backgrounded agent)
   kollab -d                                # Short form for --detached
   kollab --attach lapis                     # Attach to agent 'lapis' and see its output
+  kollab --attach lapis@devbox              # Attach to 'lapis' on devbox over ssh
   kollab --web-ui                           # Launch the engine + browser UI
   kollab --reset-config                    # Reset configs to defaults with updated profiles
   kollab --update                          # Update this source checkout from Git
@@ -482,8 +483,11 @@ Telegram bridge setup (run inside interactive mode):
         "--attach",
         type=str,
         default=None,
-        metavar="IDENTITY",
-        help="Attach to a running agent through the interactive TUI proxy",
+        metavar="IDENTITY[@HOST]",
+        help=(
+            "Watch and type to an agent that is already running. "
+            "IDENTITY@HOST reaches an agent on another computer you can already log in to"
+        ),
     )
 
     parser.add_argument(
@@ -504,7 +508,7 @@ Telegram bridge setup (run inside interactive mode):
         metavar="CMD",
         help=(
             "Hub CLI: status, agents, stop <name|all>, capture <name> [lines], "
-            "msg <name> <text>, broadcast <text>, user [name], on/off, "
+            "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
             "org <name> [mission]. Pass '--hub help' for the full list. "
             "Telegram bridge and notifications are configured interactively "
             "via /hub bridge setup and /hub notify."
@@ -523,7 +527,7 @@ Telegram bridge setup (run inside interactive mode):
         "--web-ui",
         action="store_true",
         default=False,
-        help="Launch the local engine + browser UI (http://127.0.0.1:8080)",
+        help="Open kollab in your browser (http://127.0.0.1:8080)",
     )
 
     parser.add_argument(
@@ -580,7 +584,10 @@ Telegram bridge setup (run inside interactive mode):
         "--daemon",
         action="store_true",
         default=False,
-        help="Run as daemon + attach client (Ctrl+Z to detach, agent survives)",
+        help=(
+            "Run kollab in the background and watch it from this window "
+            "(Ctrl+Z to step away; the agent keeps running)"
+        ),
     )
 
     parser.add_argument(
@@ -991,7 +998,13 @@ async def async_main() -> None:
     # Handle --attach: boot full TUI app in proxy mode
     # (connects to remote agent's socket instead of local LLM)
     if args.attach:
-        attach_identity = args.attach
+        from kollabor.attach_remote import RemoteAttachError, open_attach_target
+
+        try:
+            attach_identity, attach_socket = open_attach_target(args.attach)
+        except RemoteAttachError as e:
+            print(f"attach failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Check if we have a CLI command or --help pending
     # These should bypass pipe mode detection.
@@ -1073,6 +1086,7 @@ async def async_main() -> None:
 
         # Resolve attach identity (set earlier if --attach was used)
         _attach_to = locals().get("attach_identity", None)
+        _attach_socket = locals().get("attach_socket", None)
 
         app = TerminalLLMChat(
             args=args,
@@ -1087,6 +1101,7 @@ async def async_main() -> None:
             skill_names=args.skill,
             plugin_registry=plugin_registry,
             attach_to=_attach_to,
+            attach_socket=_attach_socket,
             context_name=getattr(args, "context", None),
         )
         logger.info("Starting application...")
@@ -1252,6 +1267,7 @@ def _print_hub_help() -> None:
     print("  capture <name> [lines]     dump last N lines of agent output")
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
+    print("  where <name>               show where an agent is running")
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")
@@ -1306,6 +1322,21 @@ async def _handle_cli_hub(hub_args: list) -> None:
     # real subcommands go through the CLI handler.
     if subcmd in ("help", "-h", "--help") or not hub_args:
         return  # fall through to normal interactive path
+
+    # Read-only, and ahead of get_presence_dir() so it creates no hub dirs.
+    # `kollab --attach name@host` runs this on the remote box over ssh.
+    if subcmd == "where":
+        from plugins.hub.presence import find_live_socket
+
+        if len(rest) != 1:
+            print("usage: kollab --hub where <name>", file=sys.stderr)
+            sys.exit(2)
+        sock = find_live_socket(rest[0])
+        if not sock:
+            print(f"no live agent named '{rest[0]}' on this machine", file=sys.stderr)
+            sys.exit(1)
+        print(sock)
+        return
 
     presence_dir = get_presence_dir()
 
@@ -1884,6 +1915,25 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
+def _pick_engine_port(
+    version: str, engine_version, port: int = 7433, tries: int = 10
+) -> tuple[int, bool]:
+    """Return (port, reuse): the first port with this version's engine, or none.
+
+    ``engine_version(port)`` is None when no engine answers there. An engine of
+    another version is left running, since other clients may use it, and
+    skipped: reusing it silently served a 0.10 engine to a 0.12 web UI.
+    """
+    for candidate in range(port, port + tries):
+        running = engine_version(candidate)
+        if running is None:
+            return candidate, False
+        if running == version:
+            return candidate, True
+        print(f"  (engine on {candidate} is {running}, not {version}; leaving it running)")
+    raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
+
+
 async def _handle_cli_web_ui() -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
@@ -1891,28 +1941,44 @@ async def _handle_cli_web_ui() -> None:
     (`kollabor_engine`, `kollabor_webui`); this just wires them together the
     way the two READMEs describe running them by hand.
     """
+    import json
     import subprocess
     import time
     import urllib.error
     import urllib.request
 
-    engine_port = 7433
     webui_port = int(os.environ.get("KOLLAB_WEBUI_PORT", "8080"))
+
+    def engine_version(port: int) -> Optional[str]:
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with urllib.request.urlopen(f"{base}/health", timeout=1) as resp:
+                if resp.status != 200:
+                    return None
+        except (urllib.error.URLError, OSError):
+            return None
+        try:
+            with urllib.request.urlopen(f"{base}/version", timeout=1) as resp:
+                return str(json.loads(resp.read()).get("version") or "unknown")
+        except (urllib.error.URLError, OSError, ValueError):
+            return "unknown"
+
+    try:
+        engine_port, reuse = _pick_engine_port(__version__, engine_version)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     engine_url = f"http://127.0.0.1:{engine_port}"
 
     def engine_healthy() -> bool:
-        try:
-            with urllib.request.urlopen(f"{engine_url}/health", timeout=1) as resp:
-                return resp.status == 200
-        except (urllib.error.URLError, OSError):
-            return False
+        return engine_version(engine_port) is not None
 
     print("\n  starting kollab web ui...")
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
 
     engine_proc = None
-    if engine_healthy():
+    if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(

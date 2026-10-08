@@ -1,9 +1,9 @@
 """Every AltView under plugins/altview/ registers without an error at launch.
 
 `AltViewCommandIntegrator` builds each discovered class with no arguments to
-read its metadata. ContactReviewAltView had three required arguments, so every
-launch logged `Error registering AltView commands for ContactReviewAltView:
-... missing 3 required positional arguments`.
+read its metadata. The old knock review screen had three required arguments,
+so every launch logged `Error registering AltView commands for ...: missing 3
+required positional arguments`; the knock screen keeps that fixed.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest
 from kollabor.altview.command_integration import AltViewCommandIntegrator
 from kollabor_tui.altview.base import AltView
 from kollabor_tui.key_parser import KeyPress, KeyType
-from plugins.altview.contact_altview import ContactReviewAltView
+from plugins.altview.knocks_altview import KnockScreenAltView
 
 PLUGINS = Path(__file__).resolve().parents[2] / "plugins"
 FILES = sorted(
@@ -87,7 +87,7 @@ def test_discovery_logs_no_error_for_any_altview(caplog, restore_altview_modules
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     assert errors == []
     assert registered >= len(FILES) - 1  # every file with a class registers
-    assert "contact-review" in integrator.get_registered_plugins()
+    assert "knocks" in integrator.get_registered_plugins()
 
 
 # The auto-registered instance is only a metadata probe, but if it is ever
@@ -106,32 +106,14 @@ class _Renderer:
 
 
 @pytest.mark.asyncio
-async def test_knock_review_without_callbacks_is_an_empty_inbox_and_inert():
-    view = ContactReviewAltView()
+async def test_the_knock_screen_without_callbacks_is_empty_and_inert():
+    view = KnockScreenAltView()
 
     await view.on_enter(_Renderer())
     assert await view.render_frame(0)
 
-    assert view._stage == "review" and view._message == "no pending knocks"
-    for char in ("a", "r"):
+    assert view._snapshot["ringing"] == [] and view._snapshot["missed"] == []
+    for char in ("a", "r", "b", "w", "c"):
         key = KeyPress(name=char, code=ord(char), char=char, type=KeyType.PRINTABLE)
         assert await view.handle_input(key) is False
-    assert view._requests == []
-
-
-@pytest.mark.asyncio
-async def test_knock_review_with_requests_but_no_decide_callback_refuses_to_decide():
-    from plugins.hub.contact_requests import PendingContactRequest, PrivateMessage
-
-    request = PendingContactRequest(
-        "b" * 32, "c" * 64, 4_000_000_000, PrivateMessage("hi"), "ana-laptop"
-    )
-    view = ContactReviewAltView(on_load=lambda: [request])
-    await view.on_enter(_Renderer())
-
-    await view.handle_input(
-        KeyPress(name="a", code=97, char="a", type=KeyType.PRINTABLE)
-    )
-
-    assert "not connected" in view._message
-    assert len(view._requests) == 1  # nothing was decided
+    assert view._message in ("", "knocks are not connected here")

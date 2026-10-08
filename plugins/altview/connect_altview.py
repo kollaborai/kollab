@@ -19,8 +19,15 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
-from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
+from plugins.altview.connect_style import (
+    draw_header,
+    paint_keys,
+    paint_row,
+    paint_status,
+    paint_tip,
+    paint_value,
+)
 from plugins.hub.connect_guide import (
     CHOICES,
     NO_NETWORK_LINE,
@@ -224,7 +231,7 @@ class ConnectAltView(AltView):
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect",
-            description="Privately enter a device enrollment code",
+            description="Privately enter a join code",
             version="1.0.0",
             author="Kollabor",
             category="internal",
@@ -288,27 +295,15 @@ class ConnectAltView(AltView):
             return True
 
         renderer.clear_screen()
-        theme = T()
-        top = max(0, (height - 12) // 2)
-        renderer.write_at(
-            0,
-            top,
-            solid_fg(str(C["half_bottom"]) * width, theme.dark[1]),
-            "",
-        )
-        renderer.write_at(
-            0,
-            top + 1,
-            solid(" Connect".ljust(width), theme.dark[1], theme.text, width),
-            "",
-        )
+        top = max(0, (height - 13) // 2)
+        body = draw_header(renderer, top, width, "Connect", _JOIN_TAGLINE) + 1
 
         if self._stage == "entry":
-            self._render_entry(top + 3, width)
+            self._render_entry(body, width)
         elif self._stage == "submitting":
-            self._write_line(2, top + 4, "submitting…", width)
+            self._write_line(2, body + 1, "submitting…", width, _accent)
         else:
-            self._render_outcome(top + 4, width)
+            self._render_outcome(body + 1, width)
         return True
 
     async def handle_input(self, key_press: KeyPress) -> bool:
@@ -374,13 +369,13 @@ class ConnectAltView(AltView):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def _render_entry(self, y: int, width: int) -> None:
-        self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width)
-        self._write_line(1, y + 2, self._field("domain", self._visible_domain()), width)
+        self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width, _entry_row)
+        self._write_line(1, y + 2, self._field("domain", self._visible_domain()), width, _entry_row)
         code_display = "********" if self._code_chars else "(enter privately)"
-        self._write_line(1, y + 3, self._field("join code", code_display), width)
+        self._write_line(1, y + 3, self._field("join code", code_display), width, _entry_row)
         if self._validation_error:
-            self._write_line(2, y + 5, self._validation_error, width)
-        self._write_line(2, y + 7, "tab switch  enter submit  esc cancel", width)
+            self._write_line(2, y + 5, self._validation_error, width, _bad)
+        self._write_line(2, y + 7, "tab switch  enter submit  esc cancel", width, paint_keys)
         hints = ["no code? run /connect code on a device already on the network"]
         if self._on_attach is not None:
             hints.append(
@@ -389,7 +384,7 @@ class ConnectAltView(AltView):
         row = y + 9
         for hint in hints:
             for line in textwrap.wrap(hint, max(10, width - 3)):
-                self._write_line(2, row, line, width)
+                self._write_line(2, row, line, width, paint_tip if "?" in line else _dim)
                 row += 1
 
     def _field(self, label: str, value: str) -> str:
@@ -398,16 +393,20 @@ class ConnectAltView(AltView):
 
     def _render_outcome(self, y: int, width: int) -> None:
         outcome = self._outcome
+        kind = "bad"
         if outcome is None:
-            message = "cancelled"
+            message, kind = "cancelled", "plain"
         elif outcome.status is ConnectStatus.PENDING:
+            kind = "accent"
             message = (
                 f"request sent to {self.domain}; "
                 "waiting for approval on another device"
             )
         elif outcome.status is ConnectStatus.APPROVED:
+            kind = "good"
             message = outcome.detail or f"joined {self.domain}"
         elif outcome.status is ConnectStatus.CONNECTED:
+            kind = "good"
             message = outcome.detail or f"connected to {self.domain}"
         elif outcome.status is ConnectStatus.REJECTED:
             message = "join request rejected"
@@ -417,23 +416,24 @@ class ConnectAltView(AltView):
         else:
             message = "could not submit the join request"
 
-        self._write_line(2, y, message, width)
+        self._write_line(2, y, message, width, lambda text: paint_status(text, kind))
         row = y + 1
         if outcome is not None and outcome.note:
             for line in textwrap.wrap(outcome.note, max(10, width - 3)):
-                self._write_line(2, row, line, width)
+                self._write_line(2, row, line, width, _dim)
                 row += 1
         if self._stage == "waiting":
             if self._wait_note:
-                self._write_line(2, y + 1, self._wait_note, width)
+                self._write_line(2, y + 1, self._wait_note, width, _dim)
             self._write_line(
                 2,
                 y + 3,
                 "esc close   /connect status shows where the request stands",
                 width,
+                paint_keys,
             )
         else:
-            self._write_line(2, max(y + 3, row + 1), "enter/esc close", width)
+            self._write_line(2, max(y + 3, row + 1), "enter/esc close", width, paint_keys)
 
     def _edit_focused_field(self, key_press: KeyPress) -> None:
         field = self._domain_chars() if self._focus == "domain" else self._code_chars
@@ -618,9 +618,13 @@ class ConnectAltView(AltView):
         self._code_chars.clear()
         self._code_cursor = 0
 
-    def _write_line(self, x: int, y: int, text: str, width: int) -> None:
+    def _write_line(
+        self, x: int, y: int, text: str, width: int, paint: Callable[[str], str] | None = None
+    ) -> None:
+        """Clip to the screen first, then color: painting never changes the width."""
         if self._renderer is not None and x < width:
-            self._renderer.write_at(x, y, clip_display(text, width - x), "")
+            clipped = clip_display(text, width - x)
+            self._renderer.write_at(x, y, paint(clipped) if paint else clipped, "")
 
     @staticmethod
     def _filter_text(value: str, limit: int) -> str:
@@ -655,6 +659,29 @@ class ConnectScreenState:
 _WANTS_TO_JOIN = " wants to join"
 
 
+_NETWORK_TAGLINE = "link your computers so your agents work together"
+_CODE_TAGLINE = "one code joins one computer"
+_JOIN_TAGLINE = "join with a code from your other computer"
+_SCREEN_LABELS = frozenset({"network", "this device", "config", "join code", "requests", "knocks", "online"})
+_ENTRY_LABELS = frozenset({"network", "domain", "join code"})
+
+
+def _entry_row(line: str) -> str:
+    return paint_row(line, _LABEL_WIDTH, _ENTRY_LABELS) or paint_value(line)
+
+
+def _accent(text: str) -> str:
+    return paint_status(text, "accent")
+
+
+def _bad(text: str) -> str:
+    return paint_status(text, "bad")
+
+
+def _dim(text: str) -> str:
+    return paint_status(text, "dim")
+
+
 def _fit(text: str, width: int) -> str:
     return clip_display(text, width)
 
@@ -678,7 +705,7 @@ def _code_value(state: ConnectScreenState) -> str:
     if state.code_status == "creating":
         return "creating…"
     unreachable = state.snapshot is not None and not state.snapshot.relay_online
-    reason = "relay unreachable" if unreachable else "could not create a code"
+    reason = "can't connect" if unreachable else "could not create a code"
     return f"{reason}   press c to try again"
 
 
@@ -698,7 +725,7 @@ def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
         )
         rows += request_row(
             f"{marker}{name}{_WANTS_TO_JOIN}",
-            f"fingerprint {request.fingerprint}",
+            f"device ID {request.fingerprint}",
             room,
             hint="[a]ccept [r]eject",
             indent=" " * len(marker),
@@ -787,16 +814,23 @@ def connect_screen_lines(
     return _clip(lines, width, max_lines)
 
 
-def _draw_lines(renderer: Any, lines: list[str], width: int) -> None:
-    """The Connect frame: title bar, then the body lines from row 3."""
+def _draw_lines(renderer: Any, lines: list[str], width: int, tagline: str = "") -> None:
+    """The Connect frame: the branded title bar, then the body lines under it.
+
+    The last line is the key hint. Rows (a known label, or the blank label
+    under one) get dim labels and bright values; any other line is prose.
+    """
     renderer.clear_screen()
-    theme = T()
-    renderer.write_at(0, 0, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), "")
-    renderer.write_at(
-        0, 1, solid(lines[0].ljust(width), theme.dark[1], theme.text, width), ""
-    )
-    for offset, line in enumerate(lines[1:]):
-        renderer.write_at(0, 3 + offset, line, "")
+    top = draw_header(renderer, 0, width, lines[0].strip(), tagline) + 1
+    body = lines[1:]
+    for offset, line in enumerate(body):
+        if offset == len(body) - 1:
+            painted = paint_keys(line)
+        else:
+            painted = paint_row(line, 1 + _LABEL_WIDTH, _SCREEN_LABELS)
+            if painted is None:
+                painted = paint_tip(line) if "?" in line else paint_value(line)
+        renderer.write_at(0, top + offset, painted, "")
 
 
 def connect_guide_lines(stage: str, selected: int, width: int) -> list[str]:
@@ -906,8 +940,9 @@ class ConnectScreenAltView(AltView):
             return True
         _draw_lines(
             self._renderer,
-            connect_screen_lines(self._screen_state(), width, height - 2),
+            connect_screen_lines(self._screen_state(), width, height - 3),
             width,
+            _CODE_TAGLINE if self.code_only else _NETWORK_TAGLINE,
         )
         self._armed = True
         return True
@@ -1141,7 +1176,7 @@ class ConnectGuideAltView(AltView):
         if width <= 0 or height <= 0:
             return True
         lines = connect_guide_lines(self.stage, self.selected, width)
-        _draw_lines(self._renderer, _clip(lines, width, height - 2), width)
+        _draw_lines(self._renderer, _clip(lines, width, height - 3), width, _NETWORK_TAGLINE)
         self._armed = True  # the choices are on screen: Enter may pick one
         return True
 

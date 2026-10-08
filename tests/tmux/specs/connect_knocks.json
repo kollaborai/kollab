@@ -1,0 +1,104 @@
+{
+  "name": "connect-knocks",
+  "description": "/connect knocks opens the knock screen (issue #123): a missed knock kept on this device shows the knocker's device name, device ID and text, never its key or a relay: address; the blocked route, the empty contacts list and who may knock show; offline says knocks cannot reach this device; Esc closes it. The missed knock and settings are seeded into knocks.json (rewritten every run) because a spec has no second device or relay.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-knocks\"; cd \"$H/ws\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 100,
+    "term_height": 34
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "throwaway HOME (first-run network guide already seen) with a workspace on an offline network and one missed knock",
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-knocks\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; printf '%s' '{\"kollabor\":{\"llm\":{\"active_profile\":\"openai-test\",\"profiles\":{\"openai-test\":{\"provider\":\"openai\",\"model\":\"gpt-5.5\",\"base_url\":\"https://api.openai.com/v1\",\"api_key\":\"sk-test-dummy\",\"supports_tools\":true}}}},\"plugins\":{\"hub\":{\"enabled\":true}}}' > \"$H/.kollab/config.json\"; ln -sfn \"$R/plugins\" \"$H/ws/plugins\"; cd \"$H/ws\" && HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" -c \"import json, os; from plugins.hub.project_scope import resolve_project_root as root; from plugins.hub.relay_state import RelayStateStore as Store; s = Store(root(), None); s.state.origin = 'https://relay.invalid'; s.state.device_name = 'laptop-kollab'; s.state.network_name = 'laptop-kollab-net'; s.save(); d = {'v': 1, 'mode': 'contacts', 'mode_until': 0, 'blocked': {'0123456789abcdef': 'spam-box'}, 'contacts': {}, 'muted': {}, 'missed': [{'id': 'c' * 32, 'key': 'ab12' + '0' * 56 + 'ef01', 'device': 'ana-laptop', 'text': 'Ana from Acme. Can we talk about the API?', 'at': 1790000000}]}; p = s.path / 'knocks.json'; p.write_text(json.dumps(d)); os.chmod(p, 0o600)\""
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "the knock screen: names, device IDs and text, never keys"
+    },
+    {
+      "action": "slash_command",
+      "command": "connect",
+      "subcommand": "knocks"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "who may knock",
+      "timeout": 20
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "ana-laptop +device ID [0-9a-f]{4}…[0-9a-f]{4}",
+      "description": "the missed knock names the device and its device ID"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Ana from Acme\\. Can we talk about the API\\?",
+      "description": "the knock's text shows"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "missed +1 of 20",
+      "description": "the missed list counts against its limit"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "0123456789abcdef +spam-box",
+      "description": "the blocked route shows with its device name"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "who may knock +contacts +\\[w\\] change",
+      "description": "the who-may-knock setting shows"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "this device is offline: knocks cannot reach it",
+      "description": "offline is said plainly"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "fingerprint",
+      "description": "the old word is gone"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "ab12000000",
+      "description": "the knocker's key never shows"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "relay:",
+      "description": "no relay: address shows"
+    },
+    {
+      "action": "section",
+      "title": "esc closes the screen"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "who may knock",
+      "description": "the knock screen closed"
+    }
+  ]
+}

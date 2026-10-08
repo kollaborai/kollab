@@ -175,3 +175,20 @@ export async function observeRun(
   // A permission pause or a failed run: the turn goes on (or never records).
   if (!finished) turn.elapsed += endedAt - runStart;
 }
+
+/**
+ * A finished turn's timing rebuilt from history timestamps, so the reply time
+ * survives a reload (`turnTimings` lives in memory). Wall clock from the
+ * user's message to the turn's final reply: unlike the live clock it includes
+ * any wait on a permission prompt.
+ */
+export const historyTurnTiming = (
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+  toolCallCount: number,
+): MessageTiming | undefined => {
+  const start = Date.parse(startedAt ?? "");
+  const end = Date.parse(endedAt ?? "");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return undefined;
+  return { streamStartTime: start, totalStreamTime: end - start, totalChunks: 0, toolCallCount };
+};

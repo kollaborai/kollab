@@ -491,7 +491,7 @@ def fig_selfhost():
     o.append(t(246, 94, "TLS proxy :443", "", 13, None, 700))
     o.append(t(246, 110, "nginx or Caddy, your cert", "dimf", 11))
     routes = ["GET  /.well-known/agent-keys.json", "GET  /relay/v1/health", "WS   /relay/v1/ws",
-              "POST /relay/v1/enrollment/*", "POST /relay/v1/contact/*"]
+              "POST /relay/v1/enrollment/*"]
     for i, s in enumerate(routes):
         o.append(t(246, 138 + i * 19, s, "m", 10.5))
     o.append(t(246, 246, "never: /relay/v1/metrics", "m warnf", 10.5, None, 700))

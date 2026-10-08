@@ -55,8 +55,7 @@ for i in $(seq 1 20); do
   [ "$i" = 20 ] && { echo "NOT HEALTHY: $H"; echo "rolling back to $BACKUP"; sudo -n cp "$BACKUP" "$DROPIN"; sudo -n systemctl daemon-reload; sudo -n systemctl restart kollab-relay.service; exit 3; }
 done
 echo "enrollment lookup: $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/enrollment/lookup -H 'content-type: application/json' -d '{}')"
-echo "contact lookup:    $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/contact/lookup -H 'content-type: application/json' -d '{}')"
-echo "contact links:     $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/contact/links -H 'content-type: application/json' -d '{}')  (400 = live, 404 = build without cross-room links)"
+echo "contact routes:    $(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST https://kollabor.ai/relay/v1/contact/lookup -H 'content-type: application/json' -d '{}')  (404 = knocks-as-calls build, knocks ride the WebSocket; 400 = older build)"
 echo "public health:     $(curl -s -m 8 https://kollabor.ai/relay/v1/health | head -c 120)"
 echo "rollback: sudo cp $BACKUP $DROPIN && sudo systemctl daemon-reload && sudo systemctl restart kollab-relay.service"
 EOF

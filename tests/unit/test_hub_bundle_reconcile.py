@@ -30,6 +30,14 @@ class TestDesiredBundleForIdentity(unittest.TestCase):
             expected = POOL_BY_NAME[gem_name].agent_type or "default"
             self.assertEqual(desired_bundle_for_identity(gem_name), expected)
 
+    def test_a_numbered_gem_runs_its_gems_bundle(self):
+        # Once every gem is live the pool hands out lapis-2, lapis-3, ...
+        self.assertEqual(
+            desired_bundle_for_identity("lapis-2"), desired_bundle_for_identity("lapis")
+        )
+        self.assertEqual(desired_bundle_for_identity("lapis-dev"), "default")
+        self.assertEqual(desired_bundle_for_identity("agent-4242"), "default")
+
     def test_every_gem_resolves_and_is_never_koordinator(self):
         # No gem in the pool should ever be promoted to the orchestrator
         # bundle — that is the whole point of the reconcile.

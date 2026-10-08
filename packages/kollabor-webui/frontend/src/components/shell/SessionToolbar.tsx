@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { GemAvatar } from "@/components/gems/GemAvatar";
+import { titleCase } from "@/components/panels/panel-model";
+import {
+  type ComponentProps,
+  forwardRef,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 import {
   Eraser,
   Pencil,
@@ -6,6 +14,8 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  ShieldCheck,
+  ShieldOff,
   Terminal,
   Trash2,
   Users,
@@ -42,6 +52,9 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 import {
   APPROVAL_MODE_OPTIONS,
   formatApprovalMode,
@@ -55,6 +68,35 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+// Header controls: borderless until hovered, so the bar reads as one strip.
+const GHOST_TRIGGER =
+  "h-8 gap-1.5 border-transparent bg-transparent px-2 shadow-none hover:bg-accent dark:bg-transparent dark:hover:bg-accent/50";
+
+/** A slim header control: a ghost icon (plus a count) whose tooltip names it. */
+const ToolbarButton = forwardRef<
+  HTMLButtonElement,
+  ComponentProps<typeof Button> & { label: string }
+>(function ToolbarButton({ label, className, children, ...props }, ref) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          ref={ref}
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={label}
+          className={cn("text-muted-foreground hover:text-foreground h-8 gap-1 px-2", className)}
+          {...props}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
+  );
+});
 
 export function SessionToolbar({
   api,
@@ -257,31 +299,68 @@ export function SessionToolbar({
     ([, info]) => info.status === "connected",
   ).length;
 
+  const activeProfile = profiles.find(
+    (profile) => profile.name === (session.profile || profiles[0]?.name),
+  );
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="ml-auto flex flex-wrap items-center gap-0.5">
       <Select
         value={session.profile || profiles[0]?.name || "default"}
         onValueChange={(next) => void changeProfile(next)}
         disabled={!profiles.length}
       >
-        <SelectTrigger size="sm" className="max-w-[15rem]" aria-label="Model">
-          <SelectValue placeholder="Model" />
+        <SelectTrigger
+          size="sm"
+          className={cn(GHOST_TRIGGER, "max-w-[7.5rem] sm:max-w-[15rem]")}
+          aria-label="Model"
+        >
+          {/* Below xl the model shows alone: "gpt-6-luna · openai-oauth" cut to
+              "gpt-6-luna ·" on phones and wrapped the header at tablet width.
+              The list below still names each profile. One
+              wrapping span: SelectValue is a gap-2 flex row, which doubled the
+              space before the dot. */}
+          <SelectValue placeholder="Model">
+            {activeProfile ? (
+              <span className="min-w-0 truncate">
+                {activeProfile.model || activeProfile.name}
+                {activeProfile.model && activeProfile.name !== activeProfile.model ? (
+                  <span className="text-muted-foreground max-xl:hidden"> · {activeProfile.name}</span>
+                ) : null}
+              </span>
+            ) : undefined}
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           {profiles.map((profile) => (
             <SelectItem key={profile.name} value={profile.name}>
-              {profile.model || profile.name}
-              {profile.model && profile.name !== profile.model
-                ? ` · ${profile.name}`
-                : ""}
+              <span className="min-w-0 truncate">
+                {profile.model || profile.name}
+                {profile.model && profile.name !== profile.model ? (
+                  <span className="text-muted-foreground"> · {profile.name}</span>
+                ) : null}
+              </span>
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
 
       <Select value={mode} onValueChange={(next) => void changeMode(next)}>
-        <SelectTrigger size="sm" className="w-[11rem]" aria-label="Approval mode">
-          <SelectValue>{formatApprovalMode(mode)}</SelectValue>
+        <SelectTrigger
+          size="sm"
+          className={GHOST_TRIGGER}
+          aria-label="Approval mode"
+          title={formatApprovalMode(mode)}
+        >
+          {/* Trust All skips every approval prompt: an open shield says so. */}
+          {mode === "trust_all" ? (
+            <ShieldOff className="size-4 text-amber-500" />
+          ) : (
+            <ShieldCheck className="size-4" />
+          )}
+          <span className="hidden sm:inline">
+            <SelectValue>{formatApprovalMode(mode)}</SelectValue>
+          </span>
         </SelectTrigger>
         <SelectContent>
           {APPROVAL_MODE_OPTIONS.map(({ value, label }) => (
@@ -292,6 +371,8 @@ export function SessionToolbar({
         </SelectContent>
       </Select>
 
+      <Separator orientation="vertical" className="mx-1 hidden data-[orientation=vertical]:h-4 sm:block" />
+
       {/* MCP servers */}
       <Dialog
         open={mcpOpen}
@@ -301,13 +382,12 @@ export function SessionToolbar({
         }}
       >
         <DialogTrigger asChild>
-          <Button variant="outline" size="sm">
+          <ToolbarButton label="MCP Servers">
             <Plug className="size-4" />
-            MCP
-            <Badge variant="secondary">
+            <span className="text-xs tabular-nums">
               {connectedCount}/{allServerNames.length}
-            </Badge>
-          </Button>
+            </span>
+          </ToolbarButton>
         </DialogTrigger>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
@@ -340,9 +420,11 @@ export function SessionToolbar({
                           <span className="truncate text-sm font-medium">
                             {name}
                           </span>
-                          <span className="text-muted-foreground text-xs">
-                            {definition.description || "No description"}
-                          </span>
+                          {definition.description ? (
+                            <span className="text-muted-foreground text-xs">
+                              {definition.description}
+                            </span>
+                          ) : null}
                           {/* A long command path must wrap anywhere, or its
                               width pushes the dialog past a phone screen. */}
                           <span className="text-muted-foreground flex items-start gap-1 text-[11px] break-all">
@@ -545,6 +627,7 @@ export function SessionToolbar({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => {
                 // Read the name before clearing state; the dialog unmounts its
                 // content on close.
@@ -568,13 +651,12 @@ export function SessionToolbar({
         }}
       >
         <DialogTrigger asChild>
-          <Button variant="outline" size="sm">
+          <ToolbarButton label="Who Is Online">
             <Users className="size-4" />
-            Online
-            <Badge variant="secondary">
+            <span className="text-xs tabular-nums">
               {agents === null ? "…" : agents.length}
-            </Badge>
-          </Button>
+            </span>
+          </ToolbarButton>
         </DialogTrigger>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -602,14 +684,10 @@ export function SessionToolbar({
                         key={identity}
                         className="flex items-center gap-3 rounded-md px-2 py-2"
                       >
-                        <span
-                          className="size-2 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgb(16_185_129/0.12)]"
-                          aria-label="online"
-                          title="online"
-                        />
+                        <GemAvatar gem={identity} state="idle" live season="auto" size={28} />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center justify-between gap-2 text-sm font-medium">
-                            <span className="truncate">{identity || "agent"}</span>
+                            <span className="truncate">{titleCase(identity) || "Agent"}</span>
                             <span className="text-muted-foreground text-xs">Online</span>
                           </span>
                           <span className="text-muted-foreground block truncate text-xs">
@@ -643,23 +721,16 @@ export function SessionToolbar({
       </Dialog>
 
       {/* Settings: the dialog lives in App (PanelHost) so every entry point shares it */}
-      <Button
-        variant="outline"
-        size="sm"
-        aria-label="Session settings trigger"
-        onClick={onOpenSettings}
-      >
+      <ToolbarButton label="Settings" onClick={onOpenSettings}>
         <Settings2 className="size-4" />
-        Settings
-      </Button>
+      </ToolbarButton>
 
       {/* Clear history */}
       <AlertDialog>
         <AlertDialogTrigger asChild>
-          <Button variant="ghost" size="sm">
+          <ToolbarButton label="Clear History">
             <Eraser className="size-4" />
-            Clear
-          </Button>
+          </ToolbarButton>
         </AlertDialogTrigger>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -671,8 +742,8 @@ export function SessionToolbar({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void clearHistory()}>
-              Clear history
+            <AlertDialogAction variant="destructive" onClick={() => void clearHistory()}>
+              Clear History
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

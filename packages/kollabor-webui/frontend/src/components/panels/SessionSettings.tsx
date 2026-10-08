@@ -108,7 +108,7 @@ export function SessionSettings({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 py-3 text-sm sm:px-6">
         <p className="text-muted-foreground text-sm">
-          Live settings for this daemon. Changes apply to the current session and
+          Live settings for this session. They apply now and
           do not rewrite your saved profile.
         </p>
         <div className="grid grid-cols-[6rem_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
@@ -187,28 +187,28 @@ export function SessionSettings({
         <div className="bg-muted/30 rounded-md border p-3 text-xs">
           {settingsBusy ? (
             <span className="text-muted-foreground">
-              Refreshing daemon state…
+              Refreshing…
             </span>
           ) : settings ? (
             <div className="grid gap-1.5">
               <div className="flex items-center gap-2 font-medium">
                 <CheckCircle2 className="size-3.5 text-emerald-500" />
-                engine connected
+                Connected
               </div>
               <span className="text-muted-foreground break-words">
-                pid{" "}
+                Process ID{" "}
                 {String(
                   settings.system?.daemon_pid || session.daemon_pid || "—",
                 )}{" "}
-                · {String(settings.system?.git_branch || "no git branch")}
+                · {String(settings.system?.git_branch || "No git branch")}
               </span>
               <span className="text-muted-foreground break-words">
-                hub{" "}
-                {String(
-                  settings.hub?.my_identity || session.identity || "unassigned",
+                Hub{" "}
+                {titleCase(
+                  String(settings.hub?.my_identity || session.identity || "unassigned"),
                 )}{" "}
                 ·{" "}
-                {String(settings.processing?.is_processing ? "working" : "idle")}
+                {settings.processing?.is_processing ? "Working" : "Idle"}
               </span>
               {settings.agent?.description ? (
                 <span className="text-muted-foreground break-words">

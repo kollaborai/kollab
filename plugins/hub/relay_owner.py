@@ -28,9 +28,7 @@ RELAY_METHODS = frozenset(
         "relay.event",
         "relay.cancel",
         "relay.status",
-        "relay.contact_submit",
-        "relay.contact_pending",
-        "relay.contact_decide",
+        "relay.knocks",
     }
 )
 

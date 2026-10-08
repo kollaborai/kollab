@@ -64,9 +64,10 @@ function RecordSummary({ record }: { record: TrajectoryRecord }) {
 
   return (
     <span className="flex min-w-0 items-center gap-1.5 truncate">
-      <span className="truncate font-medium text-foreground/90">{label}</span>
+      {/* A long output must not squeeze the tool name ("Run ls" showed "R…"). */}
+      <span className="max-w-[50%] shrink-0 truncate font-medium text-foreground/90">{label}</span>
       <span className="text-muted-foreground/60 shrink-0">→</span>
-      <span className="text-muted-foreground min-w-0 truncate">{detail}</span>
+      <span className="text-muted-foreground min-w-0 flex-1 truncate">{detail}</span>
     </span>
   );
 }
@@ -90,7 +91,7 @@ export function LoadEarlierBanner({
         onClick={onLoad}
         disabled={loading}
       >
-        {loading ? "Loading…" : "Load earlier"}
+        {loading ? "Loading…" : "Load Earlier"}
       </button>
     </div>
   );

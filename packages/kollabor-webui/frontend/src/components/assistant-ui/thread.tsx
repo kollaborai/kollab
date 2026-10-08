@@ -93,6 +93,8 @@ export type ThreadComponents = {
   ReasoningGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
     | undefined;
+  /** A system message, e.g. another agent's hub message. */
+  SystemMessage?: ComponentType | undefined;
 };
 
 export type ThreadProps = {
@@ -109,6 +111,9 @@ const EMPTY_COMPONENTS: ThreadComponents = {};
 
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
+
+/** The composer's placeholder; the app names the session's gem ("Message Lapis…"). */
+export const ComposerPlaceholderContext = createContext("Send a message...");
 
 // Startup exposes a loading placeholder thread; treat it as a new chat so
 // the composer mounts centered. Loads after startup keep the docked layout.
@@ -209,15 +214,28 @@ const ThreadRoot: FC<{
 };
 
 const ThreadMessage: FC = () => {
-  const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
-    useContext(ThreadComponentsContext);
+  const {
+    AssistantMessage: AssistantMessageComponent = AssistantMessage,
+    SystemMessage: SystemMessageComponent = SystemMessage,
+  } = useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
 
   if (isEditing) return <EditComposer />;
   if (role === "user") return <UserMessage />;
+  if (role === "system") return <SystemMessageComponent />;
   return <AssistantMessageComponent />;
 };
+
+const SystemMessage: FC = () => (
+  <MessagePrimitive.Root
+    data-slot="aui_system-message-root"
+    data-role="system"
+    className="fade-in slide-in-from-bottom-1 animate-in text-muted-foreground px-2 text-center text-sm duration-150"
+  >
+    <MessagePrimitive.Parts />
+  </MessagePrimitive.Root>
+);
 
 const ThreadScrollToBottom: FC = () => {
   return (
@@ -277,6 +295,7 @@ const Composer: FC<{
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const voice = useVoiceMode();
+  const placeholder = useContext(ComposerPlaceholderContext);
   // The mic only exists where the session's live command list has /voicemode.
   const voiceAvailable = commands.some(
     (command) => command.name === "voicemode" && command.enabled !== false,
@@ -538,7 +557,7 @@ const Composer: FC<{
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
-                placeholder="Send a message..."
+                placeholder={placeholder}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none"
                 rows={1}
                 autoFocus
@@ -673,7 +692,7 @@ const MessageError: FC = () => {
   return (
     <MessagePrimitive.Error>
       <ErrorPrimitive.Root className="aui-message-error-root border-destructive bg-destructive/10 text-destructive dark:bg-destructive/5 mt-2 rounded-md border p-3 text-sm dark:text-red-200">
-        <ErrorPrimitive.Message className="aui-message-error-message line-clamp-2" />
+        <ErrorPrimitive.Message className="aui-message-error-message whitespace-pre-wrap wrap-break-word" />
       </ErrorPrimitive.Root>
     </MessagePrimitive.Error>
   );

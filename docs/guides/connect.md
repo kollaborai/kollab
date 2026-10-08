@@ -15,8 +15,8 @@ The design contract for this feature is [the agent network spec](../specs/agent-
 You do this once per machine. Call the machine that is already connected A, and the new one B.
 
 1. On A, run `/connect`. The Connect screen opens with a code, eight characters shown as `XXXX-XXXX`, counting down. It works for one device, for five minutes. On a small terminal, `/connect code` shows just the code. A first device with no network opens the code form instead: leave the code empty and press Enter to start a network on kollabor.ai, named after this device (`laptop-kollab-net` for a device called `laptop-kollab`), then run `/connect` again.
-2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. As soon as the relay has the request, the form says `request sent to kollabor.ai; waiting for approval on another device` and keeps watching. When A decides, it turns into `joined laptop-kollab-net as home-server. trust: open` (or `join request rejected`). `Esc` closes the form and the request keeps waiting; `/connect status` shows where it stands. B joins as `<hostname>-<folder>`; rename it any time with `/connect name <name>`.
-3. Within a couple of seconds A's screen shows `home-server wants to join   fingerprint abcd…ef01   [a]ccept [r]eject`. Press `a` to accept (with several requests, Up and Down pick one first), or run `/connect accept home-server`. The screen then prints `accepted home-server. it is now a trusted device on laptop-kollab-net.` and lists it under `online`.
+2. On B, run `/connect` with nothing after it. Type the code into the private form and press Enter. Upper or lower case, with or without the dash. As soon as the relay has the request, the form says `request sent to kollabor.ai; waiting for approval on another device` and keeps watching. When A decides, it turns into `joined laptop-kollab-net as home-server. trust: open` (or `join request rejected`). `Esc` closes the form and the request keeps waiting; `/connect status` shows where it stands. B joins as `<hostname>-<folder>`, or `<hostname>-<parent>-<folder>` when another workspace on that computer already has the name (two checkouts of one repo); rename it any time with `/connect name <name>`.
+3. Within a couple of seconds A's screen shows `home-server wants to join   device ID abcd…ef01   [a]ccept [r]eject`. Press `a` to accept (with several requests, Up and Down pick one first), or run `/connect accept home-server`. The screen then prints `accepted home-server. it is now a trusted device on laptop-kollab-net.` and lists it under `online`.
 4. Every device on the network is listed on that screen and in `/connect status`, with its agents as `agent@device`.
 
 A code works for one device. Once you accept or reject a request, the line reads `used   press c for a new code`; after five minutes unused it reads `expired   press c for a new code`. Press `c` for a new one. The screen closes with `Esc`. In the default launch (a daemon plus an attached window) the screen is the same: it reads the daemon's requests and roster, and your `a` and `r` go to the daemon. A second window in the same workspace, with no daemon, can read the network but not act on it: its screen shows the network and this device, says `another window in this workspace runs the network; use /connect there`, and offers no code or keys; so does an attached window whose daemon lost the workspace to such a window. A long device name shows whole and is cut with `…` only when its row is wider than the terminal.
@@ -60,24 +60,26 @@ Trust is one setting per network, `/connect trust <level>`:
 
 ## Strangers
 
-Someone outside your network can introduce themselves. Your `/connect status` shows a contact route such as `kollabor.ai/c/8f3a2c1d9e4b7a60`. Give it to them; they run:
+Someone outside your network can knock, and a knock is a call: it rings your device for 5 minutes while it is online, and the directory keeps nothing. Your `/connect status` shows a contact route such as `kollabor.ai/c/8f3a2c1d9e4b7a60`. Give it to them; they run:
 
 ```text
 /connect knock kollabor.ai/c/8f3a2c1d9e4b7a60 "Ana from Acme. Can your ops agent review a nginx config?"
 ```
 
-`/connect knocks` shows what you received, with the sender's device name and fingerprint, and `a` accepts or `r` rejects. Accepting records the device with `agents` trust and nothing allowed until you allow an agent:
+Your terminal says `ana-laptop is knocking. /connect knocks to answer`. `/connect knocks` shows the ringing knock with the sender's device name, device ID and text: `a` accepts, `r` rejects, `b` blocks. A knock nobody answers lands under missed (on your device, 20 at most), where `k` knocks back. Accepting records the device with `agents` trust and nothing allowed until you allow an agent:
 
 ```text
 /connect allow ana-laptop ops
 ```
 
-Now Ana's agents can message `ops@laptop-kollab` and nothing else. Ana never joins your network: her device stays in her own, and the directory passes messages between the two devices only because each side consented, she when she knocked and you when you accepted. She sees only the agents you allowed, in her roster as `ops@laptop-kollab`, and `ops` can answer the agent she knocked from. Her device needs to be on the same directory as yours (kollabor.ai here) when she knocks.
+Now Ana's agents can message `ops@laptop-kollab` and nothing else. Ana never joins your network: her device stays in her own, and the directory passes messages between the two devices only because each side consented, you when you accepted and she when your accept reached her. She sees only the agents you allowed, in her roster as `ops@laptop-kollab`, and `ops` can answer the agent she knocked from. Her device needs to be on the same directory as yours (kollabor.ai here) when she knocks.
 
 - `/connect deny ana-laptop ops` (or without the agent) stops delivery at once.
 - `/connect revoke ana-laptop` removes the device and the link at the directory.
 - `/connect status` lists her allowed agents with `trust agents` next to them.
-- If the directory is older than 0.11.0, the knock and the accept work but nothing is delivered between the two networks until the directory is upgraded.
+- Ana hears `unavailable` for anything but an accept: you were offline, nobody answered, you rejected or blocked her, or you let nobody knock. Her device redials for an hour.
+- `/connect knocks contacts for 2h` lets only your contacts knock for two hours; `nobody` is do not disturb. `/connect expect <route>` accepts that route's first knock without asking.
+- A directory that cannot carry knocks says `<domain> needs an update to carry knocks`.
 
 ## Run your own directory
 

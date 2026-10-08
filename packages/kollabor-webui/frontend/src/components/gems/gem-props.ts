@@ -357,8 +357,8 @@ export function drawProps(f: FaceFrame) {
     keyboard(ctx, X(0.82), from + (baseTop - s * 0.04 - from) * fall, s * 0.3, glow, t);
   }
 
-  if (phase.laptop) {
-    // Hands on the keys; furious typing blurs them. With three keyboards out
+  {
+    // Hands on the keys, fading with the laptop; furious typing blurs them. With three keyboards out
     // the same two hands dart between the laptop and the spares, out of step.
     const tap = furious ? 26 : 12;
     const ghosts = furious ? 3 : 1;

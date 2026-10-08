@@ -280,14 +280,22 @@ class RelayCommands:
         self.agent_bridge = agent_bridge
         self._lock = asyncio.Lock()
         self._closed = False
-        self._contact_manager = None
-        self._knock_count_cache = (float("-inf"), 0)
-        self._knock_rows: tuple[tuple[str, str], ...] = ()
         self._screen_polled = float("-inf")
-        # Ids of the requests and knocks already announced. They live in the
-        # network state, so a restart announces only what is new.
+        # Ids of the join requests already announced. They live in the network
+        # state, so a restart announces only what is new.
         self._announced: set[str] = set(self.client.state.announced)
-        self._knocks_fetched = False
+        from .knocks import KnockService
+
+        self.knocks = KnockService(
+            self.client,
+            self.client.state_dir / "knocks.json",
+            notify=self._notify,
+            device_name=self._device_name,
+            bind_incoming=lambda key, device: agent_bridge._bind_knock_peer(key, device),
+            bind_outgoing=lambda key, agent: agent_bridge._bind_knocked_peer(key, agent),
+            links_changed=self._links_changed,
+            setting=self._setting,
+        )
         # Public discovery pins remain separate from transport invitations.
         if state_dir is None:
             from .dns.storage import get_dns_dir
@@ -299,6 +307,16 @@ class RelayCommands:
 
     def _setting(self, name: str, default: Any) -> Any:
         return self.config.get(name, default) if self.config else default
+
+    def _notify(self, line: str) -> None:
+        show = getattr(getattr(self.agent_bridge, "plugin", None), "show_network_notice", None)
+        if callable(show):
+            show(line)
+
+    async def _links_changed(self) -> None:
+        sync = getattr(self.agent_bridge, "sync_links", None)
+        if callable(sync):
+            await sync(force=True)
 
     def _network_name(self, domain: str) -> str:
         """The network's human name when available, else its domain."""
@@ -357,7 +375,7 @@ class RelayCommands:
             name = getattr(row, "device_name", "")
             lines.append(
                 f"  {name or 'unknown device'} wants to join   "
-                f"fingerprint {short_fingerprint(full)}   /connect accept {name or full[:4]}"
+                f"device ID {short_fingerprint(full)}   /connect accept {name or full[:4]}"
             )
         return lines
 
@@ -379,29 +397,6 @@ class RelayCommands:
             agents = [own] + agents
         return [n for n in (getattr(a, "identity", None) for a in agents) if n]
 
-    async def _knock_count(self, domain: str) -> int:
-        """How many knocks wait, fetched at most every KNOCK_COUNT_TTL_SECONDS."""
-        checked, count = self._knock_count_cache
-        now = time.monotonic()
-        if now - checked < KNOCK_COUNT_TTL_SECONDS:
-            return count
-        self._knock_count_cache = (now, count)
-        try:
-            rows = await asyncio.wait_for(
-                self.pending_contact_requests(domain), KNOCK_COUNT_TIMEOUT_SECONDS
-            )
-        except Exception:
-            return count
-        for row in rows:
-            row.introduction.clear()
-        self._knock_rows = tuple(
-            (row.receipt_id, _arrival_name(row.device_name, row.sender_key))
-            for row in rows
-        )
-        self._knocks_fetched = True
-        self._knock_count_cache = (now, len(rows))
-        return len(rows)
-
     def _domain_online(self) -> tuple[str, bool]:
         state = self.client.status()
         origin = state["origin"] or ""
@@ -409,15 +404,16 @@ class RelayCommands:
         return domain, state.get("state") == "online"
 
     def screen_polled(self) -> None:
-        """A Connect or knock screen just loaded, so it shows what is pending."""
+        """The Connect screen just loaded, so it shows what is pending."""
         self._screen_polled = time.monotonic()
 
     async def new_arrivals(self) -> list[str]:
-        """Main-pane lines for join requests and knocks not announced yet.
+        """Main-pane lines for join requests not announced yet.
 
-        Names only. A request or knock is announced once, however often this
-        runs, and across restarts. While a Connect or knock screen is showing
-        them live they are marked seen and nothing is printed.
+        Names only. A request is announced once, however often this runs, and
+        across restarts. While the Connect screen is showing them live they are
+        marked seen and nothing is printed. Knocks ring through
+        plugins/hub/knocks.py.
         """
         domain, online = self._domain_online()
         network = self._network_name(domain) or "this network"
@@ -431,25 +427,13 @@ class RelayCommands:
             for row in rows or []
             if getattr(row, "decision_available", True)
         ]
-        if online and domain:
-            await self._knock_count(domain)
-            found += [
-                (f"knock:{receipt}", f"{name} knocked. /connect knocks to review")
-                for receipt, name in self._knock_rows
-            ]
         fresh = [(key, line) for key, line in found if key not in self._announced]
-        # Keep only what is still pending, plus every id of a kind that could
-        # not be read this time (an unready issuer or an unreachable directory
-        # reads as empty, which is not the same as decided).
+        # Keep only what is still pending, or everything when the requests could
+        # not be read this time (an unready issuer reads as empty, which is not
+        # the same as decided).
         pending = {f"join:{getattr(row, 'enrollment_id', '')}" for row in rows or []}
-        pending |= {f"knock:{receipt}" for receipt, _ in self._knock_rows}
-        unread = (("join:",) if rows is None else ()) + (
-            () if online and domain and self._knocks_fetched else ("knock:",)
-        )
         self._announced = {
-            item
-            for item in self._announced
-            if item in pending or item.startswith(unread)
+            item for item in self._announced if rows is None or item in pending
         } | {key for key, _ in fresh}
         try:
             self.client.remember_announced(sorted(self._announced))
@@ -480,7 +464,7 @@ class RelayCommands:
             device=self._device_name(),
             relay_online=online,
             requests=requests,
-            knocks=await self._knock_count(domain) if online and domain else 0,
+            knocks=self.knocks.waiting(),
             local_agents=tuple(self._local_agent_names()),
             remote_agents=tuple(
                 row.get("handle")
@@ -687,38 +671,11 @@ class RelayCommands:
             + "\nNext: /connect code shows a code; enter it with /connect on the other device."
         )
 
-    def _contacts(self):
-        if self._contact_manager is None:
-            from .contact_requests import ContactRequestManager
-
-            self._contact_manager = ContactRequestManager(self)
-        return self._contact_manager
-
-    async def submit_contact_request(
-        self, domain: str, recipient_key: str, introduction: str, device_name: str = ""
-    ) -> str:
-        return await self._contacts().submit(
-            domain, recipient_key, introduction, device_name
-        )
-
-    async def resolve_contact_route(self, domain: str, route_hex: str) -> str:
-        return await self._contacts().resolve_route(domain, route_hex)
-
-    async def sync_links(self, domain: str, keys: list[str]) -> None:
-        await self._contacts().sync_links(domain, keys)
-
-    async def pending_contact_requests(self, domain: str):
-        return await self._contacts().pending(domain)
-
-    async def contact_request_status(
-        self, domain: str, recipient_key: str, request_id: str
-    ) -> str:
-        return await self._contacts().status(domain, recipient_key, request_id)
-
-    async def decide_contact_request(
-        self, domain: str, request_id: str, decision: str
-    ):
-        return await self._contacts().decide(domain, request_id, decision)
+    async def sync_links(self, keys: list[str]) -> None:
+        """Declare the keys this device consents to link with, on its own session."""
+        result = await self.client.declare_links(keys)
+        if result != "stored":
+            raise RelayError(f"links not declared ({result})")
 
     async def resume(self) -> None:
         delay = 1.0
@@ -779,7 +736,7 @@ class RelayCommands:
         if head in {"accept", "reject"}:
             fields = rest.split()
             if not 1 <= len(fields) <= 2:
-                return f"usage: /connect {head} <device> [fingerprint]"
+                return f"usage: /connect {head} <device> [device ID]"
             if self.agent_bridge is None:
                 return "connect: local enrollment issuer is unavailable"
             token = fields[0]
@@ -812,7 +769,7 @@ class RelayCommands:
             if len(matches) > 1:
                 return (
                     f"connect: more than one pending request is named '{token}'; "
-                    f"add the start of its fingerprint: /connect {head} {token} abcd"
+                    f"add the start of its device ID: /connect {head} {token} abcd"
                 )
             if not matches:
                 return f"connect: no pending request matches '{token}'"

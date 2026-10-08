@@ -173,7 +173,7 @@ def test_one_request_is_one_row_with_name_fingerprint_and_keys():
     lines = connect_screen_lines(_state(snapshot=_snapshot(requests=(_row(),))), 120)
 
     assert (
-        " requests     home-server wants to join   fingerprint abcd…ef01"
+        " requests     home-server wants to join   device ID abcd…ef01"
         "   [a]ccept [r]eject"
     ) in lines
 
@@ -201,7 +201,7 @@ def test_expired_code_says_how_to_get_a_new_one():
 
 @pytest.mark.parametrize(
     ("online", "words"),
-    [(False, "relay unreachable"), (True, "could not create a code")],
+    [(False, "can't connect"), (True, "could not create a code")],
 )
 def test_failed_code_says_why_and_the_rest_of_the_screen_still_renders(online, words):
     snapshot = _snapshot(relay_online=online, remote_agents=("ops@home-server",))
@@ -316,7 +316,7 @@ def test_narrow_widths_split_the_request_row_instead_of_wrapping():
 
     assert sum("wants to join" in line for line in wide) == 1
     assert any(line.endswith("wants to join") for line in narrow)
-    assert any("[a]ccept [r]eject" in line and "fingerprint" in line for line in narrow)
+    assert any("[a]ccept [r]eject" in line and "device ID" in line for line in narrow)
 
 
 def test_height_clips_with_an_ellipsis():
@@ -402,7 +402,7 @@ async def test_failed_creation_shows_plain_words_and_c_retries(monkeypatch):
         return _offer()
 
     view, renderer, _ = await _open(_snapshot(relay_online=False), create=create)
-    assert "relay unreachable   press c to try again" in await _text(view, renderer)
+    assert "can't connect   press c to try again" in await _text(view, renderer)
     assert "requests     none" in renderer.text()
 
     await view.handle_input(_key("c"))

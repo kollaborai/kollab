@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
+import { Loader2, Plus } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { useThreadActivity } from "@/components/gems/activity";
+import { GemAvatar } from "@/components/gems/GemAvatar";
+import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
+import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
+import { KollabLogo } from "@/components/icons/kollab-logo";
+import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { PanelHost } from "@/components/panels/PanelHost";
@@ -23,6 +29,7 @@ import {
 import {
   EngineApi,
   type AgentBundleEntry,
+  type AgentNetwork,
   type AgentPoolEntry,
   DEFAULT_SLASH_COMMANDS,
   type Profile,
@@ -77,6 +84,7 @@ function RuntimeShell({
   onOpenSettings,
   onHistoryCleared,
   onActivity,
+  onOpenProperties,
   refreshSignal,
   view,
   onViewChange: setView,
@@ -90,6 +98,8 @@ function RuntimeShell({
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
   onActivity: (activity: Activity | null) => void;
+  /** This session's Properties (its gem, double-clicked). */
+  onOpenProperties: () => void;
   refreshSignal: number;
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
@@ -151,57 +161,52 @@ function RuntimeShell({
 
   return (
     <>
-      <header className="bg-background sticky top-0 z-10 flex shrink-0 flex-col gap-2 border-b px-3 py-2">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-1 h-4" />
-          <div className="flex min-w-0 flex-col">
-            <span className="truncate font-mono text-sm font-medium">
-              {sessionLabel}
-            </span>
-            <span
-              className="text-muted-foreground truncate text-xs"
-              title={model || session.profile || "default"}
-            >
-              {model || "model unavailable"} · {session.profile || "default"}
-            </span>
-          </div>
-          <div
-            className="bg-muted flex rounded-md p-0.5"
-            role="group"
-            aria-label="Session view"
+      {/* One slim row; the controls wrap under the title on narrow screens. The
+          model picker shows model and profile, so the title carries no subtitle. */}
+      <header className="bg-background sticky top-0 z-10 flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b px-3 py-1.5">
+        <SidebarTrigger className="-ml-1" />
+        <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+        <span
+          className="min-w-0 truncate text-sm font-semibold tracking-tight"
+          title={`${model || "model unavailable"} · ${session.profile || "default"}`}
+        >
+          {sessionLabel}
+        </span>
+        <div
+          className="bg-muted flex shrink-0 rounded-md p-0.5"
+          role="group"
+          aria-label="Session view"
+        >
+          <Button
+            type="button"
+            variant={view === "chat" ? "secondary" : "ghost"}
+            size="xs"
+            aria-pressed={view === "chat"}
+            data-testid="chat-tab"
+            onClick={() => setView("chat")}
           >
-            <Button
-              type="button"
-              variant={view === "chat" ? "secondary" : "ghost"}
-              size="xs"
-              aria-pressed={view === "chat"}
-              data-testid="chat-tab"
-              onClick={() => setView("chat")}
-            >
-              Chat
-            </Button>
-            <Button
-              type="button"
-              variant={view === "trajectory" ? "secondary" : "ghost"}
-              size="xs"
-              aria-pressed={view === "trajectory"}
-              data-testid="trajectory-tab"
-              onClick={() => setView("trajectory")}
-            >
-              Trajectory
-            </Button>
-          </div>
-          <span
-            className={
-              transportError
-                ? "text-destructive ml-auto truncate text-xs"
-                : "text-muted-foreground ml-auto truncate text-xs"
-            }
+            Chat
+          </Button>
+          <Button
+            type="button"
+            variant={view === "trajectory" ? "secondary" : "ghost"}
+            size="xs"
+            aria-pressed={view === "trajectory"}
+            data-testid="trajectory-tab"
+            onClick={() => setView("trajectory")}
           >
-            {status || transportError || null}
-          </span>
+            Trajectory
+          </Button>
         </div>
+        <span
+          className={
+            transportError
+              ? "text-destructive min-w-0 flex-1 truncate text-right text-xs"
+              : "text-muted-foreground min-w-0 flex-1 truncate text-right text-xs"
+          }
+        >
+          {status || transportError || null}
+        </span>
         <SessionToolbar
           api={api}
           session={session}
@@ -222,6 +227,7 @@ function RuntimeShell({
               session.supports_vision ?? profile?.supports_vision ?? true
             }
             identity={session.identity}
+            onOpenGem={onOpenProperties}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -235,10 +241,14 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
+  const [studioOpen, setStudioOpen] = useState(false);
+  // Null: the whole Gem Studio; a gem: that session's Properties.
+  const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
@@ -249,10 +259,26 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const intentNonceRef = useRef(0);
-  const [selectedBundle, setSelectedBundle] = useState("default");
+  // The agent a new session runs, shown in New Session. Until the user picks
+  // one it is the gem's pool bundle: the hub moves an unpinned gem onto it
+  // (plugins/hub/plugin.py, "Reconcile agent bundle to hub role"), so showing
+  // "default" there was false.
+  const [pickedBundle, setPickedBundle] = useState<string | null>(null);
+  const gemBundle = agents.find((agent) => agent.name === selectedIdentity)?.agent_type;
+  const selectedBundle =
+    pickedBundle ??
+    (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
+  // What New Session will use, for the empty state's greeting.
+  const nextGem = agents.find((agent) => agent.name === selectedIdentity);
+  const selectedModelLabel =
+    profiles.find((profile) => profile.name === selectedProfile)?.model ||
+    selectedProfile ||
+    "default";
   const [activeId, setActiveId] = useState<string | null>(null);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const [busy, setBusy] = useState(true);
-  const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
+  const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
@@ -291,6 +317,7 @@ export default function App() {
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
+    setNetwork(result.network ?? { device: "", remote: [] });
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -329,6 +356,7 @@ export default function App() {
         nextSessions,
         history.history || [],
         permissions.pending_prompts || [],
+        history.last_turn_error ?? null,
       );
     },
     [],
@@ -351,12 +379,20 @@ export default function App() {
       }
     };
     const followEvents = async () => {
+      // A turn is streaming; its history is still growing.
+      let midTurn = false;
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
-            if (event.type === "turn_complete" || event.type === "error") {
+            const type = event.type ?? "";
+            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
+            // hub_message: another agent's message just landed in the
+            // history, ahead of the reply it wakes. One that lands mid-turn
+            // waits for turn_complete, which reloads the whole turn.
+            if (type === "hub_message" ? !midTurn : ["turn_complete", "error"].includes(type)) {
               void refreshActiveState(activeId);
             }
+            if (type === "turn_complete") midTurn = false;
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -379,10 +415,20 @@ export default function App() {
     const poll = async () => {
       while (!controller.signal.aborted) {
         try {
+          const watched = activeIdRef.current;
           const next = await loadSessions();
           if (!controller.signal.aborted) {
             setSessions(next);
-            setInitialState((state) => state ? { ...state, sessions: next } : state);
+            // Deleted elsewhere (another tab, the CLI, a dead daemon): close it
+            // instead of retrying its streams every second. Only when the open
+            // session did not change mid-request, so a new one is never closed.
+            if (watched && watched === activeIdRef.current && !next.some((item) => item.session_id === watched)) {
+              abortRecovery();
+              setActiveId(null);
+              setInitialState(null);
+            } else {
+              setInitialState((state) => state ? { ...state, sessions: next } : state);
+            }
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
@@ -401,14 +447,14 @@ export default function App() {
       controller.abort();
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
     };
-  }, [loadSessions]);
+  }, [abortRecovery, loadSessions]);
 
   useEffect(() => {
     let mounted = true;
     const operation = ++operationRef.current;
     (async () => {
       setBusy(true);
-      setBusyMessage("Connecting to the engine…");
+      setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
       const [result, profileResult, agentResult, bundleResult] = await Promise.all([
         loadSessions(),
@@ -455,13 +501,17 @@ export default function App() {
     const operation = ++operationRef.current;
     setBusy(true);
     setBusyMessage(
-      "Starting daemon (plugin discovery can take ~10 seconds)…",
+      "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
-        agent: selectedBundle !== "default" ? selectedBundle : undefined,
+        // Pin what New Session shows. "default" is only a placeholder until
+        // such a bundle exists (the first daemon start seeds it).
+        agent: bundles.some((bundle) => bundle.name === selectedBundle)
+          ? selectedBundle
+          : undefined,
         identity: selectedIdentity || undefined,
         approval_mode: "trust_all",
         workspace: workspacePath.trim() || undefined,
@@ -578,6 +628,30 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  const openProperties = (sessionId: string, tab?: "chat") => {
+    const session = sessions.find((item) => item.session_id === sessionId);
+    const gem = session?.identity;
+    if (!session || !gem) return;
+    // Presence is the truth for the switch: whether the agent is live, and
+    // whether it is on the mesh.
+    const pool = agents.find((agent) => agent.name === gem);
+    setStudioFocus({
+      gem,
+      tab,
+      chat: {
+        session,
+        hub: pool?.active ? !pool.solo : null,
+        setHub: async (enabled) => {
+          const result = await api.setSessionHub(sessionId, enabled);
+          // An engine that predates the switch answers ok and ignores it.
+          if (result.hub !== enabled) throw new Error("Restart kollab --web-ui to use this switch.");
+          await refreshAgentPool();
+        },
+      },
+    });
+    setStudioOpen(true);
+  };
+
   const handleSessionUpdated = useCallback((updated: Session) => {
     setSessions((current) =>
       current.map((item) =>
@@ -586,104 +660,138 @@ export default function App() {
     );
   }, []);
 
+  const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
+
   return (
-    <SidebarProvider>
-      <AppSidebar
-        sessions={sessions}
-        profiles={profiles}
-        agents={agents}
-        bundles={bundles}
-        selectedProfile={selectedProfile}
-        selectedIdentity={selectedIdentity}
-        workspacePath={workspacePath}
-        onWorkspaceChange={setWorkspacePath}
-        selectedBundle={selectedBundle}
-        activeId={activeId}
-        activeActivity={activeActivity}
-        busy={busy}
-        onProfileChange={setSelectedProfile}
-        onIdentityChange={setSelectedIdentity}
-        onBundleChange={setSelectedBundle}
-        onSettings={() => openSettings()}
-        onManageProfiles={() => setProfilesOpen(true)}
-        onSelectSession={(id) => void selectSession(id)}
-        onCreate={() => void createSession()}
-        onDelete={(id) => void deleteSession(id)}
-      />
-      <ProfilesDialog
-        api={api}
-        profiles={profiles}
-        open={profilesOpen}
-        onOpenChange={setProfilesOpen}
-        onSaved={async () => {
-          await loadSessions();
-        }}
-      />
-      {activeSession ? (
-        <PanelHost
-          key={activeSession.session_id}
-          api={api}
-          session={activeSession}
+    <GemAppearanceProvider api={api} refreshKey={aliveKey}>
+      <SidebarProvider>
+        <AppSidebar
+          sessions={sessions}
           profiles={profiles}
-          open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          tab={settingsTab}
-          onTabChange={setSettingsTab}
-          intent={settingsIntent}
-          onChanged={() => void loadSessions()}
-          onSessionUpdated={handleSessionUpdated}
+          agents={agents}
+          network={network}
+          bundles={bundles}
+          selectedProfile={selectedProfile}
+          selectedIdentity={selectedIdentity}
+          workspacePath={workspacePath}
+          onWorkspaceChange={setWorkspacePath}
+          selectedBundle={selectedBundle}
+          activeId={activeId}
+          activeActivity={activeActivity}
+          busy={busy}
+          onProfileChange={setSelectedProfile}
+          onIdentityChange={setSelectedIdentity}
+          onBundleChange={setPickedBundle}
+          onSettings={() => openSettings()}
+          onStudio={() => {
+            setStudioFocus(null);
+            setStudioOpen(true);
+          }}
+          onManageProfiles={() => setProfilesOpen(true)}
+          onSelectSession={(id) => void selectSession(id)}
+          onCreate={() => void createSession()}
+          onDelete={(id) => void deleteSession(id)}
+          onProperties={openProperties}
         />
-      ) : null}
-      <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
-        {activeSession && initialState ? (
-          <EngineRuntimeProvider
-            key={`${activeId}:${runtimeEpoch}`}
+        <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        <ProfilesDialog
+          api={api}
+          profiles={profiles}
+          open={profilesOpen}
+          onOpenChange={setProfilesOpen}
+          onSaved={async () => {
+            await loadSessions();
+          }}
+        />
+        {activeSession ? (
+          <PanelHost
+            key={activeSession.session_id}
             api={api}
-            sessionId={activeSession.session_id}
-            initialState={initialState}
-          >
-            <RuntimeShell
-              session={activeSession}
-              profiles={profiles}
-              agents={agents}
-              refreshSignal={refreshSignal}
-              onSessionUpdated={handleSessionUpdated}
-              onOpenSettings={openSettings}
-              onHistoryCleared={() => resetThread(activeSession.session_id)}
-              onActivity={setActiveActivity}
-              view={sessionView}
-              onViewChange={setSessionView}
-            />
-          </EngineRuntimeProvider>
-        ) : (
-          <>
-            <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-              <SidebarTrigger className="-ml-1" />
-              <Separator orientation="vertical" className="mr-1 h-4" />
-              <span className="text-muted-foreground text-sm">No session</span>
-            </header>
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-              <h1 className="text-2xl font-semibold">Start a kollab session</h1>
-              <p
-                className={
-                  error
-                    ? "text-destructive max-w-md text-sm"
-                    : "text-muted-foreground max-w-md text-sm"
-                }
-              >
-                {error || (busy ? busyMessage : "Create a session to begin.")}
-              </p>
-              <Button
-                type="button"
-                onClick={() => void createSession()}
-                disabled={busy}
-              >
-                {busy ? busyMessage || "Connecting…" : "Create session"}
-              </Button>
-            </div>
-          </>
-        )}
-      </SidebarInset>
-    </SidebarProvider>
+            session={activeSession}
+            profiles={profiles}
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            tab={settingsTab}
+            onTabChange={setSettingsTab}
+            intent={settingsIntent}
+            onChanged={() => void loadSessions()}
+            onSessionUpdated={handleSessionUpdated}
+          />
+        ) : null}
+        <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
+          {activeSession && initialState ? (
+            <EngineRuntimeProvider
+              key={`${activeId}:${runtimeEpoch}`}
+              api={api}
+              sessionId={activeSession.session_id}
+              initialState={initialState}
+            >
+              <RuntimeShell
+                session={activeSession}
+                profiles={profiles}
+                agents={agents}
+                refreshSignal={refreshSignal}
+                onSessionUpdated={handleSessionUpdated}
+                onOpenSettings={openSettings}
+                onHistoryCleared={() => resetThread(activeSession.session_id)}
+                onActivity={setActiveActivity}
+                onOpenProperties={() => openProperties(activeSession.session_id)}
+                view={sessionView}
+                onViewChange={setSessionView}
+              />
+            </EngineRuntimeProvider>
+          ) : (
+            <>
+              <header className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
+                <SidebarTrigger className="-ml-1" />
+                <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+                <span className="text-muted-foreground text-sm">No session</span>
+              </header>
+              {/* The next free gem greets here, as it will once its session starts. */}
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                {nextGem ? (
+                  <GemAvatar
+                    gem={nextGem.name}
+                    caste={nextGem.caste}
+                    color={nextGem.color}
+                    state={busy ? "working" : "idle"}
+                    live
+                    season="auto"
+                    follow
+                    size={112}
+                    label={titleCase(nextGem.name)}
+                  />
+                ) : (
+                  <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
+                )}
+                <h1 className="text-2xl font-semibold tracking-tight">
+                  {nextGem ? titleCase(nextGem.name) : "Start a Session"}
+                </h1>
+                <p
+                  className={
+                    error
+                      ? "text-destructive max-w-md text-sm"
+                      : "text-muted-foreground max-w-md text-sm"
+                  }
+                >
+                  {error ||
+                    (busy
+                      ? busyMessage
+                      : `Ready on ${selectedModelLabel}. Start a session to begin.`)}
+                </p>
+                <Button
+                  type="button"
+                  onClick={() => void createSession()}
+                  disabled={busy}
+                >
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {busy ? "Starting…" : "Start Session"}
+                </Button>
+              </div>
+            </>
+          )}
+        </SidebarInset>
+      </SidebarProvider>
+    </GemAppearanceProvider>
   );
 }

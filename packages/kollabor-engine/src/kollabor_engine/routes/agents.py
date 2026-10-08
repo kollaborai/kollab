@@ -2,8 +2,9 @@
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Query  # type: ignore[import-not-found]
+from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import-not-found]
 
+from ..gem_appearance import load_appearance, record_births, save_appearance
 from ..hub_bridge import HubBridge
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -51,10 +52,48 @@ async def list_agent_pool(
                 "color": list(getattr(identity, "color_rgb", None) or (128, 128, 128)),
                 "available": current is None,
                 "active": current is not None,
+                "pool": True,
                 "state": current.get("state") if current else "available",
                 "current_task": current.get("current_task", "") if current else "",
                 # The live hub agent, for /hub/agents/{agent_id}/output.
                 "agent_id": current.get("agent_id", "") if current else "",
+                # Live but off the hub mesh (its presence says so).
+                "solo": bool(current.get("solo")) if current else False,
+                # The folder it runs in (presence covers every project here).
+                "project": str(current.get("project") or "") if current else "",
+            }
+        )
+
+    # A gem's first time alive is its birth: it gets the random look it keeps.
+    alive = [agent["name"] for agent in agents if agent["active"]]
+    if alive:
+        record_births(alive)
+
+    # Live agents the pool does not name (koordinator, numbered gems like
+    # lapis-2) are listed too, so the sidebar shows every agent. "pool": False
+    # keeps them out of the launch list; a numbered gem wears its base's color.
+    by_name = {agent["name"]: agent for agent in agents}
+    for name, current in sorted(live_by_identity.items()):
+        if name in by_name:
+            continue
+        base = by_name.get(name.rsplit("-", 1)[0], {})
+        agents.append(
+            {
+                "name": name,
+                "identity": name,
+                "agent_type": "",
+                "role_aliases": [],
+                "personality": "",
+                "caste": base.get("caste", ""),
+                "color": base.get("color", [128, 128, 128]),
+                "available": False,
+                "active": True,
+                "pool": False,
+                "state": current.get("state") or "",
+                "current_task": current.get("current_task", ""),
+                "agent_id": current.get("agent_id", ""),
+                "solo": bool(current.get("solo")),
+                "project": str(current.get("project") or ""),
             }
         )
 
@@ -64,6 +103,21 @@ async def list_agent_pool(
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
     }
+
+
+@router.get("/appearance")
+async def get_gem_appearance() -> Dict[str, Any]:
+    """Every gem's look: the season, the looks gems were born with, the user's picks."""
+    return load_appearance()
+
+
+@router.put("/appearance")
+async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Replace the user's picks and season; born looks stay. Returns what was stored."""
+    try:
+        return save_appearance(body)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save gem appearance: {exc}") from exc
 
 
 @router.get("/bundles")

@@ -85,7 +85,7 @@ def verify_installation_receipt(public_key_hex: str, payload: dict[str, Any]) ->
         not isinstance(public_key_hex, str)
         or not _PUBLIC_KEY.fullmatch(public_key_hex)
         or not isinstance(payload, dict)
-        or set(payload) != _INSTALL_RECEIPT_FIELDS | {"device_signature"}
+        or not payload.keys() >= _INSTALL_RECEIPT_FIELDS | {"device_signature"}
         or not isinstance(payload.get("device_signature"), str)
         or not re.fullmatch(r"[0-9a-f]{128}", payload["device_signature"])
     ):

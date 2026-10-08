@@ -19,6 +19,7 @@ FILES = (
     "plugins/hub/relay_state.py",
     "plugins/hub/relay_commands.py",
     "plugins/hub/device_names.py",
+    "plugins/hub/knock_wire.py",
     "plugins/hub/dns/__init__.py",
     "plugins/hub/dns/models.py",
     "plugins/hub/dns/storage.py",

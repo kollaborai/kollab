@@ -346,6 +346,16 @@ Port for the `kollabor-webui` dev server.
 
 Default: `8080`
 
+### KOLLAB_WEBUI_HOSTS
+
+Comma-separated addresses the web UI listens on besides `127.0.0.1`, such as a
+VPN address, so another device can open it. Pages opened from another machine
+reach the engine through the web UI's `/engine` proxy. An address that cannot
+bind (its tunnel is down, say) is skipped. Every page that loads gets the engine
+token, so list private addresses only.
+
+Default: unset (127.0.0.1 only)
+
 ### KOLLAB_ENGINE_URL
 
 URL of the `kollabor-engine` server that the webui connects to.
