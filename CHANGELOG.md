@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-08
+
 ### Added
 - Open an agent that runs on another computer right from your terminal: `kollab --attach lapis@devbox`. It works with any computer you can already log in to with ssh and that has kollab installed. Detaching leaves the agent running there.
 - Web UI: the Kollabor K logo heads the sidebar and is the browser tab icon.
