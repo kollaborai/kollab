@@ -6,6 +6,13 @@ import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -80,6 +87,7 @@ export function AppSidebar({
   onSelectSession,
   onCreate,
   onDelete,
+  onProperties,
   ...props
 }: ComponentProps<typeof Sidebar> & {
   sessions: Session[];
@@ -105,6 +113,8 @@ export function AppSidebar({
   onSelectSession: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
+  /** A session's Properties: right-click (long press) its row, or double-click its gem. */
+  onProperties: (id: string) => void;
 }) {
   const { setOpenMobile } = useSidebar();
   // Deleting a session stops its daemon and is irreversible, so it goes behind
@@ -320,60 +330,89 @@ export function AppSidebar({
                 const hubLive = Boolean(pool?.active);
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
+                const unavailable = session.attachable === false;
+                const openProperties = () => {
+                  setOpenMobile(false);
+                  onProperties(session.session_id);
+                };
                 return (
-                <SidebarMenuItem key={session.session_id}>
-                  <SidebarMenuButton
-                    isActive={session.session_id === activeId}
-                    onClick={() => {
-                      if (session.attachable === false) return;
-                      setOpenMobile(false);
-                      onSelectSession(session.session_id);
-                    }}
-                    disabled={session.attachable === false}
-                    title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
-                    // overflow-visible: the gem canvas overhangs its box for hats and props.
-                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
-                  >
-                    <GemAvatar
-                      gem={gem}
-                      caste={pool?.caste}
-                      color={pool?.color}
-                      state={hubLive ? pool?.state : live ? "idle" : "offline"}
-                      live={live}
-                      activity={session.session_id === activeId ? activeActivity : null}
-                      season="auto"
-                      follow
-                      size={56}
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="truncate text-[13px] leading-tight font-medium">
-                        {formatSessionName(session.name, session.session_id)}
-                      </span>
-                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                        {session.attachable === false ? (
-                          <span className="text-amber-600 dark:text-amber-400">
-                            discovered · attach unavailable
+                <ContextMenu key={session.session_id}>
+                  <ContextMenuTrigger asChild disabled={unavailable}>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        isActive={session.session_id === activeId}
+                        onClick={() => {
+                          if (unavailable) return;
+                          setOpenMobile(false);
+                          onSelectSession(session.session_id);
+                        }}
+                        disabled={unavailable}
+                        title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
+                        // overflow-visible: the gem canvas overhangs its box for hats and props.
+                        className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                      >
+                        <span
+                          className="contents"
+                          onDoubleClick={unavailable || !session.identity ? undefined : openProperties}
+                        >
+                          <GemAvatar
+                            gem={gem}
+                            caste={pool?.caste}
+                            color={pool?.color}
+                            state={hubLive ? pool?.state : live ? "idle" : "offline"}
+                            live={live}
+                            activity={session.session_id === activeId ? activeActivity : null}
+                            season="auto"
+                            follow
+                            size={56}
+                          />
+                        </span>
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className="truncate text-[13px] leading-tight font-medium">
+                            {formatSessionName(session.name, session.session_id)}
                           </span>
-                        ) : task ? (
-                          task
-                        ) : (
-                          <>
-                            {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
-                            {session.model || session.profile || "default"}
-                          </>
-                        )}
-                      </span>
-                    </div>
-                  </SidebarMenuButton>
-                  <SidebarMenuAction
-                    onClick={() => setPendingDelete(session)}
-                    disabled={busy || session.attachable === false}
-                    showOnHover
-                    aria-label={`Delete session ${session.session_id}`}
-                  >
-                    <Trash2 />
-                  </SidebarMenuAction>
-                </SidebarMenuItem>
+                          <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                            {unavailable ? (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                discovered · attach unavailable
+                              </span>
+                            ) : task ? (
+                              task
+                            ) : (
+                              <>
+                                {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
+                                {session.model || session.profile || "default"}
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      </SidebarMenuButton>
+                      <SidebarMenuAction
+                        onClick={() => setPendingDelete(session)}
+                        disabled={busy || unavailable}
+                        showOnHover
+                        aria-label={`Delete session ${session.session_id}`}
+                      >
+                        <Trash2 />
+                      </SidebarMenuAction>
+                    </SidebarMenuItem>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="w-44">
+                    <ContextMenuItem disabled={!session.identity} onSelect={openProperties}>
+                      <SlidersHorizontal />
+                      Properties
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      variant="destructive"
+                      disabled={busy}
+                      onSelect={() => setPendingDelete(session)}
+                    >
+                      <Trash2 />
+                      Delete Session
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
                 );
               })}
               {!sessions.length ? (

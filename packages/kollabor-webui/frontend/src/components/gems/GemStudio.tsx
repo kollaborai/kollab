@@ -55,40 +55,59 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   );
 }
 
+/** One chat's gem: the studio opens on it alone (a session's Properties). */
+export type StudioFocus = { gem: string; tab?: "eyes" | "hat" | "color" };
+
 /**
  * Dress the gems over the random look each was born with: eyes, hat and color
  * per gem, and the season for all, on a live stage. Edits a draft; Save writes
  * it to the engine (GET/PUT /agents/appearance) and every gem in the app
- * follows. Born looks are the engine's: Reset goes back to one.
+ * follows. Born looks are the engine's: Reset goes back to one. With `focus`
+ * it dresses that one gem: no gem list and no season.
  */
 export function GemStudio({
   open,
   onOpenChange,
   agents,
+  focus = null,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   agents: readonly AgentPoolEntry[];
+  focus?: StudioFocus | null;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(64rem,calc(100%-2rem))]">
+      <DialogContent
+        className={cn(
+          "flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0",
+          focus ? "sm:max-w-[min(46rem,calc(100%-2rem))]" : "sm:max-w-[min(64rem,calc(100%-2rem))]",
+        )}
+      >
         {/* Mounted per open, so each visit starts from what is saved. */}
-        <StudioBody agents={agents} onDone={() => onOpenChange(false)} />
+        <StudioBody agents={agents} focus={focus} onDone={() => onOpenChange(false)} />
       </DialogContent>
     </Dialog>
   );
 }
 
-function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onDone: () => void }) {
+function StudioBody({
+  agents,
+  focus,
+  onDone,
+}: {
+  agents: readonly AgentPoolEntry[];
+  focus: StudioFocus | null;
+  onDone: () => void;
+}) {
   const studio = useGemAppearance();
   const [draft, setDraft] = useState<GemAppearance>(() => studio?.appearance ?? {});
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const current = agents.find((agent) => agent.name === selected) ?? agents[0];
+  const current = agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
   const target: GemLook = (current && draft.gems?.[current.name]) || {};
   const born = current ? draft.born?.[current.name] : undefined;
   const bornHat = HAT_STYLES.find((hat) => hat.id === born?.hat)?.label;
@@ -116,39 +135,48 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
   return (
     <>
       <DialogHeader className="border-b px-5 py-4 text-left">
-        <DialogTitle>Gem Studio</DialogTitle>
+        <DialogTitle>{focus ? titleCase(focus.gem) : "Gem Studio"}</DialogTitle>
         <DialogDescription>
-          Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems.
+          {focus
+            ? "Dress this chat's gem over the look it was born with; every browser shows the same gem."
+            : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems."}
         </DialogDescription>
       </DialogHeader>
 
       <GemAppearancePreview appearance={draft}>
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_20rem] lg:overflow-hidden">
-          <nav
-            aria-label="Gems"
-            className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 lg:min-h-0 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto lg:border-r lg:border-b-0"
-          >
-            {agents.map((agent) => (
-              <button
-                key={agent.name}
-                type="button"
-                aria-pressed={current?.name === agent.name}
-                onClick={() => setSelected(agent.name)}
-                className={cn(
-                  "flex shrink-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors lg:w-full",
-                  current?.name === agent.name ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
-                )}
-              >
-                <GemAvatar gem={agent.name} caste={agent.caste} color={agent.color} state="idle" live season="auto" size={28} />
-                <span className="flex min-w-0 flex-col leading-tight">
-                  <span className="font-medium">{titleCase(agent.name)}</span>
-                  <span className="text-muted-foreground text-[11px]">
-                    {draft.gems?.[agent.name] ? "Custom" : titleCase(agent.caste || "")}
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-y-auto lg:grid lg:overflow-hidden",
+            focus ? "lg:grid-cols-[minmax(0,1fr)_20rem]" : "lg:grid-cols-[13rem_minmax(0,1fr)_20rem]",
+          )}
+        >
+          {focus ? null : (
+            <nav
+              aria-label="Gems"
+              className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 lg:min-h-0 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto lg:border-r lg:border-b-0"
+            >
+              {agents.map((agent) => (
+                <button
+                  key={agent.name}
+                  type="button"
+                  aria-pressed={current?.name === agent.name}
+                  onClick={() => setSelected(agent.name)}
+                  className={cn(
+                    "flex shrink-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors lg:w-full",
+                    current?.name === agent.name ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+                  )}
+                >
+                  <GemAvatar gem={agent.name} caste={agent.caste} color={agent.color} state="idle" live season="auto" size={28} />
+                  <span className="flex min-w-0 flex-col leading-tight">
+                    <span className="font-medium">{titleCase(agent.name)}</span>
+                    <span className="text-muted-foreground text-[11px]">
+                      {draft.gems?.[agent.name] ? "Custom" : titleCase(agent.caste || "")}
+                    </span>
                   </span>
-                </span>
-              </button>
-            ))}
-          </nav>
+                </button>
+              ))}
+            </nav>
+          )}
 
           <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 border-b px-4 py-10 sm:px-6 lg:border-b-0">
             {current ? (
@@ -192,7 +220,7 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
           </section>
 
           <aside className="flex shrink-0 flex-col lg:min-h-0 lg:border-l">
-            <Tabs defaultValue="eyes" className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
+            <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
               <TabsList className="mx-3 mt-3 grid shrink-0 grid-cols-3">
                 <TabsTrigger value="eyes">Eyes</TabsTrigger>
                 <TabsTrigger value="hat">Hat</TabsTrigger>
@@ -294,26 +322,28 @@ function StudioBody({ agents, onDone }: { agents: readonly AgentPoolEntry[]; onD
               </TabsContent>
             </Tabs>
 
-            <div className="shrink-0 border-t p-3">
-              <p className="text-muted-foreground mb-2 text-[11px] font-medium">Season · All Gems</p>
-              <div className="flex flex-wrap gap-1.5">
-                <Chip active={season === "auto"} onClick={() => setDraft((prev) => ({ ...prev, season: "auto" }))}>
-                  Auto
-                </Chip>
-                {SEASONS.map((option) => (
-                  <Chip
-                    key={option.id}
-                    active={season === option.id}
-                    onClick={() => setDraft((prev) => ({ ...prev, season: option.id }))}
-                  >
-                    {option.label}
+            {focus ? null : (
+              <div className="shrink-0 border-t p-3">
+                <p className="text-muted-foreground mb-2 text-[11px] font-medium">Season · All Gems</p>
+                <div className="flex flex-wrap gap-1.5">
+                  <Chip active={season === "auto"} onClick={() => setDraft((prev) => ({ ...prev, season: "auto" }))}>
+                    Auto
                   </Chip>
-                ))}
+                  {SEASONS.map((option) => (
+                    <Chip
+                      key={option.id}
+                      active={season === option.id}
+                      onClick={() => setDraft((prev) => ({ ...prev, season: option.id }))}
+                    >
+                      {option.label}
+                    </Chip>
+                  ))}
+                </div>
+                <p className="text-muted-foreground mt-2 text-[11px]">
+                  Auto: Halloween in October, Christmas in December.
+                </p>
               </div>
-              <p className="text-muted-foreground mt-2 text-[11px]">
-                Auto: Halloween in October, Christmas in December.
-              </p>
-            </div>
+            )}
           </aside>
         </div>
       </GemAppearancePreview>

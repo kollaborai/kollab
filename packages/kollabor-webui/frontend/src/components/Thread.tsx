@@ -19,7 +19,7 @@ import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { titleCase } from "@/components/panels/panel-model";
 import { cn } from "@/lib/utils";
 
-type WelcomeGem = { name: string; pool?: AgentPoolEntry };
+type WelcomeGem = { name: string; pool?: AgentPoolEntry; onOpen?: () => void };
 
 const WelcomeContext = createContext<WelcomeGem | null>(null);
 const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
@@ -27,23 +27,26 @@ const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
 // kollab-branded welcome screen. Replaces the kit's generic ThreadWelcome via
 // the `components.Welcome` slot; everything else (messages, tool calls,
 // reasoning, composer) renders exactly as the kit ships it. A session with a
-// gem greets as that gem, live and watching the pointer.
+// gem greets as that gem, live and watching the pointer; double-click it for
+// the session's Properties.
 const Welcome: FC = () => {
   const gem = useContext(WelcomeContext);
   return (
     <div className="mb-6 flex flex-col items-center gap-3 px-4 text-center">
       {gem ? (
-        <GemAvatar
-          gem={gem.name}
-          caste={gem.pool?.caste}
-          color={gem.pool?.color}
-          state={gem.pool?.active ? gem.pool.state : "idle"}
-          live
-          season="auto"
-          follow
-          size={112}
-          label={titleCase(gem.name)}
-        />
+        <span className="contents" onDoubleClick={gem.onOpen}>
+          <GemAvatar
+            gem={gem.name}
+            caste={gem.pool?.caste}
+            color={gem.pool?.color}
+            state={gem.pool?.active ? gem.pool.state : "idle"}
+            live
+            season="auto"
+            follow
+            size={112}
+            label={titleCase(gem.name)}
+          />
+        </span>
       ) : null}
       <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
         {gem ? titleCase(gem.name) : "kollab"}
@@ -151,10 +154,16 @@ export const Thread: FC<{
   attachmentsEnabled?: boolean;
   /** The session's gem, which greets on the empty thread. */
   identity?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity }) => (
+  /** Opens the session's Properties (double-click on the greeting gem). */
+  onOpenGem?: () => void;
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem }) => (
   <PoolContext.Provider value={agents}>
     <WelcomeContext.Provider
-      value={identity ? { name: identity, pool: agents.find((agent) => agent.name === identity) } : null}
+      value={
+        identity
+          ? { name: identity, pool: agents.find((agent) => agent.name === identity), onOpen: onOpenGem }
+          : null
+      }
     >
       <ComposerPlaceholderContext.Provider
         value={identity ? `Message ${titleCase(identity)}…` : "Send a message..."}

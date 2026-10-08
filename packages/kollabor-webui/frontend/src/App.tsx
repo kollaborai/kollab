@@ -6,7 +6,7 @@ import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { useThreadActivity } from "@/components/gems/activity";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
-import { GemStudio } from "@/components/gems/GemStudio";
+import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
@@ -83,6 +83,7 @@ function RuntimeShell({
   onOpenSettings,
   onHistoryCleared,
   onActivity,
+  onOpenProperties,
   refreshSignal,
   view,
   onViewChange: setView,
@@ -96,6 +97,8 @@ function RuntimeShell({
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
   onActivity: (activity: Activity | null) => void;
+  /** This session's Properties (its gem, double-clicked). */
+  onOpenProperties: () => void;
   refreshSignal: number;
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
@@ -223,6 +226,7 @@ function RuntimeShell({
               session.supports_vision ?? profile?.supports_vision ?? true
             }
             identity={session.identity}
+            onOpenGem={onOpenProperties}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -241,6 +245,8 @@ export default function App() {
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [studioOpen, setStudioOpen] = useState(false);
+  // Null: the whole Gem Studio; a gem: that session's Properties.
+  const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
@@ -619,6 +625,13 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  const openProperties = (sessionId: string) => {
+    const gem = sessions.find((item) => item.session_id === sessionId)?.identity;
+    if (!gem) return;
+    setStudioFocus({ gem });
+    setStudioOpen(true);
+  };
+
   const handleSessionUpdated = useCallback((updated: Session) => {
     setSessions((current) =>
       current.map((item) =>
@@ -649,13 +662,17 @@ export default function App() {
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
           onSettings={() => openSettings()}
-          onStudio={() => setStudioOpen(true)}
+          onStudio={() => {
+            setStudioFocus(null);
+            setStudioOpen(true);
+          }}
           onManageProfiles={() => setProfilesOpen(true)}
           onSelectSession={(id) => void selectSession(id)}
           onCreate={() => void createSession()}
           onDelete={(id) => void deleteSession(id)}
+          onProperties={openProperties}
         />
-        <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} />
+        <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
         <ProfilesDialog
           api={api}
           profiles={profiles}
@@ -697,6 +714,7 @@ export default function App() {
                 onOpenSettings={openSettings}
                 onHistoryCleared={() => resetThread(activeSession.session_id)}
                 onActivity={setActiveActivity}
+                onOpenProperties={() => openProperties(activeSession.session_id)}
                 view={sessionView}
                 onViewChange={setSessionView}
               />

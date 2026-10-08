@@ -46,6 +46,8 @@ if Node/npm is unavailable.
   season for all, previewed live. Random Look rolls a new outfit, Reset goes
   back to the born look. The engine keeps the looks, so every browser and every
   gem in the app (session rows, chat, Who Is Online) follows.
+- **Session Properties**: right-click a session row (long-press on a phone) or
+  double-click its gem to dress that one gem in place.
 
 ## Usage
 
