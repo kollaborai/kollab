@@ -29,6 +29,31 @@ def test_default_device_name_home_and_folder(tmp_path):
     assert default_device_name(tmp_path / "My Repo").endswith("-my-repo")
 
 
+def test_a_taken_name_gets_the_parent_folder_then_a_number(monkeypatch):
+    monkeypatch.setattr("socket.gethostname", lambda: "mac.local")
+    worktree = Path("/w/buzz-completion/dsk")
+    assert default_device_name(worktree) == "mac-dsk"
+    assert default_device_name(worktree, {"mac-dsk"}) == "mac-buzz-completion-dsk"
+    taken = {"mac-dsk", "mac-buzz-completion-dsk", "mac-dsk-2"}
+    assert default_device_name(worktree, taken) == "mac-dsk-3"
+    long = Path("/w/" + "p" * 70 + "/" + "d" * 70)
+    name = default_device_name(long, {default_device_name(long)})
+    assert name == validate_device_name(name) and len(name) == 63
+
+
+def test_two_checkouts_in_same_named_folders_get_different_names(tmp_path, monkeypatch):
+    from plugins.hub.relay_state import RelayStateStore
+
+    monkeypatch.setattr("socket.gethostname", lambda: "mac")
+    network = tmp_path / "network"
+    first = RelayStateStore(tmp_path / "dev" / "dsk", network / "a")
+    second = RelayStateStore(tmp_path / "wt" / "buzz" / "dsk", network / "b")
+    assert first.state.device_name == "mac-dsk"
+    assert second.state.device_name == "mac-buzz-dsk"
+    # Pinned: a restart keeps the name, whatever starts first next time.
+    assert RelayStateStore(tmp_path / "wt" / "buzz" / "dsk", network / "b").state.device_name == "mac-buzz-dsk"
+
+
 def test_handles():
     assert parse_handle("Infra@Home-Server") == ("infra", "home-server")
     assert parse_handle("lapis") is None

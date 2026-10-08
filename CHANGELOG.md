@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: a turn that fails says why. With a broken provider the reply stayed blank; the error now shows in full under your message (it was cut to two lines) and stays after a reload (`GET /sessions/{id}/history` returns `last_turn_error`).
 - Web: a send the agent refuses because a turn is already running no longer cancels that turn.
 - An agent past the 24th on one computer (lapis-2, sapphire-2 and on) runs `coder` like every other gem; it ran `default`.
+- Two folders with the same name on one computer (two checkouts of one repo) no longer get the same device name: the second adds its parent folder, like `laptop-feature-app` next to `laptop-app`. The name is saved the first time, so it stays put; a device already on a network keeps its name.
 
 ## [0.12.0] - 2026-10-07
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey, VerifyKey
 
-from .device_names import validate_device_name, validate_network_name, validate_trust
+from .device_names import default_device_name, validate_device_name, validate_network_name, validate_trust
 from .dns.discovery import normalize_target
 
 KEY = re.compile(r"[0-9a-f]{64}\Z")
@@ -227,7 +227,26 @@ class RelayStateStore:
             self._validate()
         else:
             self.state = RelayState()
+        if not self.state.device_name:
+            # Pin the name once, so two checkouts of one repo are not both
+            # <host>-<folder>. A joined device keeps the name its network knows.
+            # ponytail: no lock across workspaces; two created in the same
+            # instant can still match, and one network still refuses the second.
+            taken = () if self.state.origin else self._names_in_use()
+            self.state.device_name = default_device_name(workspace, taken)
             self.save()
+
+    def _names_in_use(self) -> set[str]:
+        """Device names the other workspaces on this computer have pinned."""
+        names = set()
+        for other in self.path.parent.glob("*/state.json"):
+            if other.parent == self.path:
+                continue
+            try:
+                names.add(json.loads(self._read_private(other, 65536)).get("device_name") or "")
+            except (OSError, ValueError, AttributeError, RelayError):
+                continue  # unreadable or not ours: it pins no name
+        return names - {""}
 
     @staticmethod
     def _read_private(path: Path, limit: int) -> str:

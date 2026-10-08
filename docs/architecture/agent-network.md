@@ -32,7 +32,7 @@ Three steps are yours: `/connect` on the Mac, typing the code on the VPS, pressi
 - The code lives 5 minutes and admits one device.
 - The Mac polls the mailbox every 15 s; the VPS every 5 to 20 s.
 - A request is dropped after 10 minutes; lookups are limited to 10 a minute per IP.
-- Device names default to `<hostname>-<folder>`; `/connect name` changes one.
+- Device names default to `<hostname>-<folder>`. The name is saved the first time, and a workspace whose folder name another workspace on the computer already uses gets `<hostname>-<parent>-<folder>`, then a number. `/connect name` changes one.
 
 ## Inside the Tunnel
 
