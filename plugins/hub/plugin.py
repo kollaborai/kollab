@@ -10339,7 +10339,7 @@ class HubPlugin(BasePlugin):
                 return f"hub: {e}"
             if enabled:
                 return "this agent is on the hub"
-            return "this agent is off the hub: peers no longer see it (/hub join to come back)"
+            return "this agent is off the hub: your other agents no longer see it (/hub join to come back)"
         elif subcmd == "user":
             name = rest.strip()
             if not name:
