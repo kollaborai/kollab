@@ -106,7 +106,7 @@ def test_target_catalog_leads_with_the_three_broadcasts_and_lists_remote_agents(
         hub = _hub(agents=[])
         hub.network_agent_rows = AsyncMock(
             return_value=(
-                "synthyo",
+                "laptop",
                 [
                     {"name": "lapis", "device": "devbox", "handle": "lapis@devbox",
                      "state": "idle", "online": True},

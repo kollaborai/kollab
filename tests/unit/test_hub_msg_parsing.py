@@ -374,7 +374,7 @@ class TestHubWakeDecision:
         # "stacks" contains "ack": substring matching parked a real report.
         plugin = self._plugin()
         message = _hub_message(
-            "I checked Docker on alzan-prod-home: daemon is reachable; 41 "
+            "I checked Docker on home-server: daemon is reachable; 41 "
             "containers are running. Compose stacks also report exited "
             "services for buzz-prod and dsk."
         )
