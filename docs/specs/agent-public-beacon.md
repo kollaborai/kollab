@@ -4,7 +4,7 @@
 > [agent-network-simple-flow.md](agent-network-simple-flow.md). This document is the wire
 > contract only; a command or flow that appears here and not there is not part of the design.
 
-Status: the relay routes described here run on kollabor.ai. The enrollment routes ship with Kollab 0.11.0. Contact-route lookups, knocks and cross-room link declarations are WebSocket frames (`lookup`, `knock`, `knock_answer`, `links`) from the knocks-as-calls release on; the `/relay/v1/contact/*` HTTP routes of 0.11 are gone.
+Status: the relay routes described here run on kollabor.ai. The enrollment routes ship with Kollab 0.11.0. Contact-route lookups, knocks and cross-room link declarations are WebSocket frames (`lookup`, `knock`, `knock_answer`, `links`) from 0.13.0 on; the `/relay/v1/contact/*` HTTP routes of 0.11 are gone.
 
 ## Product boundary
 
