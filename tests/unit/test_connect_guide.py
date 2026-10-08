@@ -1,6 +1,7 @@
 """First-launch guided setup (issue #121, Story 1): marker, branches, texts, gate."""
 
 import asyncio
+import re
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -356,7 +357,8 @@ def test_join_outcome_shows_the_note_under_the_joined_line():
     view._renderer = pane = Pane()
     view._outcome, view._stage = outcome, "outcome"
     view._render_outcome(4, 80)
-    text = " ".join(row for _, row in sorted(pane.rows))
+    # Rows are painted; what they say is the visible text.
+    text = re.sub(r"\x1b\[[0-9;]*m", "", " ".join(row for _, row in sorted(pane.rows)))
     assert "joined mac-net as box. trust: open" in text
     assert "Settings arrive sealed from laptop-kollab" in text
     assert "Run /login on this computer:" in text

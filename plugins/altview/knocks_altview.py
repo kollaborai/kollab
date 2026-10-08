@@ -17,12 +17,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
-from kollabor_tui.design_system import C, T, solid, solid_fg
 from kollabor_tui.key_parser import KeyPress
+from plugins.altview.connect_style import draw_header, paint_keys, paint_row, paint_value
 from plugins.hub.device_names import clip_display, display_name, request_row
 
 _POLL_SECONDS = 2.0
 _LABEL_WIDTH = 15
+_TAGLINE = "who can reach your agents from outside"
+_LABELS = frozenset({"knocks", "ringing", "knocking", "missed", "blocked", "contacts", "who may knock"})
 _MAX_TEXT_BYTES = 2048
 MODES = ("everyone", "contacts", "nobody")
 
@@ -320,13 +322,17 @@ class KnockScreenAltView(AltView):
         )
         renderer = self._renderer
         renderer.clear_screen()
-        renderer.write_at(0, 0, solid_fg(str(C["half_bottom"]) * width, T().dark[1]), "")
-        renderer.write_at(0, 1, solid(lines[0].ljust(width), T().dark[1], T().text, width), "")
+        # The Connect screen's look (connect_style), so the two siblings match.
+        top = draw_header(renderer, 0, width, lines[0].strip(), _TAGLINE) + 1
         body = lines[1:]
-        if len(body) > height - 3:  # keep the footer; cut the middle
-            body = body[: height - 5] + ["  …"] + body[-2:]
+        if len(body) > height - top:  # keep the footer; cut the middle
+            body = body[: max(0, height - top - 3)] + ["  …"] + body[-2:]
         for offset, line in enumerate(body):
-            renderer.write_at(0, 3 + offset, line, "")
+            if offset == len(body) - 1:
+                painted = paint_keys(line)
+            else:
+                painted = paint_row(line, 1 + _LABEL_WIDTH, _LABELS) or paint_value(line)
+            renderer.write_at(0, top + offset, painted, "")
         self._armed = True
         return True
 

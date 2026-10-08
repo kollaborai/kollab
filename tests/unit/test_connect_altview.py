@@ -393,7 +393,7 @@ async def test_join_form_is_titled_connect_with_network_none_above_the_code_fiel
     await view.render_frame(0.0)
 
     rows = [line for _, _, line in renderer.lines]
-    assert any(line.strip() == "Connect" for line in rows)
+    assert any(re.match(r"\s*◈\s+Connect\b", line) for line in rows)  # the branded title bar
     network = next(i for i, line in enumerate(rows) if line.strip() == "network      none")
     code_field = next(i for i, line in enumerate(rows) if "join code" in line)
     assert network < code_field
