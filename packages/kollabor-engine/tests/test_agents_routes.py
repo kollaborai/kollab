@@ -98,6 +98,27 @@ class TestAgentPoolColor:
         assert body["active"] == ["lapis"]
         assert body["available"] == ["ruby"]
 
+    async def test_a_solo_agent_is_live_but_off_the_hub(self, client, pool, monkeypatch):
+        solo = {**presence("a1", "lapis", "idle"), "solo": True}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([solo]))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["lapis"]["active"] is True
+        assert by_name["lapis"]["solo"] is True
+        assert by_name["ruby"]["solo"] is False
+
+    async def test_a_live_agent_names_its_folder(self, client, pool, monkeypatch):
+        live = {**presence("a1", "lapis", "idle"), "project": "/home/dev/kollab"}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live]))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["lapis"]["project"] == "/home/dev/kollab"
+        assert by_name["ruby"]["project"] == ""
+
     async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
 

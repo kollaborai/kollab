@@ -30,6 +30,11 @@ if Node/npm is unavailable.
   click; the options button next to it opens Agent, Gem, Model and Workspace.
   Each session row shows its gem as a live 3D avatar that acts out what the
   agent is doing (thinking, typing, searching, messaging, error).
+- **Agents by computer**: the sidebar lists every agent under the computer it
+  runs on. This computer comes first (its chats, then agents running in a
+  terminal), then each of your other computers. Agents on other computers show
+  while a chat runs here and this computer is connected to your network; open
+  them from that computer.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →
@@ -47,7 +52,10 @@ if Node/npm is unavailable.
   back to the born look. The engine keeps the looks, so every browser and every
   gem in the app (session rows, chat, Who Is Online) follows.
 - **Session Properties**: right-click a session row (long-press on a phone) or
-  double-click its gem to dress that one gem in place.
+  double-click its gem to dress that one gem in place. The Chat tab takes the
+  agent off the hub (your other agents stop seeing it; your chat keeps working)
+  or puts it back, with no restart. `/hub leave` and `/hub join` do the same in
+  the terminal.
 
 ## Usage
 

@@ -1,9 +1,10 @@
 import { useMemo, useState, type ComponentProps } from "react";
 import { Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
-import type { AgentBundleEntry, AgentPoolEntry, Profile, Session } from "@/api";
+import type { AgentBundleEntry, AgentNetwork, AgentPoolEntry, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
+import { groupRemoteByDevice, terminalAgents } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +67,7 @@ export function AppSidebar({
   sessions,
   profiles,
   agents,
+  network,
   bundles,
   selectedProfile,
   selectedIdentity,
@@ -93,6 +95,7 @@ export function AppSidebar({
   sessions: Session[];
   profiles: Profile[];
   agents: AgentPoolEntry[];
+  network: AgentNetwork;
   bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
@@ -113,8 +116,8 @@ export function AppSidebar({
   onSelectSession: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
-  /** A session's Properties: right-click (long press) its row, or double-click its gem. */
-  onProperties: (id: string) => void;
+  /** A session's Properties: right-click (long press) its row for the Chat tab, or double-click its gem. */
+  onProperties: (id: string, tab?: "chat") => void;
 }) {
   const { setOpenMobile } = useSidebar();
   // Deleting a session stops its daemon and is irreversible, so it goes behind
@@ -140,6 +143,9 @@ export function AppSidebar({
     () => [...agents].sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
     [agents],
   );
+  // This computer's live agents with no session row, and the other computers' agents.
+  const terminals = useMemo(() => terminalAgents(agents, sessions), [agents, sessions]);
+  const remoteGroups = useMemo(() => groupRemoteByDevice(network.remote), [network.remote]);
   const pickedGem = poolByName.get(selectedIdentity);
   const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
   const modelLabel =
@@ -317,8 +323,13 @@ export function AppSidebar({
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>
-            Sessions
-            <span className="ml-auto tabular-nums">{sessions.length}</span>
+            This Computer
+            {network.device ? (
+              <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal">
+                {`· ${titleCase(network.device)}`}
+              </span>
+            ) : null}
+            <span className="ml-auto tabular-nums">{sessions.length + terminals.length}</span>
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -331,9 +342,9 @@ export function AppSidebar({
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
                 const unavailable = session.attachable === false;
-                const openProperties = () => {
+                const openProperties = (tab?: "chat") => {
                   setOpenMobile(false);
-                  onProperties(session.session_id);
+                  onProperties(session.session_id, tab);
                 };
                 return (
                 <ContextMenu key={session.session_id}>
@@ -353,7 +364,7 @@ export function AppSidebar({
                       >
                         <span
                           className="contents"
-                          onDoubleClick={unavailable || !session.identity ? undefined : openProperties}
+                          onDoubleClick={unavailable || !session.identity ? undefined : () => openProperties()}
                         >
                           <GemAvatar
                             gem={gem}
@@ -381,6 +392,7 @@ export function AppSidebar({
                             ) : (
                               <>
                                 {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
+                                {pool?.active && pool.solo ? "Off Hub · " : ""}
                                 {session.model || session.profile || "default"}
                               </>
                             )}
@@ -398,7 +410,7 @@ export function AppSidebar({
                     </SidebarMenuItem>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-44">
-                    <ContextMenuItem disabled={!session.identity} onSelect={openProperties}>
+                    <ContextMenuItem disabled={!session.identity} onSelect={() => openProperties("chat")}>
                       <SlidersHorizontal />
                       Properties
                     </ContextMenuItem>
@@ -415,7 +427,35 @@ export function AppSidebar({
                 </ContextMenu>
                 );
               })}
-              {!sessions.length ? (
+              {terminals.map((agent) => (
+                <SidebarMenuItem key={`terminal-${agent.name}`}>
+                  <SidebarMenuButton
+                    disabled
+                    title={agent.project || titleCase(agent.name)}
+                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                  >
+                    <GemAvatar
+                      gem={agent.name}
+                      caste={agent.caste}
+                      color={agent.color}
+                      state={agent.state || "idle"}
+                      live
+                      season="auto"
+                      follow
+                      size={56}
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="truncate text-[13px] leading-tight font-medium">
+                        {titleCase(agent.name)}
+                      </span>
+                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                        {agent.project ? `In ${agent.project.split("/").filter(Boolean).pop()}` : "Running"}
+                      </span>
+                    </div>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+              {!sessions.length && !terminals.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
                   No sessions yet.
                 </p>
@@ -423,6 +463,46 @@ export function AppSidebar({
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+        {remoteGroups.map((group) => (
+          <SidebarGroup key={group.device}>
+            <SidebarGroupLabel>
+              {titleCase(group.device)}
+              <span className="ml-auto tabular-nums">{group.agents.length}</span>
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {group.agents.map((agent) => (
+                  <SidebarMenuItem key={agent.handle || `${agent.name}@${agent.device}`}>
+                    <SidebarMenuButton
+                      disabled
+                      title={`${titleCase(agent.name)} runs on ${titleCase(agent.device)}`}
+                      className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                    >
+                      <GemAvatar
+                        gem={agent.name}
+                        caste={poolByName.get(agent.name)?.caste}
+                        color={poolByName.get(agent.name)?.color}
+                        state="idle"
+                        live
+                        season="auto"
+                        follow
+                        size={56}
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="truncate text-[13px] leading-tight font-medium">
+                          {titleCase(agent.name)}
+                        </span>
+                        <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                          {agent.state ? titleCase(agent.state) : "Online"}
+                        </span>
+                      </div>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
       </SidebarContent>
 
       <SidebarFooter className="border-t p-2">

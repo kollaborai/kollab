@@ -56,6 +56,10 @@ async def list_agent_pool(
                 "current_task": current.get("current_task", "") if current else "",
                 # The live hub agent, for /hub/agents/{agent_id}/output.
                 "agent_id": current.get("agent_id", "") if current else "",
+                # Live but off the hub mesh (its presence says so).
+                "solo": bool(current.get("solo")) if current else False,
+                # The folder it runs in (presence covers every project here).
+                "project": str(current.get("project") or "") if current else "",
             }
         )
 

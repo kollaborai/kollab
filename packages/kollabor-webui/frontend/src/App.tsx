@@ -29,6 +29,7 @@ import {
 import {
   EngineApi,
   type AgentBundleEntry,
+  type AgentNetwork,
   type AgentPoolEntry,
   DEFAULT_SLASH_COMMANDS,
   type Profile,
@@ -240,6 +241,7 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
@@ -315,6 +317,7 @@ export default function App() {
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
+    setNetwork(result.network ?? { device: "", remote: [] });
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -625,10 +628,27 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
-  const openProperties = (sessionId: string) => {
-    const gem = sessions.find((item) => item.session_id === sessionId)?.identity;
-    if (!gem) return;
-    setStudioFocus({ gem });
+  const openProperties = (sessionId: string, tab?: "chat") => {
+    const session = sessions.find((item) => item.session_id === sessionId);
+    const gem = session?.identity;
+    if (!session || !gem) return;
+    // Presence is the truth for the switch: whether the agent is live, and
+    // whether it is on the mesh.
+    const pool = agents.find((agent) => agent.name === gem);
+    setStudioFocus({
+      gem,
+      tab,
+      chat: {
+        session,
+        hub: pool?.active ? !pool.solo : null,
+        setHub: async (enabled) => {
+          const result = await api.setSessionHub(sessionId, enabled);
+          // An engine that predates the switch answers ok and ignores it.
+          if (result.hub !== enabled) throw new Error("Restart kollab --web-ui to use this switch.");
+          await refreshAgentPool();
+        },
+      },
+    });
     setStudioOpen(true);
   };
 
@@ -649,6 +669,7 @@ export default function App() {
           sessions={sessions}
           profiles={profiles}
           agents={agents}
+          network={network}
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}

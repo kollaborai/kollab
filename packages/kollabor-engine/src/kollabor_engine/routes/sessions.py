@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import socket
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -322,6 +323,29 @@ async def _reap_dead_sessions() -> None:
             logger.warning("reaping dead session %s: %s", session_id, e)
 
 
+async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any]:
+    """This computer's name and the agents on other computers, asked of a daemon.
+
+    Every daemon in a workspace answers for the same relay, but a solo daemon has
+    none, so the first non-solo one that answers is asked. No answer means no
+    network to show: no remote rows.
+    """
+    fallback = socket.gethostname().split(".")[0]
+    # ponytail: only this engine's sessions are asked, so after a restart the other
+    # computers show once a chat runs here; asking a found daemon needs a read-only
+    # RPC connection (today's only way in is a full attach).
+    for session in registry.values():
+        if not session.alive or getattr(session, "solo", False):
+            continue
+        try:
+            snapshot = await asyncio.wait_for(session.state.get_hub_state(), timeout=3)
+        except Exception as exc:
+            logger.debug("Session %s network read failed: %s", session.session_id, exc)
+            continue
+        return {"device": snapshot.device or fallback, "remote": snapshot.remote}
+    return {"device": fallback, "remote": []}
+
+
 @router.get("")
 async def list_sessions():
     """List local sessions plus running detached sessions found via hub presence."""
@@ -337,6 +361,7 @@ async def list_sessions():
         "sessions": sessions + discovered,
         "discovered": discovered,
         "active_count": len(sessions) + len(discovered),
+        "network": await _network_snapshot(registry),
     }
 
 
@@ -478,7 +503,8 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
 
 @router.patch("/{session_id}")
 async def patch_session(session_id: str, request: Request):
-    """Update mutable session fields. Currently supports: user_token."""
+    """Update mutable session fields: user_token, and hub (true puts the
+    agent on the hub mesh, false takes it off, live; see HubPlugin.set_solo)."""
     from ..auth import validate_token as validate_engine_token
 
     auth_header = request.headers.get("authorization", "")
@@ -494,6 +520,25 @@ async def patch_session(session_id: str, request: Request):
     if "user_token" in body:
         session.user_token = body["user_token"]
         logger.info(f"Session {session_id}: user_token updated")
+    if "hub" in body:
+        enabled = body["hub"]
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="hub must be true or false")
+        if not session.alive:
+            raise HTTPException(status_code=409, detail="Session daemon is not running")
+        try:
+            await session.state.set_hub_participation(enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            # An agent started before the switch existed answers "method not
+            # found"; say what failed rather than guess why.
+            logger.error("Session %s hub switch failed: %s", session_id, exc)
+            raise HTTPException(status_code=502, detail=f"hub switch failed: {exc}")
+        session.solo = not enabled
+        # Echoed so a client can tell this engine switched it; one that
+        # predates the switch answers ok without the field.
+        return {"ok": True, "session_id": session_id, "hub": enabled}
     return {"ok": True, "session_id": session_id}
 
 

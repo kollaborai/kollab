@@ -140,6 +140,10 @@ export type AgentPoolEntry = {
   color?: number[];
   /** Live hub agent id; empty when nothing runs this identity. */
   agent_id?: string;
+  /** Live but off the hub mesh: peers do not see it (Properties → Chat). */
+  solo?: boolean;
+  /** The folder the live agent runs in, on this computer. */
+  project?: string;
 };
 
 export type AgentBundleEntry = {
@@ -149,6 +153,18 @@ export type AgentBundleEntry = {
   skills?: string[];
 };
 
+
+/** A gem on another computer in the agent network (the relay directory). */
+export type NetworkAgent = {
+  name: string;
+  device: string;
+  handle?: string;
+  state?: string;
+  is_coordinator?: boolean;
+};
+
+/** This computer's relay name and the agents on other computers; `remote` is empty off a network. */
+export type AgentNetwork = { device: string; remote: NetworkAgent[] };
 
 export type SlashParameter = {
   name: string;
@@ -571,7 +587,7 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[] }>("/sessions");
+    return this.json<{ sessions: Session[]; network?: AgentNetwork }>("/sessions");
   }
 
   getSession(sessionId: string) {
@@ -760,6 +776,14 @@ export class EngineApi {
       `/sessions/${encodeURIComponent(sessionId)}/permissions/mode`,
       { method: "POST", body: JSON.stringify({ mode }) },
     );
+  }
+
+  /** Puts the session's agent on the hub mesh, or takes it off, live. */
+  setSessionHub(sessionId: string, enabled: boolean) {
+    return this.json<{ ok: boolean; hub?: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ hub: enabled }),
+    });
   }
 
   cancel(sessionId: string) {

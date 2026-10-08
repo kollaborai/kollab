@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
-import type { AgentPoolEntry, GemAppearance, GemLook } from "@/api";
+import type { AgentPoolEntry, GemAppearance, GemLook, Session } from "@/api";
 import { titleCase } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,9 +11,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
+import { formatSessionName } from "@/utils/session-display";
 import { GemAvatar } from "./GemAvatar";
 import { EVERYDAY_FACES, EVERYDAY_HATS, GemAppearancePreview, useGemAppearance } from "./gem-appearance";
 import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
@@ -55,8 +57,16 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   );
 }
 
-/** One chat's gem: the studio opens on it alone (a session's Properties). */
-export type StudioFocus = { gem: string; tab?: "eyes" | "hat" | "color" };
+/**
+ * A session's Properties: the studio on that session's gem alone, plus a Chat
+ * tab for the session itself. `hub` is whether its agent is on the hub mesh,
+ * null when no agent runs it (nothing to switch).
+ */
+export type StudioFocus = {
+  gem: string;
+  tab?: "eyes" | "hat" | "color" | "chat";
+  chat?: { session: Session; hub: boolean | null; setHub: (enabled: boolean) => Promise<void> };
+};
 
 /**
  * Dress the gems over the random look each was born with: eyes, hat and color
@@ -106,6 +116,8 @@ function StudioBody({
   const [activity, setActivity] = useState<Activity>("idle");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const chat = focus?.chat;
+  const [hub, setHub] = useState(chat?.hub ?? true);
 
   const current = agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
   const target: GemLook = (current && draft.gems?.[current.name]) || {};
@@ -124,6 +136,7 @@ function StudioBody({
     setError("");
     try {
       await studio.save(draft);
+      if (chat && chat.hub !== null && hub !== chat.hub) await chat.setHub(hub);
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -138,7 +151,9 @@ function StudioBody({
         <DialogTitle>{focus ? titleCase(focus.gem) : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
-            ? "Dress this chat's gem over the look it was born with; every browser shows the same gem."
+            ? chat
+              ? "Dress this chat's gem, or change how its agent takes part in the hub."
+              : "Dress this chat's gem over the look it was born with; every browser shows the same gem."
             : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems."}
         </DialogDescription>
       </DialogHeader>
@@ -221,11 +236,51 @@ function StudioBody({
 
           <aside className="flex shrink-0 flex-col lg:min-h-0 lg:border-l">
             <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
-              <TabsList className="mx-3 mt-3 grid shrink-0 grid-cols-3">
+              <TabsList className={cn("mx-3 mt-3 grid shrink-0", chat ? "grid-cols-4" : "grid-cols-3")}>
                 <TabsTrigger value="eyes">Eyes</TabsTrigger>
                 <TabsTrigger value="hat">Hat</TabsTrigger>
                 <TabsTrigger value="color">Color</TabsTrigger>
+                {chat ? <TabsTrigger value="chat">Chat</TabsTrigger> : null}
               </TabsList>
+
+              {chat ? (
+                <TabsContent value="chat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <div className="flex flex-col gap-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex flex-col gap-0.5">
+                        <label htmlFor="studio-hub" className="text-sm font-medium">
+                          Hub
+                        </label>
+                        <p className="text-muted-foreground text-[11px]">
+                          {chat.hub === null
+                            ? "This session has no running agent, so there is nothing to switch."
+                            : hub
+                              ? "On the hub: it can see and message your other agents."
+                              : "Off the hub: your other agents can't see it or message it. Your chat with it keeps working."}
+                        </p>
+                      </div>
+                      <Switch
+                        id="studio-hub"
+                        checked={hub}
+                        onCheckedChange={setHub}
+                        disabled={chat.hub === null}
+                      />
+                    </div>
+                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-t pt-3 text-xs">
+                      <dt className="text-muted-foreground">Session</dt>
+                      <dd className="truncate">
+                        {formatSessionName(chat.session.name, chat.session.session_id)}
+                      </dd>
+                      <dt className="text-muted-foreground">Model</dt>
+                      <dd className="truncate">{chat.session.model || chat.session.profile || "Default"}</dd>
+                      <dt className="text-muted-foreground">Workspace</dt>
+                      <dd className="truncate" title={chat.session.workspace ?? undefined}>
+                        {chat.session.workspace || "Engine Default"}
+                      </dd>
+                    </dl>
+                  </div>
+                </TabsContent>
+              ) : null}
 
               <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
