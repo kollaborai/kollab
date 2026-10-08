@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-08
+
 ### Added
 - The @ menu, in the terminal and the web, opens with @local-broadcast (every agent in this folder) and @global-broadcast (those plus every agent on your network), and lists agents on your other computers as agent@device. A broadcast's reply says when no other computer was reached, and why.
 - A relay run with `kollab relay run` can keep itself on the newest release: `scripts/relay/autoupdate.sh` (with `kollab-relay-update.timer`) installs a newer kollab from PyPI beside the running one, switches to it and rolls back if health fails. kollabor.ai runs it, so a release reaches the directory within about 20 minutes.
