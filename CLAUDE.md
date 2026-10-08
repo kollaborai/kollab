@@ -283,7 +283,9 @@ kollab --hub status              # who's online
 kollab --hub stop <name|all>     # stop agent(s) -- falls back to SIGTERM
 kollab --hub msg <name> <text>   # send message
 kollab --hub capture <name> [N]  # last N interactions (not lines)
+kollab --hub where <name>        # live socket path, any project on this machine (read-only)
 kollab --hub help                # full command list
+kollab --attach lapis@devbox     # attach over ssh: `where` on devbox + ssh -L (kollabor/attach_remote.py)
 ```
 
 **Starting/stopping agents:**

@@ -114,6 +114,7 @@ class TerminalLLMChat:
         skill_names: list[str] | None = None,
         plugin_registry=None,
         attach_to: str | None = None,
+        attach_socket: str | None = None,
         context_name: str | None = None,
     ) -> None:
         """Initialize the chat application.
@@ -187,7 +188,10 @@ class TerminalLLMChat:
         self._attach_socket: str | None = None
         self._attach_permission_bridge = AttachPermissionBridge()
         if attach_to:
-            self._attach_socket = self._resolve_attach_socket(attach_to)
+            # A remote attach passes the socket it already forwarded over ssh.
+            self._attach_socket = attach_socket or self._resolve_attach_socket(
+                attach_to
+            )
             if not self._attach_socket:
                 # List available agents
                 available = []
@@ -1950,12 +1954,15 @@ class TerminalLLMChat:
                 pass
 
             # A bare relaunch reattaches to the coordinator first
-            # (daemon.find_workspace_daemon); any other agent needs its name.
-            reattach = (
-                "kollab"
-                if hub_info.get("is_coordinator")
-                else f"kollab --attach {identity}"
-            )
+            # (daemon.find_workspace_daemon); any other agent needs its name,
+            # and one on another machine its host too.
+            target = str(getattr(self.args, "attach", "") or "")
+            if "@" in target:
+                reattach = f"kollab --attach {target}"
+            elif hub_info.get("is_coordinator"):
+                reattach = "kollab"
+            else:
+                reattach = f"kollab --attach {identity}"
             self.renderer.message_coordinator.display_message_sequence(
                 [
                     ("system", f"detached from {identity}", {"display_type": "info"}),

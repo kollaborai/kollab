@@ -345,6 +345,7 @@ Examples:
   kollab --agent coder --as lapis --detached  # Same, detached (backgrounded agent)
   kollab -d                                # Short form for --detached
   kollab --attach lapis                     # Attach to agent 'lapis' and see its output
+  kollab --attach lapis@devbox              # Attach to 'lapis' on devbox over ssh
   kollab --web-ui                           # Launch the engine + browser UI
   kollab --reset-config                    # Reset configs to defaults with updated profiles
   kollab --update                          # Update this source checkout from Git
@@ -482,8 +483,11 @@ Telegram bridge setup (run inside interactive mode):
         "--attach",
         type=str,
         default=None,
-        metavar="IDENTITY",
-        help="Attach to a running agent through the interactive TUI proxy",
+        metavar="IDENTITY[@HOST]",
+        help=(
+            "Attach to a running agent through the interactive TUI proxy. "
+            "IDENTITY@HOST attaches to an agent on another machine over ssh"
+        ),
     )
 
     parser.add_argument(
@@ -504,7 +508,7 @@ Telegram bridge setup (run inside interactive mode):
         metavar="CMD",
         help=(
             "Hub CLI: status, agents, stop <name|all>, capture <name> [lines], "
-            "msg <name> <text>, broadcast <text>, user [name], on/off, "
+            "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
             "org <name> [mission]. Pass '--hub help' for the full list. "
             "Telegram bridge and notifications are configured interactively "
             "via /hub bridge setup and /hub notify."
@@ -991,7 +995,13 @@ async def async_main() -> None:
     # Handle --attach: boot full TUI app in proxy mode
     # (connects to remote agent's socket instead of local LLM)
     if args.attach:
-        attach_identity = args.attach
+        from kollabor.attach_remote import RemoteAttachError, open_attach_target
+
+        try:
+            attach_identity, attach_socket = open_attach_target(args.attach)
+        except RemoteAttachError as e:
+            print(f"attach failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Check if we have a CLI command or --help pending
     # These should bypass pipe mode detection.
@@ -1073,6 +1083,7 @@ async def async_main() -> None:
 
         # Resolve attach identity (set earlier if --attach was used)
         _attach_to = locals().get("attach_identity", None)
+        _attach_socket = locals().get("attach_socket", None)
 
         app = TerminalLLMChat(
             args=args,
@@ -1087,6 +1098,7 @@ async def async_main() -> None:
             skill_names=args.skill,
             plugin_registry=plugin_registry,
             attach_to=_attach_to,
+            attach_socket=_attach_socket,
             context_name=getattr(args, "context", None),
         )
         logger.info("Starting application...")
@@ -1252,6 +1264,7 @@ def _print_hub_help() -> None:
     print("  capture <name> [lines]     dump last N lines of agent output")
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
+    print("  where <name>               print a local agent's live socket path")
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")
@@ -1306,6 +1319,21 @@ async def _handle_cli_hub(hub_args: list) -> None:
     # real subcommands go through the CLI handler.
     if subcmd in ("help", "-h", "--help") or not hub_args:
         return  # fall through to normal interactive path
+
+    # Read-only, and ahead of get_presence_dir() so it creates no hub dirs.
+    # `kollab --attach name@host` runs this on the remote box over ssh.
+    if subcmd == "where":
+        from plugins.hub.presence import find_live_socket
+
+        if len(rest) != 1:
+            print("usage: kollab --hub where <name>", file=sys.stderr)
+            sys.exit(2)
+        sock = find_live_socket(rest[0])
+        if not sock:
+            print(f"no live agent named '{rest[0]}' on this machine", file=sys.stderr)
+            sys.exit(1)
+        print(sock)
+        return
 
     presence_dir = get_presence_dir()
 
