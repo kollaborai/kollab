@@ -251,7 +251,7 @@ CONNECT_OWNED_ELSEWHERE = (
     "another window in this workspace runs the network; use /connect there"
 )
 # What an attached window says when its daemon predates knocks as calls.
-CONNECT_NO_KNOCK_DAEMON = "connect: the attached daemon needs an update for knocks"
+CONNECT_NO_KNOCK_DAEMON = "connect: the kollab on this computer needs an update for knocks"
 _KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
 _KNOCKS_USAGE = "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
 _KNOCK_FOR = re.compile(r"(?P<count>\d{1,4})(?P<unit>[mhd])\Z")
@@ -747,15 +747,15 @@ class HubPlugin(BasePlugin):
                     "label": "Allowed Runtimes",
                     "config_path": "plugins.hub.allowed_runtimes",
                     "placeholder": '["kollab"]',
-                    "help": "JSON list of runtimes auto-approved for mesh (default: kollab only)",
+                    "help": "Programs allowed to join (JSON list, default: kollab only)",
                 },
                 {
                     "type": "checkbox",
                     "label": "Require Socket Auth",
                     "config_path": "plugins.hub.require_auth",
                     "help": (
-                        "Require Ed25519 challenge-response handshake on "
-                        "socket connections. Off by default; enable for production."
+                        "Ask every connection to prove who it is. "
+                        "Off by default; enable for shared networks."
                     ),
                 },
                 {
@@ -908,7 +908,7 @@ class HubPlugin(BasePlugin):
                     "type": "checkbox",
                     "label": "Route Untagged to Coordinator",
                     "config_path": "plugins.hub.route_untagged_to_coordinator",
-                    "help": "Auto-send untagged LLM responses to coordinator",
+                    "help": "Send replies with no named recipient to the coordinator agent",
                 },
                 {
                     "type": "slider",
@@ -4109,7 +4109,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="hub_spawn",
                 success=False,
-                error="cannot spawn yourself",
+                error="you can't start yourself",
             )
         if not task:
             return ToolExecutionResult(
@@ -4624,12 +4624,10 @@ class HubPlugin(BasePlugin):
                         import sys as _sys
 
                         _sys.stderr.write(
-                            f"\n[hub] SPAWN GUARD (issue #38): identity "
-                            f"'{preferred}' is already running "
-                            f"(pid={holder.pid}, "
-                            f"socket={holder.socket_path or 'unknown'}).\n"
-                            f"  Attach to it:  kollab --attach {preferred}\n"
-                            f"  Stop it:       kollab --hub stop {preferred}\n\n"
+                            f"\n[kollab] '{preferred}' is already running "
+                            f"(pid={holder.pid}).\n"
+                            f"  Watch it:  kollab --attach {preferred}\n"
+                            f"  Stop it:   kollab --hub stop {preferred}\n\n"
                         )
                         _sys.stderr.flush()
                         logger.error(
@@ -9371,7 +9369,7 @@ class HubPlugin(BasePlugin):
         """Register /hub slash command."""
         cmd = CommandDefinition(
             name="hub",
-            description="Agent mesh hub",
+            description="Your agents' network",
             category=CommandCategory.CUSTOM,
             plugin_name=self.name,
             aliases=["mesh"],

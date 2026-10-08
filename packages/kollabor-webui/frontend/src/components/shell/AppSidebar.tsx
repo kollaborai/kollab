@@ -139,8 +139,12 @@ export function AppSidebar({
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
   // Free gems first; the ones a live session holds stay listed, disabled.
+  // Live agents outside the pool (pool: false) are shown, never launched as.
   const gemOptions = useMemo(
-    () => [...agents].sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
+    () =>
+      agents
+        .filter((agent) => agent.pool !== false)
+        .sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
     [agents],
   );
   // This computer's live agents with no session row, and the other computers' agents.
@@ -292,7 +296,7 @@ export function AppSidebar({
                 </Label>
                 <Input
                   id="new-session-workspace"
-                  placeholder="Engine directory"
+                  placeholder="Project folder"
                   value={workspacePath}
                   onChange={(event) => onWorkspaceChange(event.target.value)}
                   className="h-8 text-xs"
@@ -385,7 +389,7 @@ export function AppSidebar({
                           <span className="text-muted-foreground truncate text-[11px] leading-tight">
                             {unavailable ? (
                               <span className="text-amber-600 dark:text-amber-400">
-                                discovered · attach unavailable
+                                Started elsewhere · can't open here
                               </span>
                             ) : task ? (
                               task

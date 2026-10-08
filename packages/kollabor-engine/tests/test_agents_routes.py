@@ -119,6 +119,20 @@ class TestAgentPoolColor:
         assert by_name["lapis"]["project"] == "/home/dev/kollab"
         assert by_name["ruby"]["project"] == ""
 
+    async def test_every_live_agent_is_listed_but_only_pool_gems_launch(self, client, pool, monkeypatch):
+        live = [presence("a1", "koordinator", "idle"), presence("a2", "lapis-2", "working")]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(live))
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["koordinator"]["active"] and by_name["koordinator"]["pool"] is False
+        assert by_name["koordinator"]["color"] == [128, 128, 128]
+        assert by_name["lapis-2"]["color"] == by_name["lapis"]["color"]  # wears its base gem
+        assert by_name["lapis-2"]["state"] == "working"
+        assert by_name["lapis"]["pool"] is True and by_name["lapis"]["available"]
+        assert "koordinator" not in body["available"]
+
     async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
 

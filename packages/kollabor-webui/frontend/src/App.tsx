@@ -278,7 +278,7 @@ export default function App() {
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const [busy, setBusy] = useState(true);
-  const [busyMessage, setBusyMessage] = useState("Connecting to the engine…");
+  const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
@@ -454,7 +454,7 @@ export default function App() {
     const operation = ++operationRef.current;
     (async () => {
       setBusy(true);
-      setBusyMessage("Connecting to the engine…");
+      setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
       const [result, profileResult, agentResult, bundleResult] = await Promise.all([
         loadSessions(),
@@ -501,7 +501,7 @@ export default function App() {
     const operation = ++operationRef.current;
     setBusy(true);
     setBusyMessage(
-      "Starting daemon (plugin discovery can take ~10 seconds)…",
+      "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
     try {

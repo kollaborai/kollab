@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: the sidebar lists every agent under the computer it runs on. This computer comes first, with its chats and the agents running in a terminal; then each of your other computers with its agents, shown while a chat runs here and this computer is connected to your network (open those from their own computer).
 
 ### Changed
+- Plain words replace insider terms on the screens people use: the web UI says kollab instead of engine and daemon, the setup wizard asks for a server address instead of an endpoint, and `kollab --help` explains --attach, --web-ui and --daemon in everyday terms.
 - The Connect and Knocks screens in the terminal stand out: a branded title bar that says what the screen is for, the join code highlighted so it is easy to read out, quiet labels with bright values, and the keys you can press in color.
 - Joining a computer with a code is much faster. The request shows up on your other computer in about 10 seconds (it could take over a minute), and the join finishes a few seconds after you press Accept. Making a new code also cancels the old ones nobody used.
 - Knocks are calls (#123). A knock rings the device behind a contact route for 5 minutes and the directory keeps nothing: the seven-day contact mailbox and its `/relay/v1/contact/*` routes are gone, so a flood of knocks costs the directory frames, never storage. Only an accept is answered; a reject, a block or a full missed list rings out like an unanswered knock, and every outcome but accept reads `unavailable` to the knocker, whose device redials for an hour (`plugins.hub.knock_redial_minutes`). `/connect knocks` is now the knock screen (ringing knocks, the knocks you placed, missed knocks kept on this device, blocked routes, contacts, who may knock), the same under Settings → Network → Knocks; `/connect knocks everyone|contacts|nobody [for 2h]`, `/connect expect`, `block` and `unblock` set who may knock. Older kollab versions are never rung, and cannot knock until they update.
@@ -30,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Join requests and knocks show the other computer's "device ID" instead of a "fingerprint", and Settings → Network says Connection: Connected instead of Relay: Online.
 
 ### Fixed
+- The web sidebar lists every running agent, including the koordinator and numbered gems like lapis-2; before, only agents with a built-in gem name showed.
 - Apps that start a chat through kollab's engine with their own API key get a working agent; it used to wait 45 seconds and fail because the agent never received the key.
 - The bundled `default` agent's description said it fixes linting errors; it now describes the general assistant it is.
 - Shell commands report exit code 0 when they succeed; every success was reported as exit 1 next to `success: true`.

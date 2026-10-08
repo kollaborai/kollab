@@ -52,6 +52,7 @@ async def list_agent_pool(
                 "color": list(getattr(identity, "color_rgb", None) or (128, 128, 128)),
                 "available": current is None,
                 "active": current is not None,
+                "pool": True,
                 "state": current.get("state") if current else "available",
                 "current_task": current.get("current_task", "") if current else "",
                 # The live hub agent, for /hub/agents/{agent_id}/output.
@@ -67,6 +68,34 @@ async def list_agent_pool(
     alive = [agent["name"] for agent in agents if agent["active"]]
     if alive:
         record_births(alive)
+
+    # Live agents the pool does not name (koordinator, numbered gems like
+    # lapis-2) are listed too, so the sidebar shows every agent. "pool": False
+    # keeps them out of the launch list; a numbered gem wears its base's color.
+    by_name = {agent["name"]: agent for agent in agents}
+    for name, current in sorted(live_by_identity.items()):
+        if name in by_name:
+            continue
+        base = by_name.get(name.rsplit("-", 1)[0], {})
+        agents.append(
+            {
+                "name": name,
+                "identity": name,
+                "agent_type": "",
+                "role_aliases": [],
+                "personality": "",
+                "caste": base.get("caste", ""),
+                "color": base.get("color", [128, 128, 128]),
+                "available": False,
+                "active": True,
+                "pool": False,
+                "state": current.get("state") or "",
+                "current_task": current.get("current_task", ""),
+                "agent_id": current.get("agent_id", ""),
+                "solo": bool(current.get("solo")),
+                "project": str(current.get("project") or ""),
+            }
+        )
 
     return {
         "agents": agents,

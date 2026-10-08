@@ -20,6 +20,21 @@
       "action": "start_app"
     },
     {
+      "action": "wait_for",
+      "pattern": "esc later",
+      "timeout": 30,
+      "description": "a fresh home opens the first-launch Connect guide"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 15,
+      "description": "the prompt is up before /connect is typed"
+    },
+    {
       "action": "section",
       "title": "80 columns: the longest name is cut with an ellipsis and the words stay"
     },
@@ -71,8 +86,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "fingerprint abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
-      "description": "the fingerprint and the whole hint sit under the name"
+      "pattern": "device ID abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
+      "description": "the device ID and the whole hint sit under the name"
     },
     {
       "action": "assert_not_contains",
@@ -151,7 +166,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "ana-laptop wants to join +fingerprint abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
+      "pattern": "ana-laptop wants to join +device ID abcd…ef01 +\\[a\\]ccept \\[r\\]eject",
       "description": "a short row fits on one line at 120"
     },
     {
@@ -177,8 +192,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on laptop-kollab-net\\. *$",
-      "description": "the whole notice fits at 120"
+      "pattern": "^ accepted (lab-){15}lab\\. it is now a trusted device on laptop-kollab-… *$",
+      "description": "the whole name shows; the 123-column notice is cut at 120"
     },
     {
       "action": "escape"

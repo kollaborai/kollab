@@ -137,7 +137,7 @@ async def test_an_attached_window_asks_its_daemon_and_an_old_daemon_says_so():
 
     state.hub_knocks = AsyncMock(side_effect=RpcMethodNotFound("state.hub_knocks"))
     assert await plugin._run_connect_knock('kollabor.ai/c/8f3a2c1d9e4b5061 "hi"') == (
-        "connect: the attached daemon needs an update for knocks"
+        "connect: the kollab on this computer needs an update for knocks"
     )
 
 

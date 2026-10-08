@@ -90,7 +90,7 @@ PROVIDERS: List[ProviderChoice] = [
         key="local",
         label="Custom / Local  (OpenAI-compatible)",
         provider="custom",
-        blurb="Ollama, LM Studio, vLLM, or any OpenAI-compatible endpoint.",
+        blurb="Ollama, LM Studio, vLLM, or any OpenAI-compatible server.",
         default_base_url="http://localhost:1234/v1/chat/completions",
         key_hint="(optional for local servers)",
         key_url="",
@@ -103,7 +103,7 @@ PROVIDERS: List[ProviderChoice] = [
         key="advanced",
         label="Azure / Advanced  ->  manual config",
         provider="",
-        blurb="Azure OpenAI and fully-custom endpoints are configured in config.json.",
+        blurb="Azure OpenAI and other custom setups go in config.json.",
         advanced=True,
     ),
 ]
@@ -194,7 +194,7 @@ async def test_connection(
             except Exception:  # noqa: BLE001 - shutdown is best-effort
                 pass
     except asyncio.TimeoutError:
-        return False, f"timed out after {timeout:.0f}s — check endpoint / network"
+        return False, f"timed out after {timeout:.0f}s — check the server address / network"
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - reported as the test result
@@ -318,7 +318,7 @@ def _values(payload: dict) -> tuple[ProviderChoice, str, str, str]:
         if choice.needs_key and not api_key:
             errors.setdefault("api_key", "An API key is required.")
         if choice.base_url_required and not base_url:
-            errors.setdefault("base_url", "An endpoint URL is required.")
+            errors.setdefault("base_url", "A server address is required.")
         elif base_url and not valid_base_url(base_url):
             errors.setdefault("base_url", "Use an https:// URL (http only for localhost).")
         if not model:
@@ -365,10 +365,10 @@ class SetupPanel:
             },
             {
                 "id": "endpoint",
-                "title": "Endpoint",
+                "title": "Server",
                 "fields": [
                     make_field(
-                        "base_url", "text_input", "Endpoint URL",
+                        "base_url", "text_input", "Server Address",
                         placeholder="Leave empty for the provider default",
                     )
                 ],

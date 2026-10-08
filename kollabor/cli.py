@@ -485,8 +485,8 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="IDENTITY[@HOST]",
         help=(
-            "Attach to a running agent through the interactive TUI proxy. "
-            "IDENTITY@HOST attaches to an agent on another machine over ssh"
+            "Watch and type to an agent that is already running. "
+            "IDENTITY@HOST reaches an agent on another computer you can already log in to"
         ),
     )
 
@@ -527,7 +527,7 @@ Telegram bridge setup (run inside interactive mode):
         "--web-ui",
         action="store_true",
         default=False,
-        help="Launch the local engine + browser UI (http://127.0.0.1:8080)",
+        help="Open kollab in your browser (http://127.0.0.1:8080)",
     )
 
     parser.add_argument(
@@ -584,7 +584,10 @@ Telegram bridge setup (run inside interactive mode):
         "--daemon",
         action="store_true",
         default=False,
-        help="Run as daemon + attach client (Ctrl+Z to detach, agent survives)",
+        help=(
+            "Run kollab in the background and watch it from this window "
+            "(Ctrl+Z to step away; the agent keeps running)"
+        ),
     )
 
     parser.add_argument(
@@ -1264,7 +1267,7 @@ def _print_hub_help() -> None:
     print("  capture <name> [lines]     dump last N lines of agent output")
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
-    print("  where <name>               print a local agent's live socket path")
+    print("  where <name>               show where an agent is running")
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")

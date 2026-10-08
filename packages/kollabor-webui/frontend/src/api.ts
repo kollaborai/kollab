@@ -144,6 +144,8 @@ export type AgentPoolEntry = {
   solo?: boolean;
   /** The folder the live agent runs in, on this computer. */
   project?: string;
+  /** False for a live agent the pool does not name (koordinator, lapis-2): listed, never launched as. */
+  pool?: boolean;
 };
 
 export type AgentBundleEntry = {

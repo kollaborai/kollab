@@ -4,7 +4,7 @@ Walks a brand-new user through configuring their first LLM provider:
 
     1. provider   pick a provider from a list
     2. api_key    paste the API key (masked echo)
-    3. base_url   confirm / edit the endpoint (prefilled with the default)
+    3. base_url   confirm / edit the server address (prefilled with the default)
     4. model      pick a model (curated from bundles/data/models.json) or type one
     5. review     confirm the summary; optionally run a live connection test
     6. saving     create the profile (persisted to config) and activate it
@@ -61,7 +61,7 @@ STAGE_ERROR = "error"
 _CUSTOM_MODEL_ROW = "✎  enter a model name..."
 
 # step labels for the progress strip
-_STEPS = ["Provider", "API key", "Endpoint", "Model", "Confirm"]
+_STEPS = ["Provider", "API key", "Server", "Model", "Confirm"]
 
 
 def _mask_key(key: str) -> str:
@@ -279,11 +279,11 @@ class SetupAltView(AltView):
             url = self._base_url.strip()
             provider = self._provider
             if provider and provider.base_url_required and not url:
-                self._input_error = "Endpoint URL is required for a custom provider."
+                self._input_error = "A server address is required for a custom provider."
                 return False
             if url and not self._valid_url(url):
                 self._input_error = (
-                    "Endpoint must start with https:// (or be localhost)."
+                    "The server address must start with https:// (or be localhost)."
                 )
                 return False
             self._base_url = url
@@ -434,7 +434,7 @@ class SetupAltView(AltView):
                 f"profile:  {name}",
                 f"provider: {provider.provider}",
                 f"model:    {self._model}",
-                f"endpoint: {endpoint}",
+                f"server:   {endpoint}",
                 "saved to config.json and set active.",
             ]
             self.result_summary = (
@@ -503,7 +503,7 @@ class SetupAltView(AltView):
         hints = {
             STAGE_PROVIDER: " up/down move | enter select | esc cancel",
             STAGE_API_KEY: " type/paste key | enter next | esc back",
-            STAGE_BASE_URL: " edit endpoint | enter accept | esc back",
+            STAGE_BASE_URL: " edit address | enter accept | esc back",
             STAGE_MODEL: " up/down move | enter select | esc back",
             STAGE_MODEL_CUSTOM: " type model | enter accept | esc back",
             STAGE_REVIEW: " enter save & activate | t test connection | esc back",
@@ -630,7 +630,7 @@ class SetupAltView(AltView):
         provider = self._provider
         hints = []
         if provider and provider.base_url_advanced:
-            hints.append("press enter to accept the default endpoint.")
+            hints.append("press enter to accept the default address.")
         if provider and provider.base_url_required:
             hints.append("example: http://localhost:1234/v1/chat/completions")
         hints.append("must be https:// (localhost is allowed).")
@@ -638,7 +638,7 @@ class SetupAltView(AltView):
             top,
             width,
             theme,
-            "Endpoint URL:",
+            "Server address:",
             self._base_url,
             hints,
         )
@@ -696,7 +696,7 @@ class SetupAltView(AltView):
         rows = [
             ("provider", provider.provider if provider else ""),
             ("model", self._model),
-            ("endpoint", endpoint),
+            ("server", endpoint),
             ("api key", _mask_key(self._api_key) or "(none)"),
         ]
         y = top + 2

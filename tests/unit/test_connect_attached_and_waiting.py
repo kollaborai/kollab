@@ -259,7 +259,7 @@ async def test_attached_screen_renders_the_daemons_rows_without_the_request_id()
     text = renderer.text()
 
     assert "home-server wants to join" in text
-    assert "fingerprint abcd…ef01" in text
+    assert "device ID abcd…ef01" in text
     assert "ops@home-server" in text
     assert "ana-laptop (offline)" in text
     assert _ENROLLMENT_ID not in text
@@ -1272,7 +1272,7 @@ _ROUTE = "8f3a2c1d9e4b5061"
 _INTRO = "Ana from Acme. Can your ops agent review a nginx config?"
 _KNOCK_ID = "b" * 32
 _SENDER = "c" * 64
-_NO_DAEMON_SUPPORT = "connect: the attached daemon needs an update for knocks"
+_NO_DAEMON_SUPPORT = "connect: the kollab on this computer needs an update for knocks"
 _KNOCK_SCREEN = {
     "online": True, "domain": "agents.acme.com", "mode": "everyone", "mode_until": 0,
     "ringing": [{"id": _KNOCK_ID, "device": "ana-laptop", "fingerprint": "ab12…ef01",

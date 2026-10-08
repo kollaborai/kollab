@@ -231,7 +231,7 @@ class ConnectAltView(AltView):
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect",
-            description="Privately enter a device enrollment code",
+            description="Privately enter a join code",
             version="1.0.0",
             author="Kollabor",
             category="internal",
@@ -705,7 +705,7 @@ def _code_value(state: ConnectScreenState) -> str:
     if state.code_status == "creating":
         return "creating…"
     unreachable = state.snapshot is not None and not state.snapshot.relay_online
-    reason = "relay unreachable" if unreachable else "could not create a code"
+    reason = "can't connect" if unreachable else "could not create a code"
     return f"{reason}   press c to try again"
 
 
@@ -725,7 +725,7 @@ def _request_rows(state: ConnectScreenState, width: int) -> list[str]:
         )
         rows += request_row(
             f"{marker}{name}{_WANTS_TO_JOIN}",
-            f"fingerprint {request.fingerprint}",
+            f"device ID {request.fingerprint}",
             room,
             hint="[a]ccept [r]eject",
             indent=" " * len(marker),

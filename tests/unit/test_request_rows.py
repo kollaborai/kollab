@@ -334,7 +334,7 @@ def test_the_longest_name_shows_in_full_on_the_request_row_at_120_columns():
 
     assert _heads(lines) == [f"{_VALUE}{LONGEST}{_WORDS}"]
     assert all(display_width(line) <= 120 for line in lines)
-    assert f"fingerprint abcd…ef01   {HINT}" in "\n".join(lines)
+    assert f"device ID abcd…ef01   {HINT}" in "\n".join(lines)
 
 
 def test_the_longest_name_is_cut_with_an_ellipsis_at_80_columns_and_the_words_stay():
@@ -346,7 +346,7 @@ def test_the_longest_name_is_cut_with_an_ellipsis_at_80_columns_and_the_words_st
     assert display_width(head) == 80  # the name takes everything the row has
     assert LONGEST not in "\n".join(lines)
     assert all(display_width(line) <= 80 for line in lines)
-    assert f"fingerprint abcd…ef01   {HINT}" in "\n".join(lines)
+    assert f"device ID abcd…ef01   {HINT}" in "\n".join(lines)
 
 
 @pytest.mark.parametrize("width", [80, 120])

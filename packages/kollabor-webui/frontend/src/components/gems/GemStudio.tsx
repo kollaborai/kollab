@@ -275,7 +275,7 @@ function StudioBody({
                       <dd className="truncate">{chat.session.model || chat.session.profile || "Default"}</dd>
                       <dt className="text-muted-foreground">Workspace</dt>
                       <dd className="truncate" title={chat.session.workspace ?? undefined}>
-                        {chat.session.workspace || "Engine Default"}
+                        {chat.session.workspace || "Default"}
                       </dd>
                     </dl>
                   </div>
