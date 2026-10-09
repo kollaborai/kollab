@@ -34,7 +34,7 @@ bash m1/teardown.sh
 3. `probe.py relayless` sets `enabled` to `false` in that `state.json`. A device that starts with it off never connects to the relay, so it runs under its own per-process direct session.
 4. C is started again with the same identity. A's status must have dropped C before this (`c4-c-relayless` waits for it), so a later listing cannot be a leftover.
 
-B and C each get the same config keys, written to the workspace `.kollab/config.json` by `probe.py config` (nothing else): `endpoint_enabled`, `endpoint_host` (the host's own address toward the discovery group), `endpoint_port` (8801 / 8802), `endpoint_advertise_host` (the same address), `endpoint_tls_cert/key/ca`, `peer_allow_private_network`, `peer_discovery_advertise_enabled`, `peer_discovery_scan_enabled`. `endpoint_tls_ca` is the loopback certificate plus the public roots (certifi), because the same CA file also verifies kollabor.ai. A gets no config.
+B and C each get the same config keys, written to the workspace `.kollab/config.json` by `probe.py config` (nothing else): `endpoint_enabled`, `endpoint_host` (the host's own address toward the discovery group), `endpoint_port` (8801 / 8802), `endpoint_advertise_host` (the same address), `endpoint_tls_cert/key/ca`, `peer_allow_private_network`, `peer_discovery_advertise_enabled`, `peer_discovery_scan_enabled`. `endpoint_tls_ca` is the endpoint certificate plus the public roots (certifi), because the same CA file also verifies kollabor.ai. A gets no config.
 
 ## What it does
 
