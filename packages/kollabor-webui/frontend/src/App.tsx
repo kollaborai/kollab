@@ -45,7 +45,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { formatSessionName } from "@/utils/session-display";
+import { sessionHeading } from "@/utils/session-display";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -123,7 +123,7 @@ function RuntimeShell({
   );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
-  const sessionLabel = formatSessionName(session.name, session.session_id);
+  const sessionLabel = sessionHeading(session);
   // A typed /restart (/new, /clear) empties the daemon's conversation; once that
   // run ends, reset the thread the way the toolbar's Clear does. Only a run
   // seen in this mount counts, so the reloaded thread cannot loop.
