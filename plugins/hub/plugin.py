@@ -3002,6 +3002,14 @@ class HubPlugin(BasePlugin):
                 error=error,
             )
 
+        # A turn handling an agent's request replies to it on that request's
+        # thread (below). Models sent that reply as kind="answer", which is only
+        # a human's answer to a remote question, and got the exact-target error.
+        if relay_kind == "answer" and not target.startswith("relay:"):
+            asked = parse_handle(target)
+            if asked and self._network_answering(format_handle(*asked)):
+                relay_kind = "message"
+
         if relay_kind == "answer":
             from .relay_state import ID
 
