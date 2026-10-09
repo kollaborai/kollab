@@ -352,6 +352,10 @@ class OpenAIResponsesTransformer:
     ) -> Optional[GeneratedImageContent | TextContent]:
         """Persist a completed hosted image without returning its bytes."""
         result = item.get("result")
+        if not result and item.get("status") == "failed":
+            # The service says this image failed: say so and keep the rest of the
+            # reply. Raising threw away its text and every other image with it.
+            return TextContent(text="Image generation failed.")
         if not result:
             raise ProviderError(
                 "image generation completed without image data",

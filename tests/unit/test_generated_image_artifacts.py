@@ -139,6 +139,39 @@ def test_transformer_persists_image_and_redacts_raw_response(tmp_path: Path):
     )
 
 
+def test_a_failed_image_keeps_the_rest_of_the_reply(tmp_path: Path):
+    # Live story 7: one of four images a model made unasked came back failed, and
+    # the turn died with "image generation completed without image data".
+    store = GeneratedImageArtifactStore(tmp_path / "session-images")
+    response = {
+        "id": "resp_image_2",
+        "status": "completed",
+        "output": [
+            {"type": "image_generation_call", "id": "ig_failed", "status": "failed"},
+            {
+                "type": "image_generation_call",
+                "id": "ig_ok",
+                "status": "completed",
+                "result": PNG_RESULT,
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Standing by."}],
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    unified = OpenAIResponsesTransformer.transform_response(
+        response, "gpt-5.6-luna", artifact_store=store
+    )
+
+    text = unified.get_text_content()
+    assert "Image generation failed." in text and "Standing by." in text
+    assert any(isinstance(block, GeneratedImageContent) for block in unified.content)
+
+
 def test_redaction_is_scoped_to_image_generation_calls():
     payload = {
         "output": [
