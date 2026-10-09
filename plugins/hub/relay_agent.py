@@ -587,7 +587,8 @@ class RelayAgentBridge:
             logger.info(
                 "agent@device %s is not on the roster: %s",
                 handle,
-                ", ".join(sorted(row["handle"] for row in rows)[:20]) or "empty",
+                ", ".join(sorted(format_handle(r["name"], r["device"]) for r in rows)[:20])
+                or "empty",
             )
             raise RelayError(
                 "unknown agent@device: run /connect status to see who is online"
