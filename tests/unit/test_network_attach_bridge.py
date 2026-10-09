@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 from nacl.signing import SigningKey
 
+from plugins.hub import network_attach
 from plugins.hub.network_attach import NetworkAttach
 from plugins.hub.relay_state import RelayError
 from tests.unit.test_relay_agent_bridge import allow, handle
@@ -135,3 +136,76 @@ async def test_a_later_approval_keeps_who_may_open_agents(devices):
     await right.commands.run("attach allow left-box")
     right.commands.client.approve(SigningKey.generate().verify_key.encode().hex())
     assert right._state().state.attach_allowed == [left.commands.client.public_key]
+
+
+@pytest.mark.asyncio
+async def test_a_connect_command_that_withdraws_an_open_agent_closes_it(devices, monkeypatch):
+    monkeypatch.setattr(network_attach, "IDLE_SECONDS", 60.0)  # only the command's own recheck
+    left, right, notices = devices
+    await right.commands.run("attach allow left-box")
+    opened = await _open(left, right)
+    reader, _ = await asyncio.open_unix_connection(opened["socket_path"])
+    assert await reader.readline() == b"agent here\n"
+
+    await right._rpc_command({"value": "trust manual", "agent_id": right.identity.agent_id})
+    assert await asyncio.wait_for(reader.read(), 5) == b""
+    assert notices[-1] == "closed sapphire for left-box: it may no longer open it"
+
+
+def test_every_relay_method_the_bridge_calls_or_serves_is_allowlisted():
+    """One missing here fails only in a window that does not own the network."""
+    import re
+
+    from plugins.hub import relay_agent
+    from plugins.hub.relay_owner import RELAY_METHODS
+
+    used = set(re.findall(r'"(relay\.[a-z_]+)"', Path(relay_agent.__file__).read_text()))
+    assert {"relay.attach", "relay.enroll_device"} <= used <= RELAY_METHODS
+
+
+@pytest.mark.asyncio
+async def test_revoking_or_rotating_forgets_who_may_open_agents(devices):
+    left, right, _ = devices
+    key = left.commands.client.public_key
+    await right.commands.run("attach allow left-box")
+    right.commands.client.revoke(key)
+    assert key not in right._state().state.attach_allowed
+
+    right.commands.client.approve(key)  # readmitted with the same key: no grant comes back
+    assert key not in right._state().state.attach_allowed
+    right.bind_peer_device(key, "left-box")
+    await right.commands.run("attach allow left-box")
+    right.commands.client.rotate_room()
+    assert right._state().state.attach_allowed == []
+
+
+@pytest.mark.asyncio
+async def test_a_request_cancelled_while_waiting_leaves_the_holders_session_alone(devices):
+    """Only the request holding a secure session may discard it."""
+    left, right, _ = devices
+    release, calls = asyncio.Event(), []
+
+    class SlowDevice:
+        async def receive(self, peer, method, payload):
+            calls.append(method)
+            if len(calls) == 1:
+                await release.wait()
+            return {"closed": True}
+
+        async def close(self):
+            pass
+
+    right.network_attach = SlowDevice()
+    key = right.commands.client.public_key
+    frame = {"channel": "0" * 32, "seq": 0, "data": ""}
+    first = asyncio.create_task(left.secure_transport.request(key, "attach_data", frame, timeout=10))
+    for _ in range(300):
+        if calls:
+            break
+        await asyncio.sleep(0.01)
+    waiting = asyncio.create_task(left.secure_transport.request(key, "attach_data", frame, timeout=10))
+    await asyncio.sleep(0.05)
+    waiting.cancel()
+    release.set()
+    assert await first == {"closed": True}
+    assert left.secure_transport._outbound

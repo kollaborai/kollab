@@ -37,9 +37,19 @@ def sock_dir():
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def _chat(socket_path, device=""):
+def _chat(socket_path, device="", lists=(HANDLE,)):
+    """A chat here whose network lists the agents ``lists`` names (relay directory rows)."""
+
+    async def get_hub_state():
+        rows = [dict(zip(("name", "device"), h.split("@")), handle=h) for h in lists]
+        return SimpleNamespace(remote=rows)
+
     return SimpleNamespace(
-        alive=True, solo=False, device=device, daemon=SimpleNamespace(socket_path=str(socket_path))
+        alive=True,
+        solo=False,
+        device=device,
+        daemon=SimpleNamespace(socket_path=str(socket_path)),
+        state=SimpleNamespace(get_hub_state=get_hub_state),
     )
 
 
@@ -64,8 +74,10 @@ async def test_an_agent_on_another_computer_opens_through_a_chat_here(monkeypatc
     asked, opened = [], []
     reply = {"type": "network_attach", "socket_path": "/tmp/one-shot.sock"}
     listener = await _daemon_answering(sock_dir / "d.sock", reply, asked)
-    # An agent opened on another computer is never the one asked.
+    # Never asked: an agent opened on another computer, and a chat on another
+    # folder's network, where server-box may be a different computer.
     registry["other@far-box"] = _chat(sock_dir / "far.sock", device="far-box")
+    registry["elsewhere"] = _chat(sock_dir / "e.sock", lists=("lapis@far-box",))
     registry["here"] = _chat(sock_dir / "d.sock")
 
     async def adopt(found):
@@ -119,6 +131,11 @@ async def test_with_no_chat_here_a_remote_agent_answers_503(registry, sock_dir):
         await _open(HANDLE)
     assert failed.value.status_code == 503
     assert "no chat here runs this folder's network yet" in failed.value.detail
+
+    registry["elsewhere"] = _chat(sock_dir / "e.sock", lists=("lapis@far-box",))
+    with pytest.raises(HTTPException) as failed:
+        await _open(HANDLE)
+    assert f"{HANDLE} is not on the network right now" in failed.value.detail
 
     await _open("not@a@handle")  # not a handle: the route's own 404
     assert "not@a@handle" not in registry

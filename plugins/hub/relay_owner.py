@@ -29,6 +29,9 @@ RELAY_METHODS = frozenset(
         "relay.cancel",
         "relay.status",
         "relay.knocks",
+        "relay.enroll_device",
+        "relay.enrollment_offer",
+        "relay.attach",
     }
 )
 

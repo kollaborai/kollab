@@ -193,6 +193,9 @@ class SecureConversationTransport:
         binding = self._current_binding(peer_key)
         key = binding
         deadline = time.monotonic() + timeout
+        # Only a call that held the session may discard it: one cancelled or
+        # timed out while waiting for the lock leaves the holder's session alone.
+        held = False
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
@@ -202,6 +205,7 @@ class SecureConversationTransport:
                         raise RelayError("secure session capacity reached")
                     request_lock = self._request_locks[key] = asyncio.Lock()
                 async with request_lock:
+                    held = True
                     state = await self._open_locked(peer_key, key, binding, deadline)
                     raw = _encode_frame({"v": 1, "method": method, "payload": payload})
                     result = None
@@ -231,10 +235,12 @@ class SecureConversationTransport:
                         )
                     return result
         except asyncio.CancelledError:
-            self._discard_outbound(key)
+            if held:
+                self._discard_outbound(key)
             raise
         except Exception as exc:
-            self._discard_outbound(key)
+            if held:
+                self._discard_outbound(key)
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
                 method,
@@ -278,6 +284,9 @@ class SecureConversationTransport:
         binding = self._current_binding(peer_key)
         key = binding
         deadline = time.monotonic() + timeout
+        # Only a call that held the session may discard it: one cancelled or
+        # timed out while waiting for the lock leaves the holder's session alone.
+        held = False
         try:
             async with asyncio.timeout(timeout):
                 self._prune_expired()
@@ -287,12 +296,15 @@ class SecureConversationTransport:
                         raise RelayError("secure session capacity reached")
                     request_lock = self._request_locks[key] = asyncio.Lock()
                 async with request_lock:
+                    held = True
                     await self._open_locked(peer_key, key, binding, deadline)
         except asyncio.CancelledError:
-            self._discard_outbound(key)
+            if held:
+                self._discard_outbound(key)
             raise
         except Exception as exc:
-            self._discard_outbound(key)
+            if held:
+                self._discard_outbound(key)
             logger.warning(
                 "secure session to %s failed: %s: %s",
                 peer_key[:12],

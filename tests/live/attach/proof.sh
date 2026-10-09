@@ -2,7 +2,7 @@
 # proof.sh: Story 10 of docs/specs/agent-network-simple-flow.md, opening an agent on another
 # device from the web UI's engine, on the INSTALLED m1 builds. Run it after m1/proof.sh left the
 # Mac (tmux m1-mac) and the server (tmux m1-srv) joined, before m1/teardown.sh. It starts an
-# engine on the Mac in the Mac workspace, opens the server's koordinator through the network and
+# engine on the Mac in the Mac workspace, opens the server's agent through the network and
 # runs one paid turn there. It saves ~/.kollab/engine.token and puts it back at the end.
 #
 # Exit code 0 only if every row of the final table is PASS.
@@ -115,13 +115,15 @@ rec pre PASS - "both m1 TUIs are up"
 
 # ================================================================== engine ====
 say "a0: an engine on the Mac, in the Mac workspace (port $PORT)"
-(cd "$M1_MAC_WS" && nohup env KOLLAB_NO_KEYRING=1 "$M1_MAC_VENV/bin/python" -m kollabor_engine serve --port "$PORT" \
-  > "$EVID/engine.log" 2>&1 &)
+# The venv first on PATH: the engine starts its chat's daemon with the `kollab` it finds there.
+(cd "$M1_MAC_WS" && nohup env KOLLAB_NO_KEYRING=1 PATH="$M1_MAC_VENV/bin:$PATH" \
+  "$M1_MAC_VENV/bin/python" -m kollabor_engine serve --port "$PORT" > "$EVID/engine.log" 2>&1 &)
 E health "$PORT" 60 || abort a0-engine "the engine did not answer /health"
 SID=$(E create "$PORT" openai-oauth "$M1_MAC_WS") || abort a0-engine "POST /sessions failed (engine.log)" engine.log
-REMOTE=$(E remote "$PORT" koordinator 120) || abort a0-engine "no koordinator on another computer in GET /sessions network.remote"
+REMOTE=$(E remote "$PORT" - 120) || abort a0-engine "no agent on another computer in GET /sessions network.remote"
+AGENT=${REMOTE%@*}
 MAC_DEVICE=$(E device "$PORT") || abort a0-engine "GET /sessions named no device"
-rec a0-engine PASS engine.log "a chat runs here; the server's koordinator is listed"
+rec a0-engine PASS engine.log "a chat runs here; the server's $AGENT is listed"
 
 # ===================================================== refused, then allowed ====
 say "a1: the server has not allowed this computer yet"
@@ -150,8 +152,8 @@ case $OUT in
     else rec a3-history FAIL a3-history.txt "history came back without m1 Story 2's uname request"; fi ;;
   *) rec a3-history FAIL - "expected 200, got: ${OUT:0:200}" ;;
 esac
-if wait_for srv "$MAC_DEVICE opened koordinator from the network" 20; then rec a4-notice PASS - "the server's screen says who opened it"
-else cap srv a4-srv; rec a4-notice FAIL a4-srv.txt "no 'opened koordinator from the network' line on the server"; fi
+if wait_for srv "$MAC_DEVICE opened $AGENT from the network" 20; then rec a4-notice PASS - "the server's screen says who opened it"
+else cap srv a4-srv; rec a4-notice FAIL a4-srv.txt "no '$MAC_DEVICE opened $AGENT from the network' line on the server"; fi
 
 # ========================================================== one paid turn ====
 say "a5: a turn on the server agent, typed on the Mac"
@@ -166,7 +168,7 @@ say "a6: /connect attach deny closes it"
 BASE=$(count_pat srv 'may no longer open')
 cmd srv "/connect attach deny $MAC_DEVICE"
 if wait_for srv 'may no longer open this computer' 30 "$BASE" \
-  && wait_for srv "$MAC_DEVICE closed koordinator" 30 \
+  && wait_for srv "closed $AGENT for $MAC_DEVICE" 30 \
   && E gone "$PORT" "$REMOTE" 60 >/dev/null; then
   rec a6-deny PASS - "the open agent closed on both computers"
 else cap srv a6-srv; rec a6-deny FAIL a6-srv.txt "deny did not close the open agent"; fi

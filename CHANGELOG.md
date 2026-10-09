@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The web UI opens the agents on your other computers as full chats, through your network: history, live turns, sending and permission prompts. The computer running the agent decides: run `/connect attach allow <this computer>` there (`/connect attach` lists who may; `deny` closes what is open). Never under trust manual, and under trust agents only the agents that computer may message. Until it allows yours, a click shows its answer and the command to run.
+- The web UI opens the agents on your other computers as full chats, through your network: history, live turns, sending and permission prompts. The computer running the agent decides: run `/connect attach allow <this computer>` there (`/connect attach` lists who may; `deny` closes what is open). Never under trust manual, and under trust agents only the agents that computer may message. Until it allows yours, a click shows its answer and the command to run. An open agent closes as soon as that computer's rules no longer allow it.
 
 ### Removed
 - `kollabor_agent.tool_timeline`: a tool timeline module that nothing called; only its own test used it (#83).
@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `/resume` and `/branch`: Esc, or a chat that failed to load, left the terminal without its input box and status bar.
 - The engine's `GET /status` answered 500 whenever a chat was open.
+- In a folder where another window runs the network (a second terminal, or a web chat beside a terminal), New Join Code failed with "connect offer could not be created", and joining with a code failed too.
 - The web sidebar greyed out every agent the web UI had not started (a `kollab` in a terminal, a detached daemon, another folder's agent): each one now opens as a full chat, with its history, live turns and permission prompts. The web UI attaches to it and only detaches when it closes, so it offers no Delete and never stops it. Agents with the same name in different folders are separate rows, named after the conversation their terminal shows.
 - A permission prompt answered in one window (the web UI, the terminal, a second `kollab --attach`) stayed open in the others: the terminal sat on it, still "Working". Every attached window now closes it. A `kollab --no-daemon` session answers its own prompts in its terminal, even while the web UI watches it.
 

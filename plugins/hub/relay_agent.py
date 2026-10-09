@@ -580,7 +580,9 @@ class RelayAgentBridge:
 
     async def attach(self, handle: str) -> str:
         """A one-shot local socket to agent@device's own socket (network_attach.py)."""
-        return (await self._owner_call("relay.attach", {"handle": handle}))["socket_path"]
+        # The open waits on the other computer: one secure request, up to 30 s.
+        reply = await self._owner_call("relay.attach", {"handle": handle}, timeout=55)
+        return reply["socket_path"]
 
     async def _rpc_attach(self, params):
         handle = params.get("handle") if isinstance(params, dict) else None
@@ -907,7 +909,7 @@ class RelayAgentBridge:
         except (RelayError, OSError, ValueError):
             logger.debug("relay directory refresh unavailable")
 
-    async def _owner_call(self, method: str, params: dict) -> dict:
+    async def _owner_call(self, method: str, params: dict, timeout: float = 15) -> dict:
         await self._ensure_owner()
         if self.commands is not None:
             return await getattr(self, "_rpc_" + method.split(".")[1])(params)
@@ -915,7 +917,7 @@ class RelayAgentBridge:
         if record is None:
             raise RelayError("workspace relay owner is starting; retry shortly")
         return await local_relay_rpc(
-            record["socket_path"], method, params, auth=self._auth()
+            record["socket_path"], method, params, timeout=timeout, auth=self._auth()
         )
 
     async def command(self, value: str) -> str:
@@ -1140,11 +1142,12 @@ class RelayAgentBridge:
         ):
             raise RelayError("invalid local relay command")
         self._local_agent(params["agent_id"])
-        return {
-            "text": await self.commands.run(
-                params["value"], source_agent=params["agent_id"]
-            )
-        }
+        text = await self.commands.run(params["value"], source_agent=params["agent_id"])
+        if self.network_attach is not None:
+            # Trust, grants, revoke: an agent open from the network closes at
+            # once if the change withdrew it (it also re-checks on its own).
+            await self.network_attach.recheck()
+        return {"text": text}
 
     def _local_agent(self, agent_id):
         for agent in self.directory.agents(self.workspace):

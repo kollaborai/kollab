@@ -610,7 +610,12 @@ agent's. Rules on the server: only a member device a person there allowed
 (`/connect attach allow|deny <device>`, shown by `/connect attach`), never
 under `trust manual`, under `trust agents` only the agents that device may
 message, never a stranger, at most four open agents per device. `deny` closes
-that device's open agents at once.
+that device's open agents at once. The server asks these rules again while an
+agent stays open: a `/connect` command that withdraws it (`trust manual`, a
+`deny` of that agent, `revoke`) closes it at once, and any other change
+(membership from the network, an agent stopping) within about five seconds.
+`revoke`, leaving or a new room forgets every `attach allow`, so a device let
+back in must be allowed again.
 
 ## 6. Commands: keep, rename, remove
 

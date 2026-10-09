@@ -9,7 +9,8 @@ The device that runs the agent decides who may open it (``RelayAgentBridge.
 attach_target``): only a member device a person on it allowed with
 ``/connect attach allow <device>``, never under ``trust manual``, and under
 ``trust agents`` only the agents that device may message. An open channel is
-the same control as sitting at that device's keyboard.
+the same control as sitting at that device's keyboard, so the device asks its
+rules again while the channel stays open and closes it once they say no.
 
 Wire: secure application requests (``SecureConversationTransport.request``),
 sent by both sides:
@@ -21,7 +22,8 @@ sent by both sides:
 Each side writes what the other sends into its own local socket: the requester
 into a one-shot private unix socket its caller connects to, the device into
 the agent's own socket. Requests to one peer are serialized by the transport,
-so each direction stays in order; ``seq`` makes a retried send harmless.
+and each side's pump is the only sender on its channel, so each direction
+stays in order; ``seq`` makes a retried send harmless.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ import shutil
 import tempfile
 import time
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -58,12 +60,17 @@ MAX_CHANNELS_PER_PEER = 4
 READ_BYTES = 24 * 1024
 MAX_DATA_BYTES = 256 * 1024  # decompressed bound for one request
 FLUSH_SECONDS = 0.2  # coalesce a stream of small writes into one request
+IDLE_SECONDS = 5.0  # an idle channel wakes this often: the device asks its rules again
+RECHECK_SECONDS = 1.0  # with traffic, the device asks its rules at most this often
 KEEPALIVE_SECONDS = 30.0  # an idle channel proves its peer still holds it
 CONNECT_SECONDS = 15.0  # for the caller to connect the one-shot socket
 REQUEST_SECONDS = 30.0
+CLOSE_SECONDS = 5.0
 WRITE_SECONDS = 30.0
-# The relay allows a client 10 frames a second (burst 20) for all its traffic;
-# one secure request costs a frame per 4 KiB chunk. Tunnels take 6 of the 10.
+# The relay allows a client 10 frames a second (burst 20) and the client keeps
+# itself to 8 for all its traffic. A secure request costs a frame per 4 KiB
+# chunk each way: this device's own sends, and its replies to the peer's.
+# Tunnels take 6 of the 8.
 PACE_RATE = 6.0
 PACE_BURST = 12.0
 CHUNK_BYTES = 4 * 1024
@@ -83,13 +90,14 @@ class _Channel:
     peer: str
     name: str
     requester: bool
+    agent_id: str = ""
     reader: asyncio.StreamReader | None = None
     writer: asyncio.StreamWriter | None = None
     server: asyncio.AbstractServer | None = None
     path: Path | None = None
     send_seq: int = 0
     recv_seq: int = 0
-    last_send: float = field(default_factory=time.monotonic)
+    checked: float = 0.0
     pump: asyncio.Task | None = None
     closed: bool = False
 
@@ -104,17 +112,29 @@ class _Pacer:
         self.stamp = time.monotonic()
         self.lock = asyncio.Lock()
 
+    def _refill(self) -> None:
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.stamp) * self.rate)
+        self.stamp = now
+
     async def take(self, cost: float) -> None:
         cost = min(cost, self.burst)
         async with self.lock:
             while True:
-                now = time.monotonic()
-                self.tokens = min(self.burst, self.tokens + (now - self.stamp) * self.rate)
-                self.stamp = now
+                self._refill()
                 if self.tokens >= cost:
                     self.tokens -= cost
                     return
                 await asyncio.sleep((cost - self.tokens) / self.rate)
+
+    def charge(self, cost: float) -> None:
+        """Frames already sent without asking (replies to the peer's data)."""
+        self._refill()
+        self.tokens = max(-self.burst, self.tokens - cost)
+
+
+def _frames(size: int) -> int:
+    return max(1, -(-(size + 256) // CHUNK_BYTES))
 
 
 def _pack(data: bytes) -> str:
@@ -165,7 +185,6 @@ class NetworkAttach:
         self._channels: dict[tuple[str, str], _Channel] = {}
         self._pacer = _Pacer()
         self._socket_dir: Path | None = None
-        self._watch: asyncio.Task | None = None
         self._closed = False
 
     # -- requester ------------------------------------------------------
@@ -199,7 +218,6 @@ class NetworkAttach:
         asyncio.get_running_loop().call_later(
             CONNECT_SECONDS, self._expire_unconnected, channel
         )
-        self._start_watch()
         return str(channel.path)
 
     def _socket_path(self, channel_id: str) -> Path:
@@ -250,10 +268,15 @@ class NetworkAttach:
         seq = payload.get("seq")
         if type(seq) is not int or seq < 0:
             raise RelayError("invalid attach request")
+        # This device answered every chunk of the request with a frame of its own.
+        self._pacer.charge(_frames(len(str(payload.get("data") or ""))))
         if seq < channel.recv_seq:
             return {"ack": seq}  # a retried send that already landed
         if seq != channel.recv_seq:
-            await self._close(channel, tell_peer=False)
+            await self._close(channel, tell_peer=False, why=self._lost(channel))
+            return {"closed": True}
+        if not await self._allowed(channel):
+            await self._close(channel, tell_peer=False, why=self._withdrawn(channel))
             return {"closed": True}
         data = _unpack(payload.get("data"))
         if data:
@@ -264,7 +287,7 @@ class NetworkAttach:
                 channel.writer.write(data)
                 await asyncio.wait_for(channel.writer.drain(), WRITE_SECONDS)
             except (OSError, asyncio.TimeoutError):
-                await self._close(channel, tell_peer=False)
+                await self._close(channel, tell_peer=False, why=self._stopped(channel))
                 return {"closed": True}
         channel.recv_seq += 1
         return {"ack": seq}
@@ -279,9 +302,9 @@ class NetworkAttach:
             raise RelayError("attach channel already open")
         if self._closed:
             return {"refused": "this computer is shutting down its network"}
-        if len(self._channels) >= MAX_CHANNELS or (
-            sum(1 for key in self._channels if key[0] == peer) >= MAX_CHANNELS_PER_PEER
-        ):
+        # Only the agents that device holds open here count against its share.
+        held = sum(1 for (key, _), ch in self._channels.items() if key == peer and not ch.requester)
+        if len(self._channels) >= MAX_CHANNELS or held >= MAX_CHANNELS_PER_PEER:
             return {"refused": "too many of this computer's agents are open from there"}
         try:
             socket_path = await self._target(peer, agent_id, name)
@@ -293,52 +316,112 @@ class NetworkAttach:
         except (OSError, asyncio.TimeoutError):
             return {"refused": f"{name} is not running here any more"}
         channel = _Channel(
-            id=channel_id, peer=peer, name=name, requester=False, reader=reader, writer=writer
+            id=channel_id,
+            peer=peer,
+            name=name,
+            requester=False,
+            agent_id=agent_id,
+            reader=reader,
+            writer=writer,
+            checked=time.monotonic(),
         )
         self._channels[(peer, channel_id)] = channel
         channel.pump = asyncio.create_task(self._pump(channel))
-        self._start_watch()
         self._notice(f"{self._peer_name(peer)} opened {name} from the network")
         return {"open": True}
+
+    async def _allowed(self, channel: _Channel) -> bool:
+        """The device side asks its rules again (trust, grants, membership change)."""
+        if channel.requester:
+            return True
+        now = time.monotonic()
+        if now - channel.checked < RECHECK_SECONDS:
+            return True
+        channel.checked = now
+        try:
+            await self._target(channel.peer, channel.agent_id, channel.name)
+        except Exception as exc:  # AttachRefused, or rules that cannot be read: closed either way
+            logger.info("network attach %s for %s withdrawn: %s", channel.name, channel.peer[:12], exc)
+            return False
+        return True
 
     # -- both ends ------------------------------------------------------
 
     async def _pump(self, channel: _Channel) -> None:
-        """Carry what this side's local socket says to the peer."""
+        """Carry what this side's local socket says to the peer.
+
+        The pump is the channel's only sender, so its seq never races. An idle
+        channel wakes every IDLE_SECONDS for the device to ask its rules again,
+        and after KEEPALIVE_SECONDS of quiet sends an empty frame, so a vanished
+        peer is noticed. One read is in flight at a time and a timeout never
+        cancels it: a read cancelled as it completes loses its bytes.
+        """
         loop = asyncio.get_running_loop()
         reader = channel.reader
         assert reader is not None
+        quiet_since = loop.time()
+        why = None
+        pending: asyncio.Future | None = None
+
+        async def read(size: int, seconds: float) -> bytes | None:
+            """The next bytes, b"" at the end, or None if none came in ``seconds``."""
+            nonlocal pending
+            if pending is None:
+                pending = asyncio.ensure_future(reader.read(size))
+            done, _ = await asyncio.wait({pending}, timeout=seconds)
+            if not done:
+                return None
+            data, pending = pending.result(), None
+            return data
+
         try:
-            ended = False
-            while not ended:
-                data = await reader.read(READ_BYTES)
-                if not data:
-                    break
-                deadline = loop.time() + FLUSH_SECONDS
-                while len(data) < READ_BYTES:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
+            while not channel.closed:
+                data = await read(READ_BYTES, IDLE_SECONDS)
+                if data is None:
+                    if not await self._allowed(channel):
+                        why = self._withdrawn(channel)
                         break
-                    try:
-                        more = await asyncio.wait_for(
-                            reader.read(READ_BYTES - len(data)), remaining
-                        )
-                    except asyncio.TimeoutError:
+                    if loop.time() - quiet_since >= KEEPALIVE_SECONDS:
+                        await self._send_data(channel, b"")
+                        quiet_since = loop.time()
+                    continue
+                if not data:
+                    why = self._stopped(channel)
+                    break
+                ended = False
+                deadline = loop.time() + FLUSH_SECONDS
+                while len(data) < READ_BYTES and (remaining := deadline - loop.time()) > 0:
+                    more = await read(READ_BYTES - len(data), remaining)
+                    if more is None:
                         break
                     if not more:
                         ended = True
                         break
                     data += more
+                if not await self._allowed(channel):
+                    why = self._withdrawn(channel)
+                    break
                 await self._send_data(channel, data)
-        except (_PeerClosed, RelayError, OSError) as exc:
+                quiet_since = loop.time()
+                if ended:
+                    why = self._stopped(channel)
+                    break
+        except _PeerClosed:
+            why = None  # the peer closed it: "<peer> closed <name>"
+        except (RelayError, OSError) as exc:
             logger.info("network attach %s to %s ended: %s", channel.name, channel.peer[:12], exc)
+            why = self._lost(channel)
         except asyncio.CancelledError:
             raise
         finally:
+            if pending is not None:
+                pending.cancel()
             if not channel.closed:
-                await self._close(channel, tell_peer=True)
+                await self._close(channel, tell_peer=True, why=why)
 
     async def _send_data(self, channel: _Channel, data: bytes) -> None:
+        if channel.closed:
+            raise _PeerClosed("the channel closed")
         payload = {"channel": channel.id, "seq": channel.send_seq, "data": _pack(data)}
         for attempt in range(2):
             try:
@@ -351,73 +434,87 @@ class NetworkAttach:
         if response.get("closed") or response.get("ack") != payload["seq"]:
             raise _PeerClosed("peer closed the channel")
         channel.send_seq += 1
-        channel.last_send = time.monotonic()
 
-    async def _send(self, peer: str, method: str, payload: dict) -> dict:
-        size = len(payload.get("data", "")) + 256
-        await self._pacer.take(max(1, -(-size // CHUNK_BYTES)))
-        response = await self._request_fn(peer, method, payload, timeout=REQUEST_SECONDS)
+    async def _send(
+        self, peer: str, method: str, payload: dict, timeout: float = REQUEST_SECONDS
+    ) -> dict:
+        await self._pacer.take(_frames(len(payload.get("data", ""))))
+        response = await self._request_fn(peer, method, payload, timeout=timeout)
         if not isinstance(response, dict):
             raise RelayError("invalid attach response")
         return response
 
-    def _start_watch(self) -> None:
-        if self._watch is None or self._watch.done():
-            self._watch = asyncio.create_task(self._keepalive())
+    # -- closing ----------------------------------------------------------
 
-    async def _keepalive(self) -> None:
-        """An idle channel sends an empty frame, so a vanished peer is noticed."""
-        while self._channels:
-            await asyncio.sleep(KEEPALIVE_SECONDS / 3)
-            now = time.monotonic()
-            for channel in list(self._channels.values()):
-                if channel.closed or channel.writer is None:
-                    continue
-                if now - channel.last_send < KEEPALIVE_SECONDS:
-                    continue
-                channel.last_send = now
-                asyncio.create_task(self._probe(channel))
+    def _withdrawn(self, channel: _Channel) -> str:
+        return f"closed {channel.name} for {self._peer_name(channel.peer)}: it may no longer open it"
 
-    async def _probe(self, channel: _Channel) -> None:
-        try:
-            await self._send_data(channel, b"")
-        except (_PeerClosed, RelayError) as exc:
-            logger.info("network attach %s to %s lost: %s", channel.name, channel.peer[:12], exc)
-            await self._close(channel, tell_peer=False)
+    def _stopped(self, channel: _Channel) -> str:
+        return f"{channel.name} stopped; closed it for {self._peer_name(channel.peer)}"
+
+    def _lost(self, channel: _Channel) -> str:
+        return f"lost {self._peer_name(channel.peer)}; closed {channel.name} for it"
+
+    async def recheck(self) -> None:
+        """Close now what this device's rules no longer allow (a /connect command changed them)."""
+
+        async def one(channel: _Channel) -> None:
+            channel.checked = 0.0
+            if not await self._allowed(channel):
+                await self._close(channel, tell_peer=True, why=self._withdrawn(channel))
+
+        await asyncio.gather(*(one(c) for c in list(self._channels.values()) if not c.requester))
 
     async def close_peer(self, peer: str) -> None:
-        """Close every channel with ``peer`` (its attach permission was withdrawn)."""
-        for key, channel in list(self._channels.items()):
-            if key[0] == peer:
-                await self._close(channel, tell_peer=True)
+        """Close the agents ``peer`` holds open here (its attach permission was withdrawn).
 
-    async def _close(self, channel: _Channel, *, tell_peer: bool) -> None:
+        This device's own channels to that peer's agents stay open.
+        """
+        await asyncio.gather(
+            *(
+                self._close(
+                    channel,
+                    tell_peer=True,
+                    why=f"closed {channel.name} for {self._peer_name(peer)}",
+                )
+                for (key, _), channel in list(self._channels.items())
+                if key == peer and not channel.requester
+            )
+        )
+
+    async def _close(self, channel: _Channel, *, tell_peer: bool, why: str | None = None) -> None:
         if channel.closed:
             return
         channel.closed = True
         self._channels.pop((channel.peer, channel.id), None)
         self._retire_socket(channel)
+        # Closing the local socket ends the pump at its next read. It is never
+        # cancelled here: mid-send, it holds the peer's secure session.
         if channel.writer is not None:
             channel.writer.close()
-        if channel.pump is not None and channel.pump is not asyncio.current_task():
-            channel.pump.cancel()
         if not channel.requester:
-            self._notice(f"{self._peer_name(channel.peer)} closed {channel.name}")
+            self._notice(why or f"{self._peer_name(channel.peer)} closed {channel.name}")
         if tell_peer:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(
-                    self._request_fn(
-                        channel.peer, ATTACH_CLOSE, {"channel": channel.id}, timeout=10.0
+                    self._send(
+                        channel.peer, ATTACH_CLOSE, {"channel": channel.id}, timeout=CLOSE_SECONDS
                     ),
-                    12.0,
+                    CLOSE_SECONDS + 1,
                 )
 
     async def close(self) -> None:
         self._closed = True
-        if self._watch is not None:
-            self._watch.cancel()
-        for channel in list(self._channels.values()):
-            await self._close(channel, tell_peer=True)
+        channels = list(self._channels.values())
+        await asyncio.gather(
+            *(
+                self._close(channel, tell_peer=True, why=f"closed {channel.name} for {self._peer_name(channel.peer)}")
+                for channel in channels
+            )
+        )
+        for channel in channels:
+            if channel.pump is not None and not channel.pump.done():
+                channel.pump.cancel()
         if self._socket_dir is not None:
             shutil.rmtree(self._socket_dir, ignore_errors=True)
             self._socket_dir = None

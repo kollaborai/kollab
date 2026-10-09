@@ -6,7 +6,7 @@ Stdlib only, so it runs under any python3. The token is read from
 
   health <port> <seconds>                 wait until /health answers
   create <port> <profile> <workspace>     POST /sessions; prints the session id
-  remote <port> <name> <seconds>          the agent@device handle of <name> on another computer
+  remote <port> <name|-> <seconds>        the agent@device handle of <name> (- for any) on another computer
   device <port>                           this computer's network name
   history <port> <id>                     prints "<status> <message count>" or "<status> <detail>"
   dump <port> <id>                        the session history as JSON
@@ -93,7 +93,7 @@ def main(argv):
                 print(network["device"])
                 return 0
             for row in network.get("remote") or []:
-                if command == "remote" and row.get("name") == args[0] and row.get("handle"):
+                if command == "remote" and args[0] in ("-", row.get("name")) and row.get("handle"):
                     print(row["handle"])
                     return 0
             time.sleep(3)
