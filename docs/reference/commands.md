@@ -70,7 +70,8 @@ manage agents from CLI (no TUI needed):
   during the turn that handles the request (an interim "on it" and the answer)
   is printed as it arrives, one "<handle>: <text>" line each; an older or late
   answer to another request is never printed. The command exits 0 when that
-  turn ends, 1 with the error if the turn failed, and 1 on timeout ("no reply
+  turn ends, 1 if the turn failed (any words the far agent sent print first as its
+  reply, then `<handle> reported that its turn failed`), and 1 on timeout ("no reply
   from <handle> within N s", or "<handle> did not finish within N s" after
   replies). A turn that ends without a reply prints "<handle> finished without
   a reply". Several such commands at once to one agent each get only their own

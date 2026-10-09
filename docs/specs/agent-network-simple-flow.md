@@ -789,7 +789,9 @@ end-of-turn frame on the thread: how many replies the turn sent and whether it
 failed. No screen shows the frame and no model receives it. `kollab --hub msg`
 prints every message on its own request's thread as it arrives, in order, and
 exits 0 once the frame arrives and every reply it counts has come; it exits 1
-with the error when the turn failed, and after its 600 s wait with `no reply
+when the turn failed (the far agent's own words, cleaned of control
+characters, print as its reply; the error line is `<handle> reported that its
+turn failed`), and after its 600 s wait with `no reply
 from <agent@device> within 600 s` (or `did not finish within 600 s` if replies
 had come). A request that starts no turn (an acknowledgement) ends at once
 with no reply. An older, later or duplicate answer from the same agent is never
