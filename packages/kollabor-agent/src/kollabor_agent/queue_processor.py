@@ -27,6 +27,7 @@ from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
+from .tool_call_contract import resolve_text_tool_call
 from .tool_output_budget import (
     build_tool_output_store,
     pack_tool_history_and_results,
@@ -208,15 +209,20 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
     """
     entries = []
     for index, tool in enumerate(all_tools):
+        # A call written as text (resolve_text_tool_call) carries its
+        # arguments as ``input``, like a native call.
+        arguments = tool.get("input")
+        if not isinstance(arguments, dict):
+            arguments = {
+                key: value
+                for key, value in tool.items()
+                if key not in ("type", "id", "raw", "_position")
+            }
         entries.append(
             {
                 "id": tool.get("id", f"xml_{index}"),
                 "name": tool.get("type", "unknown"),
-                "input": {
-                    key: value
-                    for key, value in tool.items()
-                    if key not in ("type", "id", "raw", "_position")
-                },
+                "input": arguments,
             }
         )
     return entries
@@ -470,6 +476,21 @@ class QueueProcessor:
         wedged, and the TurnWatchdog will recover it.
         """
         self.last_progress_at = time.monotonic()
+
+    def _resolve_text_tool_calls(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Send each call written as text (<tool_call>, <functions.NAME>) to
+        the tool it names, with the names the native path uses."""
+        if not any(tool.get("type") == "mcp_tool" for tool in tools):
+            return tools
+        mcp = getattr(self._native_tools_handler, "mcp_integration", None)
+        mcp_names = set(getattr(mcp, "tool_registry", None) or {})
+        plugin_names = set(getattr(self.tool_executor, "plugin_handlers", None) or {})
+        return [
+            resolve_text_tool_call(
+                tool, mcp_tool_names=mcp_names, plugin_handler_names=plugin_names
+            )
+            for tool in tools
+        ]
 
     def _drain_env_block(self) -> str:
         """Drain pending env events and render as an [env: N events] block.
@@ -1391,7 +1412,9 @@ class QueueProcessor:
 
             parsed_response = self.response_parser.parse_response(response)
             clean_response = parsed_response["content"]
-            all_tools = self.response_parser.get_all_tools(parsed_response)
+            all_tools = self._resolve_text_tool_calls(
+                self.response_parser.get_all_tools(parsed_response)
+            )
 
             # Step 3: Emit LLM_THINKING (merge native reasoning + XML thinking)
             thinking_blocks = parsed_response.get("components", {}).get("thinking", [])

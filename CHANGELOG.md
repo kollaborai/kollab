@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A web chat still starting showed for a moment as a second agent in the sidebar, and opening that row attached a second session to the same agent.
 - After New Session, or a click on another chat, the open chat's message box stayed live for the seconds the switch took: a message typed there went to the chat being left, or was lost. The box now waits, and says what it is waiting for.
 - A message from an open-trust device to a manual-trust device that allowed it (`/connect allow`) gets its answer back. Before, the request ran but the answer never left. The answer goes only to that message's thread, and only while the allow stands.
+- A tool call the model wrote into its reply as text instead of making it (`<functions.hub_msg>{...}</functions.hub_msg>`, seen from gpt-5.6-luna) did nothing, while the reply said it was done. It now runs as the tool it names, through the same permission check, and shows as a tool card. So does a `<tool_call>{"name": ...}` naming a built-in or plugin tool (it went to MCP and failed) or holding backticks in its arguments (misread). A call that cannot be read answers with what failed.
 
 ### Security
 - A relay takes up to 64 connections from one address (was 16), so a team behind one office IP fits, and up to 4,096 per worker (was 512), so a flood needs far more addresses. The nginx config from `--print nginx` caps connections per address too; Caddy has no such limit and says so.

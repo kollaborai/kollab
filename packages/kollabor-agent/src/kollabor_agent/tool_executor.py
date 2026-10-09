@@ -685,6 +685,18 @@ class ToolExecutor:
                         logger.debug(
                             f"_execute_tool_load completed for {tool_id}"
                         )
+                    elif tool_type == "malformed_tool":
+                        # The parser could not read the call: say which and why.
+                        result = ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=(
+                                f"Could not read this tool call "
+                                f"({tool_data.get('error', 'malformed')}): "
+                                f"{str(tool_data.get('raw', ''))[:300]}"
+                            ),
+                        )
                     else:
                         result = ToolExecutionResult(
                             tool_id=tool_id,

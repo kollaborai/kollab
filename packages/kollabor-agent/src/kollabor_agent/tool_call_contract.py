@@ -174,3 +174,33 @@ def normalize_native_tool_call(
     if isinstance(tool_call, Mapping):
         return {**dict(tool_call), **normalized}
     return normalized
+
+
+def resolve_text_tool_call(
+    tool: dict[str, Any],
+    *,
+    mcp_tool_names: set[str] | None = None,
+    plugin_handler_names: set[str] | None = None,
+) -> dict[str, Any]:
+    """Send a tool call written as text to the tool it names.
+
+    The parser reads ``<tool_call>{"name": ...}`` and ``<functions.NAME>{...}``
+    as MCP calls by name. When the name is a built-in or plugin tool instead
+    (``hub_msg``, ``git``), the call goes there, as a native call with that
+    name would, so scope and permission checks see the real tool. A call with
+    a tag body keeps its MCP shape: dispatching by name would drop the body.
+    """
+    if (
+        tool.get("type") != "mcp_tool"
+        or tool.get("content")
+        or tool.get("name") in (mcp_tool_names or set())
+    ):
+        return tool
+    resolved = normalize_native_tool_call(
+        {"id": tool.get("id", ""), "name": tool.get("name", ""), "input": tool.get("arguments")},
+        mcp_tool_names=mcp_tool_names,
+        plugin_handler_names=plugin_handler_names,
+    )
+    if resolved["type"] == "mcp_tool":
+        return tool
+    return {**resolved, "raw": tool.get("raw", ""), "_position": tool.get("_position", 0)}

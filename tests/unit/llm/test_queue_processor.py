@@ -645,6 +645,81 @@ class TestQueueProcessor(unittest.TestCase):
         ]
         self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
 
+    def test_a_native_call_written_as_text_runs_as_that_tool(self):
+        """A model can write its native call into the reply instead of making it.
+
+        The parser reads ``<functions.hub_msg>{...}`` as an MCP call by name;
+        the turn sends it to the hub_msg tool, where the native call would
+        have gone, and the web card shows the call's own arguments.
+        """
+        call_text = (
+            '<functions.hub_msg>{"to":"koordinator@server","message":"hi",'
+            '"wait":"true"}</functions.hub_msg>'
+        )
+        self.streaming_handler.call_llm = AsyncMock(return_value="On it.\n" + call_text)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.native_tools_handler.mcp_integration.tool_registry = {}
+        self.tool_executor.plugin_handlers = {"hub_msg": MagicMock()}
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = "[hub_msg] sent"
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="mcp_tool_0", tool_type="hub_msg", success=True, output="sent"
+            )
+        )
+        arguments = {"to": "koordinator@server", "message": "hi", "wait": "true"}
+        self.response_parser.parse_response.return_value = {
+            "content": "On it.",
+            "components": {},
+            "turn_completed": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {
+                "type": "mcp_tool",
+                "id": "mcp_tool_0",
+                "name": "hub_msg",
+                "arguments": arguments,
+                "content": "",
+                "raw": call_text,
+                "_position": 7,
+            }
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("On it.", False, False)
+        )
+        self.renderer.get_service = MagicMock(return_value=MagicMock())
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        tool_data = self.tool_executor.execute_tool.call_args.args[0]
+        self.assertEqual(tool_data["type"], "hub_msg")
+        self.assertEqual(tool_data["to"], "koordinator@server")
+        self.assertEqual(tool_data["message"], "hi")
+        assistant = self.add_message_fn.call_args.args[0]
+        self.assertEqual(assistant.metadata.get("display_content"), "On it.")
+        self.assertEqual(
+            assistant.metadata.get("xml_tool_calls"),
+            [{"id": "mcp_tool_0", "name": "hub_msg", "input": arguments}],
+        )
+
     def _truncated_turn(self, continuation_text, continuation_stop):
         """Run one turn whose first reply is cut at the output limit."""
         replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])

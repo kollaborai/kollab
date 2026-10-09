@@ -3,6 +3,8 @@
 Replies "pong: <the last line of the last user message>". A message containing
 "runtool" gets a <terminal> tool call instead, so a spec can drive a permission
 prompt; the follow-up carries the tool's result, which is answered plainly.
+"fncall" gets the same kind of call written the way some models leak a native
+call into the reply: <functions.terminal>{"command": ...}</functions.terminal>.
 
 usage: fake_llm.py <port file>
 Binds a free port on 127.0.0.1 and writes it to <port file> once listening.
@@ -31,6 +33,10 @@ def _reply(body):
     last = lines[-1] if lines else ""
     if "runtool" in last:
         return "Running it.\n<terminal>echo fake-tool-ran</terminal>"
+    if "fncall" in last:
+        # The output (fn-text-ran) appears only if the command really ran.
+        command = json.dumps({"command": "printf 'fn-%s-ran' text"})
+        return f"Running it.\n<functions.terminal>{command}</functions.terminal>"
     return "pong: " + last[:200]
 
 

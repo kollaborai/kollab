@@ -7,8 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from kollabor.tool_contract_proof import collect_tool_contract_proofs
 from kollabor_agent.queue_processor import QueueProcessor
-from kollabor_agent.tool_call_contract import normalize_native_tool_call
-from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_agent.tool_call_contract import (
+    normalize_native_tool_call,
+    resolve_text_tool_call,
+)
+from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
 from kollabor_ai.response_parser import ResponseParser
 from kollabor_events.data_models import ConversationMessage
 
@@ -350,3 +353,74 @@ def test_native_arguments_with_ordinary_quotes_are_left_alone():
     assert call("hub_spawn", kept) == kept
     command = {"command": 'echo ">" && grep "a" b.txt'}
     assert normalize_native_tool_call(SimpleNamespace(id="c", name="terminal", input=command))["input"] == command
+
+
+def test_a_native_call_written_as_text_runs_as_that_tool():
+    # gpt-5.6-luna wrote this into its reply instead of calling hub_msg (live
+    # story 7, 2026-10-09): nothing was sent, and the reply said it was.
+    parser = ResponseParser()
+    parsed = parser.parse_response(
+        "On it.\n"
+        '<functions.hub_msg>{"to":"koordinator@server","message":"What does '
+        '`uname -n` print?","wait":"true","force":"true","thread_id":"",'
+        '"reply_to":"","kind":"message"}</functions.hub_msg>'
+        "The remote query has been sent."
+    )
+
+    assert "<functions." not in parsed["content"]
+    [call] = [
+        resolve_text_tool_call(tool, plugin_handler_names={"hub_msg"})
+        for tool in parser.get_all_tools(parsed)
+    ]
+    assert call["type"] == "hub_msg"
+    assert call["to"] == "koordinator@server"
+    assert call["message"] == "What does `uname -n` print?"
+    assert call["wait"] == "true"
+    assert call["raw"].startswith("<functions.hub_msg>")
+
+
+def test_text_calls_go_only_to_builtin_and_plugin_tools():
+    parser = ResponseParser()
+    parsed = parser.parse_response(
+        '<tool_call>{"name": "git", "arguments": {"command": "echo `git status`"}}</tool_call>\n'
+        '<functions.browser_get_page>{"tab": "active"}</functions.browser_get_page>\n'
+        '<functions.hub_msg>{"to": "lapis",</functions.hub_msg>\n'
+        '<tool name="hub_msg" to="lapis">hello</tool>'
+    )
+
+    tools = [
+        resolve_text_tool_call(
+            tool, mcp_tool_names={"browser_get_page"}, plugin_handler_names={"hub_msg"}
+        )
+        for tool in parser.get_all_tools(parsed)
+    ]
+    by_call = {(tool["type"], tool.get("name")): tool for tool in tools}
+
+    # Backticks arrive as code-span placeholders and come back intact.
+    assert by_call[("terminal", "git")]["command"] == "echo `git status`"
+    assert by_call[("mcp_tool", "browser_get_page")]["arguments"] == {"tab": "active"}
+    # Dispatching on the name alone would drop the tag body, so it stays MCP.
+    assert by_call[("mcp_tool", "hub_msg")]["content"] == "hello"
+    [malformed] = [tool for tool in tools if tool["type"] == "malformed_tool"]
+    assert malformed["raw"] == '<functions.hub_msg>{"to": "lapis",</functions.hub_msg>'
+
+
+def test_a_text_call_that_cannot_be_read_tells_the_model_why():
+    mcp = MagicMock()
+    mcp.tool_registry = {}
+    mcp.server_connections = {}
+    event_bus = MagicMock()
+    event_bus.emit_with_hooks = AsyncMock(return_value=None)
+    executor = ToolExecutor(
+        mcp_integration=mcp, event_bus=event_bus, terminal_timeout=5, mcp_timeout=10
+    )
+    parser = ResponseParser()
+    [call] = parser.get_all_tools(
+        parser.parse_response('<functions.hub_msg>{"to": "lapis",</functions.hub_msg>')
+    )
+
+    result = asyncio.run(executor.execute_tool(call))
+
+    assert not result.success
+    assert result.error.startswith("Could not read this tool call (")
+    assert '<functions.hub_msg>{"to": "lapis",' in result.error
