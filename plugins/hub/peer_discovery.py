@@ -21,7 +21,8 @@ import socket
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from typing import Any
 
 import rfc8785
@@ -42,6 +43,10 @@ PEER_DISCOVERY_FUTURE_SKEW = 30
 PEER_DISCOVERY_MAX_INFLIGHT = 8
 PEER_DISCOVERY_MAX_SOURCES = 256
 PEER_DISCOVERY_MAX_CANDIDATES = 256
+# One member (relay key) keeps at most this many cached locators; past it the
+# member's own oldest goes, so rotating endpoint keys cannot fill the cache
+# against every other member.
+PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER = 8
 PEER_DISCOVERY_SOURCE_RATE_PER_MINUTE = 20
 PEER_DISCOVERY_TOTAL_RATE_PER_MINUTE = 300
 PEER_DISCOVERY_CALLBACK_TIMEOUT = 5.0
@@ -93,6 +98,9 @@ class PeerLocatorCandidate:
     issued_at: int
     expires_at: int
     digest: str
+    # Where the datagram came from. Not part of the signed locator, so it is
+    # left out of equality and of as_dict().
+    source: str = dataclass_field(default="", compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a detached normalized value for a store adapter."""
@@ -580,6 +588,7 @@ class PeerDiscoveryService:
                 if normalized is None:
                     raise PeerDiscoveryError("locator verification failed")
                 candidate = _normalize_candidate(wire, normalized)
+                candidate = replace(candidate, source=source)
                 async with self._accept_lock:
                     if self._closed:
                         return
@@ -633,7 +642,13 @@ class PeerDiscoveryService:
                     raise PeerDiscoveryError("locator revision equivocation")
                 self._candidate_cache.move_to_end(key)
                 return True
-        elif len(self._candidate_cache) >= PEER_DISCOVERY_MAX_CANDIDATES:
+        elif (
+            len(self._candidate_cache) >= PEER_DISCOVERY_MAX_CANDIDATES
+            # A member at its share replaces its own oldest entry on remember,
+            # so it adds nothing; only a member with room is turned away.
+            and len(self._member_cache_keys(candidate.relay_public_key))
+            < PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER
+        ):
             raise PeerDiscoveryError("peer locator cache is full")
         return False
 
@@ -646,6 +661,13 @@ class PeerDiscoveryService:
             candidate.expires_at,
         )
         self._candidate_cache.move_to_end(key)
+        own = self._member_cache_keys(candidate.relay_public_key)
+        for oldest in own[: max(0, len(own) - PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER)]:
+            del self._candidate_cache[oldest]
+
+    def _member_cache_keys(self, relay_public_key: str) -> list[tuple[str, str]]:
+        """One member's cached locator keys, oldest first."""
+        return [key for key in self._candidate_cache if key[0] == relay_public_key]
 
 
 async def _invoke(callback: Callable[..., Any], *args: Any) -> Any:

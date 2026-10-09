@@ -111,7 +111,8 @@ REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 # simple-flow.md section 7). One request ends failed when no turn came for it
 # within the shell's own wait ceiling.
 _NET_TURN_MAX_SECONDS = 600.0
-# Carried by the end-of-turn frame; only the failed text is ever printed.
+# Carried by the end-of-turn frame; the failed text is shown only when a far
+# agent sends other words than this.
 _NET_TURN_DONE = "The receiving agent finished this request."
 _NET_TURN_FAILED = "The receiving agent could not complete this request."
 
@@ -138,6 +139,25 @@ def _network_answer_text(text: Optional[str], limit: int) -> str:
     if len(raw) > limit:
         text = raw[: limit - 3].decode("utf-8", "ignore") + "..."
     return text
+
+
+# A far agent's text is printed by a shell: no escape sequence and no control
+# character (CR and the C1 range included) may reach its terminal. Tab and
+# newline stay.
+_NET_ESCAPE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b[\]PX^_].*?(?:\x07|\x1b\\|\Z)"  # OSC, DCS, SOS, PM, APC up to BEL or ST
+    r"|\x1b[ -/]*[0-~]",  # any other escape
+    re.DOTALL,
+)
+_NET_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _network_display_text(text: object) -> str:
+    """A far agent's ``text`` with its escape sequences and control characters removed."""
+    if not isinstance(text, str):
+        return ""
+    return _NET_TEXT_CONTROL.sub("", _NET_ESCAPE.sub("", text))
 
 
 @dataclass
@@ -13156,7 +13176,9 @@ class HubPlugin(BasePlugin):
         request's thread (`network_reply`, in order) until the far agent's
         turn ends (`network_done`, or `error` when that turn failed) or
         ``wait_seconds`` pass (`network_timeout`). ``wait_seconds <= 0``
-        returns right after sending (``--no-wait``).
+        returns right after sending (``--no-wait``). Everything the far agent
+        wrote, a failed turn's text included, goes out as its `network_reply`
+        with control characters removed; the `error` line is only ours.
         """
         handle = parse_handle(to)
         if handle is None:
@@ -13224,11 +13246,20 @@ class HubPlugin(BasePlugin):
                     return
                 if event[0] == "reply":
                     replies += 1
-                    yield {"type": "network_reply", "from": event[1], "content": event[2]}
+                    yield {
+                        "type": "network_reply",
+                        "from": _network_display_text(event[1]),
+                        "content": _network_display_text(event[2]),
+                    }
                 else:
                     end = event[1:]
             if end[1]:
-                yield {"type": "error", "msg": end[2]}
+                # The end frame's text is the far agent's own claim: show it as
+                # its message, and keep this CLI's error line to what we know.
+                said = _network_display_text(end[2]).strip()
+                if said and said != _NET_TURN_FAILED:
+                    yield {"type": "network_reply", "from": handle_str, "content": said}
+                yield {"type": "error", "msg": f"{handle_str} reported that its turn failed"}
             else:
                 yield {"type": "network_done", "replies": replies}
         finally:

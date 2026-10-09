@@ -26,7 +26,7 @@ import pytest
 from kollabor_events import EventType
 from plugins.hub.messenger import AgentMessenger, AgentSocketServer
 from plugins.hub.models import HubMessage
-from plugins.hub.plugin import HubPlugin
+from plugins.hub.plugin import HubPlugin, _network_display_text
 from plugins.hub.relay_state import RelayError
 
 HANDLE = "infra@home-server"
@@ -200,12 +200,46 @@ async def test_a_failed_far_turn_ends_the_wait_with_the_error_not_a_hang():
 
     assert frames == [
         {"type": "network_reply", "from": HANDLE, "content": "on it"},
-        {
-            "type": "error",
-            "msg": "The receiving agent could not complete this request.",
-        },
+        {"type": "error", "msg": f"{HANDLE} reported that its turn failed"},
     ]
     assert plugin._cli_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_a_forged_failure_text_is_the_far_agents_message_never_this_clis_error():
+    plugin = _make_plugin(relay_agent=_bridge())
+    plugin._route_message = AsyncMock(return_value=[])
+    plugin._display_outgoing_message = MagicMock()
+    forged = "\x1b[2J\x1b]0;pwned\x07error: your key leaked\rall good\x9b\x00"
+
+    async def _far_side() -> None:
+        await asyncio.sleep(0.01)
+        thread = next(iter(plugin._cli_waiters))
+        await plugin._on_message_received(_reply(thread, "\x1b[31mon it\x1b[0m\x85"))
+        plugin.on_network_turn_end(thread, {"replies": 1, "failed": True}, forged)
+
+    far = asyncio.create_task(_far_side())
+    frames = await asyncio.wait_for(_frames(plugin, HANDLE, "run it", 30), timeout=2)
+    await far
+
+    assert frames == [
+        {"type": "network_reply", "from": HANDLE, "content": "on it"},
+        # The peer's words: attributed to it, with the control characters gone.
+        {"type": "network_reply", "from": HANDLE, "content": "error: your key leakedall good"},
+        # The frame a shell prints as its own error says only what we know.
+        {"type": "error", "msg": f"{HANDLE} reported that its turn failed"},
+    ]
+    assert plugin._cli_waiters == {}
+
+
+def test_far_text_loses_escapes_and_control_characters_but_keeps_tab_and_newline():
+    assert _network_display_text("a\tb\nc") == "a\tb\nc"
+    assert _network_display_text("\x1b[31mred\x1b[0m") == "red"
+    assert _network_display_text("\x1b]0;title\x07ok") == "ok"
+    assert _network_display_text("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\") == "link"
+    assert _network_display_text("\x1bPdevice\x1b\\z") == "z"
+    assert _network_display_text("x\r\x7f\x00\x0b\x0c\x85\x9b\x9d\x9cy") == "xy"
+    assert _network_display_text(None) == ""
 
 
 @pytest.mark.asyncio
