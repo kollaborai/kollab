@@ -11,6 +11,7 @@ import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
+import { targetsOn } from "@/components/shell/agent-network";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
   PanelIntent,
@@ -111,6 +112,11 @@ function RuntimeShell({
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
+  // An agent on another computer reads @names in that computer's mesh.
+  const targets = useMemo(
+    () => (session.device ? targetsOn(session.device, remoteAgents) : { agents, remote: remoteAgents }),
+    [session.device, agents, remoteAgents],
+  );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
   const sessionLabel = formatSessionName(session.name, session.session_id);
@@ -224,7 +230,7 @@ function RuntimeShell({
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
           <Thread
-            agents={agents}
+            agents={targets.agents}
             commands={commands}
             onOpenPanel={onOpenSettings}
             attachmentsEnabled={
@@ -232,7 +238,7 @@ function RuntimeShell({
             }
             identity={session.identity}
             onOpenGem={onOpenProperties}
-            remoteAgents={remoteAgents}
+            remoteAgents={targets.remote}
             workspace={session.workspace ?? ""}
           />
         ) : (
@@ -286,6 +292,9 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  // The sidebar row being opened, and why it could not be: a failed open keeps
+  // the chat that was open, so the reason shows under the row clicked.
+  const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
   // Bumped to remount the runtime: it reads its initial state only on mount.
@@ -596,15 +605,24 @@ export default function App() {
     const operation = ++operationRef.current;
     setBusy(true);
     setBusyMessage("Loading conversation…");
+    setOpening({ id: sessionId });
     try {
-      const nextState = await loadState(sessionId, sessions);
+      // An agent on another computer (agent@device) is listed once the engine
+      // opens it, which asking for it does.
+      const nextSessions = sessions.some((item) => item.session_id === sessionId)
+        ? sessions
+        : [...sessions, await api.getSession(sessionId)];
+      const nextState = await loadState(sessionId, nextSessions);
       if (operation !== operationRef.current) return;
+      setSessions(nextSessions);
       setActiveId(sessionId);
       setInitialState(nextState);
+      setOpening(null);
       recoverPendingTurn(sessionId, hasPendingPermission(nextState));
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setOpening({ id: sessionId, error: message.replace(/^\d{3}: /, "") });
       }
     } finally {
       if (operation === operationRef.current) {
@@ -687,6 +705,7 @@ export default function App() {
           selectedBundle={selectedBundle}
           activeId={activeId}
           activeActivity={activeActivity}
+          opening={opening}
           busy={busy}
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}

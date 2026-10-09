@@ -63,6 +63,11 @@ import {
  * sessions come from the engine's /sessions endpoint -- so the data layer is
  * ours while the design language stays the kit's.
  */
+/** Why a row did not open, in full: it can name the command that allows it. */
+function OpenError({ text }: { text: string }) {
+  return <span className="text-destructive text-[11px] leading-snug break-words whitespace-normal">{text}</span>;
+}
+
 export function AppSidebar({
   sessions,
   profiles,
@@ -75,6 +80,7 @@ export function AppSidebar({
   workspacePath,
   activeId,
   activeActivity,
+  opening,
   busy,
   onProfileChange,
   onIdentityChange,
@@ -104,6 +110,8 @@ export function AppSidebar({
   activeId: string | null;
   /** The open session's live action, read from its thread. */
   activeActivity?: Activity | null;
+  /** The row being opened, and why it could not be. */
+  opening?: { id: string; error?: string } | null;
   busy: boolean;
   onProfileChange: (profile: string) => void;
   onIdentityChange: (identity: string) => void;
@@ -149,6 +157,8 @@ export function AppSidebar({
   );
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   const remoteGroups = useMemo(() => groupRemoteByDevice(network.remote), [network.remote]);
+  // An agent opened on another computer is a session too; it stays in its computer's group.
+  const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
   const pickedGem = poolByName.get(selectedIdentity);
   const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
   const modelLabel =
@@ -332,11 +342,11 @@ export function AppSidebar({
                 {`· ${network.device}`}
               </span>
             ) : null}
-            <span className="ml-auto tabular-nums">{sessions.length}</span>
+            <span className="ml-auto tabular-nums">{localSessions.length}</span>
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {sessions.map((session) => {
+              {localSessions.map((session) => {
                 const gem = session.identity || session.agent || "";
                 // Hub presence when the identity is live; otherwise the engine's
                 // own word on whether a daemon backs the session.
@@ -348,6 +358,7 @@ export function AppSidebar({
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
                 const folder = session.workspace?.split("/").filter(Boolean).pop();
+                const note = opening?.id === session.session_id ? opening : null;
                 const openProperties = (tab?: "chat") => {
                   setOpenMobile(false);
                   onProperties(session.session_id, tab);
@@ -391,7 +402,9 @@ export function AppSidebar({
                             {formatSessionName(session.name, session.session_id)}
                           </span>
                           <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                            {task ? (
+                            {note && !note.error ? (
+                              "Opening…"
+                            ) : task ? (
                               task
                             ) : session.external ? (
                               [titleCase(session.identity || ""), folder ? `In ${folder}` : "Running"]
@@ -405,6 +418,7 @@ export function AppSidebar({
                               </>
                             )}
                           </span>
+                          {note?.error ? <OpenError text={note.error} /> : null}
                         </div>
                       </SidebarMenuButton>
                       {/* The engine only detaches from an agent it did not start: no Delete. */}
@@ -442,7 +456,7 @@ export function AppSidebar({
                 </ContextMenu>
                 );
               })}
-              {!sessions.length ? (
+              {!localSessions.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
                   No sessions yet.
                 </p>
@@ -458,11 +472,20 @@ export function AppSidebar({
             </SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {group.agents.map((agent) => (
-                  <SidebarMenuItem key={agent.handle || `${agent.name}@${agent.device}`}>
+                {group.agents.map((agent) => {
+                  // Opens through the network once that computer allows this one.
+                  const id = agent.handle || "";
+                  const note = id && opening?.id === id ? opening : null;
+                  return (
+                  <SidebarMenuItem key={id || `${agent.name}@${agent.device}`}>
                     <SidebarMenuButton
-                      disabled
-                      title={`${titleCase(agent.name)} runs on ${agent.device}`}
+                      disabled={!id}
+                      isActive={Boolean(id) && id === activeId}
+                      onClick={() => {
+                        setOpenMobile(false);
+                        onSelectSession(id);
+                      }}
+                      title={`Open ${titleCase(agent.name)} on ${agent.device}`}
                       className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                     >
                       <GemAvatar
@@ -471,6 +494,7 @@ export function AppSidebar({
                         color={poolByName.get(agent.name)?.color}
                         state="idle"
                         live
+                        activity={id && id === activeId ? activeActivity : null}
                         season="auto"
                         follow
                         size={56}
@@ -480,12 +504,14 @@ export function AppSidebar({
                           {titleCase(agent.name)}
                         </span>
                         <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                          {agent.state ? titleCase(agent.state) : "Online"}
+                          {note && !note.error ? "Opening…" : agent.state ? titleCase(agent.state) : "Online"}
                         </span>
+                        {note?.error ? <OpenError text={note.error} /> : null}
                       </div>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
-                ))}
+                  );
+                })}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

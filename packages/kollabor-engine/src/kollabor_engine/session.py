@@ -149,6 +149,9 @@ class EngineSession:
         # name, kept current by list_sessions.
         self.external = False
         self.display_name = ""
+        # The network name of the computer an agent runs on, when it is not this
+        # one (server.open_named_session of an agent@device). Empty here.
+        self.device = ""
 
         self.daemon: Optional[DaemonHandle] = None
 
@@ -247,6 +250,7 @@ class EngineSession:
         )
         session.external = True
         session.display_name = str(found.get("name") or "")
+        session.device = str(found.get("device") or "")
         session.workspace = str(found.get("workspace") or "") or None
         if found.get("created_at"):
             started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
@@ -256,6 +260,9 @@ class EngineSession:
             session.profile = await session.state.get_active_profile()
             mode = (await session.state.get_permission_state()).approval_mode
             session.approval_mode = str(mode or "").lower()
+            if session.device:
+                # Its folder is on that computer: what its own daemon reports.
+                session.workspace = (await session.state.get_system_info()).cwd or None
         except Exception as e:
             logger.debug("session %s: could not read its profile: %s", session_id, e)
         session._event_task = asyncio.create_task(
@@ -465,6 +472,7 @@ class EngineSession:
             ),
             "agent": agent_name,
             "workspace": self.workspace,
+            "device": self.device,
             "approval_mode": _APPROVAL_MODE_MAP.get(
                 self.approval_mode, ApprovalMode.TRUST_ALL
             ).value,

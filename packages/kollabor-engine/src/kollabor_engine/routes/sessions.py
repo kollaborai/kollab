@@ -327,15 +327,16 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
     """This computer's name and the agents on other computers, asked of a daemon.
 
     Every daemon in a workspace answers for the same relay, but a solo daemon has
-    none, so the first non-solo one that answers is asked. No answer means no
-    network to show: no remote rows.
+    none, so the first non-solo one that answers is asked. An agent opened on
+    another computer answers for that computer, so it is never asked. No answer
+    means no network to show: no remote rows.
     """
     fallback = socket.gethostname().split(".")[0]
     # ponytail: only this engine's sessions are asked, so after a restart the other
     # computers show once a chat runs here; asking a found daemon needs a read-only
     # RPC connection (today's only way in is a full attach).
     for session in registry.values():
-        if not session.alive or getattr(session, "solo", False):
+        if not session.alive or getattr(session, "solo", False) or getattr(session, "device", ""):
             continue
         try:
             snapshot = await asyncio.wait_for(session.state.get_hub_state(), timeout=3)

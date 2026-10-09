@@ -242,9 +242,18 @@ class DaemonHandle:
 
     @property
     def alive(self) -> bool:
-        """Liveness of the detached daemon, not of the launcher that spawned it."""
+        """Liveness of the detached daemon, not of the launcher that spawned it.
+
+        An agent on another computer (adopted through the network) has no pid
+        here: it is alive while its connection is.
+        """
         if not self.pid:
-            return False
+            return (
+                self.launcher is None
+                and self._read_task is not None
+                and not self._read_task.done()
+                and not self._closed
+            )
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:

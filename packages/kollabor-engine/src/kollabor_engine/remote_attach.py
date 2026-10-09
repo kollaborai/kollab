@@ -48,7 +48,6 @@ async def open_remote_agent(handle: str, registry: Dict[str, Any]) -> Optional[D
         "identity": name,
         "agent": name,
         "name": name,
-        "workspace": getattr(asker, "workspace", "") or "",
         "socket_path": reply["socket_path"],
         "daemon_pid": 0,
         "device": device,

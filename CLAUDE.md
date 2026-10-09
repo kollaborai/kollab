@@ -212,6 +212,7 @@ Peer-to-peer agent mesh with persistent identity.
 - `messenger.py` - Unix socket server/client + off-box TCP/TLS endpoint, message delivery
 - `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
 - `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
+- `network_attach.py` - Open an agent on another device of the network as a full chat: its own socket over the sealed device channel. The device running it decides (`/connect attach allow <device>`, `RelayAgentBridge.attach_target`); the engine opens `agent@device` session ids through it (`kollabor_engine/remote_attach.py`)
 - `vault.py` - Three-tier persistent memory (stream, working, crystallized)
 - `crystal_store.py` - Structured crystal entries with IDs, keywords, dedup, nudge retrieval
 - `text_utils.py` - Keyword extraction, stemming, relevance scoring for crystal nudge

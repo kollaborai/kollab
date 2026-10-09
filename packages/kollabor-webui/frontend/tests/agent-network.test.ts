@@ -1,7 +1,7 @@
 // Run: node --test tests/agent-network.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupRemoteByDevice } from "../src/components/shell/agent-network.ts";
+import { groupRemoteByDevice, targetsOn } from "../src/components/shell/agent-network.ts";
 
 test("remote agents group under the computer they run on, both sorted by name", () => {
   const groups = groupRemoteByDevice([
@@ -16,4 +16,14 @@ test("remote agents group under the computer they run on, both sorted by name", 
 
 test("no remote rows means no computer groups", () => {
   assert.deepEqual(groupRemoteByDevice([]), []);
+});
+
+test("in a chat with an agent on another computer, @names are that computer's", () => {
+  const targets = targetsOn("prod-box", [
+    { name: "lapis", device: "prod-box", handle: "lapis@prod-box", state: "working" },
+    { name: "ruby", device: "devbox", handle: "ruby@devbox" },
+  ]);
+
+  assert.deepEqual(targets.agents, [{ name: "lapis", active: true, state: "working" }]);
+  assert.deepEqual(targets.remote.map((agent) => agent.handle), ["ruby@devbox"]);
 });

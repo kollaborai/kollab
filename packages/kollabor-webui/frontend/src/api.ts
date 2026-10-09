@@ -18,6 +18,8 @@ export type Session = {
   daemon_pid?: number;
   /** Started outside this engine (a terminal, another engine): it opens on first use and Delete is not offered, since the engine only detaches from it. */
   external?: boolean;
+  /** The computer an agent opened through the network runs on (its id is agent@device); empty for this one. */
+  device?: string;
 };
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */

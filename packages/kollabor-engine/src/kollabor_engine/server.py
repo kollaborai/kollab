@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request  # type: ignore[import-not-found]
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
@@ -50,14 +50,23 @@ async def _adopt(found: Dict[str, Any]) -> EngineSession:
     return _sessions.setdefault(session.session_id, session)
 
 
+async def _open_remote(handle: str) -> Optional[EngineSession]:
+    """An agent@device on another computer of this folder's network (remote_attach)."""
+    from .remote_attach import open_remote_agent
+
+    found = await open_remote_agent(handle, _sessions)
+    return await _adopt(found) if found else None
+
+
 async def open_named_session(request: Request) -> None:
     """Attach the live agent a session route names, the first time one does.
 
     Every live agent on this computer is listed (HubBridge.discover_sessions),
     but only sessions in the registry answer the session routes. A terminal
     agent or another engine's daemon gets its registry entry here, on the
-    first request that names it; an unknown id falls through to the route's
-    own 404.
+    first request that names it, and so does an agent@device on another
+    computer of this folder's network; an unknown id falls through to the
+    route's own 404.
     """
     session_id = request.path_params.get("session_id")
     if not session_id or session_id in _sessions:
@@ -72,9 +81,12 @@ async def open_named_session(request: Request) -> None:
             ),
             None,
         )
-        if found is None:
+        if found is not None:
+            opening = asyncio.ensure_future(_adopt(found))
+        elif "@" in session_id:
+            opening = asyncio.ensure_future(_open_remote(session_id))
+        else:
             return
-        opening = asyncio.ensure_future(_adopt(found))
         _adopting[session_id] = opening
         opening.add_done_callback(lambda _: _adopting.pop(session_id, None))
     try:
@@ -217,25 +229,17 @@ def create_app() -> FastAPI:
             except Exception:
                 return "unknown"
 
-        # Aggregate providers from all sessions
-        providers = sorted(set(s.profile.provider for s in _sessions.values()))
-
-        # Aggregate MCP server status from all sessions (actual connection state)
-        mcp_status: Dict[str, str] = {}
-        for session in _sessions.values():
-            connections = session.mcp_integration.server_connections
-            for server_name, conn in connections.items():
-                if conn.initialized:
-                    mcp_status[server_name] = "connected"
-                elif server_name not in mcp_status:
-                    mcp_status[server_name] = "disconnected"
+        # The providers in use. An opened agent's profile is None until its daemon
+        # answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
+        providers = sorted(
+            {getattr(s.profile, "provider", "") or "" for s in _sessions.values()} - {""}
+        )
 
         return {
             "version": safe_ver("kollabor-engine"),
             "sessions": len(_sessions),
             "uptime": int(time.time() - _start_time),
             "providers": providers,
-            "mcp_servers": mcp_status,
             "session_ids": list(_sessions.keys()),
         }
 
