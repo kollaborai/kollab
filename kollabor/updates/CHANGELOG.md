@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-08
+
 ### Changed
 - The @ menu (terminal and web) has three broadcasts: `@broadcast` reaches every agent in this project, `@local-broadcast` every agent on this computer, in every project folder (it reached only this folder), and `@global-broadcast` every agent on every computer in your network. Broadcast rows in the web menu no longer show an "online" dot.
 
