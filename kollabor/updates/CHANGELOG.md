@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-09
+
 ### Changed
 - Opening an agent on another computer follows that computer's trust, as messages do: under `open` (the default) every computer of your network opens its agents, and can approve their tools, with no command; under `agents` only the agents it may message, under `manual` none. `/connect attach allow|deny` is gone, and so is its list; `/connect revoke <device>` cuts one computer off. On a network shared with other people, use `trust agents` there.
 
