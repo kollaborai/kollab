@@ -406,12 +406,13 @@ Run your own directory from the same application:
 ```bash
 kollab relay serve --domain agents.example.com   # relay + signed key file in one process
 kollab relay serve --domain agents.example.com --print nginx   # or caddy, systemd
+kollab relay serve --domain agents.example.com --unix-socket /run/kollab-relay/agents.sock --unix-socket-group www-data   # proxy on this host
 kollab relay run --config /private/relay.json    # several workers, shared backend
 ```
 
 `serve --domain` creates or loads its signing key under
 `~/.kollab/relay/<domain>` (`--state-dir`), serves the relay and the key file on
-one local port (`--bind`, `--port`, default `127.0.0.1:9078`), and prints the DNS
+one local port (`--bind`, `--port`, default `127.0.0.1:9078`; or `--unix-socket` for a proxy on the same host), and prints the DNS
 TXT record and the five proxy routes it needs. `--print` prints a proxy or
 systemd config for the same settings and exits. `run` supervises workers with an
 external Valkey backend or an explicitly configured managed sidecar; the bare

@@ -65,9 +65,12 @@ def relay_owner_key(node_id: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RelayLimits:
-    max_connections_per_node: int = 512
+    # Resource guards, not throughput claims: ~20 KB of RSS and one descriptor
+    # per idle connection, so a full node is ~125 MB and ~4.4k descriptors.
+    # A team behind one office address gets 64.
+    max_connections_per_node: int = 4096
     max_connections_per_room: int = 16
-    max_connections_per_source: int = 16
+    max_connections_per_source: int = 64
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_connections_per_node <= 100_000:

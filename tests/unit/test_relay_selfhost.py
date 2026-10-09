@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -96,6 +98,72 @@ def test_flags_recreate_the_same_settings(tmp_path):
     assert selfhost.flags(make_settings(tmp_path)) == ["--domain", DOMAIN, "--state-dir", str(tmp_path / "state")]
 
 
+SOCKET = "/run/kollab-relay/agents.sock"
+
+
+def test_unix_socket_settings_replace_the_tcp_listener_and_round_trip(tmp_path):
+    settings = parse(
+        "--domain", DOMAIN, "--state-dir", str(tmp_path / "s"),
+        "--unix-socket", SOCKET, "--unix-socket-group", "www-data",
+    )  # fmt: skip
+    assert settings.unix_socket == Path(SOCKET) and settings.unix_socket_group == "www-data"
+    assert settings.trusted_proxies == () and settings.upstream == f"unix:{SOCKET}"
+    flags = selfhost.flags(settings)
+    assert flags[-4:] == ["--unix-socket", SOCKET, "--unix-socket-group", "www-data"]
+    assert "--bind" not in flags and "--port" not in flags and "--trusted-proxy" not in flags
+    assert parse(*flags) == settings
+    assert parse("--domain", DOMAIN, "--unix-socket", SOCKET).unix_socket_group is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--unix-socket", "relay.sock"],
+        ["--unix-socket", "/run/" + "x" * 120],
+        ["--unix-socket", SOCKET, "--port", "9100"],
+        ["--unix-socket", SOCKET, "--bind", "10.0.0.5"],
+        ["--unix-socket", SOCKET, "--trusted-proxy", "10.0.0.1"],
+        ["--unix-socket-group", "www-data"],
+    ],
+)
+def test_bad_unix_socket_settings_are_refused_before_anything_is_created(argv, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        selfhost.main(["--domain", DOMAIN, *argv])
+    assert exit_info.value.code == 2
+    assert "kollab relay serve: error" in capsys.readouterr().err
+
+
+def test_every_printed_config_reaches_the_relay_over_the_socket(tmp_path):
+    settings = make_settings(tmp_path, unix_socket=Path(SOCKET), unix_socket_group="www-data")
+    assert selfhost.nginx_config(settings).count(f"proxy_pass http://unix:{SOCKET};") == 4
+    assert f"reverse_proxy unix/{SOCKET} {{" in selfhost.caddy_config(settings)
+    unit = selfhost.systemd_unit(settings)
+    # The unit makes the directory (0755: the proxy must traverse it; the socket file's 0660 is the lock)
+    # and puts the service in the proxy's group so it may hand the socket to it.
+    assert "RuntimeDirectory=kollab-relay\nRuntimeDirectoryMode=0755\nSupplementaryGroups=www-data" in unit
+    exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    assert f"--unix-socket {SOCKET} --unix-socket-group www-data" in exec_line and "--port" not in exec_line
+    text = selfhost.setup_text(settings, created=False)
+    assert f"listen   {SOCKET}" in text and "this user and group www-data can connect" in text
+    assert f"forward only these routes to unix:{SOCKET}" in text
+    assert "LimitNOFILE=65536" in unit
+
+
+def test_a_socket_outside_run_is_made_writable_for_the_unit_and_a_tcp_unit_has_no_socket_lines(tmp_path):
+    unit = selfhost.systemd_unit(make_settings(tmp_path, unix_socket=Path("/srv/kollab/agents.sock")))
+    assert "ReadWritePaths=/srv/kollab\n" in unit and "RuntimeDirectory" not in unit
+    assert "SupplementaryGroups" not in unit  # no group named: the socket is 0600, this user only
+    tcp = selfhost.systemd_unit(make_settings(tmp_path))
+    assert "RuntimeDirectory" not in tcp and "SupplementaryGroups" not in tcp and "unix" not in tcp.lower()
+
+
+def test_the_tcp_listener_warns_that_any_local_process_can_send_x_real_ip(tmp_path):
+    text = selfhost.setup_text(make_settings(tmp_path), created=False)
+    assert "X-Real-IP trusted from 127.0.0.1 ::1" in text and "--unix-socket" in text
+    remote = selfhost.setup_text(parse("--domain", DOMAIN, "--bind", "10.0.0.5"), created=False)
+    assert "--unix-socket" not in remote  # a proxy on another host cannot use one, and trusts no address by default
+
+
 def test_a_non_loopback_bind_trusts_no_proxy_until_told():
     assert parse("--domain", DOMAIN, "--bind", "10.0.0.5").trusted_proxies == ()
     told = parse("--domain", DOMAIN, "--bind", "10.0.0.5", "--trusted-proxy", "10.0.0.1")
@@ -122,6 +190,12 @@ def test_proxy_upstream_is_a_connectable_address(tmp_path):
     assert make_settings(tmp_path, bind="::").upstream == "[::1]:9078"
 
 
+def zone_line(config: str) -> str:
+    """The commented-out http-level directive, as the operator pastes it."""
+    commented = (line for line in config.splitlines() if line.startswith("#") and "limit_conn_zone" in line)
+    return next(commented).lstrip("# ").strip()
+
+
 def locations(config: str) -> list[str]:
     return [line.split()[-2] for line in config.splitlines() if line.startswith("location ")]
 
@@ -141,22 +215,47 @@ def test_nginx_forwards_the_four_routes_and_nothing_else(tmp_path):
     assert "\nlocation / " not in config
 
 
-@pytest.mark.skipif(shutil.which("nginx") is None, reason="nginx is not installed")
-def test_the_nginx_snippet_passes_nginx_t(tmp_path):
+def test_nginx_caps_connections_per_address_on_the_websocket_only(tmp_path):
+    config = selfhost.nginx_config(make_settings(tmp_path))
+    assert config.count("limit_conn ") == 1
+    websocket = config.split("location = /relay/v1/ws {")[1].split("\n}")[0]
+    assert "limit_conn kollab_agents_example_com 64;" in websocket  # the relay's own per-address cap
+    # The zone is http-level, so in a paste meant for a server block it is a comment that says where it goes.
+    assert zone_line(config) == "limit_conn_zone $binary_remote_addr zone=kollab_agents_example_com:10m;"
+    assert not [line for line in config.splitlines() if line.startswith("limit_conn_zone")]
+    wider = selfhost.nginx_config(make_settings(tmp_path, max_per_source=200))
+    assert "limit_conn kollab_agents_example_com 200;" in wider
+    other = selfhost.nginx_config(make_settings(tmp_path, domain="other.example.org"))
+    assert "zone=kollab_other_example_org:10m" in other  # two relays on one nginx do not redeclare a zone
+
+
+def nginx_t(tmp_path: Path, config: str, *, zone: bool) -> subprocess.CompletedProcess:
+    """`nginx -t` on the printed snippet inside a server block, with the zone line in http when asked."""
     snippet = tmp_path / "snippet.conf"
-    snippet.write_text(selfhost.nginx_config(make_settings(tmp_path)))
+    snippet.write_text(config)
     temp = "access_log off;\n" + "".join(
         f"{name}_temp_path {tmp_path}/{name};\n" for name in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi")
     )
     conf = tmp_path / "nginx.conf"
     conf.write_text(
         f"error_log stderr;\npid {tmp_path}/nginx.pid;\nevents {{}}\n"
-        f"http {{\n{temp}server {{ listen 127.0.0.1:18443; server_name {DOMAIN}; include {snippet}; }}\n}}\n"
+        f"http {{\n{temp}{zone_line(config) if zone else ''}\n"
+        f"server {{ listen 127.0.0.1:18443; server_name {DOMAIN}; include {snippet}; }}\n}}\n"
     )
-    result = subprocess.run(
+    return subprocess.run(
         ["nginx", "-t", "-c", str(conf), "-p", f"{tmp_path}/"], capture_output=True, text=True, check=False
     )
+
+
+@pytest.mark.skipif(shutil.which("nginx") is None, reason="nginx is not installed")
+@pytest.mark.parametrize("unix", [False, True])
+def test_the_nginx_snippet_passes_nginx_t(unix, tmp_path):
+    overrides = {"unix_socket": Path("/run/kollab-relay/relay.sock")} if unix else {}
+    config = selfhost.nginx_config(make_settings(tmp_path, **overrides))
+    result = nginx_t(tmp_path, config, zone=True)
     assert result.returncode == 0, result.stderr
+    missing = nginx_t(tmp_path, config, zone=False)  # skipping step 1 fails loudly, naming the zone
+    assert missing.returncode != 0 and "kollab_agents_example_com" in missing.stderr
 
 
 def test_caddy_forwards_the_same_four_routes(tmp_path):
@@ -164,7 +263,9 @@ def test_caddy_forwards_the_same_four_routes(tmp_path):
     matcher = next(line for line in config.splitlines() if line.strip().startswith("@kollab path"))
     assert matcher.split()[2:] == [path for _, path, _ in selfhost.ROUTES]
     assert "reverse_proxy [::1]:9078" in config and "header_up X-Real-IP {remote_host}" in config
-    assert config.splitlines()[2] == f"{DOMAIN} {{" and "respond 404" in config
+    assert f"{DOMAIN} {{" in config.splitlines() and "respond 404" in config
+    # Caddy has no limit_conn, and the output says so rather than implying a cap it does not enforce.
+    assert "no per-address connection limit" in config and "cap of 64 open connections" in config
 
 
 def test_systemd_unit_runs_this_state_dir_so_the_identity_survives(tmp_path, monkeypatch):
@@ -521,3 +622,41 @@ for argv in (["--domain", "a.example"], ["--origin", "https://a.example"], ["--o
         "worker ['--origin', 'https://a.example']",
         "worker ['--origin=https://a.example']",
     ]
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str):
+        super().__init__("localhost", timeout=5)
+        self._path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(5)
+        self.sock.connect(self._path)
+
+
+def test_the_real_command_listens_on_its_socket_only_and_removes_it_on_stop(tmp_path):
+    """Owner-only socket, served over it, no TCP port, and nothing left behind."""
+    domain, directory = f"localhost:{_free_port()}", Path(tempfile.mkdtemp(prefix="kr-", dir="/tmp"))
+    directory.chmod(0o755)
+    path = directory / "relay.sock"
+    env = {**os.environ, "HOME": str(tmp_path), "KOLLAB_NO_KEYRING": "1", "PYTHONUNBUFFERED": "1"}
+    command = [sys.executable, "kollabor_cli_main.py", "relay", "serve", "--domain", domain, "--unix-socket", str(path)]
+    process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    try:
+        banner = _read_until(process, "ready: relay up")
+        assert f"listen   {path}" in banner and "this user only can connect" in banner
+        assert (path.stat().st_mode & 0o777) == 0o600
+        connection = UnixHTTPConnection(str(path))
+        connection.request("GET", "/relay/v1/health")
+        reply = connection.getresponse()
+        assert reply.status == 200 and json.loads(reply.read())["status"] == "ok"
+        connection.request("GET", "/.well-known/agent-keys.json")
+        assert connection.getresponse().status == 200
+    finally:
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == 0
+    try:
+        assert not path.exists()
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
