@@ -641,6 +641,9 @@ fi
 # ================================================================== s9 ====
 say "s9: /connect answer (the server agent must ask a question)"
 if run_cmd srv "/connect trust manual" 'trust for .* is now manual' 60; then say "server is on trust manual too (a remote agent only gets the one-question line there)"; else say "server /connect trust manual: no confirmation line"; fi
+# Manual trust refuses a peer's request (not_authorized) until its human allows that peer to
+# reach the agent, so the server allows the Mac first, as r3 did the other way round.
+if run_cmd srv "/connect allow ${BACK#*@} ${REMOTE%@*}" 'conversation allowed:' 60; then say "server allows ${BACK#*@} -> ${REMOTE%@*}"; else say "server /connect allow ${BACK#*@} ${REMOTE%@*}: no confirmation line"; fi
 QRE='answer with /connect answer [0-9]+'
 QB=$(count_pat mac "$QRE")
 ASK='before doing anything else, ask me one question: should the report be red or blue? wait for my answer, then reply with the word color and my answer'
@@ -669,7 +672,11 @@ if wait_for mac "$QRE" 120 "$QB"; then
   fi
 else
   cap mac s9-mac-no-question; cap srv s9-srv-no-question
-  rec s9-answer SKIP "s9-mac-no-question.txt" "the server agent asked no question within 240s of a request that told it to ask one (model behavior); /connect answer not exercised"
+  if grep -Eq 'not_authorized|rejected' <<<"$(fl mac 60)"; then
+    rec s9-answer FAIL "s9-mac-no-question.txt" "the server refused the request (the Mac pane shows a rejection), so no question could be asked"
+  else
+    rec s9-answer SKIP "s9-mac-no-question.txt" "the server agent asked no question within 240s of a request that told it to ask one (model behavior); /connect answer not exercised"
+  fi
 fi
 
 # ================================================================= s10 ====
