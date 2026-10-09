@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web UI showed an agent's XML tool calls as raw text (`<terminal>…</terminal>`), live and after a reload. They show as tool cards with their results, like native tool calls; the model still gets its own calls back as it wrote them.
 - A web chat still starting showed for a moment as a second agent in the sidebar, and opening that row attached a second session to the same agent.
 - After New Session, or a click on another chat, the open chat's message box stayed live for the seconds the switch took: a message typed there went to the chat being left, or was lost. The box now waits, and says what it is waiting for.
+- A message from an open-trust device to a manual-trust device that allowed it (`/connect allow`) gets its answer back. Before, the request ran but the answer never left. The answer goes only to that message's thread, and only while the allow stands.
 
 ### Security
 - A relay takes up to 64 connections from one address (was 16), so a team behind one office IP fits, and up to 4,096 per worker (was 512), so a flood needs far more addresses. The nginx config from `--print nginx` caps connections per address too; Caddy has no such limit and says so.
