@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A relay takes up to 64 connections from one address (was 16), so a team behind one office IP fits, and up to 4,096 per worker (was 512), so a flood needs far more addresses. The nginx config from `--print nginx` caps connections per address too; Caddy has no such limit and says so.
 - A relay on the same computer as nginx can listen on a unix socket (`--unix-socket`), so no other program on that computer can pose as the proxy.
 - When two of your computers claim the same direct-connection name, the one you approved first keeps it, even while it is offline; the name never moves to the other computer.
-- Direct connections never dial link-local addresses, and dial loopback only for a device on this same computer.
+- Direct connections never dial loopback or link-local addresses.
 - An agent you accepted from outside your network can no longer carry or forward traffic inside it.
 - Removing a device also drops its direct connection for good; approved again, it connects through the relay.
 - Member lists are dated, so an old copy replayed later cannot remove devices you added since. Devices on 0.13 and 0.14 keep working; their lists stay undated until they update.
