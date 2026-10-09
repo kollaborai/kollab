@@ -832,6 +832,21 @@ async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
         f"returned to {sender} automatically. Write the answer as your normal reply. "
         "hub_msg is only for one kind='question' to the sender."
     )
+    # kind="answer" gets the same words. Story 7 on f8c57af: the answer checks
+    # ran first, so the receiver saw only "relay answer requires its exact
+    # target...", retried it three times and tripped the stuck-loop breaker.
+    as_answer = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "answer-kind",
+                "to": f"relay:{'b' * 64}",
+                "content": "proof.txt created",
+                "kind": "answer",
+            }
+        ),
+    )
+    assert (as_answer.success, as_answer.error) == (False, refused.error)
     assert not right.active.replied
 
 
@@ -2935,3 +2950,18 @@ async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver
     assert cancelled.startswith(f"request 1 on {target}: ")
     assert task.finished
     assert right.store.task(task.record["id"])["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_the_cached_roster_has_not_read_yet_still_resolves(bridges):
+    # Live m1 on f8c57af: a reply to an online agent failed as "unknown
+    # agent@device", and the same call worked 7 s later, once the 15 s
+    # refresher had read that peer.
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    name = await handle(left, right)
+    left._cache.clear()
+    assert name not in [row["handle"] for row in await left.remote_agents()]
+    assert await left.resolve_handle(name) == address(right)
+    with pytest.raises(RelayError, match="unknown agent@device"):
+        await left.resolve_handle("nobody@" + name.split("@")[1])

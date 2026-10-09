@@ -508,14 +508,16 @@ class RelayAgentBridge:
         store.save()
         return True
 
-    async def remote_agents(self) -> list[dict]:
-        """Remote agents from the cached directory, keyed by agent@device.
+    async def remote_agents(self, cached: bool = True) -> list[dict]:
+        """Remote agents from the directory, keyed by agent@device.
 
-        Never raises: an unavailable relay is an empty roster, not an error.
+        The cached copy (the default) lacks a peer the 15 s refresher has not
+        read yet; ``cached=False`` asks the peers. Never raises: an unavailable
+        relay is an empty roster, not an error.
         """
         try:
             result = await self._owner_call(
-                "relay.directory", {"peer": "", "cached": True}
+                "relay.directory", {"peer": "", "cached": cached}
             )
         except Exception:
             return []
@@ -562,15 +564,18 @@ class RelayAgentBridge:
     async def resolve_handle(self, handle: str) -> str:
         """The relay: address for an approved agent@device, or a clear RelayError."""
         parsed = parse_handle(handle)
-        matches = (
-            [
+        matches = []
+        # A miss in the cached roster asks the peers before it says unknown:
+        # m1 on f8c57af refused a reply to an online agent, and the same call
+        # worked 7 s later, once the refresher had read that peer.
+        for cached in (True, False) if parsed else ():
+            matches = [
                 row
-                for row in await self.remote_agents()
+                for row in await self.remote_agents(cached=cached)
                 if row["name"] == parsed[0] and row["device"] == parsed[1]
             ]
-            if parsed
-            else []
-        )
+            if matches:
+                break
         if not matches:
             raise RelayError(
                 "unknown agent@device: run /connect status to see who is online"
