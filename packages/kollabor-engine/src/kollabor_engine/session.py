@@ -30,6 +30,7 @@ from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
+from .history_xml_tools import web_history
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,8 @@ class EngineSession:
                     "thinking": getattr(message, "thinking", None),
                 }
             )
+        # XML tool turns in the shape the web renders for native tools.
+        self.history = web_history(self.history)
         return self.history
 
     async def send_message(self, content: Any) -> Dict[str, Any]:

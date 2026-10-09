@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In a folder where another window runs the network (a second terminal, or a web chat beside a terminal), New Join Code failed with "connect offer could not be created", and joining with a code failed too.
 - The web sidebar greyed out every agent the web UI had not started (a `kollab` in a terminal, a detached daemon, another folder's agent): each one now opens as a full chat, with its history, live turns and permission prompts. The web UI attaches to it and only detaches when it closes, so it offers no Delete and never stops it. Agents with the same name in different folders are separate rows, named after the conversation their terminal shows.
 - A permission prompt answered in one window (the web UI, the terminal, a second `kollab --attach`) stayed open in the others: the terminal sat on it, still "Working". Every attached window now closes it. A `kollab --no-daemon` session answers its own prompts in its terminal, even while the web UI watches it.
+- The web UI showed an agent's XML tool calls as raw text (`<terminal>…</terminal>`), live and after a reload. They show as tool cards with their results, like native tool calls; the model still gets its own calls back as it wrote them.
 
 ## [0.14.0] - 2026-10-08
 

@@ -545,6 +545,106 @@ class TestQueueProcessor(unittest.TestCase):
         self.message_display_service.display_complete_response.assert_not_called()
         self.message_display_service.display_tool_results.assert_called_once()
 
+    def test_xml_tool_turn_keeps_the_reply_and_adds_display_metadata(self):
+        """The model keeps its own tags; the web gets display-only metadata.
+
+        The stored reply goes back to the provider on every later request, so
+        it keeps the <terminal> tag the model wrote. The web UI reads
+        display_content and xml_tool_calls instead -- never tool_calls, which
+        _prepare_messages would send a provider as a call it never issued --
+        and each result by id, since one result can span many lines.
+        """
+        raw = "Running it.\n<terminal>echo fake-tool-ran</terminal>"
+        self.streaming_handler.call_llm = AsyncMock(return_value=raw)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = (
+            "[terminal] fake-tool-ran\nsecond line"
+        )
+        self.tool_executor.execute_tool = AsyncMock(
+            return_value=ToolExecutionResult(
+                tool_id="terminal_1",
+                tool_type="terminal",
+                success=True,
+                output="fake-tool-ran",
+            )
+        )
+        self.response_parser.parse_response.return_value = {
+            "content": "Running it.",
+            "components": {},
+            "turn_completed": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {
+                "id": "terminal_1",
+                "type": "terminal",
+                "command": "echo fake-tool-ran",
+                "_position": 12,
+            }
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("Running it.", False, False)
+        )
+        tap = MagicMock()
+        self.renderer.get_service = MagicMock(return_value=tap)
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        assistant = self.add_message_fn.call_args.args[0]
+        self.assertEqual(assistant.role, "assistant")
+        self.assertEqual(assistant.content, raw)
+        self.assertEqual(assistant.metadata.get("display_content"), "Running it.")
+        self.assertEqual(
+            assistant.metadata.get("xml_tool_calls"),
+            [
+                {
+                    "id": "terminal_1",
+                    "name": "terminal",
+                    "input": {"command": "echo fake-tool-ran"},
+                }
+            ],
+        )
+        self.assertNotIn("tool_calls", assistant.metadata)
+        batch = self.conversation_history[-1]
+        self.assertTrue(batch.metadata.get("tool_output_batch"))
+        self.assertEqual(
+            batch.metadata.get("xml_tool_results"),
+            [
+                {
+                    "id": "terminal_1",
+                    "content": "[terminal] fake-tool-ran\nsecond line",
+                    "tool_execution_time": 0.0,
+                }
+            ],
+        )
+
+        # The clean text also reaches non-terminal clients as a semantic
+        # event, so the web live stream can drop the raw tags it streamed.
+        response_events = [
+            call.args[0]
+            for call in tap.publish.call_args_list
+            if call.args and call.args[0].get("type") == "response"
+        ]
+        self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
+
     def _truncated_turn(self, continuation_text, continuation_stop):
         """Run one turn whose first reply is cut at the output limit."""
         replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])
