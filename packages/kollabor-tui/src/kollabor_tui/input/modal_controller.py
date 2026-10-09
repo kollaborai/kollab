@@ -426,7 +426,13 @@ class ModalController:
                                 "branch_select_session",
                                 "branch_execute",
                             ]
-                            if exit_mode == "minimal" or action in minimal_actions:
+                            # The minimal exit leaves the render loop paused for the
+                            # messages the hook handed back. Without any (Esc's
+                            # "cancel" on a minimal row, a session that failed to
+                            # load) nothing would redraw the input box and status bar.
+                            if (
+                                exit_mode == "minimal" or action in minimal_actions
+                            ) and final_data.get("display_messages"):
                                 await self._exit_modal_mode_minimal()
                             else:
                                 await self._exit_modal_mode()

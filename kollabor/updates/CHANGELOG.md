@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `kollabor_agent.tool_timeline`: a tool timeline module that nothing called; only its own test used it (#83).
 
+### Fixed
+- `/resume` and `/branch`: Esc, or a chat that failed to load, left the terminal without its input box and status bar.
+
 ## [0.14.0] - 2026-10-08
 
 ### Changed

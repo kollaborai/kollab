@@ -1,0 +1,97 @@
+{
+  "name": "resume-escape-redraws-input",
+  "description": "Esc out of /resume or /branch brings back the input box and status bar. Their rows ask for the minimal modal exit, which waits for the messages a resume prints; Esc (and a chat that fails to load) prints none, so the screen stayed without its input box.",
+  "config": {
+    "command": "sh tests/tmux/lib/resume_app.sh",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Esc for later",
+      "timeout": 40,
+      "description": "first-run Connect prompt on the fresh HOME"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "open /resume, then Esc"
+    },
+    {
+      "action": "slash_command",
+      "command": "resume",
+      "delay": 0.5
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Resume Conversation",
+      "timeout": 15,
+      "description": "resume modal open"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "two plus two",
+      "description": "the seeded chat is listed"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "description": "status bar hidden behind the modal"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 10,
+      "description": "input box and status bar redrawn after Esc"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Resume Conversation",
+      "description": "modal closed"
+    },
+    {
+      "action": "section",
+      "label": "open /branch, then Esc"
+    },
+    {
+      "action": "slash_command",
+      "command": "branch",
+      "delay": 0.5
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Branch From Session",
+      "timeout": 15,
+      "description": "branch modal open"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 10,
+      "description": "input box and status bar redrawn after Esc from /branch"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Branch From Session",
+      "description": "branch modal closed"
+    }
+  ]
+}
