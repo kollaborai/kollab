@@ -7,6 +7,10 @@
 #   s3 /connect authorize            s4 /connect send queues the request
 #   s5 /connect task                 s6 the reply returns through the task envelope
 #   s7 /connect withdraw             s8 /connect cancel stops a running request
+#   r1-r6 the mirror, an OPEN sender to a MANUAL receiver (server -> Mac), between s8 and s9:
+#     r1 trust pair (Mac manual, server open)   r2 the Mac refuses the ungranted open sender
+#     r3 /connect allow on the Mac              r4 the Mac agent runs the request
+#     r5 the reply reaches the open sender      r6 /connect deny puts the Mac back
 #   s9 /connect answer (SKIP when the model never asks)   s10 clean transcript, both hosts
 # The join code lives only in the shell variable CODE: read from a pane capture, typed into the
 # other pane through a pipe, replaced with "[join code]" in every evidence file.
@@ -349,8 +353,9 @@ if [ -n "$MAC_AGENT" ] && grep -qF "${MAC_AGENT}@${MAC_DEVICE}" <<<"$SRV_STATUS"
 
 # ============================================================ Story 7 rows ====
 # Intended product lines the leak/error scan skips (evidence keeps them): the screen hint of
-# s2 may carry a "warning:" prefix, and the s7 line says "cannot start work here" on purpose.
-PANE_ALLOW='communication grant is required|request [0-9]+ withdrawn; late replies cannot start work here'
+# s2 may carry a "warning:" prefix, the s7 line says "cannot start work here" on purpose, and r2
+# is a refusal ("sender has no conversation grant for this agent") that may carry the same prefix.
+PANE_ALLOW='communication grant is required|request [0-9]+ withdrawn; late replies cannot start work here|no conversation grant'
 record() { # record <label> <evidence-name> <text> [allow-code]
   local label=$1 name=$2 text=$3 allow=${4:-0} out flag="" kept
   if [ "$allow" = 1 ]; then flag="--allow-code"; fi
@@ -518,6 +523,120 @@ else
   rec s8-cancel-running FAIL s8-mac-no-send.txt "the long /connect send was not accepted within 120s"
 fi
 sleep 30   # the server agent winds down the cancelled turn
+
+# ======================================================= r1-r6: open -> manual ====
+# The mirror of s2-s8 (issue #123): the SERVER is the open sender, the Mac the manual receiver.
+# Mac manual (since s1) and server open (until s9 flips it) already fit, so these rows leave
+# trust as they found it. A manual receiver lets an open sender in only after its human runs
+# /connect allow <device> <agent>. Until then it refuses (not_authorized) and only the SENDER's
+# screen says so; the receiver prints nothing. Its answer is a task result and must reach the
+# open sender. /connect deny at the end puts the Mac back.
+R_IN_MAC="${REMOTE}[[:space:]]*(->|→)"   # a message from the server agent, shown on the Mac
+R_IN_SRV="${BACK}[[:space:]]*(->|→)"     # a message from the Mac agent, shown on the server
+RV_AGENT=${BACK%@*}                      # the Mac agent the server's human names
+RV_PEER=${REMOTE#*@}                     # the server's device, as the Mac knows it
+RV_HOST=${MAC_HOSTNAME%%.*}              # uname -n on the Mac, without its domain
+RV_REFUSED_RE='conversation grant|hub_msg[]] rejected'   # the receiver's reason, or the tool's own prefix
+RV_OK=0; RV_LINE=""; RVB=""
+
+# ================================================================== r1 ====
+say "r1: trust pair for the mirror: Mac manual, server open"
+R1_MAC=0; R1_SRV=0
+if run_cmd mac "/connect trust manual" 'trust for .* is now manual' 60; then R1_MAC=1; fi
+if run_cmd srv "/connect trust open" 'trust for .* is now open' 60; then R1_SRV=1; fi
+sleep 2; cap mac r1-mac-trust; cap srv r1-srv-trust
+if [ "$R1_MAC" = 1 ] && [ "$R1_SRV" = 1 ]; then
+  rec r1-trust-open-manual PASS r1-srv-trust.txt "Mac confirmed trust manual, server confirmed trust open"
+else
+  rec r1-trust-open-manual FAIL r1-srv-trust.txt "confirmation line missing (Mac manual: $R1_MAC, server open: $R1_SRV; panes: r1-mac-trust.txt, r1-srv-trust.txt)"
+fi
+
+# ================================================================== r2 ====
+say "r2: the open server agent's first message to the manual Mac agent is refused"
+RB1=$(count_pat srv "$RV_REFUSED_RE"); MIN0=$(count_pat mac "$R_IN_MAC"); MSH0=$(shell_ok mac "$(off_of mac)")
+cmd srv "Find out what \`uname -n\` prints on $BACK, using hub_msg. If it is rejected, quote the rejection text and stop."
+if wait_for srv "$RV_REFUSED_RE" 300 "$RB1"; then
+  sleep 15   # the server agent finishes its turn
+  cap srv r2-srv-refused; cap mac r2-mac-quiet
+  RV_LINE=$(newest_with srv "$RV_REFUSED_RE" | sed -E 's/^[[:space:]]+//')
+  MIN1=$(count_pat mac "$R_IN_MAC"); MSH1=$(shell_ok mac "$(off_of mac)")
+  if [ "${MIN1:-0}" -gt "${MIN0:-0}" ]; then
+    rec r2-open-send-refused FAIL r2-mac-quiet.txt "the server saw a refusal but the Mac showed a message from $REMOTE (inbound boxes $MIN0 -> $MIN1)"
+  else
+    rec r2-open-send-refused PASS r2-srv-refused.txt "server screen: $RV_LINE; the Mac showed nothing (inbound boxes $MIN0 -> $MIN1, shell runs $MSH0 -> $MSH1)"
+  fi
+else
+  cap srv r2-srv-no-refusal; cap mac r2-mac-quiet
+  MIN1=$(count_pat mac "$R_IN_MAC")
+  rec r2-open-send-refused FAIL r2-srv-no-refusal.txt "no 'conversation grant' refusal on the server within 300s of the ask (Mac inbound boxes $MIN0 -> $MIN1: if they grew, the Mac admitted an agent it never allowed)"
+fi
+
+# ================================================================== r3 ====
+say "r3: /connect allow on the Mac"
+if run_cmd mac "/connect allow $RV_PEER $RV_AGENT" 'conversation allowed:' 60; then
+  sleep 1; cap mac r3-mac-allow
+  if grep -Eq "conversation allowed: .*${RV_PEER}.*${RV_AGENT}.*local tool permissions still apply" <<<"$(fl mac 200)"; then
+    rec r3-allow PASS r3-mac-allow.txt "$OUT"
+  else
+    rec r3-allow FAIL r3-mac-allow.txt "the allowed line did not name $RV_PEER and $RV_AGENT with 'local tool permissions still apply'"
+  fi
+else
+  cap mac r3-mac-no-allow
+  rec r3-allow FAIL r3-mac-no-allow.txt "no 'conversation allowed: ...' line within 60s of /connect allow $RV_PEER $RV_AGENT (newest 'connect:' line: $(newest_with mac 'connect: ' | sed -E 's/^[[:space:]]+//'))"
+fi
+
+# ================================================================== r4 ====
+say "r4: the manual Mac agent runs the open server agent's request"
+MIN0=$(count_pat mac "$R_IN_MAC"); MSH0=$(shell_ok mac "$(off_of mac)")
+SB0=$(count_pat srv "$R_IN_SRV"); RJ0=$(log_grep srv 'secure conversation packet was rejected')
+sleep 10   # the server agent is done with the refused turn
+cmd srv "The Mac agent now allows your messages. Send it again: find out what \`uname -n\` prints on $BACK, using hub_msg."
+if wait_for mac "$R_IN_MAC" 300 "$MIN0"; then
+  MSH1=$MSH0
+  for _ in $(seq 1 36); do   # the Mac agent runs the command, up to 3 minutes
+    MSH1=$(shell_ok mac "$(off_of mac)")
+    if [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then break; fi
+    sleep 5
+  done
+  sleep 5; cap mac r4-mac-ran; cap srv r4-srv-after-resend
+  if [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then
+    RV_OK=1
+    rec r4-request-runs-on-manual PASS r4-mac-ran.txt "the Mac showed the request from $REMOTE and ran it in its shell (shell runs $MSH0 -> $MSH1)"
+  else
+    rec r4-request-runs-on-manual FAIL r4-mac-ran.txt "the Mac showed the request but its log shows no new shell tool run within 3 minutes (shell runs $MSH0 -> $MSH1)"
+  fi
+else
+  cap mac r4-mac-no-request; cap srv r4-srv-no-send
+  rec r4-request-runs-on-manual FAIL r4-mac-no-request.txt "no message from $REMOTE on the Mac within 300s of the resend, with the grant in place (the server pane: r4-srv-no-send.txt)"
+fi
+
+# ================================================================== r5 ====
+say "r5: the reply returns to the open server agent"
+if [ "$RV_OK" != 1 ]; then
+  rec r5-reply-to-open-sender FAIL - "the Mac did not run the request in r4, so no reply was due"
+elif wait_for srv "$R_IN_SRV" 300 "$SB0"; then
+  sleep 5; cap srv r5-srv-reply; cap mac r5-mac-after
+  RVB=$(block_after srv "$R_IN_SRV" | tail -n +2)
+  if [ -n "$RV_HOST" ] && grep -Fqi -- "$RV_HOST" <<<"$RVB"; then
+    rec r5-reply-to-open-sender PASS r5-srv-reply.txt "reply from $BACK with the Mac's hostname reached the open sender"
+  else
+    rec r5-reply-to-open-sender FAIL r5-srv-reply.txt "a reply from $BACK arrived without the Mac's hostname ($RV_HOST)"
+  fi
+else
+  cap srv r5-srv-no-reply; cap mac r5-mac-after
+  rec r5-reply-to-open-sender FAIL r5-srv-no-reply.txt "no reply from $BACK on the server within 300s of the Mac running the request (server log 'secure conversation packet was rejected' lines: $RJ0 -> $(log_grep srv 'secure conversation packet was rejected'); the Mac pane: r5-mac-after.txt)"
+fi
+
+# ================================================================== r6 ====
+say "r6: /connect deny puts the Mac back to no receiving grants"
+sleep 15   # the Mac agent finishes its task turn
+if run_cmd mac "/connect deny $RV_PEER $RV_AGENT" 'conversation grant revoked' 60; then
+  sleep 1; cap mac r6-mac-deny
+  rec r6-restore PASS r6-mac-deny.txt "$OUT; trust stays as s8 left it (Mac manual, server open)"
+else
+  cap mac r6-mac-no-deny
+  rec r6-restore FAIL r6-mac-no-deny.txt "no 'conversation grant revoked' line within 60s of /connect deny $RV_PEER $RV_AGENT"
+fi
 
 # ================================================================== s9 ====
 say "s9: /connect answer (the server agent must ask a question)"
