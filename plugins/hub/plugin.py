@@ -205,9 +205,6 @@ CONNECT_SUBCOMMANDS = [
         "allow", "<device> <agent>", "Let a device's agent message a local agent"
     ),
     SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
-    SubcommandInfo(
-        "attach", "[allow|deny <device>]", "Who may open this computer's agents from theirs"
-    ),
     SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
     SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
     SubcommandInfo(
@@ -9290,13 +9287,18 @@ class HubPlugin(BasePlugin):
         if relay is None or not self._relay_network_domain():
             return "", []
         device = self._relay_device_name()
-        try:
-            online = (await relay._owner_call("relay.status", {})).get("state") == "online"
-        except Exception:
-            online = False
-        if not online:
+        if not await self._relay_online(relay):
             return device, []
         return device, await self._refresh_remote_agent_rows()
+
+    @staticmethod
+    async def _relay_online(relay: Any) -> bool:
+        """Whether the relay connection is up. While it is down the directory
+        is the one cached before, not who is online now."""
+        try:
+            return (await relay._owner_call("relay.status", {})).get("state") == "online"
+        except Exception:
+            return False
 
     def _relay_network_domain(self) -> str:
         """This device's network domain for display, without the scheme."""
@@ -13168,7 +13170,8 @@ class HubPlugin(BasePlugin):
 
         agents: List[dict] = []
         try:
-            result = relay.remote_agents()
+            # Same rule as the web UI's rows (network_agent_rows).
+            result = relay.remote_agents() if await self._relay_online(relay) else []
             if asyncio.iscoroutine(result):
                 result = await result
             if isinstance(result, list):

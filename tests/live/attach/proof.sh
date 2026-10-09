@@ -135,22 +135,9 @@ AGENT=${REMOTE%@*}
 MAC_DEVICE=$(E device "$PORT") || abort a0-engine "GET /sessions named no device"
 rec a0-engine PASS engine.log "a chat runs here; the server's $AGENT is listed"
 
-# ===================================================== refused, then allowed ====
-say "a1: the server has not allowed this computer yet"
-OUT=$(E history "$PORT" "$REMOTE")
-case $OUT in
-  "503 "*"has not let $MAC_DEVICE open its agents"*"/connect attach allow $MAC_DEVICE"*)
-    rec a1-refused PASS - "503 with the command to run on the server" ;;
-  *) rec a1-refused FAIL - "expected 503 naming /connect attach allow $MAC_DEVICE, got: ${OUT:0:200}" ;;
-esac
-
-say "a2: /connect attach allow on the server"
-BASE=$(count_pat srv 'may now open this computer')
-cmd srv "/connect attach allow $MAC_DEVICE"
-if wait_for srv 'may now open this computer' 30 "$BASE"; then rec a2-allow PASS - "the server allowed the Mac"
-else cap srv a2-srv; rec a2-allow FAIL a2-srv.txt "no 'may now open' line on the server"; fi
-
 # ============================================================ full history ====
+# Nothing to run on the server first: under its trust open (the default) every
+# device of the network opens its agents.
 say "a3: the server agent's own history, through the network"
 OUT=$(E history "$PORT" "$REMOTE")
 DUMP=$(E dump "$PORT" "$REMOTE")
@@ -175,20 +162,19 @@ else rec a5-turn FAIL - "no assistant reply with the server's hostname in 300s";
 
 hold allowed
 
-# ============================================================ deny closes ====
-say "a6: /connect attach deny closes it"
-BASE=$(count_pat srv 'may no longer open')
-cmd srv "/connect attach deny $MAC_DEVICE"
-if wait_for srv 'may no longer open this computer' 30 "$BASE" \
-  && wait_for srv "closed $AGENT for $MAC_DEVICE" 30 \
+# ==================================================== trust manual closes ====
+say "a6: /connect trust manual on the server closes it"
+cmd srv "/connect trust manual"
+if wait_for srv "closed $AGENT for $MAC_DEVICE" 30 \
   && E gone "$PORT" "$REMOTE" 60 >/dev/null; then
-  rec a6-deny PASS - "the open agent closed on both computers"
-else cap srv a6-srv; rec a6-deny FAIL a6-srv.txt "deny did not close the open agent"; fi
+  rec a6-manual PASS - "the open agent closed on both computers"
+else cap srv a6-srv; rec a6-manual FAIL a6-srv.txt "trust manual did not close the open agent"; fi
 OUT=$(E history "$PORT" "$REMOTE")
 case $OUT in
-  "503 "*"has not let $MAC_DEVICE open its agents"*) rec a7-refused-again PASS - "refused again after deny" ;;
-  *) rec a7-refused-again FAIL - "expected 503 after deny, got: ${OUT:0:200}" ;;
+  "503 "*"uses trust manual"*) rec a7-refused PASS - "refused under trust manual" ;;
+  *) rec a7-refused FAIL - "expected 503 under trust manual, got: ${OUT:0:200}" ;;
 esac
+cmd srv "/connect trust open"  # the server's trust as the proof found it
 hold refused
 
 # ============================================================== leak scans ====

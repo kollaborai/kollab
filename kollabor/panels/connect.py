@@ -190,6 +190,8 @@ class ConnectPanel:
             make_field(
                 "level", "dropdown", "Trust", action="trust",
                 value=snap["trust"], options=list(TRUST_LEVELS),
+                help="open: every device on this network can message and open your agents, and approve "
+                "their tools. agents: only the agents you allow. manual: nothing without /connect authorize.",
             ),
             make_field(
                 "name", "text_input", "This Device's Name", action="rename", value=snap["device"],

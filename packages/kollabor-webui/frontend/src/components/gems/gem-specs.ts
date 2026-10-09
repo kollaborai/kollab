@@ -76,6 +76,9 @@ const CASTE_CUTS: Record<string, GemCut> = {
 };
 
 /** A clear quartz point for sessions that run without a pool identity. */
+/** A gem of the pool: it wears the pool's color, never a born one. */
+export const isPoolGem = (name?: string | null): boolean => Boolean(name && GEMS[name.toLowerCase()]);
+
 export const UNASSIGNED_GEM: GemSpec = { cut: "crystal", finish: "faceted", color: "#c9ccd6" };
 
 export function gemSpec(name?: string | null, caste?: string | null): GemSpec {

@@ -17,19 +17,23 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { formatSessionName } from "@/utils/session-display";
 import { GemAvatar } from "./GemAvatar";
-import { EVERYDAY_FACES, EVERYDAY_HATS, GemAppearancePreview, useGemAppearance } from "./gem-appearance";
+import {
+  EVERYDAY_FACES,
+  EVERYDAY_HATS,
+  GEM_LOOK_VOCABULARY,
+  GEM_SWATCHES,
+  GemAppearancePreview,
+  useGemAppearance,
+  useLookKey,
+} from "./gem-appearance";
 import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
-import { withLook } from "./gem-look";
+import { resolveGemLook, withLook } from "./gem-look";
+import { isPoolGem } from "./gem-specs";
 
 type Rgb = [number, number, number];
 
 const STAGE_ACTIVITIES: Activity[] = ["idle", "thinking", "typing", "speaking", "dance", "error", "dreaming"];
 const HAT_GROUPS = [...new Set(HAT_STYLES.map((hat) => hat.group))];
-const SWATCHES: Rgb[] = [
-  [200, 30, 50], [255, 120, 100], [240, 160, 40], [240, 220, 80],
-  [120, 190, 33], [30, 160, 90], [40, 180, 170], [100, 200, 235],
-  [15, 82, 186], [140, 80, 200], [230, 90, 160], [230, 225, 240],
-];
 
 const toHex = (rgb: readonly number[]) =>
   `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
@@ -64,6 +68,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
  */
 export type StudioFocus = {
   gem: string;
+  /** Where that agent runs (its folder, or its device): the look is that agent's alone. */
+  where?: string | null;
   tab?: "eyes" | "hat" | "color" | "chat";
   chat?: { session: Session; hub: boolean | null; setHub: (enabled: boolean) => Promise<void> };
 };
@@ -120,11 +126,15 @@ function StudioBody({
   const [hub, setHub] = useState(chat?.hub ?? true);
 
   const current = agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
-  const target: GemLook = (current && draft.gems?.[current.name]) || {};
-  const born = current ? draft.born?.[current.name] : undefined;
-  const bornHat = HAT_STYLES.find((hat) => hat.id === born?.hat)?.label;
+  // A chat's Properties dress that agent; the list dresses the gems of the engine's own folder.
+  const where = focus?.where;
+  const key = useLookKey(current?.name, where);
+  const target: GemLook = (key && draft.gems?.[key]) || {};
+  const born = resolveGemLook({ born: draft.born }, key, GEM_LOOK_VOCABULARY);
+  const bornHat = HAT_STYLES.find((hat) => hat.id === born.bornHat)?.label;
+  const baseColor = current?.color ?? (isPoolGem(current?.name) ? undefined : born.bornColor);
   const set = (patch: Partial<GemLook>) => {
-    if (current) setDraft((prev) => withLook(prev, current.name, patch));
+    if (key) setDraft((prev) => withLook(prev, key, patch));
   };
   const pick = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)];
   const season = draft.season ?? "auto";
@@ -154,7 +164,7 @@ function StudioBody({
             ? chat
               ? "Dress this chat's gem, or change how its agent takes part in the hub."
               : "Dress this chat's gem over the look it was born with; every browser shows the same gem."
-            : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems."}
+            : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems. An agent in another folder or on another computer has its own look: dress it from its chat's Properties."}
         </DialogDescription>
       </DialogHeader>
 
@@ -196,8 +206,9 @@ function StudioBody({
           <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 border-b px-4 py-10 sm:px-6 lg:border-b-0">
             {current ? (
               <GemAvatar
-                key={current.name}
+                key={key}
                 gem={current.name}
+                where={where}
                 caste={current.caste}
                 color={current.color}
                 state="idle"
@@ -211,9 +222,7 @@ function StudioBody({
             ) : null}
             <div className="text-center">
               <p className="text-lg font-semibold">{current ? titleCase(current.name) : "No Gems"}</p>
-              <p className="text-muted-foreground text-xs">
-                {[titleCase(current?.caste || ""), current && !born ? "Not Born Yet" : ""].filter(Boolean).join(" · ")}
-              </p>
+              <p className="text-muted-foreground text-xs">{titleCase(current?.caste || "")}</p>
             </div>
             <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
               {STAGE_ACTIVITIES.map((option) => (
@@ -288,9 +297,10 @@ function StudioBody({
                     <EyeTile
                       active={!target.face}
                       onClick={() => set({ face: undefined })}
-                      label={born ? "Born" : "Default"}
+                      label="Born"
                       agent={current}
-                      face={(born?.face ?? "pill") as EyeStyle}
+                      where={where}
+                      face={(born.face ?? "pill") as EyeStyle}
                     />
                   ) : null}
                   {current
@@ -301,6 +311,7 @@ function StudioBody({
                           onClick={() => set({ face: style.id })}
                           label={style.label}
                           agent={current}
+                          where={where}
                           face={style.id}
                         />
                       ))
@@ -312,16 +323,14 @@ function StudioBody({
                 <div className="flex flex-col gap-3">
                   <div className="flex flex-wrap gap-1.5">
                     <Chip active={!target.hat} onClick={() => set({ hat: undefined })}>
-                      {born ? "Born" : "Default"}
+                      Born
                     </Chip>
                     <Chip active={target.hat === "auto"} onClick={() => set({ hat: "auto" })}>
                       Auto
                     </Chip>
                   </div>
                   <p className="text-muted-foreground text-[11px]">
-                    {bornHat
-                      ? `Born hat: ${bornHat}. Seasonal costumes cover it; Auto picks a hat for its caste.`
-                      : "Until it is born it wears Auto: a hat for its caste, or a seasonal costume."}
+                    Born hat: {bornHat ?? "None"}. Seasonal costumes cover it; Auto picks a hat for its caste.
                   </p>
                   {HAT_GROUPS.map((group) => (
                     <div key={group} className="flex flex-col gap-1.5">
@@ -344,12 +353,12 @@ function StudioBody({
                     <div className="grid grid-cols-6 gap-2">
                       <Swatch
                         active={!target.color}
-                        rgb={current.color ?? [128, 128, 128]}
-                        label="Pool Color"
+                        rgb={baseColor ?? [128, 128, 128]}
+                        label={current.color ? "Pool Color" : "Born Color"}
                         onClick={() => set({ color: undefined })}
                         ring
                       />
-                      {SWATCHES.map((rgb) => (
+                      {GEM_SWATCHES.map((rgb) => (
                         <Swatch
                           key={rgb.join(",")}
                           active={sameColor(target.color, rgb)}
@@ -363,14 +372,14 @@ function StudioBody({
                       <input
                         type="color"
                         aria-label="Custom Color"
-                        value={toHex(target.color ?? current.color ?? [128, 128, 128])}
+                        value={toHex(target.color ?? baseColor ?? [128, 128, 128])}
                         onChange={(event) => set({ color: fromHex(event.target.value) })}
                         className="size-8 cursor-pointer rounded-md border bg-transparent p-0.5"
                       />
                       Custom
                     </label>
                     <p className="text-muted-foreground text-[11px]">
-                      The ringed swatch is {titleCase(current.name)}'s pool color.
+                      The ringed swatch is {titleCase(current.name)}'s {current.color ? "pool" : "born"} color.
                     </p>
                   </div>
                 ) : null}
@@ -413,7 +422,7 @@ function StudioBody({
               variant="ghost"
               size="sm"
               onClick={() => set({ face: undefined, hat: undefined, color: undefined })}
-              disabled={!draft.gems?.[current.name]}
+              disabled={!draft.gems?.[key]}
             >
               <RotateCcw className="size-4" />
               Reset {titleCase(current.name)}
@@ -437,12 +446,14 @@ function EyeTile({
   onClick,
   label,
   agent,
+  where,
   face,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   agent: AgentPoolEntry;
+  where?: string | null;
   face: EyeStyle;
 }) {
   return (
@@ -456,7 +467,17 @@ function EyeTile({
         active ? "border-primary bg-accent" : "border-transparent hover:bg-accent/50",
       )}
     >
-      <GemAvatar gem={agent.name} caste={agent.caste} color={agent.color} face={face} state="idle" live season="auto" size={44} />
+      <GemAvatar
+        gem={agent.name}
+        where={where}
+        caste={agent.caste}
+        color={agent.color}
+        face={face}
+        state="idle"
+        live
+        season="auto"
+        size={44}
+      />
       <span className="mt-1.5">{label}</span>
     </button>
   );

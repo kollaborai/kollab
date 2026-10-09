@@ -29,10 +29,12 @@ export type GemLook = { face?: string; hat?: string; color?: number[] };
 export type GemAppearance = {
   /** "auto" follows the calendar (Halloween in October, Christmas in December). */
   season?: string;
-  /** The random eyes and hat each gem got the first time it came alive; the engine rolls them. */
+  /** The random eyes and hat each pool gem got the first time it came alive in `home`; the engine rolls them. */
   born?: Record<string, Omit<GemLook, "color">>;
-  /** What the user dressed each gem in, over its born look. */
+  /** What the user dressed each agent in, over its born look; keyed by gem-look.ts lookKey. */
   gems?: Record<string, GemLook>;
+  /** The engine's own folder: a bare gem name is the agent there. */
+  home?: string;
 };
 
 export type HistoryMessage = {
@@ -136,8 +138,8 @@ export type AgentPoolEntry = {
   active?: boolean;
   state?: string;
   current_task?: string;
-  /** Pool gem color [r, g, b], shared with the TUI. */
-  color?: number[];
+  /** Pool gem color [r, g, b], shared with the TUI; null for an agent the pool does not name. */
+  color?: number[] | null;
   /** Live hub agent id; empty when nothing runs this identity. */
   agent_id?: string;
   /** Live but off the hub mesh: peers do not see it (Properties → Chat). */

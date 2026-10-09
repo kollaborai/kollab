@@ -75,6 +75,8 @@ export type GemProps = {
   follow?: boolean;
   /** Seasonal dressing; "auto" follows the calendar. */
   season?: Season | "auto";
+  /** Whose look this is (gem-look.ts lookKey): two agents of one name move out of step. */
+  lookKey?: string;
 };
 
 type Glint = { x: number; y: number; age: number; ttl: number; size: number; hue: number | null };
@@ -340,7 +342,7 @@ class GemEngine {
       danceUntil: 0,
       px: 0,
       gemPx: 0,
-      seed: hashSeed(props.gem || "unassigned"),
+      seed: hashSeed(props.lookKey || props.gem || "unassigned"),
       visible: false,
       dirty: true,
       lastRender: 0,

@@ -1612,6 +1612,16 @@ class AgentSocketServer:
                     writer.write((json.dumps(resp, default=str) + "\n").encode("utf-8"))
                     await writer.drain()
 
+                elif action:
+                    # A newer kollab asking for something this one does not
+                    # know: answer now, or the asker waits out its timeout.
+                    unknown = {
+                        "type": "error",
+                        "msg": f"this agent does not know {str(action)[:64]!r}: restart it on the current kollab",
+                    }
+                    writer.write((json.dumps(unknown) + "\n").encode())
+                    await writer.drain()
+
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
 
@@ -2574,9 +2584,11 @@ class AgentMessenger:
         """Ask a local agent's daemon to open agent@device through the network.
 
         Answers ``{"type": "network_attach", "socket_path": ...}``, a one-shot
-        socket to attach on like any agent socket, or ``{"type": "error",
+        socket to attach on like any agent socket, ``{"type": "error",
         "msg": ...}`` saying why not (the far device's own words when it
-        refused).
+        refused), or ``{"type": "timeout"}`` when the agent asked never
+        answered: the far device's wait is bounded inside it, so the silence
+        is this agent's.
         """
         writer = None
         try:
@@ -2589,7 +2601,7 @@ class AgentMessenger:
                 return {"type": "error", "msg": "the agent did not answer"}
             return reply
         except asyncio.TimeoutError:
-            return {"type": "error", "msg": "timed out waiting for the other computer"}
+            return {"type": "timeout"}
         except Exception as exc:
             logger.debug("network_attach request failed for %s: %s", socket_path, exc)
             return {"type": "error", "msg": str(exc) or type(exc).__name__}

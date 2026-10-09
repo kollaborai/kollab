@@ -389,6 +389,7 @@ export function AppSidebar({
                         >
                           <GemAvatar
                             gem={gem}
+                            where={session.device || session.workspace}
                             caste={pool?.caste}
                             color={pool?.color}
                             state={hubLive ? pool?.state : live ? "idle" : "offline"}
@@ -492,6 +493,7 @@ export function AppSidebar({
                     >
                       <GemAvatar
                         gem={agent.name}
+                        where={agent.device}
                         caste={poolByName.get(agent.name)?.caste}
                         color={poolByName.get(agent.name)?.color}
                         state="idle"

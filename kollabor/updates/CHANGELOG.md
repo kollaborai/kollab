@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Opening an agent on another computer follows that computer's trust, as messages do: under `open` (the default) every computer of your network opens its agents, and can approve their tools, with no command; under `agents` only the agents it may message, under `manual` none. `/connect attach allow|deny` is gone, and so is its list; `/connect revoke <device>` cuts one computer off. On a network shared with other people, use `trust agents` there.
+
+### Fixed
+- In the web UI every koordinator wore the same look, and dressing one dressed them all: an agent's look was keyed by its name alone. Each agent now has its own. One in another folder or on another computer is born with its own eyes, hat and color (a pool gem keeps the pool's color), and its chat's Properties dress it alone. Agents in the folder the web UI runs in keep the looks they had.
+- Opening an agent on another computer from the web UI sat on "Opening…" for a minute, then blamed the other computer, when the agent running this folder's network had started before network attach existed. It now names that agent and says to restart it. An agent asked for anything it does not know answers at once instead of leaving the asker to wait out its timeout.
+- After the web UI restarted, or the agent it was chatting with did, the agents on your other computers were missing from the sidebar until a chat was opened here, and opening one failed with "open one first". The web UI now asks any agent on this computer that is on the network, this folder's first, read-only over its hub socket, for both the list and the opening. While the relay connection is down, neither the web UI nor `kollab --hub status` lists those agents: the directory then is the cached one, not who is online.
+
 ## [0.14.1] - 2026-10-09
 
 ### Added

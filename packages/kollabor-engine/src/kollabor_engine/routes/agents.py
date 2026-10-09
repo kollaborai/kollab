@@ -1,5 +1,6 @@
 """Agent identity pool routes for the web UI."""
 
+import os
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import-not-found]
@@ -85,7 +86,8 @@ async def list_agent_pool(
                 "role_aliases": [],
                 "personality": "",
                 "caste": base.get("caste", ""),
-                "color": base.get("color", [128, 128, 128]),
+                # None when no pool gem is its base: the web UI gives it a born color.
+                "color": base.get("color"),
                 "available": False,
                 "active": True,
                 "pool": False,
@@ -107,17 +109,21 @@ async def list_agent_pool(
 
 @router.get("/appearance")
 async def get_gem_appearance() -> Dict[str, Any]:
-    """Every gem's look: the season, the looks gems were born with, the user's picks."""
-    return load_appearance()
+    """Every gem's look: the season, the looks gems were born with, the user's picks.
+
+    ``home`` is this engine's folder: a bare gem name is the agent there.
+    """
+    return {**load_appearance(), "home": os.path.realpath(os.getcwd())}
 
 
 @router.put("/appearance")
 async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Replace the user's picks and season; born looks stay. Returns what was stored."""
     try:
-        return save_appearance(body)
+        stored = save_appearance(body)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not save gem appearance: {exc}") from exc
+    return {**stored, "home": os.path.realpath(os.getcwd())}
 
 
 @router.get("/bundles")

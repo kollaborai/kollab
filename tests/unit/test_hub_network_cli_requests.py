@@ -17,6 +17,7 @@ test_hub_network_turns.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -103,6 +104,7 @@ async def test_network_status_returns_device_trust_and_remote_rows():
         network_name=lambda: "laptop-kollab-net",
         _state=lambda: SimpleNamespace(state=SimpleNamespace(origin="https://kollabor.ai")),
         remote_agents=AsyncMock(return_value=rows),
+        _owner_call=AsyncMock(return_value={"state": "online"}),
     )
     plugin = _make_plugin(relay_agent=relay)
 
@@ -116,6 +118,12 @@ async def test_network_status_returns_device_trust_and_remote_rows():
         "agents": rows,
     }
     plugin._start_relay_agent.assert_not_awaited()
+
+    # While the relay is down the directory is the cached one: no rows, as in
+    # the web UI, never agents that only look online.
+    relay._owner_call = AsyncMock(return_value={"state": "connecting"})
+    offline = await plugin._handle_network_status_request()
+    assert offline["agents"] == [] and offline["device"] == "laptop-kollab"
 
 
 @pytest.mark.asyncio
@@ -750,4 +758,23 @@ def test_network_send_with_no_handler_is_a_clean_error():
     assert result == {
         "type": "error",
         "msg": "network messaging is not available on this build",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_request_this_daemon_does_not_know_is_answered_at_once():
+    """A newer kollab asking an older daemon gets an answer, not a wait to its timeout."""
+    server = AgentSocketServer("lapis-1", AsyncMock(), socket_name=f"unknown-{os.getpid()}")
+    sock = await server.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(sock))
+        writer.write(b'{"action": "from_the_future"}\n')
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=2)
+        writer.close()
+    finally:
+        await server.stop()
+    assert json.loads(line) == {
+        "type": "error",
+        "msg": "this agent does not know 'from_the_future': restart it on the current kollab",
     }

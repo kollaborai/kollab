@@ -93,12 +93,16 @@ network exactly as a local message is observed by the rest of the hub.
 **Trust levels**, one per network:
 
 - `open` (default): every agent on every accepted device may message every
-  other. Hub rules only.
+  other, and every device may open any agent as a full chat (Story 10): read
+  it, type to it and approve its tools. Hub rules only. On a network shared
+  with other people, use `agents`.
 - `agents`: each device lists which of its agents are reachable
-  (`/connect allow`, `/connect deny`). Messages to those flow under hub rules.
+  (`/connect allow`, `/connect deny`). Messages to those flow under hub rules,
+  and those are the only agents another device may open.
 - `manual`: every first message needs a human `/connect authorize` or
   `/connect send`; replies go through the task envelope; questions wait for a
-  human answer. This is the Codex model, kept for people who want it.
+  human answer. No device opens its agents. This is the Codex model, kept for
+  people who want it.
 
 **Members.** Every device on a network approves every other. A join by code
 approves only the pair, so devices tell each other: each sends the members it
@@ -610,16 +614,18 @@ not revoke API keys at the provider; rotate those at the provider.
 
 The web UI on the Mac lists the server's agents under the server's name. One
 click opens one as a full chat: its history, its live turns, and a composer.
-The first time, the server has not allowed it, and the chat says how:
+Nothing to run first: the server's trust decides, as it does for messages.
+Under `open` (the default) every device of the network opens its agents, under
+`agents` only the agents that device may message, under `manual` none, and the
+chat says why:
 
 ```
-server-kollab has not let mac-kollab open its agents. On server-kollab, run: /connect attach allow mac-kollab
+server-kollab uses trust manual: its agents take requests only through /connect authorize
 ```
 
-Marco runs that on the server once. An open agent is the control a person has
-at that keyboard, so network trust alone never grants it: on a network shared
-with other people, `open` lets their agents message yours, not read and drive
-them. The server's own screen says `mac-kollab opened koordinator from the
+An open agent is the control a person has at that keyboard: on a network
+shared with other people, run `trust agents` there, or revoke their devices.
+The server's own screen says `mac-kollab opened koordinator from the
 network` and, later, `mac-kollab closed koordinator`.
 
 How it works (`plugins/hub/network_attach.py`): like `kollab --attach
@@ -629,16 +635,12 @@ connects to the agent's own socket, and both sides carry that socket's bytes
 in `attach_data` requests (compressed, about 200 ms batches, paced under the
 relay's per-device frame budget, `seq` so a retried send lands once). The Mac
 hands the engine a one-shot private socket that it attaches on like any local
-agent's. Rules on the server: only a member device a person there allowed
-(`/connect attach allow|deny <device>`, shown by `/connect attach`), never
-under `trust manual`, under `trust agents` only the agents that device may
-message, never a stranger, at most four open agents per device. `deny` closes
-that device's open agents at once. The server asks these rules again while an
-agent stays open: a `/connect` command that withdraws it (`trust manual`, a
-`deny` of that agent, `revoke`) closes it at once, and any other change
-(membership from the network, an agent stopping) within about five seconds.
-`revoke`, leaving or a new room forgets every `attach allow`, so a device let
-back in must be allowed again.
+agent's. Rules on the server: a member device, by trust as above, never a
+stranger, at most four open agents per device. The server asks these rules
+again while an agent stays open: a `/connect` command that withdraws it
+(`trust manual`, a `deny` of that agent under `trust agents`, `revoke`) closes
+it at once, and any other change (membership from the network, an agent
+stopping) within about five seconds.
 
 ## 6. Commands: keep, rename, remove
 
@@ -657,7 +659,6 @@ Shown in the palette and in `/connect help`:
 | `/connect knocks [everyone\|contacts\|nobody] [for <time>]` | The knock screen: ringing, missed, blocked, contacts. With an argument, who may knock | renamed from `contacts` |
 | `/connect expect <route>`, `block <route>`, `unblock <route>` | Put a route on the contact list (its first knock is accepted); refuse or allow a route's knocks | new |
 | `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers; under `open` they say they have no effect | kept; argument was a 64-hex key |
-| `/connect attach [allow\|deny <device>]` | Who may open this device's agents from theirs (Story 10); bare, the list | new |
 | `/connect revoke <device>` | Remove a device or peer | kept; argument was a 64-hex key |
 | `/connect share <device>` | Share this computer's ChatGPT login with a device on the network (milestone 5, section 9) | new |
 | `/connect leave [domain]` | Disconnect, forget the network and stop reconnecting; the device can then join another by code | renamed from `disconnect` |
