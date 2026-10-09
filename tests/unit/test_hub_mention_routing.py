@@ -82,7 +82,7 @@ def test_web_broadcasts_take_the_terminal_path() -> None:
 
         assert [call.args for call in service.send_hub_user_message.await_args_list] == [
             ("global-broadcast", "ship it"),
-            ("local-broadcast", "hi"),
+            ("broadcast", "hi"),
             ("local-broadcast", "yo"),
         ]
         service.hub_send_msg.assert_not_awaited()

@@ -330,7 +330,7 @@ export function AppSidebar({
             This Computer
             {network.device ? (
               <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal">
-                {`· ${titleCase(network.device)}`}
+                {`· ${network.device}`}
               </span>
             ) : null}
             <span className="ml-auto tabular-nums">{sessions.length + terminals.length}</span>
@@ -470,7 +470,7 @@ export function AppSidebar({
         {remoteGroups.map((group) => (
           <SidebarGroup key={group.device}>
             <SidebarGroupLabel>
-              {titleCase(group.device)}
+              {group.device}
               <span className="ml-auto tabular-nums">{group.agents.length}</span>
             </SidebarGroupLabel>
             <SidebarGroupContent>
@@ -479,7 +479,7 @@ export function AppSidebar({
                   <SidebarMenuItem key={agent.handle || `${agent.name}@${agent.device}`}>
                     <SidebarMenuButton
                       disabled
-                      title={`${titleCase(agent.name)} runs on ${titleCase(agent.device)}`}
+                      title={`${titleCase(agent.name)} runs on ${agent.device}`}
                       className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                     >
                       <GemAvatar

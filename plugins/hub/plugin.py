@@ -253,8 +253,13 @@ CONNECT_OWNED_ELSEWHERE = (
 # What an attached window says when its daemon predates knocks as calls.
 CONNECT_NO_KNOCK_DAEMON = "connect: the kollab on this computer needs an update for knocks"
 _KNOCK_USAGE = 'connect: use /connect knock <route> "text"'
-# The @ menus' broadcast targets (TUI and web), each with its broadcast scope.
-BROADCAST_TARGETS = {"local-broadcast": "", "global-broadcast": "network"}
+# The @ menus' broadcast targets (TUI and web) and their reach: this project,
+# every project folder on this computer, and every computer on the network.
+BROADCAST_TARGETS = {
+    "broadcast": "",
+    "local-broadcast": "machine",
+    "global-broadcast": "network",
+}
 _KNOCKS_USAGE = "connect: use /connect knocks [everyone|contacts|nobody] [for 30m|2h|1d]"
 _KNOCK_FOR = re.compile(r"(?P<count>\d{1,4})(?P<unit>[mhd])\Z")
 
@@ -12396,8 +12401,9 @@ class HubPlugin(BasePlugin):
                 "kind": "broadcast",
             }
             for name, description in (
-                ("local-broadcast", "every agent in this folder"),
-                ("global-broadcast", "every agent in this folder and on your network"),
+                ("broadcast", "every agent in this project"),
+                ("local-broadcast", "every agent on this computer"),
+                ("global-broadcast", "every agent on every computer in your network"),
             )
         ]
         return broadcasts + sorted(
@@ -12517,6 +12523,10 @@ class HubPlugin(BasePlugin):
             return "broadcast sent (hub not fully initialized)"
         agents = self._presence.get_cached_agents()
         base = f"broadcast to {len(agents)} agent(s)"
+        # "machine" and "network" also reach this computer's other project
+        # folders; each folder runs its own mesh.
+        if scope in ("machine", "network"):
+            base += f"; {await self._broadcast_other_folders(msg)} in other folders"
 
         # scope="network": under open trust, also reach every online remote
         # agent (docs/specs/agent-network-simple-flow.md section 7). Any
@@ -12565,6 +12575,22 @@ class HubPlugin(BasePlugin):
             parts = [f"{ident}: {reason}" for ident, reason in rejections]
             base += f" (rejected: {'; '.join(parts)})"
         return base
+
+    async def _broadcast_other_folders(self, msg: HubMessage) -> int:
+        """Send ``msg`` to every live agent in this computer's other project
+        folders, socket to socket; how many took it."""
+        from .presence import get_hub_dir, live_agents_on_machine
+
+        # ponytail: an agent whose folder also joined the network as its own
+        # device hears a global broadcast twice (here and by relay); dedup by
+        # device if one computer ever runs several networked folders.
+        here = get_hub_dir().resolve()
+        sends = [
+            AgentMessenger.send_to_agent(record["socket_path"], msg)
+            for hub_dir, record in live_agents_on_machine()
+            if hub_dir.resolve() != here
+        ]
+        return sum(await asyncio.gather(*sends))
 
     def _format_work(self) -> str:
         if not self._work_queue:
@@ -13066,7 +13092,7 @@ class HubPlugin(BasePlugin):
                 logger.debug("network_status: relay agent unavailable: %s", e)
             relay = getattr(self, "_relay_agent", None)
         if relay is None:
-            return {"device": "", "trust": "", "agents": []}
+            return {"network": "", "device": "", "trust": "", "agents": []}
 
         agents: List[dict] = []
         try:
@@ -13083,14 +13109,19 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug("network_status: remote_agents failed: %s", e)
 
-        device, trust = "", ""
+        network, device, trust = "", "", ""
         try:
+            from .relay_commands import network_label
+
             device = relay.device_name() or ""
             trust = relay.trust_level() or ""
+            domain = self._relay_network_domain()
+            if domain:
+                network = network_label(self._relay_network_name(domain), domain)
         except Exception as e:
             logger.debug("network_status: device/trust unavailable: %s", e)
 
-        return {"device": device, "trust": trust, "agents": agents}
+        return {"network": network, "device": device, "trust": trust, "agents": agents}
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int

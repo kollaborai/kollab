@@ -125,33 +125,44 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-def find_live_socket(identity: str) -> Optional[str]:
-    """Socket path of the newest live agent named ``identity`` on this machine.
+def live_agents_on_machine() -> List[tuple[Path, dict]]:
+    """``(hub_dir, presence record)`` for every live agent on this machine.
 
     Searches every project's hub dir and the global one, so a caller outside
-    the agent's project (an ssh session, say) still finds it. Read-only: no
+    an agent's project (an ssh session, say) still finds it. Read-only: no
     directory is created. A record counts only while its pid is alive and its
-    socket file exists; the newest ``started_at`` wins.
+    socket file exists.
     """
     from kollabor_config.config_utils import get_config_directory
 
     base = get_config_directory()
-    hub_dirs = [base / "hub", *sorted((base / "projects").glob("*/hub"))]
-    best: Optional[tuple[float, str]] = None
-    for hub_dir in hub_dirs:
+    found: List[tuple[Path, dict]] = []
+    for hub_dir in [base / "hub", *sorted((base / "projects").glob("*/hub"))]:
         for pf in (hub_dir / "presence").glob("*.json"):
             try:
                 data = json.loads(pf.read_text())
-                sock = data.get("socket_path") or ""
-                if data.get("identity") != identity or not Path(sock).is_absolute():
-                    continue
-                if not Path(sock).is_socket() or not pid_alive(data.get("pid", 0)):
-                    continue
-                started = float(data.get("started_at") or 0)
+                sock = Path(data.get("socket_path") or "")
+                live = sock.is_absolute() and sock.is_socket()
+                if live and pid_alive(data.get("pid", 0)):
+                    found.append((hub_dir, data))
             except Exception:
                 continue
-            if best is None or started > best[0]:
-                best = (started, sock)
+    return found
+
+
+def find_live_socket(identity: str) -> Optional[str]:
+    """Socket path of the newest live agent named ``identity`` on this machine
+    (any project; see live_agents_on_machine); the newest ``started_at`` wins."""
+    best: Optional[tuple[float, str]] = None
+    for _hub_dir, data in live_agents_on_machine():
+        if data.get("identity") != identity:
+            continue
+        try:
+            started = float(data.get("started_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if best is None or started > best[0]:
+            best = (started, data["socket_path"])
     return best[1] if best else None
 
 

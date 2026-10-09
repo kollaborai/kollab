@@ -10,10 +10,10 @@
         </mxCell>
 
         <!-- lanes -->
-        <mxCell id="laneS" value="Sender: koordinator@alzan-prod-home" style="swimlane;html=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="laneS" value="Sender: koordinator@home-server" style="swimlane;html=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="40" y="60" width="420" height="760" as="geometry" />
         </mxCell>
-        <mxCell id="laneR" value="Receiver: koordinator@synthyo-kollab (Mac)" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="laneR" value="Receiver: koordinator@laptop (Mac)" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="500" y="60" width="860" height="760" as="geometry" />
         </mxCell>
 

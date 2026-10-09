@@ -63,7 +63,17 @@ echo "relay runs ${current:-unknown}; PyPI has $latest: $decision"
 REL="$RELAY_HOME/releases/$(date +%Y%m%d-%H%M%S)-pypi-$latest"
 mkdir -p "$REL"
 "$PYTHON" -m venv "$REL/.venv"
-"$REL/.venv/bin/pip" install -q --disable-pip-version-check --no-cache-dir "kollab==$latest"
+# The JSON API above can lead the index pip installs from by ~10 minutes after a release.
+for i in $(seq 1 40); do
+  "$REL/.venv/bin/pip" install -q --disable-pip-version-check --no-cache-dir "kollab==$latest" 2>"$REL/pip.err" && break
+  if [ "$i" = 40 ]; then
+    cat "$REL/pip.err"
+    echo "kollab==$latest is not installable after 10 min; nothing changed, the next run tries again"
+    rm -r "$REL"
+    exit 1
+  fi
+  sleep 15
+done
 (cd "$REL" && KOLLAB_NO_KEYRING=1 .venv/bin/python -c "import plugins.hub.relay_service, plugins.hub.relay_runtime")
 
 HEALTH_URL=$("$PYTHON" -c "import json, sys; c = json.load(open(sys.argv[1])); print('http://%s:%s/relay/v1/health' % (c['bind_host'], c['health_port']))" "$RELAY_CONFIG")

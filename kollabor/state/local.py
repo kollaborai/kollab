@@ -59,12 +59,8 @@ logger = logging.getLogger(__name__)
 _HUB_MENTION_RE = re.compile(
     r"^@([A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9][A-Za-z0-9-]*)?)\s+(.+)$", re.DOTALL
 )
-# The web composer's broadcast targets; plain @broadcast stays this computer.
-_HUB_BROADCASTS = {
-    "broadcast": "local-broadcast",
-    "local-broadcast": "local-broadcast",
-    "global-broadcast": "global-broadcast",
-}
+# The web composer's broadcast targets: this project, this computer, the network.
+_HUB_BROADCASTS = {"broadcast", "local-broadcast", "global-broadcast"}
 
 
 def _json_safe_web_value(value: Any) -> Any:
@@ -2683,7 +2679,7 @@ class LocalStateService(StateService):
         """Send one chat mention through Hub and publish a web turn."""
         from kollabor_tui.display_tap import publish_semantic
 
-        broadcast = _HUB_BROADCASTS.get(target.lower())
+        broadcast = target.lower() if target.lower() in _HUB_BROADCASTS else None
         is_broadcast = broadcast is not None
         metadata = {
             "hub_message": text,

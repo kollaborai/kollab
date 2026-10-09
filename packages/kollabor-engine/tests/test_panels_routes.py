@@ -326,3 +326,97 @@ class TestApplyProfileMirror:
         session = SimpleNamespace(session_id="s", profile="keep")
         apply_profile_mirror(session, "opus", "opus-5")
         assert session.profile == "keep"
+
+
+class TestNetworkOwner:
+    """Only one daemon per folder runs the network; the others' Network panel is read-only."""
+
+    READ_ONLY = {"panel": "connect", "read_only": True, "notice": "Another window..."}
+    FULL = {"panel": "connect", "summary": [{"label": "Connection", "value": "Connected"}]}
+
+    def _folder(self, make_session, sid, folder, connect, **state):
+        def describe(name, params):
+            return connect if name == "connect" else {"panel": name, "from": sid}
+
+        state.setdefault("get_panel", AsyncMock(side_effect=describe))
+        session = make_session(sid, **state)
+        session.workspace = folder
+        return session
+
+    @pytest.mark.asyncio
+    async def test_a_chat_that_does_not_run_the_network_gets_the_owner_panel(self, client, make_session):
+        self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+        owner = self._folder(make_session, "sess_owner", "/w", self.FULL)
+        elsewhere = self._folder(make_session, "sess_elsewhere", "/x", self.FULL)
+
+        response = await client.get("/sessions/sess_chat/panels/connect")
+
+        assert response.status_code == 200
+        assert response.json() == self.FULL
+        owner.state.get_panel.assert_awaited_once_with("connect", {})
+        elsewhere.state.get_panel.assert_not_awaited()
+        _no_store(response)
+
+    @pytest.mark.asyncio
+    async def test_the_knocks_screen_and_actions_go_to_the_owner(self, client, make_session):
+        chat = self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+        owner = self._folder(make_session, "sess_owner", "/w", self.FULL)
+
+        knocks = await client.get("/sessions/sess_chat/panels/connect-knocks")
+        accepted = await client.post(
+            "/sessions/sess_chat/panels/connect-knocks/actions/accept", json={"id": "k1"}
+        )
+
+        assert knocks.json() == {"panel": "connect-knocks", "from": "sess_owner"}
+        assert accepted.status_code == 200
+        owner.state.panel_action.assert_awaited_once_with("connect-knocks", "accept", {"id": "k1"})
+        chat.state.panel_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_owner_answers_itself_in_one_call(self, client, make_session):
+        owner = self._folder(make_session, "sess_owner", "/w", self.FULL)
+        peer = self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+
+        response = await client.get("/sessions/sess_owner/panels/connect")
+
+        assert response.json() == self.FULL
+        owner.state.get_panel.assert_awaited_once_with("connect", {})
+        peer.state.get_panel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_owner_among_the_sessions_the_read_only_view_stays(self, client, make_session):
+        # A terminal window in the folder runs the network.
+        self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+        self._folder(make_session, "sess_other", "/w", self.READ_ONLY)
+
+        response = await client.get("/sessions/sess_chat/panels/connect")
+
+        assert response.json() == self.READ_ONLY
+
+    @pytest.mark.asyncio
+    async def test_a_peer_without_a_network_is_not_taken_for_the_owner(self, client, make_session):
+        self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+        self._folder(make_session, "sess_starting", "/w", {"panel": "connect", "summary": [], "notice": "unavailable"})
+
+        response = await client.get("/sessions/sess_chat/panels/connect")
+
+        assert response.json() == self.READ_ONLY
+
+    @pytest.mark.asyncio
+    async def test_a_chat_without_a_folder_runs_in_the_engine_folder(self, client, make_session):
+        import os
+
+        self._folder(make_session, "sess_chat", None, self.READ_ONLY)
+        self._folder(make_session, "sess_owner", os.getcwd(), self.FULL)
+
+        response = await client.get("/sessions/sess_chat/panels/connect")
+
+        assert response.json() == self.FULL
+
+    @pytest.mark.asyncio
+    async def test_other_panels_never_ask_for_the_network(self, client, make_session):
+        chat = self._folder(make_session, "sess_chat", "/w", self.READ_ONLY)
+
+        await client.get("/sessions/sess_chat/panels/config")
+
+        chat.state.get_panel.assert_awaited_once_with("config", {})

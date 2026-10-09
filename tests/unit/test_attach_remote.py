@@ -306,6 +306,17 @@ def test_find_live_socket_skips_missing_socket_and_relative_path(where_home):
     assert presence.find_live_socket("lapis") is None
 
 
+def test_live_agents_on_machine_lists_each_live_agent_with_its_hub(where_home):
+    home, socks = where_home.home, where_home.socks
+    one, two = home / "projects" / "one" / "hub", home / "projects" / "two" / "hub"
+    sock = _unix_socket(socks / "a.sock")
+    _record(one, "lapis-1", "lapis", os.getpid(), sock, 1.0)
+    _record(two, "ruby-1", "ruby", os.getpid(), sock, 2.0)
+    _record(two, "opal-1", "opal", where_home.dead_pid, sock, 3.0)
+    found = [(hub, rec["identity"]) for hub, rec in presence.live_agents_on_machine()]
+    assert found == [(one, "lapis"), (two, "ruby")]
+
+
 def test_find_live_socket_creates_nothing(where_home):
     assert presence.find_live_socket("lapis") is None
     assert not where_home.home.exists()
