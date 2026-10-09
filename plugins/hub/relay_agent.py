@@ -67,6 +67,9 @@ MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
 # A peer whose directory has not been read for this long is gone (the refresh beat is 15 s).
 DIRECTORY_STALE_SECONDS = 45
+# A read that asks the peers reuses an answer at most this old. It was the 15 s beat, so a
+# reply to an agent that came online just after a refresh failed as unknown for up to 15 s.
+DIRECTORY_REFETCH_SECONDS = 2
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
 # The directory forgets a device's consent after a day; repeating it well inside that.
@@ -566,8 +569,8 @@ class RelayAgentBridge:
         parsed = parse_handle(handle)
         matches = []
         # A miss in the cached roster asks the peers before it says unknown:
-        # m1 on f8c57af refused a reply to an online agent, and the same call
-        # worked 7 s later, once the refresher had read that peer.
+        # m1 refused a reply to an agent that had just come online, and the
+        # same call worked seconds later, once that peer was read again.
         for cached in (True, False) if parsed else ():
             matches = [
                 row
@@ -2349,7 +2352,8 @@ class RelayAgentBridge:
                 # seconds past its TTL: the refresher runs on the same 15 s
                 # beat, and skipping the entry would flash the device offline.
                 if not cached or (
-                    not params.get("cached") and time.monotonic() - cached[0] > 15
+                    not params.get("cached")
+                    and time.monotonic() - cached[0] > DIRECTORY_REFETCH_SECONDS
                 ):
                     if params.get("cached"):
                         continue

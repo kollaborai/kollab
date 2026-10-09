@@ -7606,6 +7606,21 @@ class HubPlugin(BasePlugin):
                         "even to a greeting: your plain-text reply is sent "
                         "back to them."
                     )
+                elif (
+                    relay
+                    and relay._turn.get() is not None
+                    and message is relay._injecting_message
+                ):
+                    # A remote task, or its asker's answer: the final reply goes
+                    # back by itself. Told only by hub_msg's refusal, models sent
+                    # the answer with hub_msg first and showed that error.
+                    sender = (message.metadata or {}).get("display_from") or "The sender"
+                    guidance = (
+                        f"{sender} on another machine is waiting for this. Your "
+                        "final reply in this turn is returned to them "
+                        "automatically: write the answer as your normal reply, "
+                        "not with hub_msg."
+                    )
                 else:
                     guidance = (
                         "Handle this once if actionable. If it is only an "

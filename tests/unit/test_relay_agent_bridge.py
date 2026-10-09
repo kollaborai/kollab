@@ -818,6 +818,9 @@ async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
     await left.send(address(right), "Create proof.txt")
     await right._tick()
     sender = right.active.record["payload"]["from"]
+    # The model is told before it starts, so it need not learn it from the refusal.
+    told = right_model.conversation_history[-1].content
+    assert "returned to them automatically" in told and "not with hub_msg" in told
 
     refused = await in_turn(
         right_model,
@@ -2954,13 +2957,15 @@ async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver
 
 @pytest.mark.asyncio
 async def test_an_agent_the_cached_roster_has_not_read_yet_still_resolves(bridges):
-    # Live m1 on f8c57af: a reply to an online agent failed as "unknown
-    # agent@device", and the same call worked 7 s later, once the 15 s
-    # refresher had read that peer.
+    # Live m1 on f8c57af and 3412aea: the server's first reply to the Mac agent
+    # failed as "unknown agent@device", and the same call worked seconds later.
+    # The server had read the Mac's directory just before that agent appeared,
+    # and a read that asks the peers reused that answer for up to 15 s.
     members, _ = bridges
     (left, *_), (right, *_) = members
     name = await handle(left, right)
-    left._cache.clear()
+    for key, (stamp, _rows) in list(left._cache.items()):
+        left._cache[key] = (stamp - 3, [])
     assert name not in [row["handle"] for row in await left.remote_agents()]
     assert await left.resolve_handle(name) == address(right)
     with pytest.raises(RelayError, match="unknown agent@device"):
