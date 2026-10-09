@@ -56,6 +56,7 @@ from .relay_state import (
     MAX_APPROVALS,
     RelayError,
     RelayStateStore,
+    failure_text,
     validate_key,
     validate_public_key,
 )
@@ -3099,7 +3100,13 @@ class RelayAgentBridge:
             if active.record["payload"]["kind"] == "message" and not active.replied:
                 await self.send(active.record["payload"]["from"], content)
             active.finished = True
-        except Exception:
+        except Exception as error:
+            # The reason would otherwise be lost: the task only records the line below.
+            logger.warning(
+                "network: final reply to request %s not delivered (%s)",
+                active.record["id"],
+                failure_text(error),
+            )
             await self._stop_active("failed", "final response could not be delivered")
 
     async def harness_context(self):
