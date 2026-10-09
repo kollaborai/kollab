@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A web chat still starting showed for a moment as a second agent in the sidebar, and opening that row attached a second session to the same agent.
 - After New Session, or a click on another chat, the open chat's message box stayed live for the seconds the switch took: a message typed there went to the chat being left, or was lost. The box now waits, and says what it is waiting for.
 
+### Security
+- A relay takes up to 64 connections from one address (was 16), so a team behind one office IP fits, and up to 4,096 per worker (was 512), so a flood needs far more addresses. The nginx config from `--print nginx` caps connections per address too; Caddy has no such limit and says so.
+- A relay on the same computer as nginx can listen on a unix socket (`--unix-socket`), so no other program on that computer can pose as the proxy.
+- When two of your computers claim the same direct-connection name, the one you approved first keeps it, even while it is offline; the name never moves to the other computer.
+- Direct connections never dial link-local addresses, and dial loopback only for a device on this same computer.
+- An agent you accepted from outside your network can no longer carry or forward traffic inside it.
+- Removing a device also drops its direct connection for good; approved again, it connects through the relay.
+- Member lists are dated, so an old copy replayed later cannot remove devices you added since. Devices on 0.13 and 0.14 keep working; their lists stay undated until they update.
+- A new device refuses a settings bundle older than its join, and settings sync never writes through a symlink. A `config.json` or `mcp_settings.json` that is itself a symlink is no longer synced (it was replaced by a plain file).
+- Discovery keeps at most 8 addresses per computer, so one computer cannot crowd out the rest.
+- A remote agent's failure text prints as its own message, with control characters removed, instead of as your command's error. Agent messages with C1 control characters are refused.
+
 ## [0.14.0] - 2026-10-08
 
 ### Changed
