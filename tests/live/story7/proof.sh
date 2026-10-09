@@ -664,6 +664,7 @@ QRE='answer with /connect answer [0-9]+'
 QB=$(count_pat mac "$QRE")
 ASK='before doing anything else, ask me one question: should the report be red or blue? wait for my answer, then reply with the word color and my answer'
 run_cmd mac "/connect send $REMOTE \"$ASK\"" "request [0-9]+ to ${REMOTE}: [a-z_]+" 120 || true
+S9_REQ=$(grep -oE 'request [0-9]+' <<<"${OUT:-}" | grep -oE '[0-9]+' || true)
 if wait_for mac "$QRE" 120 "$QB"; then
   sleep 3; cap mac s9-mac-question
   QN=$(raw mac 500 | grep -oE 'answer with /connect answer [0-9]+' | tail -1 | grep -oE '[0-9]+$' || true)
@@ -688,7 +689,8 @@ if wait_for mac "$QRE" 120 "$QB"; then
   fi
 else
   cap mac s9-mac-no-question; cap srv s9-srv-no-question
-  if grep -Eq 'not_authorized|rejected' <<<"$(fl mac 60)"; then
+  # This request's own state lines only: r2's intended refusal can still be on screen.
+  if [ -n "$S9_REQ" ] && grep -Eq "request $S9_REQ (to|on) [^:]+: (not_authorized|rejected)" <<<"$(fl mac 300)"; then
     rec s9-answer FAIL "s9-mac-no-question.txt" "the server refused the request (the Mac pane shows a rejection), so no question could be asked"
   else
     rec s9-answer SKIP "s9-mac-no-question.txt" "the server agent asked no question within 240s of a request that told it to ask one (model behavior); /connect answer not exercised"
