@@ -35,7 +35,7 @@ def store(path, data):
     os.replace(tmp, path)
 
 
-def config(workspace, port, cert, key, ca):
+def config(workspace, port, cert, key, ca, host):
     path = Path(workspace) / ".kollab" / "config.json"
     backup = path.with_name("config.json.m3-bak")
     none_marker = path.with_name("config.json.m3-none")
@@ -50,9 +50,9 @@ def config(workspace, port, cert, key, ca):
     hub.update(
         {
             "endpoint_enabled": True,
-            "endpoint_host": "127.0.0.1",
+            "endpoint_host": host,
             "endpoint_port": int(port),
-            "endpoint_advertise_host": "127.0.0.1",
+            "endpoint_advertise_host": host,
             "endpoint_tls_cert": cert,
             "endpoint_tls_key": key,
             "endpoint_tls_ca": ca,

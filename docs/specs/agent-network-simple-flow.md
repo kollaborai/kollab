@@ -1134,9 +1134,9 @@ names either way and no command changed.
   a per-process direct session that its locator or its signed record names. Two devices
   on one host work the same way: a discovery datagram from this host's own interface
   address is accepted (a cloud host's address is public); any other public source is not.
-  That address is also the only proof that a loopback endpoint (`127.0.0.0/8`, also as
-  `::ffff:127.x`) belongs to a device on this host: a locator heard from any other
-  source is never dialed on loopback, and a link-local address is never dialed.
+  Loopback (`127.0.0.0/8`, `::1`, also as `::ffff:127.x`) and link-local addresses are
+  never dialed, whoever signed the locator: an endpoint naming one points the dialing
+  device at its own services. Two devices on one host advertise the host's own address.
 - **Endpoint names.** A locator vouches for its endpoint name only when an approved
   device's relay key signed it. The local registry can only deny: a name it holds under
   another key, or rejected, is never admitted. When two members claim one name with

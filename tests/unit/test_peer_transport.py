@@ -14,6 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
@@ -178,17 +179,19 @@ async def mesh_network(tmp_path):
         await wire.close()
 
 
-# A device on this host announces from one of this host's own interface addresses;
-# a loopback endpoint is dialed for no other device.
-HOST_ADDRESS = "192.0.2.7"
-
-
 @pytest.fixture
-def host_address(monkeypatch):
-    monkeypatch.setattr(
-        PeerMeshRuntime, "_own_addresses", staticmethod(lambda: frozenset({HOST_ADDRESS}))
-    )
-    return HOST_ADDRESS
+def loopback_endpoints(monkeypatch):
+    """Dial the endpoint's loopback address as given.
+
+    These tests drive a real TLS link on 127.0.0.1, which the address policy never
+    dials; that policy has its own tests in test_peer_transport_rules.py.
+    """
+
+    async def pin(self, endpoint):
+        parsed = urlsplit(endpoint)
+        return parsed.hostname, parsed.port, (parsed.hostname,)
+
+    monkeypatch.setattr(PeerMeshRuntime, "_resolve_direct_endpoint", pin)
 
 
 @pytest.mark.asyncio
@@ -489,7 +492,7 @@ def _mint_tls_cert(tmp_path: Path) -> tuple[str, str]:
 
 @pytest.mark.asyncio
 async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
-    tmp_path, host_address
+    tmp_path, loopback_endpoints
 ):
     cert, key = _mint_tls_cert(tmp_path)
     server_ssl = build_server_ssl_context(cert, key)
@@ -551,7 +554,6 @@ async def test_direct_secure_record_uses_tls_identity_and_rejects_other_methods(
         "endpoint_designation": "server-agent",
         "endpoint_public_key": server_key,
         "endpoint": f"kollab+tls://127.0.0.1:{port}",
-        "source": host_address,
         "session_id": secrets.token_hex(16),
         "revision": 1,
         "issued_at": now,
@@ -634,7 +636,7 @@ async def test_locator_only_peer_is_reached_directly_and_refreshed(mesh_network)
 
 @pytest.mark.asyncio
 async def test_direct_peer_forward_uses_tls_identity_and_bounded_listener(
-    tmp_path, monkeypatch, host_address
+    tmp_path, monkeypatch, loopback_endpoints
 ):
     cert, key = _mint_tls_cert(tmp_path)
     server_ssl = build_server_ssl_context(cert, key)
@@ -698,7 +700,6 @@ async def test_direct_peer_forward_uses_tls_identity_and_bounded_listener(
         "endpoint_designation": "server-agent",
         "endpoint_public_key": server_key,
         "endpoint": f"kollab+tls://127.0.0.1:{port}",
-        "source": host_address,
         "session_id": secrets.token_hex(16),
         "revision": 1,
         "issued_at": now,

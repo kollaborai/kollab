@@ -6,7 +6,6 @@ import ipaddress
 import json
 import socket
 import time
-from dataclasses import replace
 
 import pytest
 import rfc8785
@@ -498,20 +497,6 @@ def test_one_member_rotating_endpoint_keys_cannot_evict_other_members(monkeypatc
         await service.close()
 
     asyncio.run(exercise())
-
-
-def test_candidate_carries_its_datagram_source_outside_the_signed_locator():
-    service, wire, seen, _store = _service_for_scan(clock=_Clock(1_800_000_000))
-
-    async def exercise():
-        await service._process_datagram(_packet(wire), "192.168.1.25")
-        await service.close()
-
-    asyncio.run(exercise())
-    (candidate,) = seen
-    assert candidate.source == "192.168.1.25"
-    assert "source" not in candidate.as_dict()
-    assert candidate == replace(candidate, source="")
 
 
 def test_expired_during_verifier_or_revision_wait_is_never_notified():

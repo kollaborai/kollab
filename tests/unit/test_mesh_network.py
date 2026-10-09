@@ -14,9 +14,10 @@ import re
 import secrets
 import socket
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
@@ -176,17 +177,20 @@ def approve_all(*nodes):
                 node.bridge.bind_peer_device(other.key, other.name)
 
 
-HOST_ADDRESS = "192.0.2.7"
+async def _dial_as_given(endpoint: str) -> tuple[str, int, tuple[str, ...]]:
+    parsed = urlsplit(endpoint)
+    return parsed.hostname, parsed.port, (parsed.hostname,)
 
 
 def heard_from_this_host(receiver: Node, wire: dict, normalized: dict):
-    """A locator as the UDP discovery service hands it over: heard from this host's own address.
+    """A locator as the UDP discovery service hands it over.
 
-    These nodes share one host and listen on loopback, which peer_transport accepts only
-    from a device heard on this host's own interface address.
+    These nodes share one host and listen on loopback, which peer_transport never
+    dials (that policy has its own tests in test_peer_transport_rules.py), so the
+    receiver dials the endpoint as given.
     """
-    receiver.mesh._own_addresses = lambda: frozenset({HOST_ADDRESS})
-    return replace(_normalize_candidate(wire, normalized), source=HOST_ADDRESS)
+    receiver.mesh._resolve_direct_endpoint = _dial_as_given
+    return _normalize_candidate(wire, normalized)
 
 
 def deliver_locator(receiver: Node, sender: Node) -> None:

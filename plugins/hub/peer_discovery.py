@@ -21,8 +21,7 @@ import socket
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
-from dataclasses import field as dataclass_field
+from dataclasses import dataclass
 from typing import Any
 
 import rfc8785
@@ -98,9 +97,6 @@ class PeerLocatorCandidate:
     issued_at: int
     expires_at: int
     digest: str
-    # Where the datagram came from. Not part of the signed locator, so it is
-    # left out of equality and of as_dict().
-    source: str = dataclass_field(default="", compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a detached normalized value for a store adapter."""
@@ -588,7 +584,6 @@ class PeerDiscoveryService:
                 if normalized is None:
                     raise PeerDiscoveryError("locator verification failed")
                 candidate = _normalize_candidate(wire, normalized)
-                candidate = replace(candidate, source=source)
                 async with self._accept_lock:
                     if self._closed:
                         return

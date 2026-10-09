@@ -21,22 +21,11 @@ from plugins.hub.peer_router import PeerRouteError, TransientPeerDeliveryError
 from plugins.hub.peer_transport import PeerMeshRuntime, SQLitePeerLocatorStore
 from plugins.hub.relay_client import RelayClient
 from plugins.hub.secure_conversation import SecureConversationTransport
-from tests.unit.test_peer_transport import host_address, mesh_network  # noqa: F401
+from tests.unit.test_peer_transport import mesh_network  # noqa: F401
 
 
 def key() -> str:
     return SigningKey.generate().verify_key.encode().hex()
-
-
-class Heard:
-    """A locator candidate with the source address UDP discovery heard it from."""
-
-    def __init__(self, candidate: PeerLocatorCandidate, source: str = "") -> None:
-        self._candidate = candidate
-        self.source = source
-
-    def as_dict(self) -> dict:
-        return self._candidate.as_dict()
 
 
 def locator(
@@ -46,29 +35,25 @@ def locator(
     *,
     revision: int = 1,
     endpoint: str = "kollab+tls://192.0.2.9:8801",
-    source: str = "",
-) -> Heard:
+) -> PeerLocatorCandidate:
     now = int(time.time())
-    return Heard(
-        PeerLocatorCandidate(
-            relay_public_key=relay_key,
-            endpoint_designation=designation,
-            endpoint_public_key=endpoint_key or key(),
-            endpoint=endpoint,
-            session_id=secrets.token_hex(16),
-            revision=revision,
-            issued_at=now,
-            expires_at=now + 120,
-            digest=secrets.token_hex(32),
-        ),
-        source,
+    return PeerLocatorCandidate(
+        relay_public_key=relay_key,
+        endpoint_designation=designation,
+        endpoint_public_key=endpoint_key or key(),
+        endpoint=endpoint,
+        session_id=secrets.token_hex(16),
+        revision=revision,
+        issued_at=now,
+        expires_at=now + 120,
+        digest=secrets.token_hex(32),
     )
 
 
-def deliver(mesh: PeerMeshRuntime, heard: Heard) -> None:
+def deliver(mesh: PeerMeshRuntime, candidate: PeerLocatorCandidate) -> None:
     """What UDP discovery does with a verified datagram, minus the socket."""
-    assert mesh.locator_store.accept_candidate(heard) is True
-    mesh._accept_locator_candidate(heard)
+    assert mesh.locator_store.accept_candidate(candidate) is True
+    mesh._accept_locator_candidate(candidate)
 
 
 # --- 5. a revoked peer's locator does not linger ---------------------------------
@@ -140,36 +125,20 @@ async def local_mesh(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_loopback_is_dialed_only_for_a_device_heard_from_this_hosts_address(
-    local_mesh, host_address  # noqa: F811
-):
+async def test_loopback_is_never_dialed(local_mesh):
     mesh = local_mesh(allow_private_network=True)
-    for endpoint, expected in (
-        ("kollab+tls://127.0.0.1:9443", ("127.0.0.1",)),
-        ("kollab+tls://127.8.9.10:9443", ("127.8.9.10",)),
+    for endpoint in (
+        "kollab+tls://127.0.0.1:9443",
+        "kollab+tls://127.8.9.10:9443",
+        "kollab+tls://[::1]:9443",
+        "kollab+tls://[::ffff:7f00:1]:9443",  # ::ffff:127.0.0.1
     ):
-        assert (await mesh._resolve_direct_endpoint(endpoint, source=host_address))[2] == expected
-        for source in ("", "198.51.100.4", "127.0.0.1"):  # no proof, a LAN peer, the loopback itself
-            with pytest.raises(PeerRouteError, match="outside the allowed network"):
-                await mesh._resolve_direct_endpoint(endpoint, source=source)
-    # IPv6 loopback has no same-host proof (sources are IPv4): it stays out.
-    with pytest.raises(PeerRouteError, match="outside the allowed network"):
-        await mesh._resolve_direct_endpoint("kollab+tls://[::1]:9443", source="198.51.100.4")
+        with pytest.raises(PeerRouteError, match="outside the allowed network"):
+            await mesh._resolve_direct_endpoint(endpoint)
 
 
 @pytest.mark.asyncio
-async def test_an_ipv4_mapped_loopback_is_loopback(local_mesh, host_address):  # noqa: F811
-    mesh = local_mesh(allow_private_network=True)
-    endpoint = "kollab+tls://[::ffff:7f00:1]:9443"  # ::ffff:127.0.0.1
-    with pytest.raises(PeerRouteError, match="outside the allowed network"):
-        await mesh._resolve_direct_endpoint(endpoint, source="198.51.100.4")
-    assert (await mesh._resolve_direct_endpoint(endpoint, source=host_address))[1] == 9443
-
-
-@pytest.mark.asyncio
-async def test_a_name_that_resolves_to_loopback_is_loopback(
-    local_mesh, host_address, monkeypatch  # noqa: F811
-):
+async def test_a_name_that_resolves_to_loopback_is_loopback(local_mesh, monkeypatch):
     mesh = local_mesh(allow_private_network=True)
 
     async def rebound(host, port, **_kwargs):
@@ -178,67 +147,36 @@ async def test_a_name_that_resolves_to_loopback_is_loopback(
     monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", rebound)
     with pytest.raises(PeerRouteError, match="outside the allowed network"):
         await mesh._resolve_direct_endpoint("kollab+tls://rebinding.example:9443")
-    assert (
-        await mesh._resolve_direct_endpoint("kollab+tls://rebinding.example:9443", source=host_address)
-    )[2] == ("127.0.0.1",)
 
 
 @pytest.mark.asyncio
-async def test_link_local_is_never_dialed_not_even_for_a_device_on_this_host(
-    local_mesh, host_address  # noqa: F811
-):
+async def test_link_local_is_never_dialed(local_mesh):
     mesh = local_mesh(allow_private_network=True)
     for endpoint in (
         "kollab+tls://169.254.169.254:80",
         "kollab+tls://[fe80::1]:9443",
         "kollab+tls://[::ffff:a9fe:a9fe]:80",  # ::ffff:169.254.169.254
     ):
-        for source in ("", host_address):
-            with pytest.raises(PeerRouteError, match="outside the allowed network"):
-                await mesh._resolve_direct_endpoint(endpoint, source=source)
+        with pytest.raises(PeerRouteError, match="outside the allowed network"):
+            await mesh._resolve_direct_endpoint(endpoint)
     # A LAN address is still a LAN address.
     assert (await mesh._resolve_direct_endpoint("kollab+tls://192.168.1.5:9443"))[2] == ("192.168.1.5",)
 
 
 @pytest.mark.asyncio
-async def test_loopback_needs_the_private_network_opt_in_even_on_this_host(
-    local_mesh, host_address  # noqa: F811
-):
-    mesh = local_mesh()
-    with pytest.raises(PeerRouteError):
-        await mesh._resolve_direct_endpoint("kollab+tls://127.0.0.1:9443", source=host_address)
-
-
-@pytest.mark.asyncio
-async def test_a_remote_members_loopback_locator_is_not_dialed(local_mesh, host_address):  # noqa: F811
+async def test_a_members_loopback_locator_is_not_dialed(local_mesh):
     mesh = local_mesh(
         allow_private_network=True,
         direct_enabled=True,
         endpoint_identity_manager=object(),
         endpoint_designation="client-agent",
     )
-    remote, host = key(), key()
-    for member, source in ((remote, "198.51.100.4"), (host, host_address)):
-        mesh.client.approve(member)
-        deliver(mesh, locator(member, endpoint="kollab+tls://127.0.0.1:1", source=source))
-
-    with pytest.raises(PeerRouteError, match="outside the allowed network"):
-        await mesh._send_direct_secure(remote, "secure_packet", {}, timeout=1)
-    # The device on this host is dialed: nothing listens on port 1, so the dial
-    # itself is what fails.
-    with pytest.raises(TransientPeerDeliveryError, match="unavailable"):
-        await mesh._send_direct_secure(host, "secure_packet", {}, timeout=1)
-
-
-@pytest.mark.asyncio
-async def test_the_source_address_survives_in_the_locator_store(local_mesh):
-    mesh = local_mesh()
     member = key()
     mesh.client.approve(member)
-    deliver(mesh, locator(member, source="192.0.2.7"))
-    assert mesh._locators[member]["source"] == "192.0.2.7"
-    mesh._locators.clear()  # a restart: the locator comes back from the store
-    assert mesh._locator_for_peer(member)["source"] == "192.0.2.7"
+    deliver(mesh, locator(member, endpoint="kollab+tls://127.0.0.1:1"))
+
+    with pytest.raises(PeerRouteError, match="outside the allowed network"):
+        await mesh._send_direct_secure(member, "secure_packet", {}, timeout=1)
 
 
 # --- 3. an accepted stranger is refused inside forwarding ------------------------

@@ -153,20 +153,24 @@ rec pre PASS - "sessions $M1_MAC_SESSION and $M1_SRV_SESSION up; ports $M3_B_POR
 
 # ============================================ c1: B listens on its TLS endpoint ====
 say "c1: TLS endpoint and LAN discovery on B"
-m1_ssh bash -s -- "$M3_TLS" "$M1_SRV_VENV" "$M1_SRV_ROOT" <<'REMOTE' || abort c1-endpoints "could not create the loopback certificate on the server"
+# B and C share a host, but loopback is never dialed (#123 item 7): both listen on the host's own address,
+# the one their LAN discovery datagrams come from.
+M3_ADDR=$(m1_ssh "python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect((\"239.255.77.77\", 9)); print(s.getsockname()[0])'" 2>/dev/null || true)
+[ -n "$M3_ADDR" ] || abort c1-endpoints "could not read the server's own address toward the discovery group"
+m1_ssh bash -s -- "$M3_TLS" "$M1_SRV_VENV" "$M1_SRV_ROOT" "$M3_ADDR" <<'REMOTE' || abort c1-endpoints "could not create the endpoint certificate on the server"
 set -e
-tls=$1; venv=$2; root=$3
+tls=$1; venv=$2; root=$3; addr=$4
 umask 077; mkdir -p "$tls"
-openssl req -x509 -newkey rsa:2048 -keyout "$tls/key.pem" -out "$tls/cert.pem" -days 1 -nodes -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+openssl req -x509 -newkey rsa:2048 -keyout "$tls/key.pem" -out "$tls/cert.pem" -days 1 -nodes -subj "/CN=$addr" -addext "subjectAltName=IP:$addr" 2>/dev/null
 "$venv/bin/python" "$root/bin/m3probe.py" ca "$tls/cert.pem" "$tls/ca.pem" "$("$venv/bin/python" -c 'import certifi; print(certifi.where())')"
 REMOTE
-srv_probe config "$M1_SRV_WS" "$M3_B_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" >/dev/null
+srv_probe config "$M1_SRV_WS" "$M3_B_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" "$M3_ADDR" >/dev/null
 stop_ws "$M1_SRV_SESSION" "$M1_SRV_WS" >/dev/null
 launch_srv "$M1_SRV_SESSION" "$M1_SRV_WS"
 wait_ready srv || abort c1-endpoints "B's TUI showed nothing 90s after the restart"
 if wait_listening tcp "$M3_B_PORT" 90 && wait_listening udp "$M3_DISCOVERY_PORT" 30; then
   cap srv c1-01-b-restarted
-  rec c1-endpoints PASS c1-01-b-restarted.txt "B restarted; TLS endpoint on 127.0.0.1:$M3_B_PORT and LAN discovery (udp $M3_DISCOVERY_PORT) are bound"
+  rec c1-endpoints PASS c1-01-b-restarted.txt "B restarted; TLS endpoint on the host's own address, port $M3_B_PORT, and LAN discovery (udp $M3_DISCOVERY_PORT) are bound"
 else
   cap srv c1-01-b-not-listening
   abort c1-endpoints "B is not listening on tcp $M3_B_PORT / udp $M3_DISCOVERY_PORT 90s after the restart" c1-01-b-not-listening.txt
@@ -175,7 +179,7 @@ fi
 # ============================================== c2: C joins A's network by code ====
 say "c2: C joins A's network"
 m1_ssh "mkdir -p '$M3_C_WS'"
-srv_probe config "$M3_C_WS" "$M3_C_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" >/dev/null
+srv_probe config "$M3_C_WS" "$M3_C_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" "$M3_ADDR" >/dev/null
 launch_srv "$M3_C_SESSION" "$M3_C_WS" "--as $M3_C_AS"
 wait_ready c || abort c2-c-joins "C's TUI showed nothing 90s after launch"
 trust_c
@@ -274,7 +278,7 @@ cap c c4-02-c-relayless
 if ! grep -q 'reconnect on launch disabled' <<<"$C_ST"; then
   abort c4-c-relayless "C's /connect status lacks 'reconnect on launch disabled' after enabled=false: it is back on the relay, or the status shown is not C's" c4-02-c-relayless.txt
 elif wait_listening tcp "$M3_C_PORT" 60; then
-  rec c4-c-relayless PASS c4-02-c-relayless.txt "C restarted with enabled=false: its status says 'reconnect on launch disabled'; TLS endpoint on 127.0.0.1:$M3_C_PORT"
+  rec c4-c-relayless PASS c4-02-c-relayless.txt "C restarted with enabled=false: its status says 'reconnect on launch disabled'; TLS endpoint on the host's own address, port $M3_C_PORT"
 else
   abort c4-c-relayless "C is not listening on tcp $M3_C_PORT after the restart" c4-02-c-relayless.txt
 fi

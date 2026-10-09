@@ -505,9 +505,6 @@ def _candidate_dict(candidate: object) -> dict[str, Any]:
         )
     except PeerLocatorError as exc:
         raise PeerRouteError("invalid peer locator candidate") from exc
-    # Where the datagram came from rides with the locator, unsigned: it is what
-    # tells a device on this host from a remote one (`_resolve_direct_endpoint`).
-    source = candidate.get("source") if isinstance(candidate, dict) else getattr(candidate, "source", "")
     return {
         **{
             name: value[name]
@@ -515,7 +512,6 @@ def _candidate_dict(candidate: object) -> dict[str, Any]:
             if name != "v"
         },
         "digest": value["digest"],
-        "source": source if isinstance(source, str) and len(source) <= 45 else "",
     }
 
 
@@ -866,7 +862,6 @@ class PeerMeshRuntime:
             or value["expires_at"] <= int(time.time())
         ):
             return
-        value["source"] = str(getattr(candidate, "source", "") or "")
         self.locator_store.remember_claim(
             relay_key,
             value["endpoint_designation"],
@@ -888,15 +883,11 @@ class PeerMeshRuntime:
             return None
         return value
 
-    async def _resolve_direct_endpoint(
-        self, endpoint: str, *, source: str = ""
-    ) -> tuple[str, int, tuple[str, ...]]:
+    async def _resolve_direct_endpoint(self, endpoint: str) -> tuple[str, int, tuple[str, ...]]:
         """Pin the addresses a locator's endpoint resolves to, or refuse them all.
 
-        `source` is the address the locator's datagram came from. A device on this
-        host announces from one of this host's own interface addresses, which a
-        remote member cannot send from; that is the only proof a loopback endpoint
-        belongs to the device that signed it. Link-local addresses are never dialed.
+        Loopback and link-local addresses are never dialed: a locator naming one
+        points this device at its own services, whoever signed it.
         """
         try:
             host, port = validate_peer_locator_endpoint(
@@ -930,7 +921,7 @@ class PeerMeshRuntime:
                 or address.is_multicast
                 or address.is_reserved
                 or address.is_link_local
-                or (address.is_loopback and not (source and source in self._own_addresses()))
+                or address.is_loopback
                 or (not self.allow_private_network and not address.is_global)
             ):
                 raise PeerRouteError("direct peer resolved outside the allowed network")
@@ -1001,9 +992,7 @@ class PeerMeshRuntime:
             )
         except ImportError as exc:
             raise TransientPeerDeliveryError("direct peer transport is unavailable") from exc
-        host, port, addresses = await self._resolve_direct_endpoint(
-            locator["endpoint"], source=str(locator.get("source", ""))
-        )
+        host, port, addresses = await self._resolve_direct_endpoint(locator["endpoint"])
         ssl_context = build_client_ssl_context(self.endpoint_tls_ca)
         request_line = rfc8785.dumps(request) + b"\n"
         if len(request_line) > REMOTE_PEER_FORWARD_MAX_FRAME_BYTES:
