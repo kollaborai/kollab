@@ -185,6 +185,39 @@ async def test_a_reply_sent_as_kind_answer_is_the_requests_reply():
 
 
 @pytest.mark.asyncio
+async def test_a_reply_that_misnames_the_askers_device_still_reaches_the_asker():
+    # Live m1 and story 7: answering models retyped a long device name wrong
+    # (lapis@laptop for lapis@laptop-kollab here) and got "unknown agent@device".
+    sent: list = []
+    plugin, llm = _responder(sent)
+    online = {ASKER, "lapis@home-server"}
+
+    def resolve(handle):
+        if handle not in online:
+            raise RelayError("unknown agent@device: run /connect status to see who is online")
+        return f"relay:resolved:{handle}"
+
+    plugin._relay_agent.resolve_handle = resolve
+    await plugin._on_message_received(_request(T1, W1))
+    await plugin._set_working({"messages": []})
+    llm.is_processing = True
+
+    async def hub_msg(to, content):
+        return await plugin._handle_hub_msg_tool({"id": to, "to": to, "content": content})
+
+    misnamed = await hub_msg("lapis@laptop", "wg0 is healthy")
+    other_device = await hub_msg("lapis@home-server", "fyi: wg0 is healthy")
+    other_name = await hub_msg("ops@laptop", "ops, wg0 is healthy")
+
+    assert misnamed.success and misnamed.output == f"sent to {ASKER}"
+    assert other_device.success and not other_name.success
+    assert [(s["address"], s["thread_id"] == T1, s["reply_to"]) for s in _replies(sent)] == [
+        (f"relay:resolved:{ASKER}", True, W1),
+        ("relay:resolved:lapis@home-server", False, ""),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_two_requests_answered_in_reverse_order_never_cross():
     sent: list = []
     plugin, llm = _responder(sent)

@@ -2785,6 +2785,33 @@ class HubPlugin(BasePlugin):
         turn = getattr(self, "_net_turn", None)
         return turn if turn is not None and turn.handle == handle else None
 
+    async def _asker_handle(self, target: str) -> str:
+        """``target``, or the asker's handle when it misnames the asker.
+
+        While a turn answers a remote request, models retype a long device name
+        wrong (koordinator@host-kollab-m1-dev29 for ...-m1-mac-0-14-1-dev29, or
+        their own device) and got "unknown agent@device". A handle with the
+        asker's agent name that names no online agent means the asker.
+        """
+        turn = getattr(self, "_net_turn", None)
+        typed, asker = parse_handle(target or ""), parse_handle(turn.handle if turn else "")
+        if not typed or not asker or typed[0] != asker[0] or format_handle(*typed) == turn.handle:
+            return target
+        from .relay_state import RelayError
+
+        try:
+            address = self._relay_agent.resolve_handle(format_handle(*typed))
+            if inspect.isawaitable(address):
+                await address
+        except RelayError as exc:
+            # resolve_handle's own wording: "ambiguous" names online agents.
+            if str(exc).startswith("unknown agent@device"):
+                logger.info("hub_msg to %s answers %s's request", target, turn.handle)
+                return turn.handle
+        except Exception:
+            pass
+        return target
+
     def network_turn_open(self) -> bool:
         """True while a delivered remote request's turn has not ended."""
         return getattr(self, "_net_turn", None) is not None
@@ -3003,8 +3030,10 @@ class HubPlugin(BasePlugin):
             )
 
         # A turn handling an agent's request replies to it on that request's
-        # thread (below). Models sent that reply as kind="answer", which is only
-        # a human's answer to a remote question, and got the exact-target error.
+        # thread (below), whatever device name the model typed for the asker.
+        # Models sent that reply as kind="answer", which is only a human's
+        # answer to a remote question, and got the exact-target error.
+        target = await self._asker_handle(target)
         if relay_kind == "answer" and not target.startswith("relay:"):
             asked = parse_handle(target)
             if asked and self._network_answering(format_handle(*asked)):
