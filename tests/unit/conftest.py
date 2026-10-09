@@ -1,9 +1,31 @@
 """Fixtures shared by several tests/unit modules."""
 
 import pytest
+from kollabor_config import config_utils
 
-from plugins.hub import relay_client
+from plugins.hub import presence, relay_client
 from tests.unit.test_relay_agent_bridge import bridges  # noqa: F401
+
+_REAL_CONFIG_DIR = config_utils.get_config_directory()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_agents_from_unit_tests(monkeypatch):
+    """No unit test reaches an agent running on this computer.
+
+    live_agents_on_machine() reads the real ~/.kollab presence, and a "machine" or
+    "network" broadcast sends to every live agent it lists: three broadcast tests
+    sent "shipped phase B" and "stand down" into the live proofs' sessions and any
+    chat open here. A test with its own config directory (where_home) reads that.
+    """
+    real = presence.live_agents_on_machine
+
+    def guarded():
+        if config_utils.get_config_directory() == _REAL_CONFIG_DIR:
+            return []
+        return real()
+
+    monkeypatch.setattr(presence, "live_agents_on_machine", guarded)
 
 
 @pytest.fixture
