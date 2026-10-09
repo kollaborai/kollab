@@ -583,6 +583,35 @@ holds is no longer refreshed. `/connect rotate` additionally replaces the
 network secret so nothing that device copied can be replayed. Revocation does
 not revoke API keys at the provider; rotate those at the provider.
 
+### Story 10: Marco opens the server's agent in the web UI
+
+The web UI on the Mac lists the server's agents under the server's name. One
+click opens one as a full chat: its history, its live turns, and a composer.
+The first time, the server has not allowed it, and the chat says how:
+
+```
+server-kollab has not let mac-kollab open its agents. On server-kollab, run: /connect attach allow mac-kollab
+```
+
+Marco runs that on the server once. An open agent is the control a person has
+at that keyboard, so network trust alone never grants it: on a network shared
+with other people, `open` lets their agents message yours, not read and drive
+them. The server's own screen says `mac-kollab opened koordinator from the
+network` and, later, `mac-kollab closed koordinator`.
+
+How it works (`plugins/hub/network_attach.py`): it is `kollab --attach
+lapis@devbox` without SSH. The Mac's network owner asks the server over the
+sealed device channel (`attach_open`), the server checks the permission and
+connects to the agent's own socket, and both sides carry that socket's bytes
+in `attach_data` requests (compressed, about 200 ms batches, paced under the
+relay's per-device frame budget, `seq` so a retried send lands once). The Mac
+hands the engine a one-shot private socket that it attaches on like any local
+agent's. Rules on the server: only a member device a person there allowed
+(`/connect attach allow|deny <device>`, shown by `/connect attach`), never
+under `trust manual`, under `trust agents` only the agents that device may
+message, never a stranger, at most four open agents per device. `deny` closes
+that device's open agents at once.
+
 ## 6. Commands: keep, rename, remove
 
 Shown in the palette and in `/connect help`:
@@ -600,6 +629,7 @@ Shown in the palette and in `/connect help`:
 | `/connect knocks [everyone\|contacts\|nobody] [for <time>]` | The knock screen: ringing, missed, blocked, contacts. With an argument, who may knock | renamed from `contacts` |
 | `/connect expect <route>`, `block <route>`, `unblock <route>` | Put a route on the contact list (its first knock is accepted); refuse or allow a route's knocks | new |
 | `/connect allow <device> <agent>`, `deny <device> [agent]` | Under `agents` trust or for accepted strangers; under `open` they say they have no effect | kept; argument was a 64-hex key |
+| `/connect attach [allow\|deny <device>]` | Who may open this device's agents from theirs (Story 10); bare, the list | new |
 | `/connect revoke <device>` | Remove a device or peer | kept; argument was a 64-hex key |
 | `/connect share <device>` | Share this computer's ChatGPT login with a device on the network (milestone 5, section 9) | new |
 | `/connect leave [domain]` | Disconnect, forget the network and stop reconnecting; the device can then join another by code | renamed from `disconnect` |

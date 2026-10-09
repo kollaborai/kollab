@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
+from .network_attach import ATTACH_METHODS
 from .relay_client import PeerSessionEvent, RelayClient
 from .relay_state import RelayError, failure_text, strict_json, validate_key
 from .secure_session import (
@@ -46,6 +47,7 @@ MAX_FRAMED_BYTES = MAX_SECURE_MESSAGE_BYTES + 4
 _HEX_SESSION = re.compile(r"[0-9a-f]{32}\Z")
 _SECURE_APP_METHODS = frozenset(
     {"message", "status", "cancel", "directory", "peer.exchange", "config_sync", "network_members"}
+    | ATTACH_METHODS
 )
 SecureDispatch = Callable[[str, str, dict], Awaitable[dict]]
 class TransportRequest(Protocol):

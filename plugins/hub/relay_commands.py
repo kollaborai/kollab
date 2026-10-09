@@ -843,6 +843,19 @@ class RelayCommands:
             return await self.agent_bridge.application_command(
                 head, " ".join([key, *fields[1:]]), source_agent=source_agent
             )
+        if head == "attach":
+            if self.agent_bridge is None:
+                return "connect: opening agents requires a running Kollab Hub session"
+            action, _, device = rest.strip().partition(" ")
+            if action not in ("", "allow", "deny") or bool(action) != bool(device.strip()):
+                return "usage: /connect attach [allow|deny <device>]"
+            if not action:
+                return self.agent_bridge.attach_status()
+            try:
+                key = await self._resolve_peer_key(device.strip())
+            except ValueError as exc:
+                return f"connect: {exc}"
+            return await self.agent_bridge.set_attach_allowed(key, action == "allow")
         if head in MANUAL_TRUST_COMMANDS:
             if self.agent_bridge is None:
                 return (

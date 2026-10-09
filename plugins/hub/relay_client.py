@@ -361,6 +361,7 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
+            "attach_allowed",
         ):
             setattr(self.state, name, getattr(disk, name))
 
