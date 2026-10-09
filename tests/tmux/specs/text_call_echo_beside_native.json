@@ -1,0 +1,116 @@
+{
+  "name": "text-call-echo-beside-native",
+  "description": "A model that makes a native call and also copies calls into its reply as <tool_call> text (gpt-5.6-luna sent one with no name) runs only the native call: no copy reaches a permission prompt or runs, no tool named \"unknown\", and the raw blocks never show. Throwaway HOME per run, a local fake model (tests/tmux/lib/fake_llm.py, \"echocall\"), approval_mode confirm_all.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-echo-call.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model and confirm_all",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-echo-call.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-echo-call.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"permissions\":{\"approval_mode\":\"confirm_all\"},\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "a native call with text copies"
+    },
+    {
+      "action": "type",
+      "text": "please echocall"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "PERMISSION REQUIRED",
+      "timeout": 40,
+      "description": "the native call reached the permission check"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "native-%s-ran",
+      "description": "the prompt is for the native call"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "echo-%s-ran",
+      "description": "no text copy reached a prompt"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "<tool_call>",
+      "description": "the copies are not shown"
+    },
+    {
+      "action": "section",
+      "label": "approve once"
+    },
+    {
+      "action": "type",
+      "text": "a"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: the tool answered",
+      "timeout": 40,
+      "description": "the turn ended after the native result"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "native-once-ran",
+      "description": "the native call ran (this text exists only in its output)"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "echo-%s-ran|echo-named-ran|echo-nameless-ran",
+      "description": "no text copy ran or was shown"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Tool 'unknown'|names no tool",
+      "description": "nothing ran as a tool named unknown"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "<tool_call>",
+      "description": "still no raw block after the turn"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "the prompt closed"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-echo-call.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

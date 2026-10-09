@@ -56,6 +56,7 @@ from .relay_state import (
     MAX_APPROVALS,
     RelayError,
     RelayStateStore,
+    failure_text,
     validate_key,
     validate_public_key,
 )
@@ -66,6 +67,9 @@ MAX_DIRECTORY = 64
 MAX_REMOTE_PEERS = 8
 # A peer whose directory has not been read for this long is gone (the refresh beat is 15 s).
 DIRECTORY_STALE_SECONDS = 45
+# A read that asks the peers reuses an answer at most this old. It was the 15 s beat, so a
+# reply to an agent that came online just after a refresh failed as unknown for up to 15 s.
+DIRECTORY_REFETCH_SECONDS = 2
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
 # The directory forgets a device's consent after a day; repeating it well inside that.
@@ -476,6 +480,16 @@ class RelayAgentBridge:
                 names.update(row["device"] for row in rows if row.get("device"))
         return names
 
+    async def device_known(self, name: str) -> bool:
+        """Whether `name` is a device this network knows: this device, a bound
+        peer or a device on the live roster. A failed check counts as known."""
+        try:
+            return name in self._known_device_names() or any(
+                row["device"] == name for row in await self.remote_agents()
+            )
+        except Exception:
+            return True
+
     def bind_peer_device(self, key: str, name: str) -> bool:
         """Bind a human device name to a peer's key at accept time.
 
@@ -507,16 +521,19 @@ class RelayAgentBridge:
         store.save()
         return True
 
-    async def remote_agents(self) -> list[dict]:
-        """Remote agents from the cached directory, keyed by agent@device.
+    async def remote_agents(self, cached: bool = True) -> list[dict]:
+        """Remote agents from the directory, keyed by agent@device.
 
-        Never raises: an unavailable relay is an empty roster, not an error.
+        The cached copy (the default) lacks a peer the 15 s refresher has not
+        read yet; ``cached=False`` asks the peers. Never raises: an unavailable
+        relay is an empty roster, not an error.
         """
         try:
             result = await self._owner_call(
-                "relay.directory", {"peer": "", "cached": True}
+                "relay.directory", {"peer": "", "cached": cached}
             )
-        except Exception:
+        except Exception as exc:
+            logger.info("relay directory read failed: %s", type(exc).__name__)
             return []
         rows = []
         for row in result.get("agents", []):
@@ -561,16 +578,28 @@ class RelayAgentBridge:
     async def resolve_handle(self, handle: str) -> str:
         """The relay: address for an approved agent@device, or a clear RelayError."""
         parsed = parse_handle(handle)
-        matches = (
-            [
+        matches = []
+        # A miss in the cached roster asks the peers before it says unknown:
+        # m1 refused a reply to an agent that had just come online, and the
+        # same call worked seconds later, once that peer was read again.
+        rows = []
+        for cached in (True, False) if parsed else ():
+            rows = await self.remote_agents(cached=cached)
+            matches = [
                 row
-                for row in await self.remote_agents()
+                for row in rows
                 if row["name"] == parsed[0] and row["device"] == parsed[1]
             ]
-            if parsed
-            else []
-        )
+            if matches:
+                break
         if not matches:
+            # Names only: which agents the roster held when this one was missing.
+            logger.info(
+                "agent@device %s is not on the roster: %s",
+                handle,
+                ", ".join(sorted(format_handle(r["name"], r["device"]) for r in rows)[:20])
+                or "empty",
+            )
             raise RelayError(
                 "unknown agent@device: run /connect status to see who is online"
             )
@@ -1239,6 +1268,13 @@ class RelayAgentBridge:
         if kind == "message":
             if open_trust:
                 remote = await self._remote_participant(destination)
+            elif self.store.open_request(
+                state.room, destination.key, params["thread_id"], agent.name
+            ):
+                # An answer on the thread of an open-trust sender's request that
+                # /connect allow let in goes back the way the request came.
+                open_trust = True
+                remote = await self._remote_participant(destination)
             else:
                 # Reject missing or mismatched human authorization before the
                 # directory lookup causes any network request to the peer.
@@ -1385,9 +1421,17 @@ class RelayAgentBridge:
         state = self._state().state
         # An open row waits in the outbox with no grant behind it. It goes out only
         # while the trust level still lets a message go without one, so raising
-        # trust to manual revokes it instead of letting the retry loop send it.
+        # trust to manual revokes it instead of letting the retry loop send it;
+        # an answer to an open request that /connect allow let in still goes.
         if (
-            item["open"] and not self.sends_without_grant(self.trust_level())
+            item["open"]
+            and not self.sends_without_grant(self.trust_level())
+            and not self.store.open_request(
+                state.room,
+                item["peer"],
+                item["payload"]["thread_id"],
+                item["payload"]["from_identity"],
+            )
         ) or not self.store.delivery_authorized(
             event_id,
             room=state.room,
@@ -2328,7 +2372,8 @@ class RelayAgentBridge:
                 # seconds past its TTL: the refresher runs on the same 15 s
                 # beat, and skipping the entry would flash the device offline.
                 if not cached or (
-                    not params.get("cached") and time.monotonic() - cached[0] > 15
+                    not params.get("cached")
+                    and time.monotonic() - cached[0] > DIRECTORY_REFETCH_SECONDS
                 ):
                     if params.get("cached"):
                         continue
@@ -2771,11 +2816,13 @@ class RelayAgentBridge:
             )
             return
         # A sender on manual trust marks its request as a task and waits for its
-        # result: run it as one whatever this device's trust.
-        as_task = record["payload"].get("task") is True
-        if self.effective_trust(record["peer"]) != "manual" and not as_task:
-            # Open and agents trust: an ordinary hub turn, no task envelope,
-            # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
+        # result: run it as one whatever this device's trust. An unmarked request
+        # comes from a sender on open trust, which waits for no result: it is an
+        # ordinary hub turn here too (on manual trust, once /connect allow let it
+        # in) and its answers go back on its thread (relay_conversations.open_request).
+        if record["payload"].get("task") is not True:
+            # No task envelope, no active-task bookkeeping
+            # (docs/specs/agent-network-simple-flow.md §6).
             # One request at a time: the next reaches the model only after the
             # turn that handles this one has ended, so each turn answers one
             # request and its replies go on that request's thread.
@@ -3099,7 +3146,13 @@ class RelayAgentBridge:
             if active.record["payload"]["kind"] == "message" and not active.replied:
                 await self.send(active.record["payload"]["from"], content)
             active.finished = True
-        except Exception:
+        except Exception as error:
+            # The reason would otherwise be lost: the task only records the line below.
+            logger.warning(
+                "network: final reply to request %s not delivered (%s)",
+                active.record["id"],
+                failure_text(error),
+            )
             await self._stop_active("failed", "final response could not be delivered")
 
     async def harness_context(self):

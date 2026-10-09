@@ -195,7 +195,11 @@ def validate_message(
         and len(content.encode("utf-8")) > MAX_EVENT_CONTENT
     ):
         raise RelayError("correlated event content exceeds its size limit")
-    if any(ord(c) < 32 and c not in "\n\r\t" for c in content) or "\x7f" in content:
+    # C0 (but newline, CR and tab), DEL and the C1 range: \x9b alone starts an escape
+    # sequence in some terminals.
+    if any(
+        (ord(c) < 32 and c not in "\n\r\t") or 0x7F <= ord(c) <= 0x9F for c in content
+    ):
         raise RelayError("agent message contains terminal control characters")
     if recipient.workspace_id != workspace_id:
         raise ConversationRejection("wrong_workspace")
@@ -749,10 +753,11 @@ class ConversationStore:
     def queue_open_message(self, room: str, payload: dict) -> dict:
         """Queue an ordinary hub message with no human communication grant.
 
-        Used only when the network's trust level is `open` or `agents`
-        (docs/specs/agent-network-simple-flow.md §4/§6): the message is
-        delivered like any local hub message, with no grant to bind and no
-        reply expectation recorded against it.
+        Used when the network's trust level is `open` or `agents`
+        (docs/specs/agent-network-simple-flow.md §4/§6), and on manual trust for
+        a reply on an allowed open request's thread (`open_request`): the
+        message is delivered like any local hub message, with no grant to bind
+        and no reply expectation recorded against it.
         """
         source, target = RelayAddress.parse(payload["from"]), RelayAddress.parse(
             payload["to"]
@@ -891,6 +896,37 @@ class ConversationStore:
         if record is None:
             raise RelayError("response is outside the active conversation grant")
         return json.loads(record["payload"])["expires_at"]
+
+    def open_request(self, room: str, peer: str, thread_id: str, agent: str) -> bool:
+        """True while `agent` may answer `peer`'s open request on `thread_id`.
+
+        A sender on open trust marks no task and waits for no result. On manual
+        trust its message gets in only through a receiving grant (/connect allow
+        <device> <agent>), and the agent it reached answers on the request's
+        thread the way a device on open trust does, until the request expires
+        or the grant is revoked. Nothing else leaves without a human grant.
+        """
+        now = int(time.time())
+        with self._connect() as db:
+            if not db.execute(
+                "SELECT 1 FROM grants WHERE room=? AND peer=? AND agent=?",
+                (room, peer, agent),
+            ).fetchone():
+                return False
+            rows = db.execute(
+                "SELECT payload FROM tasks WHERE room=? AND peer=? AND agent_name=?",
+                (room, peer, agent),
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if (
+                payload["thread_id"] == thread_id
+                and payload["kind"] == "message"
+                and payload.get("task") is not True
+                and payload["expires_at"] > now
+            ):
+                return True
+        return False
 
     def expect(self, room: str, payload: dict):
         """Locally sent work grants only the exact correlated return route."""

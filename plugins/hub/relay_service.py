@@ -15,16 +15,22 @@ import argparse
 import asyncio
 import base64
 import binascii
+import contextlib
+import grp
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
 import re
+import resource
 import secrets
 import signal
+import socket
+import stat
+import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -66,9 +72,9 @@ MAX_CIPHERTEXT_CHARS = 48 * 1024
 # The client rejects a peers snapshot longer than this; linked devices only fill what
 # the room leaves.
 MAX_SNAPSHOT_PEERS = 256
-MAX_CONNECTIONS_PER_NODE = 512
+MAX_CONNECTIONS_PER_NODE = 4096
 MAX_CONNECTIONS_PER_ROOM = 16
-MAX_CONNECTIONS_PER_SOURCE = 16
+MAX_CONNECTIONS_PER_SOURCE = 64
 REGISTRATION_TIMEOUT_SECONDS = 10
 SEND_DEADLINE_SECONDS = 3
 HEARTBEAT_SECONDS = 20
@@ -1575,11 +1581,29 @@ def room_digest(room_capability: str) -> str:
     return hashlib.sha256(bytes.fromhex(room_capability)).hexdigest()
 
 
+def _forwarded_ip(request: web.Request) -> str | None:
+    """The one literal address in a single X-Real-IP header, else None."""
+    forwarded = request.headers.getall("X-Real-IP", [])
+    real_ip = forwarded[0] if len(forwarded) == 1 else ""
+    if real_ip and "," not in real_ip:
+        try:
+            return str(ipaddress.ip_address(real_ip.strip()))
+        except ValueError:
+            pass
+    return None
+
+
 def _source_ip(
     request: web.Request,
     trusted_proxies: frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address],
 ) -> str | None:
     transport = request.transport
+    sock = transport.get_extra_info("socket") if transport is not None else None
+    if sock is not None and sock.family == socket.AF_UNIX:
+        # Only a process allowed to open the listener's socket file (the proxy;
+        # see bind_unix_socket) gets here, so its X-Real-IP is the client. No
+        # header means a misconfigured proxy: refuse rather than share one bucket.
+        return _forwarded_ip(request)
     peername = transport.get_extra_info("peername") if transport is not None else None
     if not isinstance(peername, tuple) or not peername:
         return None
@@ -1589,14 +1613,101 @@ def _source_ip(
         return None
 
     if peer_ip in trusted_proxies:
-        forwarded = request.headers.getall("X-Real-IP", [])
-        real_ip = forwarded[0] if len(forwarded) == 1 else ""
-        if real_ip and "," not in real_ip:
-            try:
-                return str(ipaddress.ip_address(real_ip.strip()))
-            except ValueError:
-                pass
+        return _forwarded_ip(request) or str(peer_ip)
     return str(peer_ip)
+
+
+# listener, the backend pool (at most 130), logs and the resolver
+FD_HEADROOM = 256
+UNIX_SOCKET_MAX_BYTES = 100
+
+
+def raise_fd_limit(max_connections: int) -> int:
+    """Raise the soft descriptor limit to fit the cap; return the cap that fits.
+
+    Measured: one descriptor per idle connection (3,022 open at 3,000, 22 at
+    rest). A shell's default soft limit (256 on macOS, 1024 on Linux) is below
+    the default 4,096-connection cap, so accept would fail with EMFILE first.
+    A hard limit below the need lowers the cap to fit, as Redis does with
+    maxclients; the caller says so, so a small host still starts.
+    """
+    need = max_connections + FD_HEADROOM
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft >= need:
+        return max_connections
+    target = need if hard == resource.RLIM_INFINITY else min(need, hard)
+    if target <= FD_HEADROOM:
+        raise RelayConfigError(
+            f"the file-descriptor hard limit ({hard}) leaves no room for connections; raise LimitNOFILE (ulimit -n)"
+        )
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError) as exc:
+        raise RelayConfigError(f"cannot raise the file-descriptor limit to {target}: {exc}") from exc
+    return max_connections if target == need else target - FD_HEADROOM
+
+
+def bind_unix_socket(path: str, group: str | None = None) -> socket.socket:
+    """Bind the unix socket a same-host proxy reaches the relay on.
+
+    Only this user, and `group` when named, can connect: the socket is made
+    0600 and widened to 0660 for the group afterwards, so no other user can
+    connect in between. A leftover socket from a crash is replaced; a live
+    one, any other file, or a directory its group or others can write to is refused.
+    """
+    if not os.path.isabs(path) or "\0" in path or len(path.encode()) > UNIX_SOCKET_MAX_BYTES:
+        raise RelayConfigError(f"unix socket must be an absolute path of at most {UNIX_SOCKET_MAX_BYTES} bytes")
+    parent = os.path.dirname(path)
+    try:
+        info = os.stat(parent)
+    except OSError as exc:
+        raise RelayConfigError(f"unix socket directory {parent}: {exc.strerror}") from exc
+    if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+        raise RelayConfigError(
+            f"unix socket directory {parent} must belong to this user or root and not be writable by group or others"
+        )
+    gid = None
+    if group is not None:
+        try:
+            gid = grp.getgrnam(group).gr_gid
+        except KeyError as exc:
+            raise RelayConfigError(f"unknown unix socket group {group!r}") from exc
+    try:
+        leftover = os.lstat(path)
+    except FileNotFoundError:
+        leftover = None
+    if leftover is not None:
+        if not stat.S_ISSOCK(leftover.st_mode) or leftover.st_uid != os.getuid():
+            raise RelayConfigError(f"{path} exists and is not a socket of this user")
+        with contextlib.closing(socket.socket(socket.AF_UNIX)) as probe:
+            try:
+                probe.connect(path)
+            except OSError:
+                os.unlink(path)
+            else:
+                raise RelayConfigError(f"{path} is in use by a running process")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    umask = os.umask(0o177)
+    bound = False
+    try:
+        sock.bind(path)
+        bound = True
+        if gid is not None:
+            os.chown(path, -1, gid)
+            os.chmod(path, 0o660)
+    except OSError as exc:
+        sock.close()
+        if bound:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        raise RelayConfigError(
+            f"cannot create unix socket {path}"
+            + (f" for group {group} (this user must belong to it)" if gid is not None else "")
+            + f": {exc.strerror}"
+        ) from exc
+    finally:
+        os.umask(umask)
+    return sock
 
 
 class _EnrollmentHTTPError(Exception):
@@ -2111,17 +2222,41 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="IP",
         help="exact reverse-proxy source IP allowed to supply X-Real-IP (repeatable)",
     )
+    parser.add_argument(
+        "--unix-socket",
+        metavar="PATH",
+        help="listen on this unix socket instead of --bind/--port, for a proxy on the same host; "
+        "X-Real-IP is trusted on it, and only this user (and --unix-socket-group) can connect",
+    )
+    parser.add_argument(
+        "--unix-socket-group",
+        metavar="GROUP",
+        help="the proxy's group, allowed to connect to --unix-socket (this user must belong to it)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    unix_socket = None
     try:
+        if args.unix_socket_group and not args.unix_socket:
+            raise RelayConfigError("--unix-socket-group needs --unix-socket")
+        if args.unix_socket and (args.bind != "127.0.0.1" or args.port != 8765 or args.trusted_proxy):
+            raise RelayConfigError("--unix-socket replaces --bind, --port and --trusted-proxy")
         limits = RelayLimits(
             max_connections_per_node=args.max_connections_per_node,
             max_connections_per_room=args.max_connections_per_room,
             max_connections_per_source=args.max_connections_per_source,
         )
+        usable = raise_fd_limit(limits.max_connections_per_node)
+        if usable != limits.max_connections_per_node:
+            print(
+                f"relay: the file-descriptor hard limit allows {usable} connections, not "
+                f"{limits.max_connections_per_node}; raise LimitNOFILE (ulimit -n) for the rest",
+                file=sys.stderr,
+            )
+            limits = replace(limits, max_connections_per_node=usable)
         backend_url = None
         if not args.dev_in_memory:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.backend_url_env):
@@ -2144,19 +2279,30 @@ def main(argv: list[str] | None = None) -> int:
             trusted_proxies=frozenset(args.trusted_proxy),
             limits=limits,
         )
+        if args.unix_socket:
+            unix_socket = bind_unix_socket(args.unix_socket, args.unix_socket_group)
     except (RelayConfigError, ValueError) as exc:
         raise SystemExit(f"relay configuration error: {exc}") from exc
     app = create_app(config)
     # Access logs are disabled so a rejected URL cannot accidentally log a
     # caller-supplied query string. Frames and registration material are never
     # emitted to logs.
-    web.run_app(
-        app,
-        host=config.bind,
-        port=config.port,
-        access_log=None,
-        print=None,
-    )
+    try:
+        if unix_socket is not None:
+            web.run_app(app, sock=unix_socket, access_log=None, print=None)
+        else:
+            web.run_app(
+                app,
+                host=config.bind,
+                port=config.port,
+                access_log=None,
+                print=None,
+            )
+    finally:
+        if unix_socket is not None:
+            unix_socket.close()
+            with contextlib.suppress(OSError):
+                os.unlink(args.unix_socket)
     return 0
 
 

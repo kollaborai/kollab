@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import getpass
 import ipaddress
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -37,9 +39,12 @@ from .relay_service import (
     MAX_CONNECTIONS_PER_NODE,
     MAX_CONNECTIONS_PER_ROOM,
     MAX_CONNECTIONS_PER_SOURCE,
+    UNIX_SOCKET_MAX_BYTES,
     RelayConfig,
     _parse_trusted_proxy,
+    bind_unix_socket,
     create_app,
+    raise_fd_limit,
 )
 
 DEFAULT_BIND = "127.0.0.1"
@@ -64,6 +69,10 @@ class Settings:
     trusted_proxies: tuple[str, ...] = ()
     max_per_room: int = MAX_CONNECTIONS_PER_ROOM
     max_per_source: int = MAX_CONNECTIONS_PER_SOURCE
+    # A proxy on this host connects here instead of to bind:port; only this
+    # user and unix_socket_group can open it, so X-Real-IP needs no allow-list.
+    unix_socket: Path | None = None
+    unix_socket_group: str | None = None
 
     @property
     def origin(self) -> str:
@@ -80,7 +89,9 @@ class Settings:
 
     @property
     def upstream(self) -> str:
-        """The host:port a proxy connects to."""
+        """What a proxy connects to: host:port, or unix:<socket path>."""
+        if self.unix_socket:
+            return f"unix:{self.unix_socket}"
         host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(self.bind, self.bind)
         return f"[{host}]:{self.port}" if ":" in host else f"{host}:{self.port}"
 
@@ -108,13 +119,18 @@ def flags(settings: Settings, *, state: bool = False) -> list[str]:
     out = ["--domain", settings.domain]
     if state or settings.state_dir != default_state_dir(settings.target):
         out += ["--state-dir", str(settings.state_dir)]
-    if settings.bind != DEFAULT_BIND:
-        out += ["--bind", settings.bind]
-    if settings.port != DEFAULT_PORT:
-        out += ["--port", str(settings.port)]
-    if settings.trusted_proxies != default_trusted(settings.bind):
-        for proxy in settings.trusted_proxies:
-            out += ["--trusted-proxy", proxy]
+    if settings.unix_socket:
+        out += ["--unix-socket", str(settings.unix_socket)]
+        if settings.unix_socket_group:
+            out += ["--unix-socket-group", settings.unix_socket_group]
+    else:
+        if settings.bind != DEFAULT_BIND:
+            out += ["--bind", settings.bind]
+        if settings.port != DEFAULT_PORT:
+            out += ["--port", str(settings.port)]
+        if settings.trusted_proxies != default_trusted(settings.bind):
+            for proxy in settings.trusted_proxies:
+                out += ["--trusted-proxy", proxy]
     if settings.max_per_room != MAX_CONNECTIONS_PER_ROOM:
         out += ["--max-connections-per-room", str(settings.max_per_room)]
     if settings.max_per_source != MAX_CONNECTIONS_PER_SOURCE:
@@ -126,13 +142,24 @@ def setup_text(settings: Settings, *, created: bool) -> str:
     """What the operator still has to do, printed once the port is listening."""
     command = shlex.join(["kollab", "relay", "serve", *flags(settings)])
     routes = [f"       {method:<5} {path:<32} {note}" for method, path, note in ROUTES]
+    if settings.unix_socket:
+        who = f"this user and group {settings.unix_socket_group}" if settings.unix_socket_group else "this user only"
+        listen = f"  listen   {settings.unix_socket}  (plain HTTP on a unix socket, behind your TLS proxy)"
+        proxies = f"  proxies  X-Real-IP trusted from the socket; {who} can connect"
+    else:
+        listen = f"  listen   http://{settings.upstream}  (plain HTTP, behind your TLS proxy)"
+        proxies = f"  proxies  X-Real-IP trusted from {' '.join(settings.trusted_proxies) or 'none'}"
+        if settings.trusted_proxies:
+            proxies += (
+                "\n           any process that can reach the port can send it; --unix-socket limits that to the proxy"
+            )
     return "\n".join(
         [
             f"kollab relay serve: {settings.domain}",
             f"  state    {settings.state_dir}",
             f"           {'new signing key created' if created else 'signing key loaded'}; back this directory up",
-            f"  listen   http://{settings.upstream}  (plain HTTP, behind your TLS proxy)",
-            f"  proxies  X-Real-IP trusted from {' '.join(settings.trusted_proxies) or 'none'}",
+            listen,
+            proxies,
             "",
             "still to do, once:",
             "  1. DNS: add this TXT record",
@@ -148,8 +175,16 @@ def setup_text(settings: Settings, *, created: bool) -> str:
 
 
 _NGINX = """\
-# Kollab directory for @DOMAIN@. Put these inside the TLS server block for that name.
-# Only these four routes are forwarded; /relay/v1/metrics and everything else stay private.
+# Kollab directory for @DOMAIN@. Two places:
+#
+# 1. Once, in the http { } block (for example /etc/nginx/conf.d/@ZONE@.conf), the shared
+#    counter behind the per-address cap on the websocket below. A line here is a syntax error
+#    inside a server block, so it is a comment in this paste; nginx -t names the zone if you skip it.
+#
+#      limit_conn_zone $binary_remote_addr zone=@ZONE@:10m;
+#
+# 2. The rest, inside the TLS server block for that name.
+#    Only these four routes are forwarded; /relay/v1/metrics and everything else stay private.
 location = /.well-known/agent-keys.json {
     proxy_pass http://@UPSTREAM@;
     proxy_set_header Host $host;
@@ -159,6 +194,7 @@ location = /relay/v1/health {
     proxy_set_header Host $host;
 }
 location = /relay/v1/ws {
+    limit_conn @ZONE@ @MAX_PER_SOURCE@;
     proxy_pass http://@UPSTREAM@;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
@@ -180,6 +216,9 @@ location /relay/v1/enrollment/ {
 _CADDY = """\
 # Kollab directory for @DOMAIN@. Only these four routes are forwarded;
 # /relay/v1/metrics and everything else stay private.
+# Caddy has no per-address connection limit (nginx's limit_conn), so the relay's own
+# cap of @MAX_PER_SOURCE@ open connections per address is the only one. For a cap at the edge
+# use nginx, or a firewall rule such as nftables "ct count over @MAX_PER_SOURCE@ drop" on port 443.
 @DOMAIN@ {
     @kollab path /.well-known/agent-keys.json /relay/v1/health /relay/v1/ws /relay/v1/enrollment/*
     handle @kollab {
@@ -210,12 +249,13 @@ ExecStart=@EXEC@
 Restart=on-failure
 RestartSec=5
 UMask=0077
+# one descriptor per connection: 4,096 by default, so 65,536 leaves room to raise --max-connections-per-node
 LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=@STATE@
-PrivateTmp=true
+PrivateTmp=true@SOCKET@
 
 [Install]
 WantedBy=multi-user.target
@@ -228,12 +268,42 @@ def _render(template: str, **values: str) -> str:
     return template
 
 
+def zone_name(settings: Settings) -> str:
+    """One nginx counter per domain, so two relays on one nginx do not redeclare it."""
+    return "kollab_" + re.sub(r"[^a-z0-9]+", "_", settings.domain)
+
+
 def nginx_config(settings: Settings) -> str:
-    return _render(_NGINX, DOMAIN=settings.domain, UPSTREAM=settings.upstream)
+    return _render(
+        _NGINX,
+        DOMAIN=settings.domain,
+        ZONE=zone_name(settings),
+        MAX_PER_SOURCE=str(settings.max_per_source),
+        UPSTREAM=settings.upstream,
+    )
 
 
 def caddy_config(settings: Settings) -> str:
-    return _render(_CADDY, DOMAIN=settings.domain, UPSTREAM=settings.upstream)
+    upstream = f"unix/{settings.unix_socket}" if settings.unix_socket else settings.upstream
+    return _render(_CADDY, DOMAIN=settings.domain, MAX_PER_SOURCE=str(settings.max_per_source), UPSTREAM=upstream)
+
+
+def socket_unit_lines(settings: Settings) -> str:
+    """What the unit adds for a unix socket: a directory the service can create it in, and the proxy's group."""
+    sock = settings.unix_socket
+    if not sock:
+        return ""
+    if sock.parent.parent == Path("/run"):
+        # 0755 on the directory is deliberate: the proxy must traverse it, and the socket file's 0660 is the lock.
+        lines = [f"RuntimeDirectory={sock.parent.name}", "RuntimeDirectoryMode=0755"]
+    else:
+        lines = [
+            f"# {sock.parent} must exist, owned by the service user and not writable by others",
+            f"ReadWritePaths={sock.parent}",
+        ]
+    if settings.unix_socket_group:
+        lines.append(f"SupplementaryGroups={settings.unix_socket_group}")
+    return "\n" + "\n".join(lines)
 
 
 def unit_name(settings: Settings) -> str:
@@ -256,6 +326,7 @@ def systemd_unit(settings: Settings) -> str:
         COMMAND=command,
         EXEC=shlex.join(argv),
         STATE=str(settings.state_dir),
+        SOCKET=socket_unit_lines(settings),
     )
 
 
@@ -316,7 +387,7 @@ async def key_file(request: web.Request) -> web.Response:
     return web.Response(body=body, content_type="application/json", headers={"Cache-Control": "no-store"})
 
 
-def build_app(settings: Settings) -> web.Application:
+def build_app(settings: Settings, max_connections: int = MAX_CONNECTIONS_PER_NODE) -> web.Application:
     """The relay app plus the key file route on the same port."""
     config = RelayConfig(
         origin=settings.origin,
@@ -326,7 +397,7 @@ def build_app(settings: Settings) -> web.Application:
         port=settings.port,
         trusted_proxies=frozenset(ipaddress.ip_address(proxy) for proxy in settings.trusted_proxies),
         limits=RelayLimits(
-            max_connections_per_node=MAX_CONNECTIONS_PER_NODE,
+            max_connections_per_node=max_connections,
             max_connections_per_room=settings.max_per_room,
             max_connections_per_source=settings.max_per_source,
         ),
@@ -354,13 +425,23 @@ async def keep_published(app: web.Application, advertised: bool) -> None:
 
 
 async def serve(settings: Settings, *, created: bool) -> None:
-    app = build_app(settings)
+    usable = raise_fd_limit(MAX_CONNECTIONS_PER_NODE)
+    if usable != MAX_CONNECTIONS_PER_NODE:
+        say(
+            f"the file-descriptor hard limit allows {usable} connections, not {MAX_CONNECTIONS_PER_NODE}; "
+            "raise LimitNOFILE (ulimit -n) for the rest"
+        )
+    app = build_app(settings, usable)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     task = None
     try:
         try:
-            await web.TCPSite(runner, settings.bind, settings.port).start()
+            if settings.unix_socket:
+                site = web.SockSite(runner, bind_unix_socket(str(settings.unix_socket), settings.unix_socket_group))
+            else:
+                site = web.TCPSite(runner, settings.bind, settings.port)
+            await site.start()
         except OSError as exc:
             raise RuntimeConfigError(f"cannot listen: {exc.strerror or exc}") from None
         stop = asyncio.Event()
@@ -386,6 +467,9 @@ async def serve(settings: Settings, *, created: bool) -> None:
             except Exception as exc:
                 say(f"publishing failed, the key file will name this relay for up to five minutes: {exc}")
         await runner.cleanup()
+        if settings.unix_socket:
+            with contextlib.suppress(OSError):
+                settings.unix_socket.unlink()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -414,9 +498,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-connections-per-source",
         type=int,
         default=MAX_CONNECTIONS_PER_SOURCE,
-        help="raise it for an office behind one address",
+        help="open connections per client address; the default fits a team behind one office address, "
+        "and --print nginx caps the same number",
     )
     parser.add_argument("--max-connections-per-room", type=int, default=MAX_CONNECTIONS_PER_ROOM)
+    parser.add_argument(
+        "--unix-socket",
+        type=Path,
+        metavar="PATH",
+        help="listen on this unix socket instead of --bind/--port, for a proxy on this host: "
+        "only this user and --unix-socket-group can connect, so no local process can fake X-Real-IP",
+    )
+    parser.add_argument(
+        "--unix-socket-group",
+        metavar="GROUP",
+        help="the proxy's group (www-data, nginx, ...); this user must belong to it",
+    )
     once = parser.add_mutually_exclusive_group()
     once.add_argument("--print", choices=sorted(PRINTABLE), help="print that config for these settings and exit")
     once.add_argument(
@@ -442,6 +539,13 @@ def settings_from(args: argparse.Namespace) -> Settings:
         raise ValueError("--bind must be a literal IP address") from None
     if not 1 <= args.port <= 65535:
         raise ValueError("--port must be in 1..65535")
+    if args.unix_socket_group and not args.unix_socket:
+        raise ValueError("--unix-socket-group needs --unix-socket")
+    if args.unix_socket:
+        if not args.unix_socket.is_absolute() or len(str(args.unix_socket).encode()) > UNIX_SOCKET_MAX_BYTES:
+            raise ValueError(f"--unix-socket must be an absolute path of at most {UNIX_SOCKET_MAX_BYTES} bytes")
+        if args.bind != DEFAULT_BIND or args.port != DEFAULT_PORT or args.trusted_proxy:
+            raise ValueError("--unix-socket replaces --bind, --port and --trusted-proxy")
     RelayLimits(  # its ValueError names the offending limit
         max_connections_per_room=args.max_connections_per_room,
         max_connections_per_source=args.max_connections_per_source,
@@ -453,9 +557,13 @@ def settings_from(args: argparse.Namespace) -> Settings:
         port=args.port,
         trusted_proxies=tuple(str(proxy) for proxy in args.trusted_proxy)
         if args.trusted_proxy
+        else ()
+        if args.unix_socket
         else default_trusted(args.bind),
         max_per_room=args.max_connections_per_room,
         max_per_source=args.max_connections_per_source,
+        unix_socket=args.unix_socket,
+        unix_socket_group=args.unix_socket_group,
     )
 
 

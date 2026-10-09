@@ -143,26 +143,34 @@ m1_ssh "command -v openssl >/dev/null && '$M1_SRV_VENV/bin/python' -c 'import ce
 m1_ssh "mkdir -p '$M1_SRV_ROOT/bin'"
 scp -q "${M1_SSH_OPTS[@]}" "$M1_DIR/scan.py" "$M1_DIR/tmuxtype.py" "$M1_HOST:$M1_SRV_ROOT/bin/"
 scp -q "${M1_SSH_OPTS[@]}" "$PROBE" "$M1_HOST:$M1_SRV_ROOT/bin/m3probe.py"
+# C is a fresh TUI session each launch: unless the server's global approval mode is trust_all, its shell tool waits on a
+# prompt and c6 times out. Same check and same command as m1/proof.sh.
+SRV_APPROVAL=$(m1_ssh "python3 -c 'import json,os; c=json.load(open(os.path.expanduser(\"~/.kollab/config.json\"))); print(c.get(\"kollabor\",{}).get(\"permissions\",{}).get(\"approval_mode\",\"\"))' 2>/dev/null" || true)
+trust_c() { [ "$SRV_APPROVAL" = trust_all ] || { cmd c "/permissions trust"; sleep 2; }; }
 key mac Escape; key srv Escape; sleep 1
 MAC_LOG0=$(log_size mac); SRV_LOG0=$(log_size srv); C_LOG0=0
 rec pre PASS - "sessions $M1_MAC_SESSION and $M1_SRV_SESSION up; ports $M3_B_PORT/$M3_C_PORT and udp $M3_DISCOVERY_PORT free; nothing of an earlier run left"
 
 # ============================================ c1: B listens on its TLS endpoint ====
 say "c1: TLS endpoint and LAN discovery on B"
-m1_ssh bash -s -- "$M3_TLS" "$M1_SRV_VENV" "$M1_SRV_ROOT" <<'REMOTE' || abort c1-endpoints "could not create the loopback certificate on the server"
+# B and C share a host, but loopback is never dialed (#123 item 7): both listen on the host's own address,
+# the one their LAN discovery datagrams come from.
+M3_ADDR=$(m1_ssh "python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect((\"239.255.77.77\", 9)); print(s.getsockname()[0])'" 2>/dev/null || true)
+[ -n "$M3_ADDR" ] || abort c1-endpoints "could not read the server's own address toward the discovery group"
+m1_ssh bash -s -- "$M3_TLS" "$M1_SRV_VENV" "$M1_SRV_ROOT" "$M3_ADDR" <<'REMOTE' || abort c1-endpoints "could not create the endpoint certificate on the server"
 set -e
-tls=$1; venv=$2; root=$3
+tls=$1; venv=$2; root=$3; addr=$4
 umask 077; mkdir -p "$tls"
-openssl req -x509 -newkey rsa:2048 -keyout "$tls/key.pem" -out "$tls/cert.pem" -days 1 -nodes -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+openssl req -x509 -newkey rsa:2048 -keyout "$tls/key.pem" -out "$tls/cert.pem" -days 1 -nodes -subj "/CN=$addr" -addext "subjectAltName=IP:$addr" 2>/dev/null
 "$venv/bin/python" "$root/bin/m3probe.py" ca "$tls/cert.pem" "$tls/ca.pem" "$("$venv/bin/python" -c 'import certifi; print(certifi.where())')"
 REMOTE
-srv_probe config "$M1_SRV_WS" "$M3_B_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" >/dev/null
+srv_probe config "$M1_SRV_WS" "$M3_B_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" "$M3_ADDR" >/dev/null
 stop_ws "$M1_SRV_SESSION" "$M1_SRV_WS" >/dev/null
 launch_srv "$M1_SRV_SESSION" "$M1_SRV_WS"
 wait_ready srv || abort c1-endpoints "B's TUI showed nothing 90s after the restart"
 if wait_listening tcp "$M3_B_PORT" 90 && wait_listening udp "$M3_DISCOVERY_PORT" 30; then
   cap srv c1-01-b-restarted
-  rec c1-endpoints PASS c1-01-b-restarted.txt "B restarted; TLS endpoint on 127.0.0.1:$M3_B_PORT and LAN discovery (udp $M3_DISCOVERY_PORT) are bound"
+  rec c1-endpoints PASS c1-01-b-restarted.txt "B restarted; TLS endpoint on the host's own address, port $M3_B_PORT, and LAN discovery (udp $M3_DISCOVERY_PORT) are bound"
 else
   cap srv c1-01-b-not-listening
   abort c1-endpoints "B is not listening on tcp $M3_B_PORT / udp $M3_DISCOVERY_PORT 90s after the restart" c1-01-b-not-listening.txt
@@ -171,18 +179,17 @@ fi
 # ============================================== c2: C joins A's network by code ====
 say "c2: C joins A's network"
 m1_ssh "mkdir -p '$M3_C_WS'"
-srv_probe config "$M3_C_WS" "$M3_C_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" >/dev/null
+srv_probe config "$M3_C_WS" "$M3_C_PORT" "$M3_TLS/cert.pem" "$M3_TLS/key.pem" "$M3_TLS/ca.pem" "$M3_ADDR" >/dev/null
 launch_srv "$M3_C_SESSION" "$M3_C_WS" "--as $M3_C_AS"
 wait_ready c || abort c2-c-joins "C's TUI showed nothing 90s after launch"
+trust_c
 MAC_BASE=$(raw mac 500)
 cmd mac "/connect code"
-found=0; pressed=0
-for _ in $(seq 1 30); do
+found=0
+for _ in $(seq 1 30); do   # /connect code makes its code when the screen opens (ConnectScreenAltView.on_enter): no key to press
   sleep 3
-  snap=$(screen mac)
-  CODE=$(printf '%s\n' "$snap" | python3 "$SCAN" findcode 4< <(printf %s "$MAC_BASE")) || true
+  CODE=$(screen mac | python3 "$SCAN" findcode 4< <(printf %s "$MAC_BASE")) || true
   [ -n "$CODE" ] && { found=1; break; }
-  if [ "$pressed" = 0 ] && grep -Eq 'Enter: create code' <<<"$snap"; then key mac Enter; pressed=1; fi
 done
 [ "$found" = 1 ] || abort c2-c-joins "no join code appeared on the Mac after /connect code"
 key mac Escape; sleep 1
@@ -199,7 +206,8 @@ sleep 4
 # only shows up in `/connect status` (or the full Connect screen). Ask for it, the way m1's fallback does, for 2 minutes.
 # Match C's own request by name (<host>-<workspace>, the default device name): an older
 # request still pending on the Mac must never be the one accepted.
-C_REQ="$(m1_ssh uname -n)-$M3_C_WS_NAME"
+# default_device_name (plugins/hub/device_names.py): slug(hostname up to the first dot) + "-" + slug(workspace folder)
+C_REQ=$(printf '%s-%s' "$(m1_ssh uname -n | cut -d. -f1)" "$M3_C_WS_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9\n' '-' | sed 's/^-//; s/-$//')
 got=0
 for _ in $(seq 1 12); do
   b_wants=$(count_pat mac "$C_REQ[[:space:]]+wants to join"); cmd mac "/connect status"
@@ -211,9 +219,10 @@ wait_for mac 'accepted|trusted device' 60 "$b_acc" || { cap mac c2-03-mac-accept
 wait_for c 'joined ' 90 || { cap c c2-04-c-not-joined; abort c2-c-joins "C never printed a 'joined ...' line" c2-04-c-not-joined.txt; }
 tm mac clear-history -t "$M1_MAC_SESSION" || true      # the join code is off the Mac's screen and scrollback from here on
 cap c c2-04-c-joined
-# The state dir is sha256(workspace path) (plugins/hub/local_directory.py
-# _workspace_id). Teardown removes it, so it exists only if this run's join made it.
-C_STATE_DIR=$(m1_ssh "printf %s '$M3_C_WS' | sha256sum | cut -d' ' -f1")
+# The state dir is sha256(str(workspace.resolve())) (plugins/hub/relay_state.py RelayStateStore), as m1's preflight
+# computes it. Teardown removes it, so it exists only if this run's join made it.
+py='import hashlib, pathlib, sys; print(hashlib.sha256(str(pathlib.Path(sys.argv[1]).resolve()).encode()).hexdigest())'
+C_STATE_DIR=$(m1_ssh "python3 -c '$py' '$M3_C_WS'")
 m1_ssh "test -d \"\$HOME/.kollab/network/$C_STATE_DIR\"" || abort c2-c-joins "C joined but its state dir ~/.kollab/network/<sha256 of $M3_C_WS> is missing" c2-04-c-joined.txt
 rec c2-c-joins PASS c2-04-c-joined.txt "C ($C_REQ, hub identity $M3_C_AS) joined A's network; state dir $C_STATE_DIR"
 
@@ -260,13 +269,16 @@ say "c4: A dropped $C_HANDLE $(( $(date +%s) - T_STOP ))s after C was stopped (s
 srv_probe relayless "$M1_SRV_HOME/.kollab/network/$C_STATE_DIR" > "$EVID/c4-01-relayless.txt"
 launch_srv "$M3_C_SESSION" "$M3_C_WS" "--as $M3_C_AS"
 wait_ready c || abort c4-c-relayless "C's TUI showed nothing 90s after the restart"
+trust_c
 cmd c "/connect status"; sleep 7
 C_ST=$(latest_status c)
 cap c c4-02-c-relayless
-if grep -q 'via kollabor\.ai' <<<"$C_ST"; then
-  abort c4-c-relayless "C still shows a relay connection ('via kollabor.ai') after enabled=false" c4-02-c-relayless.txt
+# `network <name>  via kollabor.ai` is the network's label (network_label) and stays on a relay-less device. The line that
+# proves the relay is off is `reconnect on launch disabled` (RelayCommands.format_status): enabled stays false until a connect.
+if ! grep -q 'reconnect on launch disabled' <<<"$C_ST"; then
+  abort c4-c-relayless "C's /connect status lacks 'reconnect on launch disabled' after enabled=false: it is back on the relay, or the status shown is not C's" c4-02-c-relayless.txt
 elif wait_listening tcp "$M3_C_PORT" 60; then
-  rec c4-c-relayless PASS c4-02-c-relayless.txt "C restarted with enabled=false: no relay connection on its status; TLS endpoint on 127.0.0.1:$M3_C_PORT"
+  rec c4-c-relayless PASS c4-02-c-relayless.txt "C restarted with enabled=false: its status says 'reconnect on launch disabled'; TLS endpoint on the host's own address, port $M3_C_PORT"
 else
   abort c4-c-relayless "C is not listening on tcp $M3_C_PORT after the restart" c4-02-c-relayless.txt
 fi

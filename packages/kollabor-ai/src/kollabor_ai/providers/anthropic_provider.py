@@ -317,7 +317,8 @@ class AnthropicProvider(LLMProvider):
                         yield streaming_response
 
         except Exception as e:
-            logger.error(f"Anthropic stream failed: {e}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"Anthropic stream failed: {e}")
             if isinstance(e, ProviderError):
                 raise
             raise map_anthropic_error(e, "anthropic") from e

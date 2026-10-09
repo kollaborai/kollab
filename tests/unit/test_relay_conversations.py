@@ -197,6 +197,7 @@ def test_grant_requires_exact_room_peer_agent(store):
         ("content", "\x1b[31m", "control"),
         ("content", "\x00", "control"),
         ("content", "\x7f", "control"),
+        ("content", "\x9b31m", "control"),
         ("content", " " * 3, "content"),
         ("content", "x" * 16001, "content"),
         ("content", "\u00e9" * 8001, "content"),

@@ -60,10 +60,8 @@ def web_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     results message written before the daemon kept ``xml_tool_results`` stays
     as it was.
     """
-    if not any(
-        "xml_tool_calls" in _metadata(message) or "xml_tool_results" in _metadata(message)
-        for message in history
-    ):
+    keys = ("xml_tool_calls", "xml_tool_results", "display_content")
+    if not any(key in _metadata(message) for message in history for key in keys):
         return history
 
     shaped: List[Dict[str, Any]] = []
@@ -84,6 +82,11 @@ def web_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         elif results and metadata.get("tool_output_batch"):
             timestamp = message.get("timestamp", "")
             shaped.extend(_tool_row(entry, i, timestamp) for i, entry in enumerate(results))
+        elif "display_content" in metadata:
+            # A reply whose only tags echoed its native calls: clean text only.
+            metadata = dict(metadata)
+            content = str(metadata.pop("display_content") or "")
+            shaped.append(dict(message, metadata=metadata, content=content))
         else:
             shaped.append(message)
     return shaped

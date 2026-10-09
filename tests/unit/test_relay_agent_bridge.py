@@ -818,6 +818,12 @@ async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
     await left.send(address(right), "Create proof.txt")
     await right._tick()
     sender = right.active.record["payload"]["from"]
+    # The model is told before it starts, so it need not learn it from the refusal.
+    told = right_model.conversation_history[-1].content
+    assert "returned to them automatically" in told and "not with hub_msg" in told
+    # ... and how to ask first: told only "not with hub_msg", a model asked its
+    # question as the final reply (live story 7 s9 on 902e20a).
+    assert 'kind="question"' in told
 
     refused = await in_turn(
         right_model,
@@ -832,6 +838,21 @@ async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
         f"returned to {sender} automatically. Write the answer as your normal reply. "
         "hub_msg is only for one kind='question' to the sender."
     )
+    # kind="answer" gets the same words. Story 7 on f8c57af: the answer checks
+    # ran first, so the receiver saw only "relay answer requires its exact
+    # target...", retried it three times and tripped the stuck-loop breaker.
+    as_answer = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "answer-kind",
+                "to": f"relay:{'b' * 64}",
+                "content": "proof.txt created",
+                "kind": "answer",
+            }
+        ),
+    )
+    assert (as_answer.success, as_answer.error) == (False, refused.error)
     assert not right.active.replied
 
 
@@ -2935,3 +2956,30 @@ async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver
     assert cancelled.startswith(f"request 1 on {target}: ")
     assert task.finished
     assert right.store.task(task.record["id"])["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_device_is_known_by_its_own_name_a_bound_peer_or_the_roster(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    device = (await handle(left, right)).split("@")[1]
+    assert await left.device_known(device)
+    assert await left.device_known(left.device_name())
+    assert not await left.device_known("nowhere-box")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_the_cached_roster_has_not_read_yet_still_resolves(bridges):
+    # Live m1 on f8c57af and 3412aea: the server's first reply to the Mac agent
+    # failed as "unknown agent@device", and the same call worked seconds later.
+    # The server had read the Mac's directory just before that agent appeared,
+    # and a read that asks the peers reused that answer for up to 15 s.
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    name = await handle(left, right)
+    for key, (stamp, _rows) in list(left._cache.items()):
+        left._cache[key] = (stamp - 3, [])
+    assert name not in [row["handle"] for row in await left.remote_agents()]
+    assert await left.resolve_handle(name) == address(right)
+    with pytest.raises(RelayError, match="unknown agent@device"):
+        await left.resolve_handle("nobody@" + name.split("@")[1])

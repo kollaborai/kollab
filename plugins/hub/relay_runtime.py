@@ -39,9 +39,9 @@ OWNER_VALUE = "kollab-relay-runtime-v1"
 BACKEND_ENV = "KOLLAB_RELAY_BACKEND_URL"
 FIRST_READY_GRACE_SECONDS = 45
 LIMIT_DEFAULTS = {
-    "max_connections_per_node": 512,
+    "max_connections_per_node": 4096,
     "max_connections_per_room": 16,
-    "max_connections_per_source": 16,
+    "max_connections_per_source": 64,
 }
 
 
@@ -136,6 +136,10 @@ class RuntimeConfig:
     trusted_proxies: tuple[str, ...]
     backend: dict
     limits: dict[str, int]
+    # Same-host proxy: each worker listens on <dir>/relay-<n>.sock instead of a TCP port,
+    # so only this user and the group can reach it and X-Real-IP needs no allow-list.
+    unix_socket_dir: Path | None = None
+    unix_socket_group: str | None = None
 
     @classmethod
     def load(cls, path: Path):
@@ -155,6 +159,8 @@ class RuntimeConfig:
             "trusted_proxies",
             "backend",
             "limits",
+            "unix_socket_dir",
+            "unix_socket_group",
         }
         if set(payload) - fields or not {"origin", "node_prefix", "backend"} <= set(payload):
             raise RuntimeConfigError(
@@ -189,6 +195,19 @@ class RuntimeConfig:
             proxies = tuple(str(ipaddress.ip_address(value)) for value in proxies)
         except (ValueError, TypeError) as exc:
             raise RuntimeConfigError("trusted_proxies requires exact IP addresses") from exc
+        socket_dir, socket_group = payload.get("unix_socket_dir"), payload.get("unix_socket_group")
+        if socket_dir is not None:
+            if not isinstance(socket_dir, str) or not Path(socket_dir).is_absolute() or len(socket_dir.encode()) > 80:
+                raise RuntimeConfigError("unix_socket_dir must be an absolute path of at most 80 bytes")
+            if proxies:
+                raise RuntimeConfigError("unix_socket_dir replaces trusted_proxies; use one")
+            socket_dir = Path(socket_dir)
+        if socket_group is not None and (
+            socket_dir is None
+            or not isinstance(socket_group, str)
+            or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", socket_group)
+        ):
+            raise RuntimeConfigError("unix_socket_group must be a group name, and needs unix_socket_dir")
         limits = payload.get("limits", {})
         if not isinstance(limits, dict) or set(limits) - set(LIMIT_DEFAULTS):
             raise RuntimeConfigError("unknown connection quota")
@@ -236,7 +255,23 @@ class RuntimeConfig:
                 )
             if backend["port"] in {*range(port, port + workers), health_port}:
                 raise RuntimeConfigError("managed backend port overlaps a runtime listener")
-        return cls(origin, bind, port, workers, health_port, prefix, state_dir, proxies, backend, limits)
+        return cls(
+            origin,
+            bind,
+            port,
+            workers,
+            health_port,
+            prefix,
+            state_dir,
+            proxies,
+            backend,
+            limits,
+            socket_dir,
+            socket_group,
+        )
+
+    def socket_path(self, index: int) -> Path:
+        return self.unix_socket_dir / f"relay-{index}.sock"
 
     def node_id(self, index: int) -> str:
         return hashlib.sha256(f"{self.origin}\n{self.node_prefix}\n{index}".encode()).hexdigest()[:32]
@@ -588,6 +623,13 @@ class RelayRuntime:
                     pending.clear()
                     discard = False
 
+    def _listen_args(self, worker):
+        config = self.config
+        if config.unix_socket_dir:
+            group = ["--unix-socket-group", config.unix_socket_group] if config.unix_socket_group else []
+            return ["--unix-socket", str(config.socket_path(worker.index)), *group]
+        return ["--bind", config.bind_host, "--port", str(config.base_port + worker.index - 1)]
+
     async def _spawn(self, worker):
         args = [
             sys.executable,
@@ -595,10 +637,7 @@ class RelayRuntime:
             "plugins.hub.relay_service",
             "--origin",
             self.config.origin,
-            "--bind",
-            self.config.bind_host,
-            "--port",
-            str(self.config.base_port + worker.index - 1),
+            *self._listen_args(worker),
             "--node-id",
             self.config.node_id(worker.index),
             "--backend-url-env",
@@ -629,7 +668,11 @@ class RelayRuntime:
         self._log(
             "worker_started",
             worker=f"{self.config.node_prefix}-{worker.index}",
-            port=self.config.base_port + worker.index - 1,
+            **(
+                {"socket": str(self.config.socket_path(worker.index))}
+                if self.config.unix_socket_dir
+                else {"port": self.config.base_port + worker.index - 1}
+            ),
             pid=worker.process.pid,
         )
 
@@ -723,8 +766,16 @@ class RelayRuntime:
         if ":" in host:
             host = f"[{host}]"
         url = f"http://{host}:{self.config.base_port + worker.index - 1}/relay/v1/health"
+        probe = session
+        if self.config.unix_socket_dir:
+            url = "http://relay/relay/v1/health"
+            probe = aiohttp.ClientSession(
+                connector=aiohttp.UnixConnector(path=str(self.config.socket_path(worker.index))),
+                timeout=session.timeout,
+                trust_env=False,
+            )
         try:
-            async with session.get(url, allow_redirects=False) as response:
+            async with probe.get(url, allow_redirects=False) as response:
                 raw = await response.content.read(8193)
                 value = strict_json(raw, limit=8192)
                 worker.ready = (
@@ -735,6 +786,9 @@ class RelayRuntime:
                 )
         except (aiohttp.ClientError, TimeoutError, ValueError, OSError):
             worker.ready = False
+        finally:
+            if probe is not session:
+                await probe.close()
         worker.unhealthy = 0 if worker.ready or not self.backend_ready else worker.unhealthy + 1
 
     async def run(self):

@@ -19,13 +19,15 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
-import tempfile
+import stat
 import time
 import zlib
 from collections.abc import Callable, Iterator
@@ -260,13 +262,106 @@ def kollab_root(root: Path | None = None) -> Path:
     return root if root is not None else get_config_directory()
 
 
+CONFIG_PARTS = ("config.json",)
+MCP_PARTS = ("mcp", "mcp_settings.json")
+
+
 def mcp_settings_path(root: Path | None = None) -> Path:
-    return kollab_root(root) / "mcp" / "mcp_settings.json"
+    return kollab_root(root).joinpath(*MCP_PARTS)
 
 
 def record_path(root: Path | None) -> Path | None:
     """The managed-config record for ``root``; None means the default location."""
     return None if root is None else root / "private" / "managed-config.json"
+
+
+JOIN_FLOOR_PARTS = ("private", "join-floor.json")
+
+
+@dataclass(frozen=True)
+class JoinFloor:
+    """Where the primary's config stood when it accepted this device (`record_join_floor`)."""
+
+    primary_key: str
+    revision: int
+    digest: str = ""  # empty: the primary had stamped no snapshot yet, so only the revision is pinned
+
+
+def floor_path(root: Path | None = None) -> Path:
+    """The join floor, beside the managed-config record but never part of it: that
+    record means "a bundle has landed" to the Connect screen and to `Receiver.sync`,
+    which a floor must not claim."""
+    return kollab_root(root).joinpath(*JOIN_FLOOR_PARTS)
+
+
+def _well_formed(revision: Any, digest: Any) -> bool:
+    return (
+        type(revision) is int
+        and 0 <= revision < 2**53
+        and (digest == "" or (isinstance(digest, str) and _SHA.fullmatch(digest) is not None))
+    )
+
+
+def read_join_floor(root: Path | None = None) -> JoinFloor | None:
+    """The floor, or None when there is none or the file is not a well-formed one."""
+    try:
+        found = _read_file(kollab_root(root), JOIN_FLOOR_PARTS, 4096)
+        data = json.loads(found[0]) if found else None
+    except (OSError, ConfigSyncError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("primary_key"), str)
+        or not _well_formed(data.get("revision"), data.get("digest"))
+    ):
+        return None
+    return JoinFloor(data["primary_key"], data["revision"], data["digest"])
+
+
+def clear_join_floor(root: Path | None = None) -> None:
+    try:
+        directory = _open_dir(kollab_root(root), JOIN_FLOOR_PARTS[:-1])
+        try:
+            os.unlink(JOIN_FLOOR_PARTS[-1], dir_fd=directory)
+        finally:
+            os.close(directory)
+    except (OSError, ConfigSyncError):
+        pass  # none there, or a link on the way; a floor left behind is ignored for another primary
+
+
+def record_join_floor(
+    state_dir: Path, primary_key: str, revision: Any, digest: Any = None
+) -> None:
+    """A joining device keeps what its primary sent in the join decision: the revision
+    (and digest) of its config when it accepted this device.
+
+    The first bundle has no managed-config record to be compared with, so one the
+    primary signed before the join, replayed inside its 24 hours, would apply
+    (`Receiver._check`). Nothing sent (a primary from before this) clears any old
+    floor and behavior is as it was; a malformed floor is logged and records
+    nothing. Neither ever fails the join. Like the managed-config record the floor
+    is machine-global: a state living elsewhere (a test, another root) leaves it
+    alone (`RelayClient._forget_stale_primary`). It is written by `_write_json`,
+    so never through a link, 0600 in a 0700 folder.
+    """
+    if state_dir.parent != kollab_root() / "network":
+        return
+    clear_join_floor()
+    if revision is None and digest is None:
+        return
+    digest = "" if digest is None else digest
+    if not _well_formed(revision, digest):
+        logger.warning("config sync: the join floor is malformed; none recorded")
+        return
+    try:
+        _write_json(
+            kollab_root(),
+            JOIN_FLOOR_PARTS,
+            {"primary_key": primary_key, "revision": revision, "digest": digest},
+            dir_mode=0o700,
+        )
+    except (OSError, ConfigSyncError):
+        logger.warning("config sync: could not save the join floor")
 
 
 def eligible_file(name: str) -> bool:
@@ -435,9 +530,18 @@ class SnapshotBuilder:
             sha, zsize = cached[2], cached[3]
         else:
             try:
-                data = path.read_bytes()
-            except OSError:
+                # Not `path.read_bytes()`: scan_files checked for a link a moment
+                # ago, and one swapped in since would be followed into any file the
+                # user can read, which then travels to every device.
+                parts = tuple(rel.split("/"))
+                found = _read_file(
+                    kollab_root(self._root) / parts[0], parts[1:], MAX_FILE_BYTES
+                )
+            except (OSError, ConfigSyncError):
                 return None
+            if found is None:
+                return None
+            data = found[0]
             sha, zsize = hashlib.sha256(data).hexdigest(), len(zlib.compress(data, 6))
             self._hashes[rel] = (info.st_mtime_ns, info.st_size, sha, zsize)
         return (sha, zsize) if zsize <= MAX_ZFILE_BYTES else None
@@ -681,67 +785,177 @@ def safe_parts(rel: Any) -> tuple[str, ...] | None:
     return parts
 
 
-def _write_atomic(path: Path, data: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".kollab-sync-", dir=path.parent)
+# Opening a folder ``O_NOFOLLOW`` fails with ELOOP on a link to a file and ENOTDIR on a
+# link to a folder or a plain file: both mean "not a real folder here".
+_LINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# NONBLOCK: a FIFO planted as a synced file must not hang the open.
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def _open_dir(
+    base: Path, folders: tuple[str, ...], *, create: bool = False, mode: int = 0o777
+) -> int:
+    """A descriptor for ``base/folders``; the caller closes it.
+
+    A path check races: a same-user process can swap a folder for a symlink
+    between the check and the write, and the write lands wherever the link
+    points. So nothing here checks. ``base`` is trusted (the user may link
+    ``~/.kollab/skills`` itself); each folder below it is opened ``O_NOFOLLOW``
+    relative to the one before, so a link on the way is refused (``unsafe``) at the
+    moment of use, never followed.
+    """
+    if create:
+        base.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        for name in folders:
+            try:
+                child = os.open(name, _DIR_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(name, mode, dir_fd=descriptor)
+                except FileExistsError:
+                    pass  # made meanwhile; the open below still refuses a link
+                child = os.open(name, _DIR_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+    except OSError as error:
+        os.close(descriptor)
+        if error.errno in _LINK_ERRNOS:
+            raise ConfigSyncError("unsafe") from None
         raise
+    return descriptor
 
 
-def _write_json(path: Path, value: dict) -> None:
+def _read_file(
+    base: Path, parts: tuple[str, ...], limit: int
+) -> tuple[bytes, bool] | None:
+    """(content, executable) of the plain file ``base/parts``, read without following a link.
+
+    None when it is not a plain file or is over ``limit``. A link on the way raises
+    ``unsafe``; a missing file raises ``FileNotFoundError``.
+    """
+    directory = _open_dir(base, parts[:-1])
+    try:
+        descriptor = os.open(parts[-1], _FILE_FLAGS, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        data = stream.read(limit + 1)
+    return (data, bool(info.st_mode & 0o111)) if len(data) <= limit else None
+
+
+def _write_atomic(
+    base: Path, parts: tuple[str, ...], data: bytes, mode: int, dir_mode: int = 0o777
+) -> None:
+    """Replace the file ``base/parts`` with ``data`` in one step, never writing through a link.
+
+    The folders are opened by `_open_dir`; the data goes to a ``O_EXCL | O_NOFOLLOW``
+    temp file in the last one and is renamed over the target by descriptor, so
+    nothing the path does after this point can move the write. A link already on
+    the target is refused; one raced into its place is replaced, not followed.
+    """
+    directory = _open_dir(base, parts[:-1], create=True, mode=dir_mode)
+    temporary = f".kollab-sync-{secrets.token_hex(8)}"
+    try:
+        try:
+            if not stat.S_ISREG(
+                os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode
+            ):
+                raise ConfigSyncError("unsafe")
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), mode)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, parts[-1], src_dir_fd=directory, dst_dir_fd=directory)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(directory)
+
+
+def _write_json(
+    base: Path, parts: tuple[str, ...], value: dict, dir_mode: int = 0o777
+) -> None:
     _write_atomic(
-        path, json.dumps(value, indent=2, ensure_ascii=False).encode("utf-8"), 0o600
+        base,
+        parts,
+        json.dumps(value, indent=2, ensure_ascii=False).encode("utf-8"),
+        0o600,
+        dir_mode,
     )
 
 
-def _tighten(path: Path) -> None:
+def _remove(base: Path, parts: tuple[str, ...]) -> None:
+    """Delete the file ``base/parts`` and the folders it leaves empty, never through a link."""
+    folders = parts[:-1]
+    directory = _open_dir(base, folders)
+    try:
+        if stat.S_ISREG(
+            os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode
+        ):
+            os.unlink(parts[-1], dir_fd=directory)
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(directory)
+    for depth in range(len(folders), 0, -1):  # innermost first, up to the first one in use
+        parent = _open_dir(base, folders[: depth - 1])
+        try:
+            os.rmdir(folders[depth - 1], dir_fd=parent)
+        except OSError:
+            return
+        finally:
+            os.close(parent)
+
+
+def _tighten(base: Path, parts: tuple[str, ...]) -> None:
     """0600 even when an apply changed nothing: the file may hold the same key
     at a looser mode from before this device was managed (section 9)."""
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass  # nothing on disk to tighten
+        directory = _open_dir(base, parts[:-1])
+        try:
+            descriptor = os.open(parts[-1], _FILE_FLAGS, dir_fd=directory)
+        finally:
+            os.close(directory)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+    except (OSError, ConfigSyncError):
+        pass  # nothing on disk to tighten, or a link: not ours to change
 
 
-def _file_path(parts: tuple[str, ...], root: Path | None = None) -> Path:
-    """The target of a synced file. Refuses any symlink below the top folder."""
-    current = kollab_root(root) / parts[0]  # the user may link the folder itself
-    for part in parts[1:-1]:
-        current = current / part
-        if current.is_symlink() or (current.exists() and not current.is_dir()):
-            raise ConfigSyncError("unsafe")
-    target = current / parts[-1]
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-        raise ConfigSyncError("unsafe")
-    return target
-
-
-def _local_sha(parts: tuple[str, ...], root: Path | None = None) -> str | None:
+def _local_file(
+    parts: tuple[str, ...], root: Path | None = None
+) -> tuple[str, bool] | None:
+    """(sha256, executable) of a synced file on disk; None when it is missing, not a
+    plain file, too big, or behind a link."""
     try:
-        target = _file_path(parts, root)
-        if not target.is_file() or target.stat().st_size > MAX_FILE_BYTES:
-            return None
-        return hashlib.sha256(target.read_bytes()).hexdigest()
+        found = _read_file(kollab_root(root) / parts[0], parts[1:], MAX_FILE_BYTES)
     except (OSError, ConfigSyncError):
         return None
-
-
-def _local_executable(parts: tuple[str, ...], root: Path | None = None) -> bool:
-    try:
-        return bool(_file_path(parts, root).stat().st_mode & 0o111)
-    except (OSError, ConfigSyncError):
-        return False
+    return None if found is None else (hashlib.sha256(found[0]).hexdigest(), found[1])
 
 
 def parse_manifest(value: Any) -> list[tuple[str, str, int, bool]]:
@@ -812,7 +1026,13 @@ class Receiver:
             ):
                 raise ConfigSyncError("invalid")
             record = read_managed_config(record_path(self._root))
-            self._check(record, primary_key, revision, digest)
+            self._check(
+                record,
+                primary_key,
+                revision,
+                digest,
+                None if record else read_join_floor(self._root),
+            )
             name = core.get("primary_name")
             if not isinstance(name, str) or not NAME_RE.fullmatch(name):
                 name = primary_name
@@ -824,9 +1044,31 @@ class Receiver:
 
     @staticmethod
     def _check(
-        record: ManagedConfig | None, primary_key: str, revision: int, digest: str
+        record: ManagedConfig | None,
+        primary_key: str,
+        revision: int,
+        digest: str,
+        floor: JoinFloor | None = None,
     ) -> None:
         if record is None:
+            # Nothing has landed yet, so a bundle the primary signed before it
+            # accepted this device (good for 24 hours) is compared with the join
+            # floor, not waved through. A floor of another primary is not ours to
+            # enforce, and an unpinned digest (a primary that had not stamped yet)
+            # leaves the equal-revision case open.
+            if (
+                floor is not None
+                and floor.primary_key == primary_key
+                and (
+                    revision < floor.revision
+                    or (
+                        revision == floor.revision
+                        and floor.digest
+                        and digest != floor.digest
+                    )
+                )
+            ):
+                raise ConfigSyncError("stale", revision=floor.revision)
             return
         if record.primary_key != primary_key:
             raise ConfigSyncError("other_primary")
@@ -865,8 +1107,8 @@ class Receiver:
             and not (path[-1] == "api_key" and _is_oauth_profile(profiles, path))
         }
         applied = Applied()
-        config_path = kollab_root(self._root) / "config.json"
-        current = _read_object(config_path)
+        base = kollab_root(self._root)
+        current = _read_object(base.joinpath(*CONFIG_PARTS))
         before = copy.deepcopy(current)
         previous = {tuple(path) for path in record.keys} if record else set()
         for path in previous - leaves.keys() - kept:
@@ -874,12 +1116,11 @@ class Receiver:
         for path, value in leaves.items():
             set_leaf(current, path, value)
         if current != before:
-            _write_json(config_path, current)
+            _write_json(base, CONFIG_PARTS, current)
             applied.config_changed = True
             applied.profiles_changed = _llm_profiles(before) != _llm_profiles(current)
-        _tighten(config_path)  # keys live here: 0600 on every apply, write or not
-        mcp_path = mcp_settings_path(self._root)
-        settings = _read_object(mcp_path)
+        _tighten(base, CONFIG_PARTS)  # keys live here: 0600 on every apply, write or not
+        settings = _read_object(base.joinpath(*MCP_PARTS))
         existing = settings.get("servers")
         existing = existing if isinstance(existing, dict) else {}
         merged = dict(existing)
@@ -897,9 +1138,9 @@ class Receiver:
         applied.skipped_mcp = tuple(sorted(n for n in skipped if servers[n].get("enabled", True)))
         if merged != existing:
             settings["servers"] = merged
-            _write_json(mcp_path, settings)
+            _write_json(base, MCP_PARTS, settings)
             applied.mcp_changed = True
-        _tighten(mcp_path)  # server env can carry tokens: 0600 on every apply
+        _tighten(base, MCP_PARTS)  # server env can carry tokens: 0600 on every apply
         write_managed_config(
             ManagedConfig(
                 primary_key=primary_key,
@@ -918,6 +1159,8 @@ class Receiver:
             ),
             record_path(self._root),
         )
+        if record is None:
+            clear_join_floor(self._root)  # the record carries the revision from here on
         return applied
 
     # ---- files ----
@@ -942,8 +1185,7 @@ class Receiver:
             if revision != record.revision:
                 raise ConfigSyncError("stale", revision=record.revision)
             need = [  # a mode-only change counts: the bytes alone would never move it
-                _local_sha(safe_parts(rel), self._root) != sha
-                or _local_executable(safe_parts(rel), self._root) != x
+                _local_file(safe_parts(rel), self._root) != (sha, x)
                 for rel, sha, _size, x in manifest
             ]
             if any(need):
@@ -980,7 +1222,10 @@ class Receiver:
                 if parts is None:
                     raise ConfigSyncError("invalid")
                 _write_atomic(
-                    _file_path(parts, self._root), data, 0o755 if item["x"] else 0o644
+                    kollab_root(self._root) / parts[0],
+                    parts[1:],
+                    data,
+                    0o755 if item["x"] else 0o644,
                 )
                 written += 1
             return {"ok": written}
@@ -1004,13 +1249,7 @@ class Receiver:
             if parts is None:
                 continue
             try:
-                target = _file_path(parts, self._root)
-                if target.is_file():
-                    target.unlink()
-                parent, top = target.parent, kollab_root(self._root) / parts[0]
-                while parent != top and parent.is_dir() and not any(parent.iterdir()):
-                    parent.rmdir()
-                    parent = parent.parent
+                _remove(kollab_root(self._root) / parts[0], parts[1:])
             except (OSError, ConfigSyncError):
                 continue
         write_managed_config(

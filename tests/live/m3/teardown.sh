@@ -35,7 +35,8 @@ m1_ssh "rm -rf -- '$M3_C_WS' '$M3_TLS'"
 # C starts every run as a stranger: drop its network state (sha256 of the
 # workspace path) and its project dir.
 C_PROJECT=$(m1_project_dir "$M3_C_WS" "$M1_SRV_HOME")
-m1_ssh "d=\$(printf %s '$M3_C_WS' | sha256sum | cut -d' ' -f1); rm -rf -- \"\$HOME/.kollab/network/\$d\" '$C_PROJECT'"
+py='import hashlib, pathlib, sys; print(hashlib.sha256(str(pathlib.Path(sys.argv[1]).resolve()).encode()).hexdigest())'   # relay_state.py RelayStateStore
+m1_ssh "d=\$(python3 -c '$py' '$M3_C_WS') && [ -n \"\$d\" ] && rm -rf -- \"\$HOME/.kollab/network/\$d\" '$C_PROJECT'"
 say "srv: restarting B ($M1_SRV_SESSION) on its restored config"
 stop_ws "$M1_SRV_SESSION" "$M1_SRV_WS" >/dev/null
 launch_srv "$M1_SRV_SESSION" "$M1_SRV_WS"

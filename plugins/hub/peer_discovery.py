@@ -42,6 +42,10 @@ PEER_DISCOVERY_FUTURE_SKEW = 30
 PEER_DISCOVERY_MAX_INFLIGHT = 8
 PEER_DISCOVERY_MAX_SOURCES = 256
 PEER_DISCOVERY_MAX_CANDIDATES = 256
+# One member (relay key) keeps at most this many cached locators; past it the
+# member's own oldest goes, so rotating endpoint keys cannot fill the cache
+# against every other member.
+PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER = 8
 PEER_DISCOVERY_SOURCE_RATE_PER_MINUTE = 20
 PEER_DISCOVERY_TOTAL_RATE_PER_MINUTE = 300
 PEER_DISCOVERY_CALLBACK_TIMEOUT = 5.0
@@ -633,7 +637,13 @@ class PeerDiscoveryService:
                     raise PeerDiscoveryError("locator revision equivocation")
                 self._candidate_cache.move_to_end(key)
                 return True
-        elif len(self._candidate_cache) >= PEER_DISCOVERY_MAX_CANDIDATES:
+        elif (
+            len(self._candidate_cache) >= PEER_DISCOVERY_MAX_CANDIDATES
+            # A member at its share replaces its own oldest entry on remember,
+            # so it adds nothing; only a member with room is turned away.
+            and len(self._member_cache_keys(candidate.relay_public_key))
+            < PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER
+        ):
             raise PeerDiscoveryError("peer locator cache is full")
         return False
 
@@ -646,6 +656,13 @@ class PeerDiscoveryService:
             candidate.expires_at,
         )
         self._candidate_cache.move_to_end(key)
+        own = self._member_cache_keys(candidate.relay_public_key)
+        for oldest in own[: max(0, len(own) - PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER)]:
+            del self._candidate_cache[oldest]
+
+    def _member_cache_keys(self, relay_public_key: str) -> list[tuple[str, str]]:
+        """One member's cached locator keys, oldest first."""
+        return [key for key in self._candidate_cache if key[0] == relay_public_key]
 
 
 async def _invoke(callback: Callable[..., Any], *args: Any) -> Any:

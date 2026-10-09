@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -13,6 +14,9 @@ from kollabor_ai.message_content import (
 
 AGENT_HUD_OPEN = "<agent_hud>"
 AGENT_HUD_CLOSE = "</agent_hud>"
+
+# An agent_hud tag inside an entry: <agent_hud>, </agent_hud>, </AGENT_HUD >.
+_HUD_TAG = re.compile(r"<(\s*/?\s*agent_hud\b[^>]*)>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -51,7 +55,11 @@ def _strip_legacy_wrappers(content: str) -> str:
 
 
 def _format_body(content: str) -> str:
-    body = _strip_legacy_wrappers(content)
+    # An entry can hold someone else's words (another agent's hub message). Its
+    # own </agent_hud> would end the block early, and the text after it would
+    # read as the user's turn, to the model and to the web UI. Escaped, it stays
+    # inside the block, and markdown still shows it as written.
+    body = _HUD_TAG.sub(r"&lt;\1&gt;", _strip_legacy_wrappers(content))
     if not body:
         return "+"
     lines = body.splitlines()

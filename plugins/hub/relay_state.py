@@ -25,6 +25,7 @@ MAX_APPROVALS = 256
 MAX_VOUCHERS = 8  # members remembered per vouched device
 MAX_REVOKED = 64  # revocations remembered
 MAX_ANNOUNCED = 128  # pending join requests and knocks the human was told about
+MAX_STAMP = 2**53 - 1  # the largest integer strict_json carries
 INVITE_PREFIX = "kollab-invite-v1:"
 
 
@@ -167,6 +168,13 @@ class RelayState:
     # Devices revoked on this network, by this device or announced by a member:
     # a vouch for one of them counts for nothing until a member accepts it anew.
     revoked: list[str] = field(default_factory=list)
+    # Per member that has sent a dated list (`"v": 2`): the highest `issued_at`
+    # taken from it. A list not above it is a replay; an entry at all means that
+    # member's undated v1 lists are refused. plugins/hub/network_members.py.
+    members_seen: dict[str, int] = field(default_factory=dict)
+    # The last `issued_at` this device stamped on a list: the next is above it
+    # even if the clock stepped back.
+    members_issued_at: int = 0
     # Ids (`join:<id>`) of the join requests the human was already told about
     # in the main pane, pruned to what is still pending, so a restart announces
     # only what is new. Knocks live in plugins/hub/knocks.py.
@@ -339,6 +347,16 @@ class RelayStateStore:
             for voucher in vouchers:
                 validate_public_key(voucher)
         for key in value.revoked:
+            validate_public_key(key)
+        if (
+            not isinstance(value.members_seen, dict)
+            or len(value.members_seen) > MAX_APPROVALS
+            or any(type(mark) is not int or not 0 < mark <= MAX_STAMP for mark in value.members_seen.values())
+            or type(value.members_issued_at) is not int
+            or not 0 <= value.members_issued_at <= MAX_STAMP
+        ):
+            raise RelayError("invalid member list stamps")
+        for key in value.members_seen:
             validate_public_key(key)
         if (
             not isinstance(value.announced, list)

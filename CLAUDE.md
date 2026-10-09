@@ -321,6 +321,7 @@ kollab service install                           # this folder's agent under sys
 - response_parser runs on ALL responses regardless of native tool presence
 - Plugin tags (hub_msg, scratchpad, etc) are registered via `register_plugin_tag()` and executed via `register_plugin_handler()` -- real tools, not regex hacks on LLM_RESPONSE_POST
 - 43 hub pipeline tags registered (hub_msg, hub_broadcast, hub_stop, hub_status, scratchpad*, state_update, task_*, change feed, agent ops, vault_write, hub_ask_ctx)
+- A native call the model writes into its reply as text (`<functions.NAME>{json}</functions.NAME>`, `<tool_call>{"name": ...}</tool_call>`) parses as an MCP call by name; `resolve_text_tool_call` (`kollabor_agent/tool_call_contract.py`) sends it to the built-in or plugin tool it names before scope and permission checks, as `normalize_native_tool_call` does for real native calls. Its result returns in the XML batch, never as a provider tool result (the provider never issued that call id). Beside real native calls such a block only echoes them and never runs (`is_text_written_call`); a `<tool_call>` with no name is a `malformed_tool`, never a tool named "unknown"
 - See `docs/specs/unified-tool-pipeline.md` for full design
 
 **Troubleshooting hub bugs -- DO NOT GUESS, read the data:**

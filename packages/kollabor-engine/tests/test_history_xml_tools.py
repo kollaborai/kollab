@@ -100,6 +100,20 @@ def test_native_calls_keep_their_place_before_inline_xml_calls():
     assert [call["id"] for call in calls] == ["call_1", "hub_msg_0"]
 
 
+def test_a_native_turn_shows_without_the_text_call_it_echoed():
+    # The daemon did not run the <tool_call> echo of a native call; the reply
+    # keeps its native card and shows only its own words.
+    native = {"id": "call_1", "type": "function", "function": {"name": "hub_msg", "arguments": "{}"}}
+    raw = 'Sent.\n<tool_call>{"to": "lapis"}</tool_call>'
+    history = [_message("assistant", raw, {"tool_calls": [native], "display_content": "Sent."})]
+
+    [reply] = web_history(history)
+
+    assert reply["content"] == "Sent."
+    assert reply["metadata"] == {"tool_calls": [native]}
+    assert history[0]["content"] == raw  # the daemon's own copy is untouched
+
+
 def test_history_without_xml_turns_is_returned_as_is():
     history = [_message("user", "hi"), _message("assistant", "hello")]
 

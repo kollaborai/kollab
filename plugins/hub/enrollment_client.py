@@ -1407,6 +1407,14 @@ async def _finish_destination_enrollment(
             raise EnrollmentProtocolError("invalid_response")
         _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
         _bind_network_name(commands, decision.get("network_name"))
+        from .config_sync import record_join_floor
+
+        record_join_floor(
+            client.state_dir,
+            invite["key"],
+            decision.get("config_revision"),
+            decision.get("config_digest"),
+        )
         _store_destination_recovery(journal, record, "invite_joined")
 
     status = client.status()
@@ -1972,6 +1980,23 @@ class EnrollmentIssuer:
         except Exception:
             name = ""
         return {"network_name": name} if isinstance(name, str) and NAME_RE.fullmatch(name) else {}
+
+    def _config_floor_field(self) -> dict[str, Any]:
+        """`{"config_revision": n, "config_digest": hex}`: where this device's sealed-config
+        sync stands, so the joining device refuses a bundle signed before this join,
+        replayed ahead of its first real one (config_sync.record_join_floor).
+
+        Empty when sync is not running or its answer is unusable; the digest is
+        left out until a snapshot has been stamped.
+        """
+        getter = getattr(getattr(self.bridge, "config_sync", None), "join_floor", None)
+        try:
+            revision, digest = getter() if callable(getter) else (0, "")
+        except Exception:
+            return {}
+        if type(revision) is not int or not 0 < revision < 2**53:
+            return {}
+        return {"config_revision": revision, **({"config_digest": digest} if digest else {})}
 
     def _recovery_journal(self, client) -> EnrollmentRecoveryJournal:
         return EnrollmentRecoveryJournal(
@@ -3681,6 +3706,7 @@ class EnrollmentIssuer:
                                 "provisioning_bundle": base64.urlsafe_b64encode(bundle).rstrip(b"=").decode("ascii"),
                                 **self._issuer_device_name_field(),
                                 **self._network_name_field(),
+                                **self._config_floor_field(),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

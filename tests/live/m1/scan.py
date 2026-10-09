@@ -25,6 +25,9 @@ HEX64 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{64}(?![0-9A-Za-z])")
 RELAY = re.compile(r"relay:\S")
 RELAY_FULL = re.compile(r"relay:\S+")
 RECEIPT = re.compile(r"(?i)receipt")
+# Screens only (a log says ERROR): a failed tool shows "➲ Error: …", an error box "✖ Error",
+# and the stuck-loop breaker "Stuck loop detected".
+PANE_ERR = re.compile(r"\bError\b|Stuck loop")
 SHELL_OK = re.compile(r"Tool execution completed: \[SUCCESS\] terminal:")
 CODE_RE = re.compile(r"(?<![0-9A-Za-z-])([0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4})(?![0-9A-Za-z-])")
 
@@ -59,7 +62,7 @@ def report(text, vs, allow_code, panes):
     for line in lines:
         if ENV_OK.search(line):
             env += 1
-        elif ERR.search(line) or (panes and RECEIPT.search(line)):
+        elif ERR.search(line) or (panes and (RECEIPT.search(line) or PANE_ERR.search(line))):
             hits.append(redact_line(line, vs)[:220])
     other_code = bool(CODE_RE.search(text)) and not allow_code
     print(f"code={int((bool(vs) and not allow_code and any(v in text for v in vs)) or other_code)}")

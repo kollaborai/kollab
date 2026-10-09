@@ -104,6 +104,43 @@ async def test_agents_trust_delivers_once_allowed(bridges):
 
 
 @pytest.mark.asyncio
+async def test_an_allowed_manual_receiver_answers_an_open_senders_request_on_its_thread(
+    bridges,
+):
+    """Open sender, manual receiver (live Story 7 r4/r5): the request is an
+    ordinary turn there, and its answer goes back on the request's thread."""
+    members, _ = bridges
+    (left, _, left_model, _), (right, _, right_model, _) = members
+    set_trust(left, "open")
+    set_trust(right, "manual")
+    allow(left, right)  # the receiver's human: /connect allow <left> <agent>
+
+    sent = await left.send(address(right), "what does uname -n print?")
+    assert sent["state"] == "queued"
+    await right._tick()
+
+    # The open sender waits for no task result: no task envelope here either.
+    assert right.active is None
+    request = right.store.task(sent["id"])
+    assert request["state"] == "delivered"
+    assert len(right_model.contexts) == 1
+
+    thread = request["payload"]["thread_id"]
+    answer = await right.send(address(left), "it prints worker-1", thread_id=thread)
+    assert answer["state"] not in {"failed", "rejected", "revoked"}
+    await left._tick()
+    assert "it prints worker-1" in left_model.conversation_history[-1].content
+
+    # Only that thread goes without a human grant ...
+    with pytest.raises(RelayError, match="human communication grant"):
+        await right.send(address(left), "unrelated", thread_id="f" * 32)
+    # ... and only while the receiving grant stands (/connect deny).
+    right.store.revoke(right.commands.client.state.room, left.commands.client.public_key)
+    with pytest.raises(RelayError, match="human communication grant"):
+        await right.send(address(left), "one more", thread_id=thread)
+
+
+@pytest.mark.asyncio
 async def test_harness_context_drops_manual_only_lines_under_open_trust(bridges):
     members, _ = bridges
     (left, *_), _ = members
@@ -153,7 +190,7 @@ async def test_resolve_handle_ambiguous(bridges):
     members, _ = bridges
     (left, *_), _ = members
 
-    async def two_rows_same_handle():
+    async def two_rows_same_handle(cached=True):
         return [
             {
                 "name": "sapphire",

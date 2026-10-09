@@ -110,6 +110,28 @@ and drops devices only it named. A revoked device stays out until a person on a
 member accepts it again. Approval is not a grant: `agents` and `manual` trust
 work exactly as before. Accepted strangers, below, are not members.
 
+**Member lists are dated.** A list is signed by the device that sends it, one
+per recipient, over `v`, `voucher`, `to`, `net`, `members`, `revoked` and, in
+`"v": 2`, `issued_at` (whole seconds). A device never repeats or lowers one: it
+saves the last it stamped and stamps `max(now, last + 1)`, so a clock that steps
+back changes nothing. The receiver saves the highest `issued_at` it took from
+each member (`members_seen` in the relay state, written with the list, so a
+restart does not reopen the gap) and refuses a list that is not above it. A late
+or replayed older list therefore cannot drop a device the member named since.
+A member that has sent a `"v": 2` list is held to it: its `"v": 1` lists are
+refused. A refused list changes nothing; the sender stamps a fresh one at its
+next try.
+
+Devices that predate `issued_at` (0.13, 0.14) read only `"v": 1`: they check `v`
+exactly and ignore fields they do not know. A device offers each member `"v": 2`
+first. One that refuses it gets the `"v": 1` list at once, and `"v": 1` alone for
+as long as its relay session lasts (an upgrade restarts the session). A `"v": 1`
+list is taken until its sender has sent `"v": 2`, so an old device keeps working
+both ways; its lists carry no date, so a replay of one stays possible until it
+upgrades. `"v": 1` retires two releases or 90 days after the first release that
+ships `"v": 2`, whichever is later (`docs/specs/agent-public-beacon.md`,
+Versioning); after that a `"v": 1` list is refused.
+
 **Strangers.** A device outside your network can knock on your contact route.
 The knock rings your device while it is online; the directory passes it
 through and keeps nothing. Accepting makes the knocker a peer with `agents`
@@ -499,6 +521,7 @@ kollab relay serve: agents.acme.com
            new signing key created; back this directory up
   listen   http://127.0.0.1:9078  (plain HTTP, behind your TLS proxy)
   proxies  X-Real-IP trusted from 127.0.0.1 ::1
+           any process that can reach the port can send it; --unix-socket limits that to the proxy
 
 still to do, once:
   1. DNS: add this TXT record
@@ -553,7 +576,7 @@ back through the task envelope; a remote question waits for the human's
 `(answer with /connect answer 3 <text>)`. This is the Codex model, unchanged
 apart from the numbers, and it is only reachable through this setting.
 Switching to manual trust revokes any message still queued from open or agents trust, so nothing leaves without a human grant.
-Each device's trust is its own: a request from a manual device still runs as a task (status, cancel and a result back) on a device set to open.
+Each device's trust is its own: a request from a manual device still runs as a task (status, cancel and a result back) on a device set to open. The other way round, a message from an open device is an ordinary hub turn on a manual one: it gets in only from a device and agent the human allowed (`/connect allow <device> <agent>`), and the agent answers on that message's thread, as on open trust, until the message expires or `/connect deny`. Nothing else leaves the manual device without a human grant.
 
 ### Story 8: the sealed config follows Marco
 
@@ -766,7 +789,9 @@ end-of-turn frame on the thread: how many replies the turn sent and whether it
 failed. No screen shows the frame and no model receives it. `kollab --hub msg`
 prints every message on its own request's thread as it arrives, in order, and
 exits 0 once the frame arrives and every reply it counts has come; it exits 1
-with the error when the turn failed, and after its 600 s wait with `no reply
+when the turn failed (the far agent's own words, cleaned of control
+characters, print as its reply; the error line is `<handle> reported that its
+turn failed`), and after its 600 s wait with `no reply
 from <agent@device> within 600 s` (or `did not finish within 600 s` if replies
 had come). A request that starts no turn (an acknowledgement) ends at once
 with no reply. An older, later or duplicate answer from the same agent is never
@@ -832,6 +857,17 @@ How it stays secure with 40 bits:
 - Primary wins. The secondary sets every key the primary sends, keeps its own
   keys the primary does not send, and deletes a key or file the primary
   dropped. It records what it manages in `~/.kollab/private/managed-config.json`.
+- A write never follows a link. A path check races: a process of the same user
+  can swap a folder for a symlink between the check and the write. So the
+  secondary checks nothing by path. It opens `agents/` or `skills/` (the user
+  may link that folder itself), or `~/.kollab` for `config.json` and
+  `mcp/mcp_settings.json`, then each folder below it without following links,
+  by descriptor. It writes a temp file in the last folder and renames it into
+  place, so a link anywhere on the way is refused as `unsafe` at the moment of
+  use. Deleting a dropped file works the same way, and so does the primary's
+  read of a file for the manifest, so a file swapped for a link never travels.
+  A `config.json` or `mcp_settings.json` that is itself a link is refused too
+  (before, the link was replaced by a plain file).
 - An MCP server whose command is not installed on a secondary (a bare name
   `shutil.which` cannot find, or a path that is missing or not executable) is
   skipped: it is never written and a local server of the same name stays. The
@@ -862,6 +898,29 @@ How it stays secure with 40 bits:
   minutes. The running app follows settings and MCP servers at once; agents and
   skills are read the next time they are used. Each bundle carries a revision:
   a device holding a newer one answers `stale` and the primary raises its own.
+- The first bundle. A device that has not received one has no managed-config
+  record to compare a revision with, so a bundle its primary signed earlier
+  (good for 24 hours) could be replayed onto it before the first real one. The
+  join decision therefore carries the primary's config revision as `config_revision`,
+  and `config_digest` once the primary has stamped a snapshot: two optional
+  fields under the owner signature, which already covers a decision exactly as
+  sent. The device keeps them as the join floor in
+  `~/.kollab/private/join-floor.json` (0600, naming the primary) and answers
+  `stale` to a first bundle below that revision, or at it with another digest.
+  The floor is the lowest revision the primary's next bundle can carry, so the
+  real first bundle always applies; it writes the managed-config record and
+  removes the floor. A primary from before this sends neither field and the
+  device behaves as it did. A floor another primary left is ignored, and like the
+  record it is machine-global. The device checks the fields before keeping them:
+  a revision that is an integer from 0 to 2^53 - 1 and a digest of 64 lowercase
+  hex characters, or no digest. Anything else is logged as a warning and no floor
+  is kept; the join never fails over it. The floor is written like every other
+  sync file (never through a link, 0600 in the 0700 `private` folder) and is
+  deleted when the first real bundle lands, after which the managed-config record
+  governs. The join request carries no version or capability signal, so the two
+  fields go to every joiner. A device from before 0.13.0 rejects extra decision
+  fields (`agent-public-beacon.md`, Versioning) and must upgrade before it joins
+  a primary on this release.
 - Leaving. `/connect leave` on a secondary keeps the received values as its own
   and stops managing them. `/connect revoke <device>` on the primary ends the
   updates to that device; revoking the primary on a secondary does the same
@@ -1075,11 +1134,21 @@ names either way and no command changed.
   a per-process direct session that its locator or its signed record names. Two devices
   on one host work the same way: a discovery datagram from this host's own interface
   address is accepted (a cloud host's address is public); any other public source is not.
+  Loopback (`127.0.0.0/8`, `::1`, also as `::ffff:127.x`) and link-local addresses are
+  never dialed, whoever signed the locator: an endpoint naming one points the dialing
+  device at its own services. Two devices on one host advertise the host's own address.
 - **Endpoint names.** A locator vouches for its endpoint name only when an approved
   device's relay key signed it. The local registry can only deny: a name it holds under
-  another key, or rejected, is never admitted. A name two approved devices claim with
-  different keys admits neither. A device admitted this way reaches the peer carrier
-  (`peer_forward`, `peer_secure`) and nothing else: no Hub message, no ping.
+  another key, or rejected, is never admitted. When two members claim one name with
+  different keys, the member approved first keeps it, even while its locator has
+  expired: the name is unreachable until that member is back and never moves to a later
+  claimant. A claim is the last name a member signed, kept in the locator store (one row
+  per member, never more rows than approvals). Revoking the member deletes its claim and
+  the next member to claim the name takes it. "First" is the order of this device's own
+  approvals, so a member revoked and approved again counts from its new approval, and an
+  accepted stranger is not a member and claims nothing. A device admitted this way
+  reaches the peer carrier (`peer_forward`, `peer_secure`) and nothing else: no Hub
+  message, no ping.
 - **Strangers** (Story 5) get no mesh records, links or forwarding, on the relay path
   and on the direct endpoint.
 - **On by default, two off switches.** `plugins.hub.peer_direct_enabled` and
@@ -1092,8 +1161,8 @@ names either way and no command changed.
 
 Members: the mesh needs every device on a route to approve every other, so devices
 spread approval (section 4, Members). A network of three or more routes once the
-signed member lists have crossed. A designation two members claim goes to the one
-approved first.
+signed member lists have crossed. A designation two members claim stays with the one
+approved first (Endpoint names, above).
 
 Proof: `tests/unit/test_mesh_network.py` (three real bridges, A and B on one wire, C on
 none) covers the route, the sealing, C's own trust, the session invariant, the limits,
@@ -1123,9 +1192,13 @@ prints both. Operator detail is in
   not root), enables and starts it, after creating the state directory the unit
   is confined to; `--uninstall` removes it. Without them nothing is written.
 - **Client addresses.** A proxy on the same machine is trusted for `X-Real-IP`, so
-  per-address limits see the client and not the proxy. A proxy elsewhere needs
-  `--trusted-proxy <ip>`; an office behind one address needs
-  `--max-connections-per-source`.
+  per-address limits see the client and not the proxy. Over loopback any local
+  process can send that header too; on a shared host give the proxy a unix socket
+  instead (`--unix-socket <path> --unix-socket-group <proxy group>`): only that
+  user and group can open it, and `X-Real-IP` is trusted there. A proxy elsewhere
+  needs `--trusted-proxy <ip>`. The relay allows 64 connections per address (a
+  team behind one office address); `--max-connections-per-source` changes it and
+  `--print nginx` caps the same number with `limit_conn`.
 - **Backend.** One worker on the in-memory backend. The managed Valkey sidecar
   never persisted either: a join code that is waiting at a restart ends, a knock
   is never on the directory to lose, and everything else is rebuilt as devices

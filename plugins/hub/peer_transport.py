@@ -270,6 +270,12 @@ class SQLitePeerLocatorStore:
             "retain_until INTEGER NOT NULL, candidate_json TEXT NOT NULL, "
             "revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)))"
         )
+        # The designation each member last signed into a locator. A locator lives
+        # four minutes; the name its device holds outlives it.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS locator_claims ("
+            "relay_key TEXT PRIMARY KEY, designation TEXT NOT NULL)"
+        )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -277,6 +283,48 @@ class SQLitePeerLocatorStore:
 
     def close(self) -> None:
         self._connection.close()
+
+    def claim(self, relay_key: str) -> str:
+        """The designation `relay_key` last signed, or "" when it never signed one."""
+        row = self._connection.execute(
+            "SELECT designation FROM locator_claims WHERE relay_key = ?", (relay_key,)
+        ).fetchone()
+        return "" if row is None else str(row[0])
+
+    def remember_claim(
+        self, relay_key: str, designation: str, *, approved: set[str] | frozenset[str]
+    ) -> None:
+        """Keep the designation a member signed: one row per key, `max_peers` at most.
+
+        Rows of keys no longer in `approved` make room first, so the table never
+        outgrows the approvals it serves.
+        """
+        if not isinstance(relay_key, str) or not _HEX_32.fullmatch(relay_key):
+            raise PeerRouteError("invalid peer claim identity")
+        try:
+            validate_peer_designation(designation)
+        except PeerLocatorError as exc:
+            raise PeerRouteError("invalid peer claim designation") from exc
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "INSERT INTO locator_claims(relay_key, designation) VALUES (?, ?) "
+                "ON CONFLICT(relay_key) DO UPDATE SET designation = excluded.designation",
+                (relay_key, designation),
+            )
+            held = [row[0] for row in connection.execute("SELECT relay_key FROM locator_claims")]
+            for stale in held:
+                if stale not in approved:
+                    connection.execute(
+                        "DELETE FROM locator_claims WHERE relay_key = ?", (stale,)
+                    )
+            if len([key for key in held if key in approved]) > self._max_peers:
+                raise PeerRouteError("peer claim capacity is full")
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
 
     def next_revision(self, relay_key: str) -> int:
         if not isinstance(relay_key, str) or not _HEX_32.fullmatch(relay_key):
@@ -385,6 +433,8 @@ class SQLitePeerLocatorStore:
         if not isinstance(relay_key, str) or not _HEX_32.fullmatch(relay_key):
             raise PeerRouteError("invalid revoked peer identity")
         connection = self._connection
+        # Its name goes with it, even when the tombstone below has no room.
+        connection.execute("DELETE FROM locator_claims WHERE relay_key = ?", (relay_key,))
         connection.execute("BEGIN IMMEDIATE")
         try:
             row = connection.execute(
@@ -812,6 +862,11 @@ class PeerMeshRuntime:
             or value["expires_at"] <= int(time.time())
         ):
             return
+        self.locator_store.remember_claim(
+            relay_key,
+            value["endpoint_designation"],
+            approved=frozenset(self.client.state.approvals),
+        )
         self._locators[relay_key] = value
         self._locators.move_to_end(relay_key)
         while len(self._locators) > MAX_PEER_LOCATORS:
@@ -829,6 +884,11 @@ class PeerMeshRuntime:
         return value
 
     async def _resolve_direct_endpoint(self, endpoint: str) -> tuple[str, int, tuple[str, ...]]:
+        """Pin the addresses a locator's endpoint resolves to, or refuse them all.
+
+        Loopback and link-local addresses are never dialed: a locator naming one
+        points this device at its own services, whoever signed it.
+        """
         try:
             host, port = validate_peer_locator_endpoint(
                 endpoint, allow_private_network=self.allow_private_network
@@ -854,10 +914,14 @@ class PeerMeshRuntime:
                 address = ipaddress.ip_address(address_text)
             except ValueError as exc:
                 raise PeerRouteError("direct peer resolved to an invalid address") from exc
+            if address.version == 6 and address.ipv4_mapped is not None:
+                address = address.ipv4_mapped  # ::ffff:127.0.0.1 is 127.0.0.1
             if (
                 address.is_unspecified
                 or address.is_multicast
                 or address.is_reserved
+                or address.is_link_local
+                or address.is_loopback
                 or (not self.allow_private_network and not address.is_global)
             ):
                 raise PeerRouteError("direct peer resolved outside the allowed network")
@@ -1155,6 +1219,11 @@ class PeerMeshRuntime:
             peer_id = peer_id_for_key(event.peer_key)
             if event.kind == "peer_revoked":
                 router.revoke(peer_id)
+                # After the router, so no failure here skips the revoke above. The
+                # store's tombstone is permanent: the same device approved again
+                # gets no direct link and stays on the relay.
+                self._locators.pop(event.peer_key, None)
+                self.locator_store.revoke(event.peer_key)
                 return
             if event.kind in {"peer_disappeared", "peer_session_changed"}:
                 router.set_authenticated_neighbor(peer_id, False)
@@ -1378,6 +1447,7 @@ class PeerMeshRuntime:
 
     async def handle_exchange(self, peer_key: str, value: dict) -> dict:
         """Accept signed metadata only on a current, direct mutual-TLS session."""
+        self._refuse_stranger(peer_key)
         direct = self._direct_peer(peer_key)
         router = self._ensure_router()
         now = int(time.time())
@@ -1683,6 +1753,7 @@ class PeerMeshRuntime:
         ):
             raise PeerRouteError("invalid peer route metadata")
         router = self._ensure_router()
+        self._refuse_stranger(ingress_peer_key)
         now = int(time.time())
         records = {}
         for wire in records_wire:
@@ -1699,6 +1770,8 @@ class PeerMeshRuntime:
                 or self.record_store.is_revoked(record.peer_id, scope=router.scope)
             ):
                 raise PeerRouteError("peer route contains an unapproved identity")
+            # Every node on the route, the origin and the hops included, is a member.
+            self._refuse_stranger(record.public_key)
             records[record.peer_id] = record
         if set(records) != set(route):
             raise PeerRouteError("peer route identity set does not match its path")
@@ -1787,29 +1860,55 @@ class PeerMeshRuntime:
             router.add_link(link, now=now)
         return envelope, route, trace, records, links, expected_local_index
 
+    def _claimant(
+        self, designation: str, keys: list[str]
+    ) -> tuple[str, dict[str, Any] | None]:
+        """The first of `keys`, in approval order, that claims `designation`.
+
+        A claim is the designation the key's live locator names, or, once that
+        locator has expired, the last one the key signed. Its live locator comes
+        with it, or None while the owner is away: the name is held, not up for
+        the next claimant.
+        """
+        for peer_key in keys:
+            locator = self._locator_for_peer(peer_key)
+            claimed = (
+                locator.get("endpoint_designation")
+                if locator is not None
+                else self.locator_store.claim(peer_key)
+            )
+            if claimed == designation:
+                return peer_key, locator
+        return "", None
+
     def endpoint_key_for(self, designation: str) -> str:
         """The endpoint key a network member's live locator gives a designation.
 
         A claim belongs to the relay key that signed it, and `_direct_caller`
         maps a caller back to that key alone. When two members claim one name
-        with different keys, the member approved first keeps it, so a later
-        claim cannot block the first device. An accepted stranger is not a
-        member and never claims a name.
+        with different keys, the member approved first keeps it, even while its
+        locator has expired: the name is then unreachable until that member is
+        back, and never moves to a later claimant. Revoking the owner frees it.
+        An accepted stranger is not a member and never claims a name.
         """
         if not self.direct_enabled:
             return ""
-        for peer_key in self.client.members():
-            locator = self._locator_for_peer(peer_key)
-            if locator is not None and locator.get("endpoint_designation") == designation:
-                return str(locator.get("endpoint_public_key", "")).lower()
-        return ""
+        _owner, locator = self._claimant(designation, self.client.members())
+        return str(locator.get("endpoint_public_key", "")).lower() if locator else ""
 
     def _direct_caller(self, designation: str, endpoint_public_key: str) -> str:
         """Map a current endpoint-authenticated caller to its approved relay key."""
-        candidates = [
-            self._locator_for_peer(peer_key)
-            for peer_key in tuple(self.client.state.approvals)
-        ]
+        strangers = getattr(self.client.state, "links", ())
+        approved = tuple(self.client.state.approvals)
+        owner, locator = self._claimant(
+            designation, [key for key in approved if key not in strangers]
+        )
+        if owner:
+            # A member holds the name: only its own live locator speaks for it.
+            candidates = [locator]
+        else:
+            # No member does; the registry may still have admitted a stranger by key.
+            candidates = [self._locator_for_peer(key) for key in approved if key in strangers]
         matches = [
             item
             for item in candidates
@@ -1821,12 +1920,15 @@ class PeerMeshRuntime:
             raise PeerRouteError("direct peer identity is not bound to one approved relay")
         return matches[0]["relay_public_key"]
 
+    def _refuse_stranger(self, peer_key: str) -> None:
+        """An accepted stranger is not a mesh member: it neither carries nor is carried."""
+        if peer_key in getattr(self.client.state, "links", ()):
+            raise PeerRouteError("an accepted stranger is not a mesh member")
+
     async def handle_direct_forward(
         self, designation: str, endpoint_public_key: str, frame: dict[str, Any]
     ) -> dict[str, Any]:
         peer_key = self._direct_caller(designation, endpoint_public_key)
-        if peer_key in getattr(self.client.state, "links", ()):
-            raise PeerRouteError("an accepted stranger is not a mesh member")
         return await self.handle_forward(peer_key, frame)
 
     async def handle_direct_secure(
@@ -1870,6 +1972,7 @@ class PeerMeshRuntime:
         """Verify and forward one opaque end-to-end encrypted application frame."""
         if self._closed or ingress_peer_key not in self.client.state.approvals:
             raise PeerRouteError("peer forwarding is not approved")
+        self._refuse_stranger(ingress_peer_key)
         if ingress_peer_key not in self._live_peers():
             raise PeerRouteError("peer forwarding ingress is offline")
         try:

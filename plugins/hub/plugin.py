@@ -111,7 +111,8 @@ REMOTE_SHUTDOWN_WATCHDOG_SECONDS = 2.0
 # simple-flow.md section 7). One request ends failed when no turn came for it
 # within the shell's own wait ceiling.
 _NET_TURN_MAX_SECONDS = 600.0
-# Carried by the end-of-turn frame; only the failed text is ever printed.
+# Carried by the end-of-turn frame; the failed text is shown only when a far
+# agent sends other words than this.
 _NET_TURN_DONE = "The receiving agent finished this request."
 _NET_TURN_FAILED = "The receiving agent could not complete this request."
 
@@ -138,6 +139,25 @@ def _network_answer_text(text: Optional[str], limit: int) -> str:
     if len(raw) > limit:
         text = raw[: limit - 3].decode("utf-8", "ignore") + "..."
     return text
+
+
+# A far agent's text is printed by a shell: no escape sequence and no control
+# character (CR and the C1 range included) may reach its terminal. Tab and
+# newline stay.
+_NET_ESCAPE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b[\]PX^_].*?(?:\x07|\x1b\\|\Z)"  # OSC, DCS, SOS, PM, APC up to BEL or ST
+    r"|\x1b[ -/]*[0-~]",  # any other escape
+    re.DOTALL,
+)
+_NET_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _network_display_text(text: object) -> str:
+    """A far agent's ``text`` with its escape sequences and control characters removed."""
+    if not isinstance(text, str):
+        return ""
+    return _NET_TEXT_CONTROL.sub("", _NET_ESCAPE.sub("", text))
 
 
 @dataclass
@@ -2765,6 +2785,25 @@ class HubPlugin(BasePlugin):
         turn = getattr(self, "_net_turn", None)
         return turn if turn is not None and turn.handle == handle else None
 
+    async def _asker_handle(self, target: str) -> str:
+        """``target``, or the asker's handle when it misnames the asker.
+
+        While a turn answers a remote request, models retype a long device name
+        wrong (koordinator@host-kollab-m1-dev29 for ...-m1-mac-0-14-1-dev29) and
+        got "unknown agent@device". A handle with the asker's agent name and a
+        device this network does not know means the asker. A known device keeps
+        its own answer: relaying to an agent of that name there is a real ask.
+        """
+        turn = getattr(self, "_net_turn", None)
+        typed, asker = parse_handle(target or ""), parse_handle(turn.handle if turn else "")
+        if not typed or not asker or typed[0] != asker[0] or format_handle(*typed) == turn.handle:
+            return target
+        known = getattr(getattr(self, "_relay_agent", None), "device_known", None)
+        if known is None or await known(typed[1]):
+            return target
+        logger.info("hub_msg to %s answers %s's request", target, turn.handle)
+        return turn.handle
+
     def network_turn_open(self) -> bool:
         """True while a delivered remote request's turn has not ended."""
         return getattr(self, "_net_turn", None) is not None
@@ -2959,6 +2998,39 @@ class HubPlugin(BasePlugin):
                 success=False,
                 error="hub_msg kind must be message, question, or answer",
             )
+
+        # A receiving agent's final reply returns to its sender automatically.
+        # Only a question is its to send; refuse anything else before routing,
+        # with an error that says how to reply instead of a generic failure.
+        # It runs before the answer checks, or a receiver's kind="answer" gets
+        # only their error, retries it and trips the stuck-loop breaker.
+        relay = getattr(self, "_relay_agent", None)
+        if relay is not None and relay._turn.get() is not None and relay_kind != "question":
+            active = relay.active
+            sender = active.record["payload"]["from"] if active else "the sender"
+            error = (
+                "Do not send your answer with hub_msg: your final reply in this turn "
+                f"is returned to {sender} automatically. Write the answer as your "
+                "normal reply. hub_msg is only for one kind='question' to the sender."
+            )
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output=error,
+                error=error,
+            )
+
+        # A turn handling an agent's request replies to it on that request's
+        # thread (below), whatever device name the model typed for the asker.
+        # Models sent that reply as kind="answer", which is only a human's
+        # answer to a remote question, and got the exact-target error.
+        target = await self._asker_handle(target)
+        if relay_kind == "answer" and not target.startswith("relay:"):
+            asked = parse_handle(target)
+            if asked and self._network_answering(format_handle(*asked)):
+                relay_kind = "message"
+
         if relay_kind == "answer":
             from .relay_state import ID
 
@@ -2976,26 +3048,6 @@ class HubPlugin(BasePlugin):
                         "and question reply_to"
                     ),
                 )
-
-        # A receiving agent's final reply returns to its sender automatically.
-        # Only a question is its to send; refuse anything else before routing,
-        # with an error that says how to reply instead of a generic failure.
-        relay = getattr(self, "_relay_agent", None)
-        if relay is not None and relay._turn.get() is not None and relay_kind != "question":
-            active = relay.active
-            sender = active.record["payload"]["from"] if active else "the sender"
-            error = (
-                "Do not send your answer with hub_msg: your final reply in this turn "
-                f"is returned to {sender} automatically. Write the answer as your "
-                "normal reply. hub_msg is only for one kind='question' to the sender."
-            )
-            return ToolExecutionResult(
-                tool_id=tool_data.get("id", "unknown"),
-                tool_type="hub_msg",
-                success=False,
-                output=error,
-                error=error,
-            )
 
         # wait="true" means "send, then stop": once the send succeeds, this turn
         # ends (the result's end_turn flag below, honoured by the queue
@@ -7582,6 +7634,22 @@ class HubPlugin(BasePlugin):
                         "machine and is waiting for your answer. Reply once, "
                         "even to a greeting: your plain-text reply is sent "
                         "back to them."
+                    )
+                elif (
+                    relay
+                    and relay._turn.get() is not None
+                    and message is relay._injecting_message
+                ):
+                    # A remote task, or its asker's answer: the final reply goes
+                    # back by itself. Told only by hub_msg's refusal, models sent
+                    # the answer with hub_msg first and showed that error.
+                    sender = (message.metadata or {}).get("display_from") or "The sender"
+                    guidance = (
+                        f"{sender} on another machine is waiting for this. Your "
+                        "final reply in this turn is returned to them "
+                        "automatically: write the answer as your normal reply, "
+                        "not with hub_msg. To ask them something first, send one "
+                        'hub_msg with kind="question" and wait for their answer.'
                     )
                 else:
                     guidance = (
@@ -13156,7 +13224,9 @@ class HubPlugin(BasePlugin):
         request's thread (`network_reply`, in order) until the far agent's
         turn ends (`network_done`, or `error` when that turn failed) or
         ``wait_seconds`` pass (`network_timeout`). ``wait_seconds <= 0``
-        returns right after sending (``--no-wait``).
+        returns right after sending (``--no-wait``). Everything the far agent
+        wrote, a failed turn's text included, goes out as its `network_reply`
+        with control characters removed; the `error` line is only ours.
         """
         handle = parse_handle(to)
         if handle is None:
@@ -13224,11 +13294,20 @@ class HubPlugin(BasePlugin):
                     return
                 if event[0] == "reply":
                     replies += 1
-                    yield {"type": "network_reply", "from": event[1], "content": event[2]}
+                    yield {
+                        "type": "network_reply",
+                        "from": _network_display_text(event[1]),
+                        "content": _network_display_text(event[2]),
+                    }
                 else:
                     end = event[1:]
             if end[1]:
-                yield {"type": "error", "msg": end[2]}
+                # The end frame's text is the far agent's own claim: show it as
+                # its message, and keep this CLI's error line to what we know.
+                said = _network_display_text(end[2]).strip()
+                if said and said != _NET_TURN_FAILED:
+                    yield {"type": "network_reply", "from": handle_str, "content": said}
+                yield {"type": "error", "msg": f"{handle_str} reported that its turn failed"}
             else:
                 yield {"type": "network_done", "replies": replies}
         finally:

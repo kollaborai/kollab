@@ -632,6 +632,12 @@ class ResponseParser:
             r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE
         )
 
+        # A native call the model wrote into its reply instead of making it:
+        # <functions.hub_msg>{"to": "lapis", "message": "hi"}</functions.hub_msg>
+        self.functions_call_pattern = re.compile(
+            r"<functions\.([\w-]+)>(.*?)</functions\.\1>", re.DOTALL
+        )
+
         # File operations parser
         self.file_ops_parser = FileOperationParser()
 
@@ -1100,12 +1106,13 @@ class ResponseParser:
         return match.group(1) if match else default
 
     def _extract_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Extract MCP tool call blocks from both <tool> and <tool_call> tags.
+        """Extract MCP tool call blocks from <tool>, <tool_call> and <functions.*> tags.
 
         Supports:
         - <tool name="tool_name" arg="value">content</tool>
         - <tool_call>tool_name</tool_call>
         - <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+        - <functions.tool_name>{...arguments...}</functions.tool_name>
 
         Args:
             content: Raw response content
@@ -1168,6 +1175,40 @@ class ResponseParser:
                 )
                 tool_index += 1
 
+        # Extract <functions.NAME>{arguments}</functions.NAME> calls
+        for match in self.functions_call_pattern.finditer(content):
+            try:
+                # strict=False: a code span in a string arrives as a \x00
+                # placeholder (_mask_code_spans), restored after extraction.
+                arguments = json.loads(
+                    unescape(match.group(2).strip()) or "{}", strict=False
+                )
+                if not isinstance(arguments, dict):
+                    raise ValueError("the arguments are not a JSON object")
+                tool_calls.append(
+                    {
+                        "type": "mcp_tool",
+                        "id": f"mcp_tool_{tool_index}",
+                        "name": match.group(1),
+                        "arguments": arguments,
+                        "content": "",
+                        "raw": match.group(0),
+                        "_position": match.start(),
+                    }
+                )
+            except ValueError as e:
+                logger.warning(f"Failed to parse <functions.{match.group(1)}>: {e}")
+                tool_calls.append(
+                    {
+                        "type": "malformed_tool",
+                        "id": f"malformed_{tool_index}",
+                        "error": str(e),
+                        "raw": match.group(0),
+                        "_position": match.start(),
+                    }
+                )
+            tool_index += 1
+
         return tool_calls
 
     def _parse_tool_call_content(
@@ -1188,21 +1229,26 @@ class ResponseParser:
         """
         content = unescape(content.strip())
 
-        # Try JSON format first
+        # Try JSON format first (strict=False: code-span placeholders hold \x00)
         if content.startswith("{"):
             try:
-                data = json.loads(content)
+                data = json.loads(content, strict=False)
+            except json.JSONDecodeError:
+                data = None
+            if data is not None:
+                # Arguments alone (a model echoing its native call) name no
+                # tool; never run them as a tool called "unknown".
+                if not isinstance(data, dict) or not data.get("name"):
+                    raise ValueError("the call names no tool")
                 return {
                     "type": "mcp_tool",
                     "id": f"mcp_tool_{index}",
-                    "name": data.get("name", "unknown"),
+                    "name": data["name"],
                     "arguments": data.get("arguments", {}),
                     "content": "",
                     "raw": f"<tool_call>{content}</tool_call>",
                     "_position": position,
                 }
-            except json.JSONDecodeError:
-                pass
 
         # Simple name format: just the tool name, maybe with inline args
         # Handle: "search_nodes" or "search_nodes query=test"
@@ -1391,8 +1437,9 @@ class ResponseParser:
         # Remove tool tags but preserve content structure
         cleaned = self.tool_pattern.sub("", cleaned)
 
-        # Remove <tool_call> tags
+        # Remove <tool_call> and <functions.*> tags
         cleaned = self.tool_call_pattern.sub("", cleaned)
+        cleaned = self.functions_call_pattern.sub("", cleaned)
 
         # Remove file operation tags (all 14 types)
         # Only successfully parsed tags are removed; malformed tags remain visible

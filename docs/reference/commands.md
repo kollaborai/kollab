@@ -70,7 +70,8 @@ manage agents from CLI (no TUI needed):
   during the turn that handles the request (an interim "on it" and the answer)
   is printed as it arrives, one "<handle>: <text>" line each; an older or late
   answer to another request is never printed. The command exits 0 when that
-  turn ends, 1 with the error if the turn failed, and 1 on timeout ("no reply
+  turn ends, 1 if the turn failed (any words the far agent sent print first as its
+  reply, then `<handle> reported that its turn failed`), and 1 on timeout ("no reply
   from <handle> within N s", or "<handle> did not finish within N s" after
   replies). A turn that ends without a reply prints "<handle> finished without
   a reply". Several such commands at once to one agent each get only their own
@@ -316,6 +317,9 @@ device (`/connect allow` / `/connect deny`). `manual` is the original,
 human-gated model — every first message needs `/connect authorize` or
 `/connect send`, replies go through the task envelope, and a remote question
 waits for `/connect answer`; that is what the `help all` commands are for.
+Each device's trust is its own: a message from an `open` device reaches a
+`manual` one only through `/connect allow`, and the allowed agent answers on
+that message's thread.
 
 `/connect accept` and `/connect reject` take a device name; when two pending
 requests share a name, add the start of the device ID the Connect screen
@@ -406,12 +410,13 @@ Run your own directory from the same application:
 ```bash
 kollab relay serve --domain agents.example.com   # relay + signed key file in one process
 kollab relay serve --domain agents.example.com --print nginx   # or caddy, systemd
+kollab relay serve --domain agents.example.com --unix-socket /run/kollab-relay/agents.sock --unix-socket-group www-data   # proxy on this host
 kollab relay run --config /private/relay.json    # several workers, shared backend
 ```
 
 `serve --domain` creates or loads its signing key under
 `~/.kollab/relay/<domain>` (`--state-dir`), serves the relay and the key file on
-one local port (`--bind`, `--port`, default `127.0.0.1:9078`), and prints the DNS
+one local port (`--bind`, `--port`, default `127.0.0.1:9078`; or `--unix-socket` for a proxy on the same host), and prints the DNS
 TXT record and the five proxy routes it needs. `--print` prints a proxy or
 systemd config for the same settings and exits. `run` supervises workers with an
 external Valkey backend or an explicitly configured managed sidecar; the bare

@@ -31,6 +31,8 @@ def test_peer_designation_rejects_values_outside_dns_label_boundary(
         ("kollab+tls://peer.example:7443", ("peer.example", 7443)),
         ("kollab+tls://127.0.0.1:7443", ("127.0.0.1", 7443)),
         ("kollab+tls://[2001:db8::1]:7443", ("2001:db8::1", 7443)),
+        # An IPv4-mapped address is dotted on every Python (3.12 writes it in hex).
+        ("kollab+tls://[::ffff:192.0.2.1]:7443", ("::ffff:192.0.2.1", 7443)),
     ],
 )
 def test_direct_peer_locator_accepts_canonical_authorities(endpoint, expected) -> None:
@@ -50,6 +52,7 @@ def test_direct_peer_locator_accepts_canonical_authorities(endpoint, expected) -
         "kollab+tls://user@peer.example:7443",
         "kollab+tls://010.0.0.1:7443",
         "kollab+tls://[2001:0db8::1]:7443",
+        "kollab+tls://[::ffff:c000:201]:7443",  # ::ffff:192.0.2.1 in hex
     ],
 )
 def test_direct_peer_locator_rejects_noncanonical_or_wrong_carrier(endpoint) -> None:

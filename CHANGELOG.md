@@ -23,6 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web UI showed an agent's XML tool calls as raw text (`<terminal>…</terminal>`), live and after a reload. They show as tool cards with their results, like native tool calls; the model still gets its own calls back as it wrote them.
 - A web chat still starting showed for a moment as a second agent in the sidebar, and opening that row attached a second session to the same agent.
 - After New Session, or a click on another chat, the open chat's message box stayed live for the seconds the switch took: a message typed there went to the chat being left, or was lost. The box now waits, and says what it is waiting for.
+- A message from an open-trust device to a manual-trust device that allowed it (`/connect allow`) gets its answer back. Before, the request ran but the answer never left. The answer goes only to that message's thread, and only while the allow stands.
+- A tool call the model wrote into its reply as text instead of making it (`<functions.hub_msg>{...}</functions.hub_msg>`, seen from gpt-5.6-luna) did nothing, while the reply said it was done. It now runs as the tool it names, through the same permission check, and shows as a tool card. So does a `<tool_call>{"name": ...}` naming a built-in or plugin tool (it went to MCP and failed) or holding backticks in its arguments (misread). A call that cannot be read answers with what failed. A block written beside the model's native calls only echoes them, so it never runs and nothing runs twice; a `<tool_call>` that names no tool says so instead of running as a tool named "unknown".
+- An agent answering another device's request with `hub_msg` was told only "relay answer requires its exact target, thread_id, and question reply_to", tried again, and stopped on "Stuck loop detected". It is now told before it starts that its normal reply goes back to the sender.
+- A message to an agent on another computer (`koordinator@box`) could fail as "unknown agent@device" for up to 15 seconds after that agent came online. The name now asks the other computers again before it gives up.
+- A reply in which one generated image failed was lost whole, with "image generation completed without image data". The failed image now shows as a note and the rest of the reply stays.
+- An agent answering another device's message showed "unknown agent@device" when its `hub_msg` reply misspelled the asker's long device name, or "relay answer requires its exact target…" when it marked the reply `kind="answer"`. Both now reach the asker as the reply.
+
+### Security
+- Another agent's message could end the block of agent notes the model reads before your turn: a `</agent_hud>` in its text closed the block early, so the words after it read as yours, to the model and in the web UI, where they showed as a message you sent. That covered any peer, including one on another computer. Agent tags inside a note are now escaped, and the web UI still shows the message as written.
+- A relay takes up to 64 connections from one address (was 16), so a team behind one office IP fits, and up to 4,096 per worker (was 512), so a flood needs far more addresses. The nginx config from `--print nginx` caps connections per address too; Caddy has no such limit and says so.
+- A relay on the same computer as nginx can listen on a unix socket (`--unix-socket`), so no other program on that computer can pose as the proxy.
+- When two of your computers claim the same direct-connection name, the one you approved first keeps it, even while it is offline; the name never moves to the other computer.
+- Direct connections never dial loopback or link-local addresses.
+- An agent you accepted from outside your network can no longer carry or forward traffic inside it.
+- Removing a device also drops its direct connection for good; approved again, it connects through the relay.
+- Member lists are dated, so an old copy replayed later cannot remove devices you added since. Devices on 0.13 and 0.14 keep working; their lists stay undated until they update.
+- A new device refuses a settings bundle older than its join, and settings sync never writes through a symlink. A `config.json` or `mcp_settings.json` that is itself a symlink is no longer synced (it was replaced by a plain file).
+- Discovery keeps at most 8 addresses per computer, so one computer cannot crowd out the rest.
+- A remote agent's failure text prints as its own message, with control characters removed, instead of as your command's error. Agent messages with C1 control characters are refused.
 
 ## [0.14.0] - 2026-10-08
 

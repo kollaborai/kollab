@@ -13,7 +13,7 @@ import pytest
 from nacl.signing import SigningKey
 
 from kollabor_config.provisioned_state import ProvisionedStateFile
-from plugins.hub import enrollment_client
+from plugins.hub import config_sync, enrollment_client
 from plugins.hub.dns.private_directory import (
     PrivateDirectory,
     prove_pairing,
@@ -417,6 +417,7 @@ async def _run_enrollment(
     claim_other_owner=False,
     issuer_device_name=None,
     network_name=None,
+    config_floor=None,
     submitted_probe=None,
     before_enroll=None,
 ):
@@ -619,6 +620,7 @@ async def _run_enrollment(
                         .decode("ascii"),
                         **({"issuer_device_name": issuer_device_name} if issuer_device_name else {}),
                         **({"network_name": network_name} if network_name else {}),
+                        **(config_floor or {}),
                     },
                 )
                 self.decision_envelope = encrypt_enrollment_envelope(self.envelope_key, decision)
@@ -856,6 +858,32 @@ async def test_joining_an_issuer_that_sends_no_network_name_still_completes(tmp_
 
     assert result == {"status": "approved"}
     assert commands.agent_bridge.named == []
+
+
+@pytest.mark.asyncio
+async def test_joining_device_hands_the_signed_config_floor_to_the_receiver(tmp_path, monkeypatch):
+    handed = []
+    monkeypatch.setattr(config_sync, "record_join_floor", lambda *args: handed.append(args))
+
+    result, _commands, destination, _transport, _directory = await _run_enrollment(
+        tmp_path,
+        monkeypatch,
+        config_floor={"config_revision": 1234567, "config_digest": "a" * 64},
+    )
+
+    assert result == {"status": "approved"}
+    assert handed == [(destination.state_dir, destination.state.inviter, 1234567, "a" * 64)]
+
+
+@pytest.mark.asyncio
+async def test_joining_an_issuer_that_sends_no_floor_clears_an_old_one(tmp_path, monkeypatch):
+    handed = []
+    monkeypatch.setattr(config_sync, "record_join_floor", lambda *args: handed.append(args))
+
+    result, _commands, destination, _transport, _directory = await _run_enrollment(tmp_path, monkeypatch)
+
+    assert result == {"status": "approved"}
+    assert handed == [(destination.state_dir, destination.state.inviter, None, None)]
 
 
 @pytest.mark.asyncio
@@ -1372,6 +1400,7 @@ async def test_issuer_requires_explicit_decision_after_proof(
         _closed=False,
         device_name=lambda: "laptop-kollab",
         network_name=lambda: "laptop-kollab-net",
+        config_sync=SimpleNamespace(join_floor=lambda: (1234567, "a" * 64)),
     )
     issuer = EnrollmentIssuer(bridge)
     provisioning_plan = await issuer._make_provisioning_plan(offer_id)
@@ -1510,6 +1539,9 @@ async def test_issuer_requires_explicit_decision_after_proof(
                     # the joiner learns the issuer's device name from the signed decision
                     assert self.decision["issuer_device_name"] == "laptop-kollab"
                     assert self.decision["network_name"] == "laptop-kollab-net"
+                    # and where its sealed-config sync stands, as a floor for the first bundle
+                    assert self.decision["config_revision"] == 1234567
+                    assert self.decision["config_digest"] == "a" * 64
                     bundle = base64.urlsafe_b64decode(
                         self.decision["provisioning_bundle"] + "=" * (-len(self.decision["provisioning_bundle"]) % 4)
                     )

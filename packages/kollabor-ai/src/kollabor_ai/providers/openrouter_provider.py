@@ -412,7 +412,8 @@ class OpenRouterProvider(LLMProvider):
                     )
 
         except Exception as e:
-            logger.error(f"OpenRouter stream failed: {e}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"OpenRouter stream failed: {e}")
             raise map_openai_error(e, "openrouter") from e
 
         finally:

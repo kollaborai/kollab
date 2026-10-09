@@ -296,10 +296,12 @@ class GeminiProvider(LLMProvider):
             httpx.HTTPStatusError,
         ) as e:
             mapped_error = map_httpx_error(e, "gemini")
-            logger.error(f"Gemini stream failed: {mapped_error}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"Gemini stream failed: {mapped_error}")
             raise mapped_error from e
         except Exception as e:
-            logger.error(f"Gemini stream failed: {e}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"Gemini stream failed: {e}")
             raise
         finally:
             await self._track_request_end()

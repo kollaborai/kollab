@@ -197,11 +197,25 @@ class ConfigSyncService:
         if snapshot.digest != self._stamped:
             # Milliseconds since the epoch keep growing across restarts; a
             # device that says the number is stale raises the floor.
-            self._revision = max(
-                self._revision + 1, self._floor, int(time.time() * 1000)
-            )
+            self._revision = self._next_revision()
             self._stamped = snapshot.digest
         self._snapshot = snapshot
+
+    def _next_revision(self) -> int:
+        return max(self._revision + 1, self._floor, int(time.time() * 1000))
+
+    def join_floor(self) -> tuple[int, str]:
+        """(revision, digest): the lowest revision this primary's next bundle can carry.
+
+        A join decision names it (`EnrollmentIssuer`) so the new device refuses an
+        older bundle replayed before its first (`Receiver._check`). Once a snapshot
+        is stamped the next bundle repeats that revision, or a change restamps above
+        it. Before the first stamp it is a fresh stamp, so the clock is the floor
+        and no digest is pinned.
+        """
+        if self._stamped is not None:
+            return self._revision, self._stamped
+        return self._next_revision(), ""
 
     async def _push(
         self, key: str, session: str, snapshot: Snapshot, revision: int

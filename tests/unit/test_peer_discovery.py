@@ -442,6 +442,63 @@ def test_verified_replay_is_noop_and_cache_capacity_fails_closed(monkeypatch):
     asyncio.run(capacity_exercise())
 
 
+def test_one_member_rotating_endpoint_keys_cannot_evict_other_members(monkeypatch):
+    monkeypatch.setattr(peer_discovery, "PEER_DISCOVERY_MAX_CANDIDATES", 8)
+    monkeypatch.setattr(peer_discovery, "PEER_DISCOVERY_MAX_CANDIDATES_PER_MEMBER", 3)
+    now = 1_800_000_000
+    seen = []
+    service = PeerDiscoveryService(
+        scan_enabled=True,
+        candidate_verifier=_verify,
+        revision_acceptor=lambda _candidate: True,
+        on_candidate=seen.append,
+        source_address_policy=lambda _source: True,
+        clock=_Clock(now),
+        multicast_group=None,
+        port=0,
+        bind_address="127.0.0.1",
+    )
+    flooder = SigningKey.generate()
+    flood_endpoints = [SigningKey.generate() for _ in range(20)]
+    others = [(SigningKey.generate(), SigningKey.generate()) for _ in range(5)]
+
+    def cache_key(relay_key: SigningKey, endpoint_key: SigningKey) -> tuple[str, str]:
+        return relay_key.verify_key.encode().hex(), endpoint_key.verify_key.encode().hex()
+
+    async def exercise():
+        for revision, endpoint_key in enumerate(flood_endpoints, start=1):
+            wire = _wire(flooder, endpoint_key, now, revision=revision)
+            await service._process_datagram(_packet(wire), "192.168.1.25")
+        for relay_key, endpoint_key in others:
+            await service._process_datagram(_packet(_wire(relay_key, endpoint_key, now)), "192.168.1.26")
+
+        cached = set(service._candidate_cache)
+        other_keys = {cache_key(relay_key, endpoint_key) for relay_key, endpoint_key in others}
+        flooder_keys = {key for key in cached if key[0] == flooder.verify_key.encode().hex()}
+        # The flooder keeps only its newest three; every other member got in.
+        assert flooder_keys == {cache_key(flooder, endpoint_key) for endpoint_key in flood_endpoints[-3:]}
+        assert other_keys <= cached
+        assert len(cached) == 8
+        assert len(seen) == 25
+        assert service.datagrams_rejected == 0
+
+        # With the cache full the flooder still only replaces its own oldest.
+        extra = _wire(flooder, SigningKey.generate(), now, revision=21)
+        await service._process_datagram(_packet(extra), "192.168.1.25")
+        assert len(service._candidate_cache) == 8
+        assert other_keys <= set(service._candidate_cache)
+        assert len(seen) == 26
+
+        # The global cap still turns away a further member.
+        newcomer = _wire(SigningKey.generate(), SigningKey.generate(), now)
+        await service._process_datagram(_packet(newcomer), "192.168.1.26")
+        assert len(service._candidate_cache) == 8
+        assert service.datagrams_rejected == 1
+        await service.close()
+
+    asyncio.run(exercise())
+
+
 def test_expired_during_verifier_or_revision_wait_is_never_notified():
     now = 1_800_000_000
     clock = _Clock(now)

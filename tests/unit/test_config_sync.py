@@ -1096,3 +1096,330 @@ def test_a_synced_server_whose_new_command_is_missing_keeps_its_last_good_defini
     servers, record = mcp_on_server(homes)
     assert servers["one"]["command"] == sys.executable  # never swapped for one that cannot start
     assert record.mcp_servers == ("one",)  # still synced, so the primary can still drop it
+
+
+# ---- no write goes through a link ---------------------------------------------------
+
+
+def test_a_symlinked_target_file_is_refused_and_nothing_is_written_through(
+    homes, keys, tmp_path
+):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+        mac_home = kollab
+    precious = tmp_path / "precious.txt"
+    precious.write_text("mine\n")
+    receiver = cs.Receiver(secondary)
+    with homes("server") as server:
+        (server / "skills" / "tdd").mkdir(parents=True)
+        (server / "skills" / "tdd" / "SKILL.md").symlink_to(precious)
+    push_core(snapshot, 1, receiver, primary, secondary, homes)
+
+    reply = send_files(snapshot, 1, receiver, primary, secondary, homes, mac_home)
+
+    assert reply == {"error": "unsafe"}
+    assert precious.read_text() == "mine\n"
+    with homes("server") as server:
+        folder = server / "skills" / "tdd"
+        assert (folder / "SKILL.md").is_symlink()
+        assert [p.name for p in folder.iterdir()] == ["SKILL.md"]  # no temp file left
+
+
+def test_a_folder_swapped_for_a_link_before_the_write_is_refused(tmp_path):
+    base, outside = tmp_path / "skills", tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (base / "tdd").symlink_to(outside)
+
+    with pytest.raises(cs.ConfigSyncError) as refused:
+        cs._write_atomic(base, ("tdd", "SKILL.md"), b"x", 0o644)
+
+    assert refused.value.code == "unsafe"
+    assert list(outside.iterdir()) == []
+    # the same for a link deeper down, and for a plain file where a folder belongs
+    (base / "a").mkdir()
+    (base / "a" / "b").symlink_to(outside)
+    (base / "file").write_text("not a folder")
+    for parts in (("a", "b", "c", "x"), ("file", "x")):
+        with pytest.raises(cs.ConfigSyncError):
+            cs._write_atomic(base, parts, b"x", 0o644)
+    assert list(outside.iterdir()) == []
+
+
+def test_a_folder_swapped_for_a_link_during_the_write_is_not_followed(
+    tmp_path, monkeypatch
+):
+    """The swap lands after the data is written, before the rename: the rename goes by
+    descriptor, so it stays in the folder that was opened (a path-based one fails or follows)."""
+    base, outside = tmp_path / "skills", tmp_path / "outside"
+    (base / "tdd").mkdir(parents=True)
+    outside.mkdir()
+    real_fsync = os.fsync
+
+    def swap_then_sync(descriptor):
+        folder = base / "tdd"
+        if not folder.is_symlink():
+            folder.rename(base / "moved")
+            folder.symlink_to(outside)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(cs.os, "fsync", swap_then_sync)
+
+    cs._write_atomic(base, ("tdd", "SKILL.md"), b"new\n", 0o644)
+
+    assert list(outside.iterdir()) == []  # a path-based rename would have landed here
+    assert (base / "moved" / "SKILL.md").read_bytes() == b"new\n"
+    assert [p.name for p in (base / "moved").iterdir()] == ["SKILL.md"]
+
+
+def test_a_link_raced_onto_the_target_is_replaced_not_followed(tmp_path, monkeypatch):
+    base, outside = tmp_path / "skills", tmp_path / "outside"
+    (base / "tdd").mkdir(parents=True)
+    outside.mkdir()
+    precious = outside / "precious.txt"
+    precious.write_text("mine\n")
+    real_fsync = os.fsync
+
+    def link_then_sync(descriptor):
+        target = base / "tdd" / "SKILL.md"
+        if not target.is_symlink():
+            target.symlink_to(precious)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(cs.os, "fsync", link_then_sync)
+
+    cs._write_atomic(base, ("tdd", "SKILL.md"), b"new\n", 0o644)
+
+    assert precious.read_text() == "mine\n"
+    assert not (base / "tdd" / "SKILL.md").is_symlink()
+    assert (base / "tdd" / "SKILL.md").read_bytes() == b"new\n"
+
+
+def test_a_write_keeps_the_modes_and_a_user_linked_top_folder(tmp_path):
+    real = tmp_path / "dotfiles-skills"
+    real.mkdir()
+    base = tmp_path / "skills"
+    base.symlink_to(real)  # the user may link the folder itself
+
+    cs._write_atomic(base, ("tdd", "run.sh"), b"#!/bin/sh\n", 0o755)
+    cs._write_json(tmp_path / "root", ("mcp", "mcp_settings.json"), {"servers": {}})
+
+    assert stat.S_IMODE((real / "tdd" / "run.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((tmp_path / "root/mcp/mcp_settings.json").stat().st_mode) == 0o600
+    assert [p.name for p in (real / "tdd").iterdir()] == ["run.sh"]
+
+
+def test_a_link_in_the_settings_path_is_refused_and_the_target_stays(homes, keys, tmp_path):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    elsewhere = tmp_path / "dotfiles-config.json"
+    elsewhere.write_text('{"mine": 1}')
+    with homes("server") as server:
+        (server / "config.json").symlink_to(elsewhere)
+
+    reply, applied = push_core(
+        snapshot, 1, cs.Receiver(secondary), primary, secondary, homes
+    )
+
+    assert reply == {"error": "unsafe"} and applied is None
+    assert elsewhere.read_text() == '{"mine": 1}'
+
+
+def test_a_file_swapped_for_a_link_is_never_hashed_so_never_sent(homes, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not for sharing\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.md").write_text("elsewhere\n")
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        build = builder()
+        good = kollab / "skills" / "tdd" / "SKILL.md"
+        assert build._hash("skills/tdd/SKILL.md", good, good.stat()) is not None
+        link = kollab / "skills" / "tdd" / "LINK.md"
+        link.symlink_to(secret)  # a scan that already passed its is_symlink check
+        assert build._hash("skills/tdd/LINK.md", link, link.lstat()) is None
+        (kollab / "skills" / "swapped").symlink_to(outside)
+        assert (
+            build._hash(
+                "skills/swapped/a.md", kollab / "skills/swapped/a.md", (outside / "a.md").stat()
+            )
+            is None
+        )
+        (kollab / "skills" / "fifo").mkdir()
+        os.mkfifo(kollab / "skills" / "fifo" / "p")
+        assert (
+            build._hash("skills/fifo/p", kollab / "skills/fifo/p", (kollab / "skills/tdd/SKILL.md").stat())
+            is None
+        )  # a planted FIFO neither hangs nor travels
+
+
+# ---- the join floor: a replay before the first real bundle -----------------------------
+
+
+def floor_at(homes, primary, revision, digest=None, *, key=None):
+    """What a join leaves on the secondary when its primary sent a floor."""
+    with homes("server") as server:
+        cs.record_join_floor(
+            server / "network" / "work",
+            key or bytes(primary.verify_key).hex(),
+            revision,
+            digest,
+        )
+        return server
+
+
+def test_a_bundle_signed_before_the_join_is_refused_until_the_first_real_one_lands(
+    homes, keys
+):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    receiver = cs.Receiver(secondary)
+    floor_at(homes, primary, 1000, snapshot.digest)
+
+    replay, applied = push_core(snapshot, 999, receiver, primary, secondary, homes)
+
+    assert replay == {"error": "stale", "revision": 1000} and applied is None
+    with homes("server") as server:
+        assert not (server / "config.json").exists()
+        assert read_managed_config() is None  # still no first bundle
+
+    first, applied = push_core(snapshot, 1000, receiver, primary, secondary, homes)
+
+    assert first == {"ok": True} and applied.config_changed
+    with homes("server") as server:
+        assert read_managed_config().revision == 1000
+        assert not cs.floor_path().exists()  # the record carries the revision now
+    older, _ = push_core(snapshot, 999, receiver, primary, secondary, homes)
+    assert older == {"error": "stale", "revision": 1000}  # the ordinary rule, as before
+
+
+def test_a_first_bundle_above_the_floor_applies_and_a_changed_digest_at_it_does_not(
+    homes, keys
+):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+        write_json(kollab / "config.json", {"terminal": {"render_fps": 12}})
+        other = builder().build()
+    assert other.digest != snapshot.digest
+    receiver = cs.Receiver(secondary)
+    floor_at(homes, primary, 1000, snapshot.digest)
+
+    same_revision, _ = push_core(other, 1000, receiver, primary, secondary, homes)
+    above, applied = push_core(other, 1001, receiver, primary, secondary, homes)
+
+    assert same_revision == {"error": "stale", "revision": 1000}
+    assert above == {"ok": True} and applied.config_changed
+
+
+def test_a_floor_without_a_digest_pins_the_revision_only(homes, keys):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    receiver = cs.Receiver(secondary)
+    floor_at(homes, primary, 1000)  # the primary had not stamped a snapshot yet
+
+    below, _ = push_core(snapshot, 999, receiver, primary, secondary, homes)
+    at, _ = push_core(snapshot, 1000, receiver, primary, secondary, homes)
+
+    assert below == {"error": "stale", "revision": 1000}
+    assert at == {"ok": True}
+
+
+def test_an_old_primary_that_sends_no_floor_behaves_as_before(homes, keys):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    floor_at(homes, primary, 1000, snapshot.digest)  # left by an earlier join
+    floor_at(homes, primary, None)  # this join's primary sent nothing
+
+    with homes("server"):
+        assert not cs.floor_path().exists()
+    first, applied = push_core(snapshot, 1, cs.Receiver(secondary), primary, secondary, homes)
+    assert first == {"ok": True} and applied.config_changed
+
+
+def test_a_floor_another_primary_left_is_not_ours_to_enforce(homes, keys):
+    primary, secondary = keys
+    rival = SigningKey.generate()
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    floor_at(homes, primary, 10**15, key=bytes(rival.verify_key).hex())
+
+    first, _ = push_core(snapshot, 1, cs.Receiver(secondary), primary, secondary, homes)
+
+    assert first == {"ok": True}  # not refused for good by someone else's floor
+
+
+def test_the_floor_is_machine_global_like_the_record(homes, keys, tmp_path):
+    primary, _ = keys
+    with homes("server") as server:
+        cs.record_join_floor(tmp_path / "elsewhere" / "work", "a" * 64, 1000, None)
+        assert not cs.floor_path().exists()  # a state outside ~/.kollab/network
+        cs.record_join_floor(server / "network" / "work", "a" * 64, 1000, "b" * 64)
+        floor = cs.read_join_floor()
+        assert (floor.primary_key, floor.revision, floor.digest) == ("a" * 64, 1000, "b" * 64)
+        assert stat.S_IMODE(cs.floor_path().stat().st_mode) == 0o600
+        assert stat.S_IMODE(cs.floor_path().parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("revision", [True, -5, 2**53, "1000", 1000.0, [1]])
+def test_a_malformed_floor_is_logged_and_records_nothing(homes, caplog, revision):
+    floor_at(homes, SigningKey.generate(), 1000, "c" * 64)  # left by an earlier join
+    with caplog.at_level("WARNING"):
+        floor_at(homes, SigningKey.generate(), revision, "c" * 64)  # must not raise: the join goes on
+    with homes("server"):
+        assert not cs.floor_path().exists()
+    assert "join floor is malformed" in caplog.text
+
+
+@pytest.mark.parametrize("digest", ["not-a-digest", "A" * 64, "c" * 63, 5, ["c" * 64]])
+def test_a_malformed_digest_records_no_floor_at_all(homes, caplog, digest):
+    with caplog.at_level("WARNING"):
+        floor_at(homes, SigningKey.generate(), 1000, digest)
+    with homes("server"):
+        assert not cs.floor_path().exists()
+    assert "join floor is malformed" in caplog.text
+
+
+def test_the_edges_of_the_revision_range_are_well_formed(homes):
+    for revision in (0, 2**53 - 1):
+        floor_at(homes, SigningKey.generate(), revision, None)
+        with homes("server"):
+            assert cs.read_join_floor().revision == revision
+
+
+def test_a_floor_file_edited_into_garbage_is_ignored(homes, keys):
+    primary, secondary = keys
+    with homes("mac") as kollab:
+        fill_primary(kollab)
+        snapshot = builder().build()
+    floor_at(homes, primary, 10**15)
+    with homes("server"):
+        cs.floor_path().write_text('{"primary_key": 5, "revision": "x"}')
+        assert cs.read_join_floor() is None
+
+    first, _ = push_core(snapshot, 1, cs.Receiver(secondary), primary, secondary, homes)
+
+    assert first == {"ok": True}
+
+
+def test_the_floor_is_never_written_through_a_link(homes, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with homes("server") as server:
+        (server / "private").symlink_to(outside)
+        cs.record_join_floor(server / "network" / "work", "a" * 64, 1000, None)  # logs, never raises
+        assert cs.read_join_floor() is None
+    assert list(outside.iterdir()) == []
