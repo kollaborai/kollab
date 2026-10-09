@@ -1,0 +1,84 @@
+{
+  "name": "attach-prompt-answered-elsewhere",
+  "description": "A terminal attached to its agent (plain kollab: daemon + this window) closes a permission prompt that another window answered, the way the web UI does once it opens the agent: the terminal must not sit on a dead prompt. Throwaway HOME per run, a local fake model (tests/tmux/lib/fake_llm.py), approval mode confirm_all, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-attach-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model and confirm_all",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-attach-prompt.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-attach-prompt.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"permissions\":{\"approval_mode\":\"confirm_all\"},\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "label": "the agent asks to run a tool"
+    },
+    {
+      "action": "type",
+      "text": "please runtool"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "PERMISSION REQUIRED",
+      "timeout": 40,
+      "description": "the prompt shows in this terminal"
+    },
+    {
+      "action": "section",
+      "label": "another window answers"
+    },
+    {
+      "action": "shell",
+      "description": "attach as a second window and allow it (what the web UI does)",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-attach-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/answer_prompt_elsewhere.py\" APPROVE_ONCE"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: Tool result",
+      "timeout": 40,
+      "description": "the tool ran and the turn finished"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "this terminal closed its copy of the prompt"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "fake-tool-ran",
+      "description": "the tool output shows here too"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-attach-prompt.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

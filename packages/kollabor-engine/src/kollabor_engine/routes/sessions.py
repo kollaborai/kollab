@@ -348,14 +348,26 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
 
 @router.get("")
 async def list_sessions():
-    """List local sessions plus running detached sessions found via hub presence."""
+    """List this engine's sessions plus every other live agent on this computer.
+
+    The others open on first use (server.open_named_session). This engine's own
+    daemons are in presence too, so they are matched by pid and listed once.
+    """
     await _reap_dead_sessions()
     registry = get_session_registry()
+    found = HubBridge().discover_sessions(use_cache=False)
+    # A terminal can switch conversations (/new, /resume): keep the name current.
+    names = {row.get("session_id"): row.get("name") for row in found}
+    for session in registry.values():
+        if getattr(session, "external", False) and names.get(session.session_id):
+            session.display_name = names[session.session_id]
     sessions = [s.to_dict() for s in registry.values()]
     local_ids = {str(item.get("session_id")) for item in sessions}
+    local_pids = {item.get("daemon_pid") for item in sessions} - {0, None}
     discovered = [
-        item for item in HubBridge().discover_sessions(use_cache=False)
+        item for item in found
         if item.get("session_id") not in local_ids
+        and item.get("daemon_pid") not in local_pids
     ]
     return {
         "sessions": sessions + discovered,
@@ -372,11 +384,6 @@ async def get_session(session_id: str):
     session = registry.get(session_id)
     if session:
         return session.to_dict()
-    # Detached daemons survive engine restarts; expose their presence record so
-    # clients can discover/reconnect instead of receiving a false 404.
-    for discovered in HubBridge().discover_sessions(use_cache=False):
-        if discovered.get("session_id") == session_id:
-            return discovered
     raise HTTPException(status_code=404, detail="Session not found")
 
 

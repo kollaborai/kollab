@@ -162,28 +162,28 @@ class HubBridge:
         return None
 
     def discover_sessions(self, use_cache: bool = True) -> List[Dict[str, Any]]:
-        """Return running detached daemons persisted by hub presence.
+        """Return every live agent on this computer that has an attach socket.
 
-        Engine sessions are process-local, while detached daemons can outlive
-        the engine that created them. Presence is the durable discovery
-        contract: only fresh entries with a usable socket are exposed. The
-        returned ``session_id`` is the daemon identity (the stable reconnect
-        key when the creating engine is gone).
+        Terminal sessions, detached daemons and other engines' daemons alike:
+        the engine opens one on first use (``EngineSession.adopt``). Presence
+        is the discovery contract: only fresh entries with a usable socket are
+        exposed. ``session_id`` is the presence agent id, because gem names
+        repeat across folders (a koordinator per project).
         """
         sessions: List[Dict[str, Any]] = []
         for agent in self.get_agents(use_cache=use_cache):
-            strategy = str(agent.get("launch_strategy") or "").lower()
             socket_path = self._socket_path_for_agent(agent)
             if not socket_path or not socket_path.exists():
-                continue
-            if strategy and strategy not in {"subprocess", "api", "detached"}:
                 continue
             identity = str(agent.get("identity") or agent.get("agent_id") or "")
             if not identity:
                 continue
+            # The conversation its terminal shows ("session: nexus-drift"); the
+            # web UI drops the log's timestamp prefix.
+            log_name = Path(str(agent.get("session_log") or "")).stem
             sessions.append({
-                "session_id": identity,
-                "name": session_display_name(identity),
+                "session_id": str(agent.get("agent_id") or identity),
+                "name": log_name or session_display_name(identity),
                 "identity": identity,
                 "agent": agent.get("agent_name") or agent.get("name") or "default",
                 "workspace": agent.get("project") or "",
@@ -193,12 +193,8 @@ class HubBridge:
                 "created_at": agent.get("started_at") or 0,
                 "active": True,
                 "discovered": True,
+                "external": True,
                 "source": "hub_presence",
-                # Presence proves the daemon is alive, but this engine process
-                # has no EngineSession/RPC subscription for it. Keep discovery
-                # explicit so clients do not send session-scoped mutations here.
-                "attachable": False,
-                "actions_supported": [],
             })
         return sessions
 

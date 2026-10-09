@@ -395,7 +395,9 @@ export default function App() {
             // hub_message: another agent's message just landed in the
             // history, ahead of the reply it wakes. One that lands mid-turn
             // waits for turn_complete, which reloads the whole turn.
-            if (type === "hub_message" ? !midTurn : ["turn_complete", "error"].includes(type)) {
+            // permission_request: a turn this page did not start (typed in the
+            // agent's terminal) waits on a prompt this page can answer too.
+            if (type === "hub_message" ? !midTurn : ["turn_complete", "error", "permission_request"].includes(type)) {
               void refreshActiveState(activeId);
             }
             if (type === "turn_complete") midTurn = false;
@@ -478,7 +480,8 @@ export default function App() {
         profileResult.active || nextProfiles[0]?.name || "default",
       );
       setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
-      const first = [...result].reverse().find((session) => session.attachable !== false);
+      // Restore this engine's newest chat; an agent started elsewhere opens on a click.
+      const first = [...result].reverse().find((session) => !session.external);
       if (first) {
         setBusyMessage("Restoring session…");
         const firstState = await loadState(first.session_id, result);
@@ -552,7 +555,7 @@ export default function App() {
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
-      const next = [...result].reverse().find((session) => session.attachable !== false);
+      const next = [...result].reverse().find((session) => !session.external);
       if (!next) {
         setActiveId(null);
         setInitialState(null);
@@ -731,6 +734,7 @@ export default function App() {
               api={api}
               sessionId={activeSession.session_id}
               initialState={initialState}
+              onStale={() => void resetThread(activeSession.session_id)}
             >
               <RuntimeShell
                 session={activeSession}

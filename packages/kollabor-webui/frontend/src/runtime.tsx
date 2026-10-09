@@ -541,11 +541,14 @@ export function EngineRuntimeProvider({
   api,
   sessionId,
   initialState,
+  onStale,
   children,
 }: {
   api: EngineApi;
   sessionId: string;
   initialState: EngineState;
+  /** Reload the thread whole: the prompt it waits on closed in another window. */
+  onStale?: () => void;
   children: ReactNode;
 }) {
   const turnRef = useRef<TurnClock>(newTurnClock());
@@ -620,6 +623,15 @@ export function EngineRuntimeProvider({
     if (initialState.messages === reloaded.current) return;
     reloaded.current = initialState.messages;
     const thread = runtime.thread.getState();
+    // A permission prompt opened or closed in another window (the agent's
+    // terminal): a run that ends at a prompt leaves no sync point to append
+    // from, so when the thread and the reloaded history disagree on whether a
+    // prompt is waiting, reload the thread whole.
+    const waiting = (message?: { status?: { type?: string } }) => message?.status?.type === "requires-action";
+    if (!thread.isRunning && waiting(thread.messages.at(-1)) !== initialState.messages.some(waiting)) {
+      onStale?.();
+      return;
+    }
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
     // A run that ended without a sync point (an older engine, a dropped
@@ -636,7 +648,7 @@ export function EngineRuntimeProvider({
       messages,
       synced: { history: initialState.synced.history, messages: messages.length },
     });
-  }, [initialState, runtime]);
+  }, [initialState, runtime, onStale]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

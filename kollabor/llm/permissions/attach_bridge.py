@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from kollabor_events.permissions_models import ConfirmationResponse
 
@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 DEFAULT_VISIBLE_CLIENT_GRACE_SECONDS = 2.0
 
+# An approving response and the scope the engine's permission_granted event
+# names (kollabor_engine.session._APPROVE_SCOPE_RESPONSES, inverted).
+_GRANTED_SCOPES = {
+    "APPROVE_ONCE": "once",
+    "APPROVE_SESSION": "session",
+    "APPROVE_PROJECT": "project",
+    "APPROVE_ALWAYS": "always_edits",
+    "APPROVE_TOOL_ALWAYS": "trust_tool",
+}
+
+
+def resolution_event(tool_id: str, response: Any) -> Dict[str, Any]:
+    """The event that tells every attached window a prompt is closed."""
+    scope = _GRANTED_SCOPES.get(getattr(response, "name", str(response)))
+    if scope:
+        return {"type": "permission_granted", "tool_id": tool_id, "scope": scope}
+    return {"type": "permission_denied", "tool_id": tool_id}
+
 
 class AttachPermissionBridge:
     """Routes daemon permission prompts to the visible attach client."""
@@ -21,6 +39,12 @@ class AttachPermissionBridge:
     def __init__(self) -> None:
         self._pending: Dict[str, asyncio.Future[ConfirmationResponse]] = {}
         self._registered_rpc_servers: set[int] = set()
+        # Attach-client side: one prompt on screen at a time, and the prompts
+        # (shown or queued) that another window answered first.
+        self._prompt_lock = asyncio.Lock()
+        self._showing: Optional[str] = None
+        self._queued: set[str] = set()
+        self._answered_elsewhere: set[str] = set()
 
     def register_response_handler(self, rpc_server: Any) -> None:
         """Register the daemon-side RPC handler that resolves prompts."""
@@ -64,13 +88,18 @@ class AttachPermissionBridge:
 
         display_tap.publish({"type": "permission_request", "details": details})
 
+        response = ConfirmationResponse.DENY
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            response = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning("attach permission prompt timed out for %s", tool_id)
-            return ConfirmationResponse.DENY
         finally:
             self._pending.pop(tool_id, None)
+            # Every attached window shows this prompt (a terminal and the web UI
+            # can watch one daemon): tell them all it is closed, so the ones that
+            # did not answer stop showing it.
+            display_tap.publish(resolution_event(tool_id, response))
+        return response
 
     async def handle_client_event(
         self,
@@ -80,12 +109,33 @@ class AttachPermissionBridge:
         event: dict[str, Any],
         wait_for_rpc_reply: bool = True,
     ) -> None:
-        """Show a permission_request event locally and send the answer back."""
+        """Show a permission_request event locally and send the answer back.
+
+        Another window can answer first (handle_client_resolution): then the
+        prompt closes here and no answer is sent.
+        """
         details = event.get("details") or {}
         if not isinstance(details, dict):
             details = {}
+        tool_id = str(details.get("tool_id") or "")
 
-        response = await layout_manager.show_permission_prompt(details)
+        self._queued.add(tool_id)
+        try:
+            async with self._prompt_lock:
+                self._queued.discard(tool_id)
+                if tool_id in self._answered_elsewhere:
+                    self._answered_elsewhere.discard(tool_id)
+                    return
+                self._showing = tool_id
+                try:
+                    response = await layout_manager.show_permission_prompt(details)
+                finally:
+                    self._showing = None
+                if tool_id in self._answered_elsewhere:
+                    self._answered_elsewhere.discard(tool_id)
+                    return
+        finally:
+            self._queued.discard(tool_id)
         response_name = getattr(response, "name", str(response))
 
         response_call = rpc_client.call(
@@ -117,6 +167,21 @@ class AttachPermissionBridge:
                 )
 
         task.add_done_callback(_log_response_error)
+
+    def handle_client_resolution(self, *, layout_manager: Any, event: dict[str, Any]) -> None:
+        """A prompt closed on the daemon (any window answered it): close it here.
+
+        Only a prompt this window is showing or has queued; the echo of this
+        window's own answer finds neither and does nothing.
+        """
+        tool_id = str(event.get("tool_id") or "")
+        if not tool_id:
+            return
+        if tool_id == self._showing:
+            self._answered_elsewhere.add(tool_id)
+            layout_manager.cancel_permission_prompt()
+        elif tool_id in self._queued:
+            self._answered_elsewhere.add(tool_id)
 
     def has_visible_attach_client(self, display_tap: Any) -> bool:
         """Return true when at least one attach client can answer prompts."""

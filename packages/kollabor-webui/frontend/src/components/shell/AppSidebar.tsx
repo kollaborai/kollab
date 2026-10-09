@@ -4,7 +4,7 @@ import type { AgentBundleEntry, AgentNetwork, AgentPoolEntry, Profile, Session }
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
-import { groupRemoteByDevice, terminalAgents } from "@/components/shell/agent-network";
+import { groupRemoteByDevice } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { Button } from "@/components/ui/button";
 import {
@@ -147,8 +147,7 @@ export function AppSidebar({
         .sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
     [agents],
   );
-  // This computer's live agents with no session row, and the other computers' agents.
-  const terminals = useMemo(() => terminalAgents(agents, sessions), [agents, sessions]);
+  // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   const remoteGroups = useMemo(() => groupRemoteByDevice(network.remote), [network.remote]);
   const pickedGem = poolByName.get(selectedIdentity);
   const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
@@ -333,7 +332,7 @@ export function AppSidebar({
                 {`· ${network.device}`}
               </span>
             ) : null}
-            <span className="ml-auto tabular-nums">{sessions.length + terminals.length}</span>
+            <span className="ml-auto tabular-nums">{sessions.length}</span>
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -342,33 +341,38 @@ export function AppSidebar({
                 // Hub presence when the identity is live; otherwise the engine's
                 // own word on whether a daemon backs the session.
                 const pool = poolByName.get(session.identity || "");
-                const hubLive = Boolean(pool?.active);
+                // Gem names repeat across folders (a koordinator per project), so
+                // an agent started elsewhere reads only its own presence entry.
+                const ownPool = !session.external || pool?.agent_id === session.session_id;
+                const hubLive = ownPool && Boolean(pool?.active);
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
-                const unavailable = session.attachable === false;
+                const folder = session.workspace?.split("/").filter(Boolean).pop();
                 const openProperties = (tab?: "chat") => {
                   setOpenMobile(false);
                   onProperties(session.session_id, tab);
                 };
                 return (
                 <ContextMenu key={session.session_id}>
-                  <ContextMenuTrigger asChild disabled={unavailable}>
+                  <ContextMenuTrigger asChild>
                     <SidebarMenuItem>
                       <SidebarMenuButton
                         isActive={session.session_id === activeId}
                         onClick={() => {
-                          if (unavailable) return;
                           setOpenMobile(false);
                           onSelectSession(session.session_id);
                         }}
-                        disabled={unavailable}
-                        title={task ? `${titleCase(gem)}: ${task}` : session.session_id}
+                        title={
+                          task
+                            ? `${titleCase(gem)}: ${task}`
+                            : (session.external && session.workspace) || session.session_id
+                        }
                         // overflow-visible: the gem canvas overhangs its box for hats and props.
                         className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                       >
                         <span
                           className="contents"
-                          onDoubleClick={unavailable || !session.identity ? undefined : () => openProperties()}
+                          onDoubleClick={session.identity ? () => openProperties() : undefined}
                         >
                           <GemAvatar
                             gem={gem}
@@ -387,12 +391,12 @@ export function AppSidebar({
                             {formatSessionName(session.name, session.session_id)}
                           </span>
                           <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                            {unavailable ? (
-                              <span className="text-amber-600 dark:text-amber-400">
-                                Started elsewhere · can't open here
-                              </span>
-                            ) : task ? (
+                            {task ? (
                               task
+                            ) : session.external ? (
+                              [titleCase(session.identity || ""), folder ? `In ${folder}` : "Running"]
+                                .filter(Boolean)
+                                .join(" · ")
                             ) : (
                               <>
                                 {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
@@ -403,14 +407,17 @@ export function AppSidebar({
                           </span>
                         </div>
                       </SidebarMenuButton>
-                      <SidebarMenuAction
-                        onClick={() => setPendingDelete(session)}
-                        disabled={busy || unavailable}
-                        showOnHover
-                        aria-label={`Delete session ${session.session_id}`}
-                      >
-                        <Trash2 />
-                      </SidebarMenuAction>
+                      {/* The engine only detaches from an agent it did not start: no Delete. */}
+                      {session.external ? null : (
+                        <SidebarMenuAction
+                          onClick={() => setPendingDelete(session)}
+                          disabled={busy}
+                          showOnHover
+                          aria-label={`Delete session ${session.session_id}`}
+                        >
+                          <Trash2 />
+                        </SidebarMenuAction>
+                      )}
                     </SidebarMenuItem>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-44">
@@ -418,48 +425,24 @@ export function AppSidebar({
                       <SlidersHorizontal />
                       Properties
                     </ContextMenuItem>
-                    <ContextMenuSeparator />
-                    <ContextMenuItem
-                      variant="destructive"
-                      disabled={busy}
-                      onSelect={() => setPendingDelete(session)}
-                    >
-                      <Trash2 />
-                      Delete Session
-                    </ContextMenuItem>
+                    {session.external ? null : (
+                      <>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          variant="destructive"
+                          disabled={busy}
+                          onSelect={() => setPendingDelete(session)}
+                        >
+                          <Trash2 />
+                          Delete Session
+                        </ContextMenuItem>
+                      </>
+                    )}
                   </ContextMenuContent>
                 </ContextMenu>
                 );
               })}
-              {terminals.map((agent) => (
-                <SidebarMenuItem key={`terminal-${agent.name}`}>
-                  <SidebarMenuButton
-                    disabled
-                    title={agent.project || titleCase(agent.name)}
-                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
-                  >
-                    <GemAvatar
-                      gem={agent.name}
-                      caste={agent.caste}
-                      color={agent.color}
-                      state={agent.state || "idle"}
-                      live
-                      season="auto"
-                      follow
-                      size={56}
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="truncate text-[13px] leading-tight font-medium">
-                        {titleCase(agent.name)}
-                      </span>
-                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                        {agent.project ? `In ${agent.project.split("/").filter(Boolean).pop()}` : "Running"}
-                      </span>
-                    </div>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-              {!sessions.length && !terminals.length ? (
+              {!sessions.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
                   No sessions yet.
                 </p>

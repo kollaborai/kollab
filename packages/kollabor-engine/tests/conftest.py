@@ -17,3 +17,12 @@ def appearance_store(tmp_path, monkeypatch):
 def bypass_auth(monkeypatch):
     """Bypass auth middleware for all tests."""
     monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+
+
+@pytest.fixture(autouse=True)
+def no_real_presence(monkeypatch):
+    """Hub presence starts empty: the engine lists every live agent on this
+    computer, so without this a test would see the developer's own agents."""
+    import kollabor_engine.hub_bridge as hub_bridge  # type: ignore[import-not-found]
+
+    monkeypatch.setattr(hub_bridge, "_find_presence_dirs", lambda: [])

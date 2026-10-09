@@ -16,10 +16,8 @@ export type Session = {
   total_output_tokens?: number;
   identity?: string;
   daemon_pid?: number;
-  /** False for metadata-only rows discovered from external runtimes. */
-  attachable?: boolean;
-  /** Actions supported by the backing runtime for this session row. */
-  actions_supported?: string[];
+  /** Started outside this engine (a terminal, another engine): it opens on first use and Delete is not offered, since the engine only detaches from it. */
+  external?: boolean;
 };
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */

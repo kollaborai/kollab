@@ -299,6 +299,8 @@ kollab service install                           # this folder's agent under sys
 
 `kollab service` runs `kollab --detached` with `KOLLAB_SERVICE=1`: cli_main skips the fork so the manager owns the process, pops the flag (agents it spawns still detach) and sets `KOLLAB_SERVICE_PID`. Its hub status then reports `service: true`, `find_workspace_daemon` attaches to it although launchd does not make it a session leader, and the attaching window never owns it (no `KOLLAB_DAEMON_PID`).
 
+**The web UI opens every agent on this computer.** `HubBridge.discover_sessions` lists each live agent with an attach socket (session id = its presence `agent_id`, since gem names repeat across folders). The first session route that names one adopts it (`server.open_named_session` → `EngineSession.adopt` → `DaemonPool.adopt`): a handle with no launcher, so closing it only detaches and the engine never signals a process it did not start. A `--detached` daemon sends a permission prompt to every attached window and, once one answers, publishes `permission_granted`/`permission_denied` (`attach_bridge.resolution_event`) so the others close theirs. A `--no-daemon` session keeps its prompts in its own terminal (`_try_attach_permission_prompt`).
+
 **Hub message flow (4 flows, see docs/specs/hub-message-flow.md):**
 1. Human types -> `_broadcast_user_input` -> broadcast to all peers
 2. LLM emits `<hub_msg>` -> `_parse_hub_messages` -> route + strip tags

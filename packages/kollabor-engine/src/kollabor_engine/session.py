@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -144,6 +144,11 @@ class EngineSession:
         self.requested_identity = identity
         self.approval_mode = approval_mode
         self.mcp_server_names = mcp_server_names or []
+        # Started outside this engine (a terminal, another engine) and attached
+        # by adopt(): shutdown detaches. display_name is its own conversation's
+        # name, kept current by list_sessions.
+        self.external = False
+        self.display_name = ""
 
         self.daemon: Optional[DaemonHandle] = None
 
@@ -224,6 +229,40 @@ class EngineSession:
             self._track_events(), name=f"session-track-{self.session_id}"
         )
         await self.refresh_history()
+
+    @classmethod
+    async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":
+        """Open a live agent this engine did not start (a discover_sessions row).
+
+        Nothing about the agent changes: its profile and approval mode are read
+        from it, never set, and closing the session only detaches.
+        """
+        session_id = str(found["session_id"])
+        session = cls(
+            session_id=session_id,
+            profile=None,
+            approval_mode="",
+            agent=str(found.get("agent") or "") or None,
+            identity=str(found.get("identity") or "") or None,
+        )
+        session.external = True
+        session.display_name = str(found.get("name") or "")
+        session.workspace = str(found.get("workspace") or "") or None
+        if found.get("created_at"):
+            started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
+            session.created_at = started.replace(tzinfo=None)
+        session.daemon = await get_daemon_pool().adopt(session_id, found)
+        try:
+            session.profile = await session.state.get_active_profile()
+            mode = (await session.state.get_permission_state()).approval_mode
+            session.approval_mode = str(mode or "").lower()
+        except Exception as e:
+            logger.debug("session %s: could not read its profile: %s", session_id, e)
+        session._event_task = asyncio.create_task(
+            session._track_events(), name=f"session-track-{session_id}"
+        )
+        await session.refresh_history()
+        return session
 
     async def shutdown(self) -> None:
         if self._event_task is not None:
@@ -415,7 +454,8 @@ class EngineSession:
         model = getattr(self.profile, "model", "")
         return {
             "session_id": self.session_id,
-            "name": session_display_name(self.session_id),
+            "name": self.display_name or session_display_name(self.session_id),
+            "external": self.external,
             "profile": getattr(self.profile, "name", str(self.profile or "")),
             "model": model,
             # What the daemon will send next (mirrored by apply_profile_mirror).

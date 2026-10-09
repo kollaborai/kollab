@@ -117,13 +117,17 @@ def _kollab_command() -> List[str]:
 class DaemonHandle:
     """One headless kollab daemon, plus the socket the engine drives it over."""
 
-    def __init__(self, session_id: str, identity: str, launcher: subprocess.Popen):
+    def __init__(
+        self, session_id: str, identity: str, launcher: Optional[subprocess.Popen]
+    ):
         self.session_id = session_id
         self.identity = identity
         self.agent_name: str = ""
         # `kollab --detached` double-forks: the process we spawned is only a
         # launcher and exits 0 as soon as the real daemon is detached. The pid
         # that matters comes from hub presence, once the daemon publishes it.
+        # None for an agent this pool attached to but did not start
+        # (DaemonPool.adopt): closing that handle detaches and never signals it.
         self.launcher = launcher
         self.pid: int = 0
         self.socket_path: str = ""
@@ -155,7 +159,9 @@ class DaemonHandle:
                 {
                     "action": "attach",
                     "mode": "interactive",
-                    "client_id": f"engine-{self.session_id}",
+                    # The daemon keys subscribers by this id: two engines
+                    # attached to one agent must not replace each other.
+                    "client_id": f"engine-{os.getpid()}-{self.session_id}",
                 }
             )
             + "\n"
@@ -287,6 +293,10 @@ class DaemonHandle:
                         # daemon is still stopped below, so this is best effort.
                         pass
 
+        if self.launcher is None:
+            logger.info("detached from %s (session %s)", self.identity, self.session_id)
+            return
+
         # A spawn that failed before presence was read has no pid yet. Look it
         # up one last time so a failed create never leaves a live daemon behind.
         if not self.pid:
@@ -411,24 +421,9 @@ class DaemonPool:
         moment is exactly the collision the hub's spawn guard rejects.
         """
         async with self._spawn_lock:
-            existing = self._daemons.get(session_id)
+            existing = await self._live_handle(session_id)
             if existing is not None:
-                if existing.alive:
-                    return existing
-
-                # A daemon can die outside this pool (for example after a
-                # Hub stop or a crashed detached process). Do not overwrite a
-                # dead handle while its reader/socket resources are still
-                # attached; close it before claiming the session again.
-                self._daemons.pop(session_id, None)
-                try:
-                    await existing.close()
-                except Exception as e:
-                    logger.debug(
-                        "stale daemon handle cleanup failed for %s: %s",
-                        session_id,
-                        e,
-                    )
+                return existing
 
             identity_name = self._assign_identity(identity)
             argv = _kollab_command() + ["--detached", "--as", identity_name]
@@ -494,6 +489,45 @@ class DaemonPool:
 
             self._daemons[session_id] = handle
             return handle
+
+    async def adopt(self, session_id: str, found: Dict[str, Any]) -> DaemonHandle:
+        """Attach to a live agent this pool did not start (a discover_sessions row).
+
+        A terminal session or another engine's daemon stays its owner's
+        process: the handle has no launcher, so closing it only detaches.
+        """
+        async with self._spawn_lock:
+            existing = await self._live_handle(session_id)
+            if existing is not None:
+                return existing
+
+            handle = DaemonHandle(session_id, str(found.get("identity") or ""), None)
+            handle.pid = int(found.get("daemon_pid") or 0)
+            handle.agent_name = str(found.get("agent") or "")
+            try:
+                await handle.connect(str(found.get("socket_path") or ""))
+            except Exception:
+                await handle.close()
+                raise
+            self._daemons[session_id] = handle
+            return handle
+
+    async def _live_handle(self, session_id: str) -> Optional[DaemonHandle]:
+        """The session's handle if its daemon is alive; a dead one is closed."""
+        existing = self._daemons.get(session_id)
+        if existing is None or existing.alive:
+            return existing
+
+        # A daemon can die outside this pool (for example after a Hub stop or
+        # a crashed detached process). Do not overwrite a dead handle while its
+        # reader/socket resources are still attached; close it before claiming
+        # the session again.
+        self._daemons.pop(session_id, None)
+        try:
+            await existing.close()
+        except Exception as e:
+            logger.debug("stale daemon handle cleanup failed for %s: %s", session_id, e)
+        return None
 
     async def _await_socket(self, handle: DaemonHandle) -> str:
         """Poll hub presence until the daemon publishes a live socket.
