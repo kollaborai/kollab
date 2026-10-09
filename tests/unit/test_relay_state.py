@@ -144,6 +144,43 @@ def test_invalid_trust_level_is_rejected_on_save(store):
         store.save()
 
 
+def test_member_list_marks_survive_a_reload(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_dir = tmp_path / "state"
+    first = RelayStateStore(workspace, state_dir)
+    assert first.state.members_seen == {} and first.state.members_issued_at == 0
+    first.state.members_seen = {PEER_KEY: 1_760_000_000}
+    first.state.members_issued_at = 1_760_000_007
+    first.save()
+
+    reloaded = RelayStateStore(workspace, state_dir).state
+    assert reloaded.members_seen == {PEER_KEY: 1_760_000_000}
+    assert reloaded.members_issued_at == 1_760_000_007
+
+
+@pytest.mark.parametrize(
+    "seen, issued_at",
+    [
+        ({"not-a-key": 5}, 0),
+        ({PEER_KEY: 0}, 0),
+        ({PEER_KEY: -1}, 0),
+        ({PEER_KEY: True}, 0),
+        ({PEER_KEY: 1.5}, 0),
+        ({PEER_KEY: 2**53}, 0),
+        ([PEER_KEY], 0),
+        ({}, -1),
+        ({}, True),
+        ({}, 2**53),
+    ],
+)
+def test_a_bad_member_list_mark_is_rejected_on_save(store, seen, issued_at):
+    store.state.members_seen = seen
+    store.state.members_issued_at = issued_at
+    with pytest.raises(RelayError, match="member list stamps|peer key|public key"):
+        store.save()
+
+
 def test_client_approve_and_revoke_keep_names_written_by_another_store(tmp_path):
     """The client's long-lived copy must not save stale peer names back."""
     from plugins.hub.relay_client import RelayClient

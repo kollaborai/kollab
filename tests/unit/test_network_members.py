@@ -7,16 +7,20 @@ member approve every other, and revocation must reach every member.
 
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from nacl.signing import SigningKey
+from nacl.exceptions import BadSignatureError
+from nacl.signing import SigningKey, VerifyKey
 
 from plugins.hub import network_members, relay_client
-from plugins.hub.network_members import METHOD, seal_members
-from plugins.hub.relay_state import RelayError
+from plugins.hub.device_names import NAME_RE
+from plugins.hub.network_members import METHOD, MembershipSync, seal_members
+from plugins.hub.relay_client import RelayClient
+from plugins.hub.relay_state import RelayError, validate_public_key
 
 from .test_mesh_network import deliver_locator, make_node
 from .test_peer_transport import RelayWire, _mint_tls_cert
@@ -271,7 +275,8 @@ async def test_a_forged_vouch_is_refused(chain):
     tampered["members"] = [{"key": outsider, "name": "friend"}]
     other_device = listing(b, to=c.key)  # a real list, meant for C
     other_network = listing(b, to=a.key, net="00" * 32)
-    for payload in (forged, tampered, other_device, other_network, {"v": 1}, "x", None):
+    shapes = ({"v": 1}, {"v": 2}, {"v": 3}, {"v": True}, {"v": [1]}, "x", None)
+    for payload in (forged, tampered, other_device, other_network, *shapes):
         assert await a.bridge.membership_sync.receive(b.key, payload) == {"error": "invalid"}
     assert outsider not in approved(a)
     # The genuine article is taken.
@@ -305,3 +310,271 @@ async def test_a_second_key_claiming_a_designation_cannot_block_the_first_device
         await node.bridge.close()
         if node.server is not None:
             await node.server.stop()
+
+
+# --- dated lists: a replayed older list must not revoke members vouched since (#123) ---
+
+# kollab 0.13 and 0.14 as released: reads "v": 1 exactly, ignores fields it does not
+# know, remembers nothing. Frozen here so the v1 wire a v1-only device speaks cannot
+# drift, and so the tests below talk to a real v1-only device, not to our own v1 path.
+_V1_DOMAIN = b"kollab-network-members-v1\n"
+_V1_FIELDS = frozenset({"v", "voucher", "to", "net", "members", "revoked", "sig"})
+
+
+def _v1_signed(body):
+    return _V1_DOMAIN + json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+
+
+def v1_seal(*, key, to, net, members, revoked):
+    body = {
+        "v": 1,
+        "voucher": key.verify_key.encode().hex(),
+        "to": to,
+        "net": net,
+        "members": [{"key": k, "name": name} for k, name in members[:64]],
+        "revoked": list(revoked[:64]),
+    }
+    return {**body, "sig": key.sign(_v1_signed(body)).signature.hex()}
+
+
+def v1_open(payload, *, peer, own_key, net):
+    if not isinstance(payload, dict) or not payload.keys() >= _V1_FIELDS or payload["v"] != 1:
+        raise RelayError("invalid membership list")
+    if payload["voucher"] != peer or payload["to"] != own_key or payload["net"] != net:
+        raise RelayError("invalid membership list")
+    members, revoked, sig = payload["members"], payload["revoked"], payload["sig"]
+    if (
+        not isinstance(members, list)
+        or len(members) > 64
+        or not isinstance(revoked, list)
+        or len(revoked) > 64
+        or not isinstance(sig, str)
+    ):
+        raise RelayError("invalid membership list")
+    entries = []
+    for item in members:
+        if (
+            not isinstance(item, dict)
+            or not item.keys() >= {"key", "name"}
+            or not isinstance(item["name"], str)
+            or (item["name"] and not NAME_RE.fullmatch(item["name"]))
+        ):
+            raise RelayError("invalid membership list")
+        validate_public_key(item["key"])
+        entries.append((item["key"], item["name"]))
+    for key in revoked:
+        validate_public_key(key)
+    body = {name: value for name, value in payload.items() if name != "sig"}
+    try:
+        VerifyKey(bytes.fromhex(peer)).verify(_v1_signed(body), bytes.fromhex(sig))
+    except (BadSignatureError, ValueError):
+        raise RelayError("invalid membership list") from None
+    return entries, list(revoked)
+
+
+def be_a_v1_device(node):
+    """Make `node` answer lists as a 0.14 device does. Returns the versions it was sent."""
+    versions = []
+
+    async def receive(peer, payload):
+        versions.append(payload.get("v") if isinstance(payload, dict) else None)
+        client = node.client
+        try:
+            members, revoked = v1_open(
+                payload, peer=peer, own_key=client.public_key, net=client.network_id()
+            )
+            client.accept_membership(peer, members, revoked)
+        except RelayError:
+            return {"error": "invalid"}
+        return {"ok": True}
+
+    node.bridge.membership_sync.receive = receive
+    return versions
+
+
+def list_from(sender, to, *members, issued_at=None, revoked=()):
+    return seal_members(
+        key=sender.client._store.key,
+        to=to.key,
+        net=sender.client.network_id(),
+        members=[(m.key, m.name) for m in members],
+        revoked=list(revoked),
+        issued_at=issued_at,
+    )
+
+
+async def deliver(receiver, sender, payload):
+    return await receiver.bridge._receive(sender.key, METHOD, payload, _secure=True)
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_older_list_is_refused(chain):
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+    assert c.key in approved(a)  # B vouched for C
+    mark = a.client.state.members_seen[b.key]
+
+    # A genuine, validly signed list from B that names nobody: taken as news, it
+    # would drop C at A, which only B vouched for. Older or equal, it is a replay.
+    for stale in (mark - 1, mark):
+        assert await deliver(a, b, list_from(b, a, issued_at=stale)) == {"error": "invalid"}
+        assert c.key in approved(a)
+    assert a.client.state.members_seen[b.key] == mark
+
+    # The same list, newer, is news.
+    assert await deliver(a, b, list_from(b, a, issued_at=mark + 1)) == {"ok": True}
+    assert c.key not in approved(a)
+    assert a.client.state.members_seen[b.key] == mark + 1
+
+
+@pytest.mark.asyncio
+async def test_a_voucher_that_sent_dated_lists_is_not_heard_undated_again(chain):
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+    assert a.client.state.members_seen[b.key]
+
+    assert await deliver(a, b, list_from(b, a)) == {"error": "invalid"}  # v1, names nobody
+    assert c.key in approved(a)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issued_at", [0, -5, True, 1.5, "1", 2**53])
+async def test_a_list_with_a_malformed_date_is_refused(chain, issued_at):
+    a, b, c, nodes, _wire = chain
+    assert await deliver(a, b, list_from(b, a, issued_at=issued_at)) == {"error": "invalid"}
+    assert b.key not in a.client.state.members_seen
+
+
+@pytest.mark.asyncio
+async def test_a_refused_list_does_not_move_the_mark(chain):
+    a, b, c, nodes, _wire = chain
+    forged = list_from(b, a, issued_at=5_000_000_000)
+    forged["members"] = [{"key": fresh_key(), "name": "friend"}]  # altered after signing
+    assert await deliver(a, b, forged) == {"error": "invalid"}
+    assert b.key not in a.client.state.members_seen
+    assert await deliver(a, b, list_from(b, a, issued_at=10)) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_the_high_water_survives_a_restart(chain):
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+    mark = a.client.state.members_seen[b.key]
+    older = list_from(b, a, issued_at=mark - 1)
+
+    restarted = RelayClient(a.client.workspace, state_dir=a.client.state_dir)
+    assert restarted.state.members_seen[b.key] == mark
+    after = MembershipSync(client=restarted, transport=None, online=dict)
+    assert await after.receive(b.key, older) == {"error": "invalid"}
+    assert c.key in restarted.state.approvals  # still vouched, still approved
+    assert await after.receive(b.key, list_from(b, a, c, issued_at=mark + 1)) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_a_mark_is_kept_only_for_a_member_still_approved(chain):
+    a, b, c, nodes, _wire = chain
+    await sync(nodes)
+    assert set(a.client.state.members_seen) == {b.key, c.key}  # both sent dated lists
+
+    a.client.revoke(c.key)
+    mark = a.client.state.members_seen[b.key]
+    assert await deliver(a, b, list_from(b, a, issued_at=mark + 1)) == {"ok": True}
+    assert set(a.client.state.members_seen) == {b.key}
+
+
+@pytest.mark.asyncio
+async def test_issued_at_never_goes_back_when_the_clock_does(chain, monkeypatch):
+    a, b, c, nodes, _wire = chain
+    clock = {"now": 5000.0}
+    monkeypatch.setattr(
+        network_members, "time", SimpleNamespace(**{**vars(time), "time": lambda: clock["now"]})
+    )
+    stamp = a.bridge.membership_sync._stamp
+    assert stamp() == 5000
+    assert stamp() == 5001  # the same second twice
+    clock["now"] = 100.0  # the clock steps back
+    assert stamp() == 5002
+    clock["now"] = 9000.0
+    assert stamp() == 9000
+
+    # Saved before use: a restarted device with a clock still behind keeps counting up.
+    clock["now"] = 100.0
+    restarted = RelayClient(a.client.workspace, state_dir=a.client.state_dir)
+    assert MembershipSync(client=restarted, transport=None, online=dict)._stamp() == 9001
+
+
+@pytest.mark.asyncio
+async def test_the_v1_wire_is_what_a_v1_device_signed_and_a_v1_device_refuses_v2(chain):
+    a, b, c, nodes, _wire = chain
+    key = b.client._store.key
+    ours = seal_members(key=key, to=a.key, net="ab" * 32, members=[(c.key, "srv-c")], revoked=[])
+    theirs = v1_seal(key=key, to=a.key, net="ab" * 32, members=[(c.key, "srv-c")], revoked=[])
+    assert ours == theirs  # byte for byte: ed25519 signatures are deterministic
+
+    dated = seal_members(
+        key=key, to=a.key, net="ab" * 32, members=[(c.key, "srv-c")], revoked=[], issued_at=9
+    )
+    assert dated["v"] == 2 and dated["issued_at"] == 9 and dated["sig"] != ours["sig"]
+    with pytest.raises(RelayError):
+        v1_open(dated, peer=b.key, own_key=a.key, net="ab" * 32)
+    # Stripping the date to pass for v1 does not verify: "v" is signed.
+    undated = {name: value for name, value in dated.items() if name != "issued_at"}
+    with pytest.raises(RelayError):
+        v1_open({**undated, "v": 1}, peer=b.key, own_key=a.key, net="ab" * 32)
+
+
+@pytest.mark.asyncio
+async def test_a_device_that_reads_only_v1_still_interoperates(tmp_path):
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c")
+    a, b, c = nodes  # A and C are new; B has not upgraded
+    joined(a, b)
+    joined(a, c)
+    seen_by_b = be_a_v1_device(b)
+
+    # New to old: A offers v2, B refuses it, A sends v1 at once and B takes it.
+    await sync((a,), rounds=1)
+    assert seen_by_b == [2, 1]
+    assert c.key in approved(b) and c.key in b.client.state.vouched_by
+    assert a.bridge.membership_sync._v1_only == {b.key: b.client._session_id}
+    # New to new is v2 alone, and nothing falls back.
+    assert b.key in approved(c) and a.client.state.members_seen == {}
+    assert c.client.state.members_seen == {a.key: c.client.state.members_seen[a.key]}
+
+    # Old to new: B's v1 lists are taken and set no mark, however often they come.
+    for _ in range(2):
+        assert await deliver(a, b, v1_seal(
+            key=b.client._store.key, to=a.key, net=b.client.network_id(), members=[(c.key, "srv-c")], revoked=[]
+        )) == {"ok": True}
+    assert c.key in approved(a) and b.key not in a.client.state.members_seen
+
+    # While B's session lasts A sends it v1 alone: a revocation reaches it.
+    a.client.revoke(c.key, announce=True)
+    await sync((a,), rounds=1)
+    assert seen_by_b == [2, 1, 1]
+    assert c.key not in approved(b)
+
+    # B upgrades: its first dated list sets the mark, and its v1 lists stop being heard.
+    assert await deliver(a, b, list_from(b, a, issued_at=50)) == {"ok": True}
+    assert a.client.state.members_seen[b.key] == 50
+    assert await deliver(a, b, list_from(b, a)) == {"error": "invalid"}
+    await close_net(wire, nodes)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_is_not_about_the_version_costs_one_more_send_and_a_retry(chain):
+    a, b, c, nodes, _wire = chain
+    sent = []
+    send = a.bridge.secure_transport.request
+
+    async def refuse(key, method, payload, *, timeout):
+        sent.append(payload["v"])
+        return {"error": "invalid"}
+
+    a.bridge.secure_transport.request = refuse
+    try:
+        await a.bridge.membership_sync.tick()
+    finally:
+        a.bridge.secure_transport.request = send
+    assert sent == [2, 1]  # both offered, neither taken
+    assert not a.bridge.membership_sync._delivered and not a.bridge.membership_sync._v1_only
+    assert a.bridge.membership_sync._failures == {b.key: 1}
