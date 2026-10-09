@@ -35,6 +35,17 @@ def validate_peer_designation(value: object) -> str:
     return value
 
 
+def _canonical_ipv6(address: ipaddress.IPv6Address) -> str:
+    """The one wire spelling of an IPv6 address, the same from every Python.
+
+    Python 3.13 writes an IPv4-mapped address as ::ffff:127.0.0.1 and 3.12 as
+    ::ffff:7f00:1, so `compressed` alone made devices disagree on what is canonical.
+    """
+    if address.ipv4_mapped is not None:
+        return f"::ffff:{address.ipv4_mapped}"
+    return address.compressed
+
+
 def validate_peer_locator_endpoint(
     endpoint: object,
     *,
@@ -93,9 +104,9 @@ def validate_peer_locator_endpoint(
             raise PeerLocatorError("invalid peer locator address") from exc
         if not isinstance(address, ipaddress.IPv6Address):
             raise PeerLocatorError("brackets are reserved for IPv6 addresses")
-        if raw_host != address.compressed:
+        canonical_host = _canonical_ipv6(address)
+        if raw_host != canonical_host:
             raise PeerLocatorError("IPv6 peer locator is not canonical")
-        canonical_host = address.compressed
     else:
         if authority.count(":") != 1:
             raise PeerLocatorError("invalid peer locator authority")

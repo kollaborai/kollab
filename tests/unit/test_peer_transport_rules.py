@@ -131,7 +131,7 @@ async def test_loopback_is_never_dialed(local_mesh):
         "kollab+tls://127.0.0.1:9443",
         "kollab+tls://127.8.9.10:9443",
         "kollab+tls://[::1]:9443",
-        "kollab+tls://[::ffff:7f00:1]:9443",  # ::ffff:127.0.0.1
+        "kollab+tls://[::ffff:127.0.0.1]:9443",
     ):
         with pytest.raises(PeerRouteError, match="outside the allowed network"):
             await mesh._resolve_direct_endpoint(endpoint)
@@ -155,7 +155,7 @@ async def test_link_local_is_never_dialed(local_mesh):
     for endpoint in (
         "kollab+tls://169.254.169.254:80",
         "kollab+tls://[fe80::1]:9443",
-        "kollab+tls://[::ffff:a9fe:a9fe]:80",  # ::ffff:169.254.169.254
+        "kollab+tls://[::ffff:169.254.169.254]:80",
     ):
         with pytest.raises(PeerRouteError, match="outside the allowed network"):
             await mesh._resolve_direct_endpoint(endpoint)
