@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-09
+
 ### Added
 - The web UI opens the agents on your other computers as full chats, through your network: history, live turns, sending and permission prompts. The computer running the agent decides: run `/connect attach allow <this computer>` there (`/connect attach` lists who may; `deny` closes what is open). Never under trust manual, and under trust agents only the agents that computer may message. Until it allows yours, a click shows its answer and the command to run. An open agent closes as soon as that computer's rules no longer allow it.
 
