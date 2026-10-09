@@ -14,7 +14,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Collection, Dict, List, Optional, Tuple
 
 from kollabor_ai.session_naming import session_display_name
 from kollabor_config.config_utils import (
@@ -403,3 +403,28 @@ class HubBridge:
         """Force next get_agents() call to re-read disk."""
         self._cache = None
         self._cache_ts = 0.0
+
+
+async def network_daemons(skip: Collection[Any] = ()) -> AsyncIterator[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Local daemons on a network, each with its ``network_status`` answer.
+
+    The engine's own chats are asked through their state service; ``skip``
+    holds their session ids and pids. Every other live agent on this computer
+    is asked over its hub socket, read-only (``kollab --hub status`` asks the
+    same), this engine's folder first and one at a time, so a caller that stops
+    at the first answer pokes no other daemon. A daemon on no network is passed.
+    """
+    from plugins.hub.messenger import AgentMessenger
+
+    home = os.path.realpath(os.getcwd())
+    rows = [
+        row
+        for row in HubBridge().discover_sessions(use_cache=False)
+        if row.get("session_id") not in skip and row.get("daemon_pid") not in skip
+    ]
+    rows.sort(key=lambda row: not row.get("workspace") or os.path.realpath(row["workspace"]) != home)
+    for row in rows:
+        status = await AgentMessenger.request_network_status(row["socket_path"], timeout=3)
+        # An older agent sends no network name; its rows still say it is on one.
+        if status and (status.get("network") or status.get("agents")):
+            yield row, status

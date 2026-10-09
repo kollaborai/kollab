@@ -25,6 +25,8 @@ type WelcomeGem = { name: string; pool?: AgentPoolEntry; onOpen?: () => void };
 
 const WelcomeContext = createContext<WelcomeGem | null>(null);
 const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
+/** Where the session's agent runs (its device, else its folder): a bare hub name is its neighbor there. */
+const WhereContext = createContext("");
 
 // kollab-branded welcome screen. Replaces the kit's generic ThreadWelcome via
 // the `components.Welcome` slot; everything else (messages, tool calls,
@@ -33,12 +35,14 @@ const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
 // the session's Properties.
 const Welcome: FC = () => {
   const gem = useContext(WelcomeContext);
+  const where = useContext(WhereContext);
   return (
     <div className="mb-6 flex flex-col items-center gap-3 px-4 text-center">
       {gem ? (
         <span className="contents" onDoubleClick={gem.onOpen}>
           <GemAvatar
             gem={gem.name}
+            where={where}
             caste={gem.pool?.caste}
             color={gem.pool?.color}
             state={gem.pool?.active ? gem.pool.state : "idle"}
@@ -75,10 +79,13 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
   footer,
 }) => {
   const sender = useContext(PoolContext).find((agent) => agent.name === from);
+  const [name, device] = from.split("@");
+  const where = useContext(WhereContext);
   return (
     <div className="flex gap-3">
       <GemAvatar
-        gem={from.split("@")[0]}
+        gem={name}
+        where={device || where}
         caste={sender?.caste}
         color={sender?.color}
         state={sender?.active ? sender.state : "idle"}
@@ -168,10 +175,13 @@ export const Thread: FC<{
   remoteAgents?: readonly NetworkAgent[];
   /** The session's project folder: @ offers only the live agents in it. */
   workspace?: string;
+  /** The computer the session's agent runs on, when it is another one. */
+  device?: string;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "", locked = "" }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
   <PoolContext.Provider value={agents}>
+  <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
     <WelcomeContext.Provider
       value={
@@ -198,5 +208,6 @@ export const Thread: FC<{
       </ComposerPlaceholderContext.Provider>
     </WelcomeContext.Provider>
   </ComposerHubContext.Provider>
+  </WhereContext.Provider>
   </PoolContext.Provider>
 );

@@ -36,8 +36,9 @@ if Node/npm is unavailable.
   attaches to an agent it did not start, so it offers no Delete). Then each of
   your other computers. Agents on other computers show
   while a chat runs here and this computer is connected to your network. One
-  click opens one as a full chat, through the network, once that computer
-  allows this one: `/connect attach allow <this computer>`, run there.
+  click opens one as a full chat, through the network, as that computer's
+  trust allows: under `open` (the default) every computer of your network,
+  under `agents` only the agents it lets this one message, under `manual` none.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →
@@ -53,7 +54,10 @@ if Node/npm is unavailable.
   and hat) that sticks; dress any gem over it (eyes, hat, color) and set the
   season for all, previewed live. Random Look rolls a new outfit, Reset goes
   back to the born look. The engine keeps the looks, so every browser and every
-  gem in the app (session rows, chat, Who Is Online) follows.
+  gem in the app (session rows, chat, Who Is Online) follows. Each agent has its
+  own look: the studio's list dresses the gems of the folder the web UI runs in,
+  and an agent of the same name in another folder or on another computer is born
+  with its own eyes, hat and color (dress it from its chat's Properties).
 - **Session Properties**: right-click a session row (long-press on a phone) or
   double-click its gem to dress that one gem in place. The Chat tab takes the
   agent off the hub (your other agents stop seeing it; your chat keeps working)

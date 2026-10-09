@@ -13,6 +13,12 @@ it alive (``record_births``, from ``GET /agents``). It sticks: nothing rolls it
 again, and the studio's save keeps it from disk whatever the request says.
 ``gems`` holds the user's picks, drawn over the born look.
 
+A name repeats across folders and computers (a koordinator per project), and
+each of those agents dresses on its own. A bare name is the agent in the
+engine's own folder (``home`` in the routes' answer); the web UI saves picks
+for any other under ``name@folder`` or ``name@device`` and draws its born
+look from that key (``gem-look.ts`` ``lookKey``).
+
 The web UI owns the style vocabulary (``gem-face.ts``), so the engine checks
 shape only: short slug ids, colors as three 0-255 ints, a bounded number of
 gems. The renderer skips ids it does not know, and malformed fields are
@@ -35,6 +41,8 @@ logger = logging.getLogger(__name__)
 APPEARANCE_FILE = "appearance.json"
 MAX_GEMS = 256
 _SLUG = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# A pick's key: a gem name, alone or @ the folder or device the agent runs in.
+_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}(@[^\x00-\x1f\x7f]{1,1024})?$")
 
 # What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
 # the Halloween and Christmas groups (a test keeps the two in step).
@@ -73,11 +81,11 @@ def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     return look
 
 
-def _looks(value: Any, allow_color: bool) -> Dict[str, Dict[str, Any]]:
+def _looks(value: Any, allow_color: bool, key: "re.Pattern[str]" = _SLUG) -> Dict[str, Dict[str, Any]]:
     looks: Dict[str, Dict[str, Any]] = {}
     if isinstance(value, dict):
         for name, raw in list(value.items())[:MAX_GEMS]:
-            look = _look(raw, allow_color) if _slug(name) else {}
+            look = _look(raw, allow_color) if isinstance(name, str) and key.fullmatch(name) else {}
             if look:
                 looks[name] = look
     return looks
@@ -91,7 +99,7 @@ def normalize(doc: Any) -> Dict[str, Any]:
         "season": _slug(doc.get("season")) or "auto",
         # Born looks keep a gem's own color: the gem names are colors.
         "born": _looks(doc.get("born"), allow_color=False),
-        "gems": _looks(doc.get("gems"), allow_color=True),
+        "gems": _looks(doc.get("gems"), allow_color=True, key=_KEY),
     }
 
 

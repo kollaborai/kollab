@@ -127,7 +127,7 @@ class TestAgentPoolColor:
 
         by_name = {agent["name"]: agent for agent in body["agents"]}
         assert by_name["koordinator"]["active"] and by_name["koordinator"]["pool"] is False
-        assert by_name["koordinator"]["color"] == [128, 128, 128]
+        assert by_name["koordinator"]["color"] is None  # no pool gem is its base: the web UI gives it a born color
         assert by_name["lapis-2"]["color"] == by_name["lapis"]["color"]  # wears its base gem
         assert by_name["lapis-2"]["state"] == "working"
         assert by_name["lapis"]["pool"] is True and by_name["lapis"]["available"]

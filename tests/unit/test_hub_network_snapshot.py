@@ -35,6 +35,7 @@ class FakeHub:
     """Just the network surface of the hub plugin, with the real method bound."""
 
     network_agent_rows = HubPlugin.network_agent_rows
+    _relay_online = staticmethod(HubPlugin._relay_online)
 
     def __init__(self, relay=None, on_network=True):
         self._relay_agent = relay

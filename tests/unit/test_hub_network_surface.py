@@ -320,7 +320,10 @@ async def test_connect_trust_open_calls_set_trust_level(tmp_path):
 
     result = await commands._run("trust open", source_agent=None)
 
-    assert result == "trust for kollabor.ai is now open"
+    assert result == (
+        "trust for kollabor.ai is now open\n"
+        "every device on this network can now open your agents and approve their tools"
+    )
     assert calls == ["open"]
 
 

@@ -119,8 +119,8 @@ def test_the_device_says_why_it_will_not_open_an_agent():
     async def run():
         pair = Pair()
         await pair.start_agent()
-        pair.refuse = "server has not let mac open its agents"
-        with pytest.raises(AttachRefused, match="has not let mac open"):
+        pair.refuse = "mac is not a member of server's network"
+        with pytest.raises(AttachRefused, match="mac is not a member of server's network"):
             await pair.mac.open(SERVER, AGENT_ID, "lapis")
         assert not pair.mac._channels and not pair.server._channels
         await pair.stop()
@@ -247,7 +247,7 @@ def test_an_idle_channel_closes_once_the_device_withdraws_it(monkeypatch):
         pair = Pair()
         await pair.start_agent()
         reader, _ = await _opened(pair)
-        pair.refuse = "server has not let mac open its agents"
+        pair.refuse = "mac is not a member of server's network"
         assert await asyncio.wait_for(reader.read(), 3) == b""
         await _settle(lambda: not pair.mac._channels and not pair.server._channels)
         assert pair.notices[-1] == "closed lapis for mac: it may no longer open it"
@@ -278,7 +278,7 @@ def test_recheck_closes_a_withdrawn_channel_at_once():
         pair = Pair()
         await pair.start_agent()
         reader, _ = await _opened(pair)
-        pair.refuse = "server has not let mac open its agents"
+        pair.refuse = "mac is not a member of server's network"
         await pair.server.recheck()
         assert not pair.server._channels
         assert await asyncio.wait_for(reader.read(), 3) == b""
@@ -287,14 +287,15 @@ def test_recheck_closes_a_withdrawn_channel_at_once():
     asyncio.run(run())
 
 
-def test_deny_and_the_cap_count_only_the_agents_the_peer_holds_here():
+def test_a_withdrawal_and_the_cap_count_only_the_agents_the_peer_holds_here():
     async def run():
         pair = Pair(mac_runs_agent=True)
         await pair.start_agent()
         for _ in range(network_attach.MAX_CHANNELS_PER_PEER):
             await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
         await pair.mac.open(SERVER, AGENT_ID, "lapis")  # the mac still opens one of the server's
-        await pair.server.close_peer(MAC)  # the server withdraws the mac's access
+        pair.refuse = "mac is not a member of server's network"  # the server withdraws the mac's access
+        await pair.server.recheck()
         assert [ch.requester for ch in pair.server._channels.values()] == [True] * 4
         await pair.stop()
 
@@ -319,7 +320,8 @@ def test_closing_tells_every_peer_at_once(monkeypatch):
         pair.server._request_fn = silent
         loop = asyncio.get_running_loop()
         started = loop.time()
-        await pair.server.close_peer(MAC)
+        pair.refuse = "mac is not a member of server's network"
+        await pair.server.recheck()
         assert loop.time() - started < 2.0  # one close's bound, not three
         assert not pair.server._channels
         await pair.stop()

@@ -48,7 +48,8 @@ def _chat(socket_path, device="", lists=(HANDLE,)):
         alive=True,
         solo=False,
         device=device,
-        daemon=SimpleNamespace(socket_path=str(socket_path)),
+        workspace="/work/kollab",
+        daemon=SimpleNamespace(socket_path=str(socket_path), identity="lapis"),
         state=SimpleNamespace(get_hub_state=get_hub_state),
     )
 
@@ -108,7 +109,7 @@ async def test_an_agent_on_another_computer_opens_through_a_chat_here(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_refusal_answers_503_in_the_other_computers_words(registry, sock_dir):
-    refusal = "server-box has not let mac-box open its agents. On server-box, run: /connect attach allow mac-box"
+    refusal = "server-box uses trust manual: its agents take requests only through /connect authorize"
     asked = []
     listener = await _daemon_answering(sock_dir / "d.sock", {"type": "error", "msg": refusal}, asked)
     registry["here"] = _chat(sock_dir / "d.sock")
@@ -125,12 +126,92 @@ async def test_a_refusal_answers_503_in_the_other_computers_words(registry, sock
 
 
 @pytest.mark.asyncio
+async def test_a_chat_whose_daemon_never_answers_is_named_not_the_other_computer(monkeypatch, registry, sock_dir):
+    from plugins.hub.messenger import AgentMessenger
+
+    asked = []
+
+    async def silent(reader, writer):
+        # A daemon started before network attach existed reads the request and never answers.
+        asked.append(json.loads(await reader.readline()))
+        await reader.read()
+        writer.close()
+
+    listener = await asyncio.start_unix_server(silent, path=str(sock_dir / "d.sock"))
+    registry["here"] = _chat(sock_dir / "d.sock")
+    ask = AgentMessenger.request_network_attach
+    monkeypatch.setattr(
+        AgentMessenger, "request_network_attach", staticmethod(lambda path, to: ask(path, to, timeout=0.2))
+    )
+    try:
+        with pytest.raises(HTTPException) as failed:
+            await _open(HANDLE)
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert asked == [{"action": "network_attach", "to": HANDLE}]
+    assert "Lapis in /work/kollab runs this folder's network and did not answer." in failed.value.detail
+    assert "other computer" not in failed.value.detail
+
+
+async def _found_daemon(path, lists, asked):
+    """A live agent here that no chat has open: answers network_status and network_attach."""
+
+    async def serve(reader, writer):
+        action = json.loads(await reader.readline())["action"]
+        asked.append((Path(path).name, action))
+        rows = [dict(zip(("name", "device"), h.split("@")), handle=h) for h in lists]
+        reply = (
+            {"type": "network_status", "network": "net", "device": "mac-box", "trust": "open", "agents": rows}
+            if action == "network_status"
+            else {"type": "network_attach", "socket_path": "/tmp/one-shot.sock"}
+        )
+        writer.write(json.dumps(reply).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_unix_server(serve, path=str(path))
+
+
+@pytest.mark.asyncio
+async def test_with_no_chat_open_an_agent_running_here_opens_it(monkeypatch, registry, sock_dir):
+    # After the web UI restarts it has no chat open; a terminal or detached agent here runs the network.
+    asked, opened = [], []
+    here = await _found_daemon(sock_dir / "d.sock", (HANDLE,), asked)
+    elsewhere = await _found_daemon(sock_dir / "e.sock", ("lapis@far-box",), asked)
+    found = [
+        {"session_id": "e1", "identity": "koordinator", "workspace": "/w/other", "daemon_pid": 11},
+        {"session_id": "d1", "identity": "lapis", "workspace": "/work/kollab", "daemon_pid": 12},
+    ]
+    for row, sock in zip(found, ("e.sock", "d.sock")):
+        row["socket_path"] = str(sock_dir / sock)
+    monkeypatch.setattr(HubBridge, "discover_sessions", lambda self, use_cache=False: found)
+
+    async def adopt(row):
+        opened.append(row)
+        return SimpleNamespace(session_id=row["session_id"])
+
+    monkeypatch.setattr(EngineSession, "adopt", staticmethod(adopt))
+    try:
+        await _open(HANDLE)
+    finally:
+        for listener in (here, elsewhere):
+            listener.close()
+            await listener.wait_closed()
+
+    # Both asked what their network holds; only the one whose network lists it opens it.
+    assert sorted(asked) == [("d.sock", "network_attach"), ("d.sock", "network_status"), ("e.sock", "network_status")]
+    assert [(row["socket_path"], row["device"]) for row in opened] == [("/tmp/one-shot.sock", "server-box")]
+
+
+@pytest.mark.asyncio
 async def test_with_no_chat_here_a_remote_agent_answers_503(registry, sock_dir):
     registry["other@far-box"] = _chat(sock_dir / "far.sock", device="far-box")
     with pytest.raises(HTTPException) as failed:
         await _open(HANDLE)
     assert failed.value.status_code == 503
-    assert "no chat here runs this folder's network yet" in failed.value.detail
+    assert "no agent on this computer is on a network right now" in failed.value.detail
 
     registry["elsewhere"] = _chat(sock_dir / "e.sock", lists=("lapis@far-box",))
     with pytest.raises(HTTPException) as failed:

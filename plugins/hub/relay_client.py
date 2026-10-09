@@ -329,7 +329,6 @@ class RelayClient:
         self.state.peer_trust = {}
         self.state.config_recipients = []
         self.state.links = []
-        self.state.attach_allowed = []
         self.state.vouched_by = {}
         self.state.revoked = []
         self._store.save()
@@ -362,7 +361,6 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
-            "attach_allowed",
         ):
             setattr(self.state, name, getattr(disk, name))
 
@@ -552,9 +550,6 @@ class RelayClient:
                 changed = True
             if key in self.state.links:
                 self.state.links.remove(key)
-                changed = True
-            if key in self.state.attach_allowed:
-                self.state.attach_allowed.remove(key)
                 changed = True
             if changed:
                 self._store.save()

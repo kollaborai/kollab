@@ -244,6 +244,7 @@ function RuntimeShell({
             onOpenGem={onOpenProperties}
             remoteAgents={targets.remote}
             workspace={session.workspace ?? ""}
+            device={session.device ?? ""}
             locked={locked}
           />
         ) : (
@@ -671,6 +672,7 @@ export default function App() {
     const pool = agents.find((agent) => agent.name === gem);
     setStudioFocus({
       gem,
+      where: session.device || session.workspace,
       tab,
       chat: {
         session,

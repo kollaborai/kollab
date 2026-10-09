@@ -2,6 +2,7 @@
 GET/PUT /agents/appearance. The conftest points the store at a temp file."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from httpx import ASGITransport, AsyncClient
 from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
 EMPTY = {"season": "auto", "born": {}, "gems": {}}
+# The routes also say which folder a bare gem name means: this engine's.
+HOME = {"home": os.path.realpath(os.getcwd())}
 GEM_FACE_TS = (
     Path(__file__).resolve().parents[3]
     / "packages/kollabor-webui/frontend/src/components/gems/gem-face.ts"
@@ -56,6 +59,25 @@ class TestNormalize:
     def test_non_object_is_empty(self):
         assert gem_appearance.normalize(["nope"]) == EMPTY
 
+    def test_an_agent_in_another_folder_or_on_another_computer_keeps_its_own_picks(self):
+        looks = {
+            "koordinator": {"face": "visor"},
+            "koordinator@/Users/me/dev/webapp": {"face": "kawaii", "color": [30, 90, 180]},
+            "koordinator@home-server": {"hat": "crown"},
+        }
+        doc = {"born": dict(looks), "gems": {
+            **looks,
+            "koordinator@": {"face": "pill"},
+            "koordinator@bad\nline": {"face": "pill"},
+            "Koordinator@home-server": {"face": "pill"},
+            "koordinator@" + "x" * 1025: {"face": "pill"},
+            "lapis\n": {"face": "pill"},
+        }}
+        clean = gem_appearance.normalize(doc)
+        assert clean["gems"] == looks
+        # Only the engine rolls born looks, and only for a gem's bare name.
+        assert clean["born"] == {"koordinator": {"face": "visor"}}
+
 
 class TestBirths:
     def test_a_gem_is_born_once_and_keeps_its_look(self, appearance_store):
@@ -95,7 +117,7 @@ class TestBirths:
 @pytest.mark.asyncio
 class TestAppearanceRoutes:
     async def test_missing_file_reads_as_empty(self, client):
-        assert (await client.get("/agents/appearance")).json() == EMPTY
+        assert (await client.get("/agents/appearance")).json() == {**EMPTY, **HOME}
 
     async def test_put_saves_and_get_reads_back(self, client, appearance_store):
         doc = {
@@ -103,11 +125,11 @@ class TestAppearanceRoutes:
             "born": {},
             "gems": {"lapis": {"hat": "crown", "color": [10, 20, 30]}},
         }
-        saved = (await client.put("/agents/appearance", json=doc)).json()
+        saved = (await client.put("/agents/appearance", json={**doc, "home": "/forged"})).json()
 
-        assert saved == doc
+        assert saved == {**doc, **HOME}
         assert json.loads(appearance_store.read_text()) == doc
-        assert (await client.get("/agents/appearance")).json() == doc
+        assert (await client.get("/agents/appearance")).json() == {**doc, **HOME}
 
     async def test_put_keeps_born_looks_from_disk(self, client):
         gem_appearance.record_births(["lapis"])
@@ -133,4 +155,4 @@ class TestAppearanceRoutes:
         appearance_store.parent.mkdir(parents=True)
         appearance_store.write_text("{not json")
 
-        assert (await client.get("/agents/appearance")).json() == EMPTY
+        assert (await client.get("/agents/appearance")).json() == {**EMPTY, **HOME}

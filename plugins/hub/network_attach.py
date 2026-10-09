@@ -6,11 +6,11 @@ channel instead, so the web UI opens an agent on another computer the way it
 opens one on this computer: its history, its live turns, and input.
 
 The device that runs the agent decides who may open it (``RelayAgentBridge.
-attach_target``): only a member device a person on it allowed with
-``/connect attach allow <device>``, never under ``trust manual``, and under
-``trust agents`` only the agents that device may message. An open channel is
-the same control as sitting at that device's keyboard, so the device asks its
-rules again while the channel stays open and closes it once they say no.
+attach_target``), by its trust, as for messages: under ``trust open`` every
+member device, under ``trust agents`` only the agents that device may message,
+under ``trust manual`` none. An open channel is the same control as sitting at
+that device's keyboard, so the device asks its rules again while the channel
+stays open and closes it once they say no.
 
 Wire: secure application requests (``SecureConversationTransport.request``),
 sent by both sides:
@@ -464,23 +464,6 @@ class NetworkAttach:
                 await self._close(channel, tell_peer=True, why=self._withdrawn(channel))
 
         await asyncio.gather(*(one(c) for c in list(self._channels.values()) if not c.requester))
-
-    async def close_peer(self, peer: str) -> None:
-        """Close the agents ``peer`` holds open here (its attach permission was withdrawn).
-
-        This device's own channels to that peer's agents stay open.
-        """
-        await asyncio.gather(
-            *(
-                self._close(
-                    channel,
-                    tell_peer=True,
-                    why=f"closed {channel.name} for {self._peer_name(peer)}",
-                )
-                for (key, _), channel in list(self._channels.items())
-                if key == peer and not channel.requester
-            )
-        )
 
     async def _close(self, channel: _Channel, *, tell_peer: bool, why: str | None = None) -> None:
         if channel.closed:

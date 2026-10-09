@@ -6,17 +6,17 @@ runs a stand-in agent socket; the left device opens it through the network.
 
 import asyncio
 import dataclasses
+import json
 import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from nacl.signing import SigningKey
 
 from plugins.hub import network_attach
 from plugins.hub.network_attach import AttachRefused, NetworkAttach
-from plugins.hub.relay_state import RelayError
+from plugins.hub.relay_state import RelayError, RelayStateStore
 from tests.unit.test_relay_agent_bridge import allow, handle
 
 
@@ -61,21 +61,8 @@ async def _open(left, right):
 
 
 @pytest.mark.asyncio
-async def test_an_agent_opens_from_the_network_only_once_a_person_there_allows_it(devices):
+async def test_a_member_device_opens_an_agent_under_trust_open_with_no_command(devices):
     left, right, notices = devices
-    here = right.device_name()
-    with pytest.raises(AttachRefused) as refused:
-        await _open(left, right)
-    assert str(refused.value) == (
-        f"{here} has not let left-box open its agents. "
-        f"On {here}, run: /connect attach allow left-box"
-    )
-
-    said = await right.commands.run("attach allow left-box")
-    assert said.startswith("left-box may now open this computer's agents")
-    assert await right.commands.run("attach") == (
-        "may open this computer's agents: left-box"
-    )
     opened = await _open(left, right)
     reader, writer = await asyncio.open_unix_connection(opened)
     assert await reader.readline() == b"agent here\n"
@@ -84,16 +71,15 @@ async def test_an_agent_opens_from_the_network_only_once_a_person_there_allows_i
     assert await reader.readline() == b"HELLO\n"
     assert notices == ["left-box opened sapphire from the network"]
 
-    said = await right.commands.run("attach deny left-box")
-    assert said == "left-box may no longer open this computer's agents"
-    assert await asyncio.wait_for(reader.read(), 5) == b""
+    # Revoked: the rules say no, so the device closes the agent it held open.
+    right.commands.client.revoke(left.commands.client.public_key)
+    await right.network_attach.recheck()
     assert not right.network_attach._channels
 
 
 @pytest.mark.asyncio
 async def test_trust_manual_never_opens_agents(devices):
     left, right, _ = devices
-    await right.commands.run("attach allow left-box")
     right.set_trust_level("manual")
     with pytest.raises(AttachRefused, match="uses trust manual"):
         await _open(left, right)
@@ -102,7 +88,6 @@ async def test_trust_manual_never_opens_agents(devices):
 @pytest.mark.asyncio
 async def test_trust_agents_opens_only_the_agents_that_device_may_reach(devices):
     left, right, _ = devices
-    await right.commands.run("attach allow left-box")
     right.set_trust_level("agents")
     with pytest.raises(AttachRefused, match="reach only the agents it allowed"):
         await _open(left, right)
@@ -113,7 +98,6 @@ async def test_trust_agents_opens_only_the_agents_that_device_may_reach(devices)
 @pytest.mark.asyncio
 async def test_an_accepted_stranger_cannot_open_agents(devices):
     left, right, _ = devices
-    await right.commands.run("attach allow left-box")
     named = await handle(left, right)
     right.set_peer_link(left.commands.client.public_key)
     with pytest.raises(RelayError):
@@ -122,28 +106,9 @@ async def test_an_accepted_stranger_cannot_open_agents(devices):
 
 
 @pytest.mark.asyncio
-async def test_only_a_member_can_be_allowed(devices):
-    left, right, _ = devices
-    right.set_peer_link(left.commands.client.public_key)
-    said = await right.commands.run("attach allow left-box")
-    assert "not a member of this network" in said or said.startswith("connect:")
-    assert left.commands.client.public_key not in right._state().state.attach_allowed
-
-
-@pytest.mark.asyncio
-async def test_a_later_approval_keeps_who_may_open_agents(devices):
-    """The relay client saves its own copy of the state: it must not drop the grant."""
-    left, right, _ = devices
-    await right.commands.run("attach allow left-box")
-    right.commands.client.approve(SigningKey.generate().verify_key.encode().hex())
-    assert right._state().state.attach_allowed == [left.commands.client.public_key]
-
-
-@pytest.mark.asyncio
 async def test_a_connect_command_that_withdraws_an_open_agent_closes_it(devices, monkeypatch):
     monkeypatch.setattr(network_attach, "IDLE_SECONDS", 60.0)  # only the command's own recheck
     left, right, notices = devices
-    await right.commands.run("attach allow left-box")
     opened = await _open(left, right)
     reader, _ = await asyncio.open_unix_connection(opened)
     assert await reader.readline() == b"agent here\n"
@@ -162,22 +127,6 @@ def test_every_relay_method_the_bridge_calls_or_serves_is_allowlisted():
 
     used = set(re.findall(r'"(relay\.[a-z_]+)"', Path(relay_agent.__file__).read_text()))
     assert {"relay.attach", "relay.enroll_device"} <= used <= RELAY_METHODS
-
-
-@pytest.mark.asyncio
-async def test_revoking_or_rotating_forgets_who_may_open_agents(devices):
-    left, right, _ = devices
-    key = left.commands.client.public_key
-    await right.commands.run("attach allow left-box")
-    right.commands.client.revoke(key)
-    assert key not in right._state().state.attach_allowed
-
-    right.commands.client.approve(key)  # readmitted with the same key: no grant comes back
-    assert key not in right._state().state.attach_allowed
-    right.bind_peer_device(key, "left-box")
-    await right.commands.run("attach allow left-box")
-    right.commands.client.rotate_room()
-    assert right._state().state.attach_allowed == []
 
 
 @pytest.mark.asyncio
@@ -228,7 +177,7 @@ async def test_a_refusal_reaches_a_window_that_does_not_own_the_network(tmp_path
     from plugins.hub.relay_conversations import RelayAddress
     from tests.unit.test_relay_agent_bridge import Directory
 
-    refusal = "box has not let mac open its agents. On box, run: /connect attach allow mac"
+    refusal = "box uses trust manual: its agents take requests only through /connect authorize"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     directory = Directory(workspace, AgentRuntime(identity="sapphire", agent_id="one"))
@@ -262,9 +211,9 @@ async def test_a_refusal_reaches_a_window_that_does_not_own_the_network(tmp_path
 
         owner.network_attach = Refusing()
         owner.resolve_handle = AsyncMock(return_value=str(RelayAddress("b" * 64, "c" * 32, "lapis-session")))
-        with pytest.raises(AttachRefused, match="On box, run: /connect attach allow mac"):
+        with pytest.raises(AttachRefused, match=refusal):
             await window.attach("lapis@box")
-        with pytest.raises(AttachRefused, match="On box, run"):
+        with pytest.raises(AttachRefused, match="box uses trust manual"):
             await owner.attach("lapis@box")  # the owner's own windows: same words
         assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL") or r.exc_info]
     finally:
@@ -272,3 +221,14 @@ async def test_a_refusal_reaches_a_window_that_does_not_own_the_network(tmp_path
             await bridge.close()
             await server.stop()
 
+
+def test_a_relay_state_from_the_attach_allow_list_loads_without_it(tmp_path):
+    """Who may open agents follows trust now; a state file from the allow list still loads."""
+    store = RelayStateStore(tmp_path, tmp_path / "state")
+    data = json.loads(store.state_path.read_text())
+    store.state_path.write_text(json.dumps(data | {"attach_allowed": ["a" * 64]}))
+
+    again = RelayStateStore(tmp_path, tmp_path / "state")
+    again.save()
+
+    assert "attach_allowed" not in json.loads(again.state_path.read_text())

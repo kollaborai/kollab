@@ -158,9 +158,6 @@ class RelayState:
     # Accepted strangers: devices in their own room, reached through the
     # directory only while both sides consent to the link.
     links: list[str] = field(default_factory=list)
-    # Member devices a person here allowed to open this device's agents
-    # (`/connect attach allow`): plugins/hub/network_attach.py.
-    attach_allowed: list[str] = field(default_factory=list)
     # Members approved because a member this device already approved vouched
     # for them (key -> the members that did). A device accepted first-hand, by
     # join code or as the inviter, has no entry. plugins/hub/network_members.py.
@@ -229,8 +226,9 @@ class RelayStateStore:
             # device_name/trust/peer_devices/peer_trust is missing those
             # keys, and the dataclass defaults fill them in. Any key outside
             # the dataclass is still rejected.
-            # Knocks became calls: a knock no longer leaves state behind.
-            for gone in ("knocks", "knock_requests"):
+            # Knocks became calls: a knock no longer leaves state behind. Who may
+            # open agents follows trust now, not a list (attach_allowed).
+            for gone in ("knocks", "knock_requests", "attach_allowed"):
                 payload.pop(gone, None)
             if set(payload) - set(RelayState.__dataclass_fields__):
                 raise RelayError("unsupported relay state fields")
@@ -318,14 +316,6 @@ class RelayStateStore:
         ):
             raise RelayError("invalid stranger links")
         for key in value.links:
-            validate_public_key(key)
-        if (
-            not isinstance(value.attach_allowed, list)
-            or len(value.attach_allowed) > MAX_APPROVALS
-            or len(set(value.attach_allowed)) != len(value.attach_allowed)
-        ):
-            raise RelayError("invalid attach permissions")
-        for key in value.attach_allowed:
             validate_public_key(key)
         if (
             not isinstance(value.vouched_by, dict)

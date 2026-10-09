@@ -635,21 +635,14 @@ class RelayAgentBridge:
     async def attach_target(self, peer: str, agent_id: str, name: str) -> str:
         """The socket of a local agent ``peer`` may open, or AttachRefused saying why.
 
-        Opening an agent is the control a person has at this keyboard, so a
-        device needs a person here to allow it (/connect attach allow); network
-        trust alone is not enough on a network shared with other people.
+        Trust decides, as it does for messages: under ``open`` every member
+        device may open this device's agents, under ``agents`` only the ones it
+        may message, under ``manual`` none. A device that is not a member never may.
         """
         state = self._state().state
         here, there = self.device_name(), self._peer_name(peer)
-        if (
-            peer not in state.attach_allowed
-            or peer in state.links
-            or peer not in self.commands.client.state.approvals
-        ):
-            raise AttachRefused(
-                f"{here} has not let {there} open its agents. On {here}, run: "
-                f"/connect attach allow {there}"
-            )
+        if peer in state.links or peer not in self.commands.client.state.approvals:
+            raise AttachRefused(f"{there} is not a member of {here}'s network")
         trust = self.effective_trust(peer)
         if trust == "manual":
             raise AttachRefused(
@@ -671,40 +664,6 @@ class RelayAgentBridge:
                 f"{here} lets {there} reach only the agents it allowed, and {name} is not one"
             )
         return agent.socket_path
-
-    def attach_status(self) -> str:
-        state = self._state().state
-        approved = self.commands.client.state.approvals
-        names = sorted(self._peer_name(key) for key in state.attach_allowed if key in approved)
-        if not names:
-            return "no device may open this computer's agents; /connect attach allow <device>"
-        return "may open this computer's agents: " + ", ".join(names)
-
-    async def set_attach_allowed(self, peer_key: str, allowed: bool) -> str:
-        self._require_human_network_context(
-            "remote model turns cannot change who may open this computer's agents"
-        )
-        store = self._state()
-        name = self._peer_name(peer_key)
-        if allowed:
-            if (
-                peer_key not in self.commands.client.state.approvals
-                or peer_key in store.state.links
-            ):
-                raise RelayError(f"{name} is not a member of this network")
-            if peer_key not in store.state.attach_allowed:
-                store.state.attach_allowed.append(peer_key)
-                store.save()
-            return (
-                f"{name} may now open this computer's agents, "
-                "with the control you have at this keyboard"
-            )
-        if peer_key in store.state.attach_allowed:
-            store.state.attach_allowed.remove(peer_key)
-            store.save()
-        if self.network_attach is not None:
-            await self.network_attach.close_peer(peer_key)
-        return f"{name} may no longer open this computer's agents"
 
     async def start(self):
         rpc = self.plugin._rpc_server

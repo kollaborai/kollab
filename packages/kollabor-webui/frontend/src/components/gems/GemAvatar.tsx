@@ -1,15 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { cn } from "@/lib/utils";
-import { useGemLook } from "./gem-appearance";
+import { useGemLook, useLookKey } from "./gem-appearance";
 import { GEM_PAD, gemEngine, type GemProps } from "./gem-engine";
 import { seasonFor, type EyeStyle, type HatStyle, type Season } from "./gem-face";
-import { gemSpec } from "./gem-specs";
+import { gemSpec, isPoolGem } from "./gem-specs";
 
-export type GemAvatarProps = Omit<GemProps, "size"> & {
+export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
   size?: number;
   className?: string;
   /** Accessible name; without it the avatar is decorative (aria-hidden). */
   label?: string;
+  /** Where the agent runs: its folder here, or its device for one on another computer. */
+  where?: string | null;
 };
 
 /**
@@ -21,11 +23,13 @@ export type GemAvatarProps = Omit<GemProps, "size"> & {
  * `size` is the layout box; the canvas overhangs it by GEM_PAD so hats and
  * props have room without pushing the layout around.
  */
-export function GemAvatar({ size = 32, className, label, ...own }: GemAvatarProps) {
+export function GemAvatar({ size = 32, className, label, where, ...own }: GemAvatarProps) {
   // The Gem Studio's saved look fills what the caller left open: an explicit
   // face or hat wins (studio tiles, the dev lab), an "auto" season follows the
-  // user's pick, and a picked color replaces the pool's.
-  const look = useGemLook(own.gem);
+  // user's pick, and a picked color replaces the pool's. Each agent has its
+  // own look, so a koordinator per project never wears another's.
+  const key = useLookKey(own.gem, where);
+  const look = useGemLook(key);
   const season = own.season === "auto" ? ((look.season as Season | "auto" | undefined) ?? "auto") : own.season;
   // A seasonal costume covers the hat a gem was born with, not one the user picked.
   const inSeason = (season === "auto" ? seasonFor() : (season ?? "none")) !== "none";
@@ -34,7 +38,8 @@ export function GemAvatar({ size = 32, className, label, ...own }: GemAvatarProp
     face: own.face ?? (look.face as EyeStyle | undefined),
     hat: own.hat ?? ((look.hat ?? (inSeason ? undefined : look.bornHat)) as HatStyle | "auto" | undefined),
     season,
-    color: look.color ?? own.color,
+    color: look.color ?? own.color ?? (isPoolGem(own.gem) ? undefined : look.bornColor),
+    lookKey: key,
   };
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [fallback, setFallback] = useState(false);
