@@ -218,7 +218,7 @@ async def test_an_agent_on_another_computer_reports_its_own_folder(monkeypatch):
             asked.append("system")
             return SimpleNamespace(cwd="/home/someone/project")
 
-        async def get_conversation(self):
+        async def get_conversation(self, since=None, anchor=None):
             return SimpleNamespace(messages=[])
 
     async def adopt(self, session_id, found):

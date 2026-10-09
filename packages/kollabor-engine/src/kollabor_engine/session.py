@@ -160,6 +160,12 @@ class EngineSession:
         # truth; this is refreshed on demand so synchronous readers (to_dict,
         # the history route) don't have to await mid-render.
         self.history: List[Dict[str, Any]] = []
+        # The daemon's messages as sent, and the digest it gave for them: a
+        # refresh asks for only what follows (an agent on another computer
+        # would otherwise send its whole history over the network every turn).
+        self._raw_history: List[Dict[str, Any]] = []
+        self._history_anchor = ""
+        self._history_lock = asyncio.Lock()
 
         self.total_turns = 0
         self.total_input_tokens = 0
@@ -329,42 +335,59 @@ class EngineSession:
 
 
     async def refresh_history(self) -> List[Dict[str, Any]]:
-        """Pull the daemon's conversation into the local mirror."""
-        try:
-            snapshot = await self.state.get_conversation()
-        except Exception as e:
-            logger.debug("session %s history refresh failed: %s", self.session_id, e)
+        """Pull the daemon's conversation into the local mirror.
+
+        Asks for only the messages past the ones already held, with the digest
+        the daemon gave for them; a daemon whose history changed (compaction,
+        /clear, /resume), or one too old to know, sends all of it.
+        """
+        async with self._history_lock:
+            held = self._raw_history
+            try:
+                snapshot = await self.state.get_conversation(
+                    since=len(held) or None, anchor=self._history_anchor or None
+                )
+            except Exception as e:
+                logger.debug("session %s history refresh failed: %s", self.session_id, e)
+                return self.history
+
+            messages = getattr(snapshot, "messages", None)
+            if messages is None and isinstance(snapshot, dict):
+                messages = snapshot.get("messages", [])
+
+            # StateService returns MessageDto snapshots with timestamps, metadata,
+            # and thinking. Keep the complete wire shape in the engine mirror;
+            # reducing messages to role/content here hides native tool-call IDs
+            # from both the trajectory projector and the restored chat runtime.
+            received: List[Dict[str, Any]] = []
+            for message in messages or []:
+                if isinstance(message, dict):
+                    received.append(message)
+                    continue
+                to_dict = getattr(message, "to_dict", None)
+                if callable(to_dict):
+                    received.append(to_dict())
+                    continue
+                received.append(
+                    {
+                        "role": getattr(message, "role", ""),
+                        "content": getattr(message, "content", "") or "",
+                        "timestamp": str(getattr(message, "timestamp", "") or ""),
+                        "metadata": dict(getattr(message, "metadata", None) or {}),
+                        "thinking": getattr(message, "thinking", None),
+                    }
+                )
+            since = getattr(snapshot, "since", None)
+            if since is not None and since > len(held):
+                # A tail past what is held cannot be joined; the next refresh
+                # sends no anchor and gets all of it.
+                self._history_anchor = ""
+                return self.history
+            self._raw_history = (held[:since] if since else []) + received
+            self._history_anchor = getattr(snapshot, "anchor", "") or ""
+            # XML tool turns in the shape the web renders for native tools.
+            self.history = web_history(self._raw_history)
             return self.history
-
-        messages = getattr(snapshot, "messages", None)
-        if messages is None and isinstance(snapshot, dict):
-            messages = snapshot.get("messages", [])
-
-        # StateService returns MessageDto snapshots with timestamps, metadata,
-        # and thinking. Keep the complete wire shape in the engine mirror;
-        # reducing messages to role/content here hides native tool-call IDs
-        # from both the trajectory projector and the restored chat runtime.
-        self.history = []
-        for message in messages or []:
-            if isinstance(message, dict):
-                self.history.append(message)
-                continue
-            to_dict = getattr(message, "to_dict", None)
-            if callable(to_dict):
-                self.history.append(to_dict())
-                continue
-            self.history.append(
-                {
-                    "role": getattr(message, "role", ""),
-                    "content": getattr(message, "content", "") or "",
-                    "timestamp": str(getattr(message, "timestamp", "") or ""),
-                    "metadata": dict(getattr(message, "metadata", None) or {}),
-                    "thinking": getattr(message, "thinking", None),
-                }
-            )
-        # XML tool turns in the shape the web renders for native tools.
-        self.history = web_history(self.history)
-        return self.history
 
     async def send_message(self, content: Any) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""

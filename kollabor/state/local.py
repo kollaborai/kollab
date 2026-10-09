@@ -233,11 +233,15 @@ class LocalStateService(StateService):
 
     # === Conversation ===
 
-    async def get_conversation(self) -> ConversationSnapshot:
+    async def get_conversation(
+        self, since: int | None = None, anchor: str | None = None
+    ) -> ConversationSnapshot:
         """Return a snapshot of the current conversation.
 
         Reads llm_service.conversation_history (List[ConversationMessage])
         and converts each message to a MessageDto with ISO-string timestamps.
+        ``since``/``anchor``: only what a reader's copy lacks
+        (ConversationSnapshot.tail).
         """
         history = getattr(self._llm_service, "conversation_history", None) or []
         messages: list[MessageDto] = []
@@ -281,7 +285,7 @@ class LocalStateService(StateService):
             started_at=started_at,
             message_count=len(messages),
             metadata=metadata,
-        )
+        ).tail(since, anchor)
 
     def get_conversation_uid(self) -> str | None:
         """Durable conversation identity for the goal layer (spec 6.5).

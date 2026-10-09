@@ -91,11 +91,18 @@ class RemoteStateService(StateService):
 
     # === Conversation ===
 
-    async def get_conversation(self) -> ConversationSnapshot:
-        """Fetch the daemon's conversation via RPC and reconstruct the snapshot."""
-        logger.debug("state rpc: get_conversation")
+    async def get_conversation(
+        self, since: int | None = None, anchor: str | None = None
+    ) -> ConversationSnapshot:
+        """Fetch the daemon's conversation via RPC and reconstruct the snapshot.
+
+        With ``since``/``anchor`` only what follows the caller's copy comes
+        back (ConversationSnapshot.tail); a daemon too old to know sends it all.
+        """
+        logger.debug("state rpc: get_conversation since=%s", since)
+        params = {} if since is None else {"since": since, "anchor": anchor or ""}
         result = await self._rpc.call(
-            "state.get_conversation", {}, timeout=self._timeout
+            "state.get_conversation", params, timeout=self._timeout
         )
         if not isinstance(result, dict):
             raise TypeError(
