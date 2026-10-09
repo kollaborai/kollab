@@ -195,7 +195,11 @@ def validate_message(
         and len(content.encode("utf-8")) > MAX_EVENT_CONTENT
     ):
         raise RelayError("correlated event content exceeds its size limit")
-    if any(ord(c) < 32 and c not in "\n\r\t" for c in content) or "\x7f" in content:
+    # C0 (but newline, CR and tab), DEL and the C1 range: \x9b alone starts an escape
+    # sequence in some terminals.
+    if any(
+        (ord(c) < 32 and c not in "\n\r\t") or 0x7F <= ord(c) <= 0x9F for c in content
+    ):
         raise RelayError("agent message contains terminal control characters")
     if recipient.workspace_id != workspace_id:
         raise ConversationRejection("wrong_workspace")
