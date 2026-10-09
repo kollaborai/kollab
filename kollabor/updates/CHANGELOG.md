@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- `kollabor_agent.tool_timeline`: a tool timeline module that nothing called; only its own test used it (#83).
+
 ## [0.14.0] - 2026-10-08
 
 ### Changed
