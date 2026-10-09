@@ -91,6 +91,7 @@ function RuntimeShell({
   refreshSignal,
   view,
   onViewChange: setView,
+  locked,
 }: {
   session: Session;
   profiles: Profile[];
@@ -109,6 +110,8 @@ function RuntimeShell({
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
+  /** Why the composer is closed while another chat starts or loads; empty when open. */
+  locked: string;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
@@ -240,6 +243,7 @@ function RuntimeShell({
             onOpenGem={onOpenProperties}
             remoteAgents={targets.remote}
             workspace={session.workspace ?? ""}
+            locked={locked}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -768,6 +772,7 @@ export default function App() {
                 onOpenProperties={() => openProperties(activeSession.session_id)}
                 view={sessionView}
                 onViewChange={setSessionView}
+                locked={busy ? busyMessage || "Loading…" : ""}
               />
             </EngineRuntimeProvider>
           ) : (

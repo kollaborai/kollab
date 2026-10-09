@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
@@ -365,10 +366,12 @@ async def list_sessions():
     sessions = [s.to_dict() for s in registry.values()]
     local_ids = {str(item.get("session_id")) for item in sessions}
     local_pids = {item.get("daemon_pid") for item in sessions} - {0, None}
+    pool = get_daemon_pool()
     discovered = [
         item for item in found
         if item.get("session_id") not in local_ids
         and item.get("daemon_pid") not in local_pids
+        and not pool.owns(item)
     ]
     return {
         "sessions": sessions + discovered,

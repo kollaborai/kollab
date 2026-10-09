@@ -351,11 +351,26 @@ class DaemonPool:
 
     def __init__(self) -> None:
         self._daemons: Dict[str, DaemonHandle] = {}
+        # (identity, folder) of the daemons still starting, by session id.
+        self._starting: Dict[str, tuple] = {}
         self._bridge = HubBridge()
         self._spawn_lock = asyncio.Lock()
 
     def get(self, session_id: str) -> Optional[DaemonHandle]:
         return self._daemons.get(session_id)
+
+    def owns(self, row: Dict[str, Any]) -> bool:
+        """Whether a discovered agent is one of this pool's daemons.
+
+        A daemon publishes presence before the engine attaches to it and before
+        its session is registered; until then discovery would list it as an
+        agent started elsewhere, a second row a click would open twice.
+        """
+        pid = int(row.get("daemon_pid") or 0)
+        if pid and any(handle.pid == pid for handle in self._daemons.values()):
+            return True
+        folder = os.path.realpath(str(row.get("workspace") or ""))
+        return (str(row.get("identity") or ""), folder) in self._starting.values()
 
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
@@ -467,37 +482,41 @@ class DaemonPool:
                 raise ValueError(f"workspace does not exist: {cwd}")
 
             logger.info("spawning daemon %s for session %s", identity_name, session_id)
-            process = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-
-            handle = DaemonHandle(session_id, identity_name, process)
+            self._starting[session_id] = (identity_name, os.path.realpath(cwd))
             try:
-                deadline = time.monotonic() + SPAWN_TIMEOUT_SECONDS
-                while True:
-                    socket_path = await self._await_socket(handle)
-                    try:
-                        await handle.connect(socket_path)
-                        break
-                    except (ConnectionRefusedError, FileNotFoundError):
-                        # The socket file can predate the listener: a dead
-                        # daemon of the same gem leaves it behind, and the
-                        # new one publishes presence before it binds.
-                        if time.monotonic() >= deadline:
-                            raise
-                        await asyncio.sleep(0.25)
-            except Exception:
-                await handle.close()
-                raise
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
 
-            self._daemons[session_id] = handle
-            return handle
+                handle = DaemonHandle(session_id, identity_name, process)
+                try:
+                    deadline = time.monotonic() + SPAWN_TIMEOUT_SECONDS
+                    while True:
+                        socket_path = await self._await_socket(handle)
+                        try:
+                            await handle.connect(socket_path)
+                            break
+                        except (ConnectionRefusedError, FileNotFoundError):
+                            # The socket file can predate the listener: a dead
+                            # daemon of the same gem leaves it behind, and the
+                            # new one publishes presence before it binds.
+                            if time.monotonic() >= deadline:
+                                raise
+                            await asyncio.sleep(0.25)
+                except Exception:
+                    await handle.close()
+                    raise
+
+                self._daemons[session_id] = handle
+                return handle
+            finally:
+                self._starting.pop(session_id, None)
 
     async def adopt(self, session_id: str, found: Dict[str, Any]) -> DaemonHandle:
         """Attach to a live agent this pool did not start (a discover_sessions row).

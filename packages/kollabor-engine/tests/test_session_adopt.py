@@ -169,6 +169,47 @@ async def test_list_sessions_lists_each_agent_once(monkeypatch, registry):
     assert [item["session_id"] for item in result["sessions"]] == ["griffin-born", "terminal-id"]
 
 
+@pytest.mark.asyncio
+async def test_a_daemon_this_engine_is_starting_is_not_listed_as_another_agent(monkeypatch, registry):
+    # A new daemon writes presence before the engine attaches and registers it.
+    pool = daemon_pool.DaemonPool()
+    pool._starting["new-chat"] = ("bismuth", os.path.realpath("/w/mentiko"))
+    pool._daemons["attached-chat"] = SimpleNamespace(pid=333)
+    monkeypatch.setattr(sessions_route, "get_daemon_pool", lambda: pool)
+    monkeypatch.setattr(
+        HubBridge,
+        "discover_sessions",
+        lambda self, use_cache=False: [
+            _row("starting-id", pid=0, identity="bismuth"),
+            _row("attached-id", pid=333, identity="zircon"),
+            _row("other-folder-id", pid=444, identity="bismuth", workspace="/w/other"),
+        ],
+    )
+
+    async def no_network(_registry):
+        return {"device": "", "remote": []}
+
+    monkeypatch.setattr(sessions_route, "_network_snapshot", no_network)
+    result = await sessions_route.list_sessions()
+
+    assert [item["session_id"] for item in result["sessions"]] == ["other-folder-id"]
+
+
+def test_a_daemon_this_engine_is_starting_does_not_open_as_another_agent(monkeypatch, registry):
+    pool = daemon_pool.DaemonPool()
+    pool._starting["new-chat"] = ("koordinator", os.path.realpath("/w/mentiko"))
+    monkeypatch.setattr(server, "get_daemon_pool", lambda: pool)
+    monkeypatch.setattr(HubBridge, "discover_sessions", lambda self, use_cache=False: [_row()])
+
+    async def adopt(found):
+        raise AssertionError("must not adopt this engine's own daemon")
+
+    monkeypatch.setattr(EngineSession, "adopt", staticmethod(adopt))
+    response = TestClient(server.create_app()).get("/sessions/a1b2c3/history")
+
+    assert response.status_code == 404
+
+
 def test_adopted_session_reports_itself_as_external():
     session = EngineSession(session_id="a1b2c3", profile=None, approval_mode="")
     session.external = True

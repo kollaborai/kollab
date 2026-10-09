@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-fo
 from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 
 from .auth import validate_token
+from .daemon_pool import get_daemon_pool
 from .hub_bridge import HubBridge
 from .session import EngineSession
 
@@ -77,7 +78,8 @@ async def open_named_session(request: Request) -> None:
             (
                 row
                 for row in HubBridge().discover_sessions(use_cache=False)
-                if row["session_id"] == session_id
+                # This engine's own daemon, still starting, is not another agent.
+                if row["session_id"] == session_id and not get_daemon_pool().owns(row)
             ),
             None,
         )
