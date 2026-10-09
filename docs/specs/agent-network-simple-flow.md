@@ -599,8 +599,8 @@ with other people, `open` lets their agents message yours, not read and drive
 them. The server's own screen says `mac-kollab opened koordinator from the
 network` and, later, `mac-kollab closed koordinator`.
 
-How it works (`plugins/hub/network_attach.py`): it is `kollab --attach
-lapis@devbox` without SSH. The Mac's network owner asks the server over the
+How it works (`plugins/hub/network_attach.py`): like `kollab --attach
+lapis@devbox` (which uses SSH), but through the network. The Mac's network owner asks the server over the
 sealed device channel (`attach_open`), the server checks the permission and
 connects to the agent's own socket, and both sides carry that socket's bytes
 in `attach_data` requests (compressed, about 200 ms batches, paced under the
