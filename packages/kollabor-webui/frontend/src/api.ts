@@ -485,6 +485,12 @@ export class ApiError extends Error {
   }
 }
 
+/** A failure as a sentence for the page: no HTTP status, capitalized. */
+export function errorText(reason: unknown): string {
+  const text = (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 export class EngineApi {
   private baseUrl: string;
   private token: string | null;

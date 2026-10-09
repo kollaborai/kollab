@@ -5,6 +5,10 @@
 # engine on the Mac in the Mac workspace, opens the server's agent through the network and
 # runs one paid turn there. It saves ~/.kollab/engine.token and puts it back at the end.
 #
+# To check the web UI by hand against this engine, create evidence/hold-allowed (after the
+# paid turn, the agent open) and/or evidence/hold-refused (after deny) before it gets there;
+# it waits at each until the file is removed.
+#
 # Exit code 0 only if every row of the final table is PASS.
 set -euo pipefail
 AT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -81,6 +85,12 @@ wait_for() { # wait_for <host> <ERE> <timeout-s> [baseline]: until count(ERE) in
   done
 }
 kv() { sed -n "s/^$2=//p" <<<"$1" | head -1; }
+hold() { # hold <name>: while evidence/hold-<name> exists (30 min at most), stay up for a check by hand
+  local f="$EVID/hold-$1" end=$(( $(date +%s) + 1800 ))
+  [ -e "$f" ] || return 0
+  say "holding at $1 (engine port $PORT) until $f is removed"
+  while [ -e "$f" ] && [ "$(date +%s)" -lt "$end" ]; do sleep 3; done
+}
 
 # ------------------------------------------------------ evidence and scanning ----
 record() { # record <label> <evidence-name> <text>: redact into evidence/<name>.txt, scan for leaks and errors
@@ -163,6 +173,8 @@ elif REPLY=$(E reply "$PORT" "$REMOTE" "$SRV_HOSTNAME" 300); then
   record mac a5-reply "$REPLY"; rec a5-turn PASS a5-reply.txt "the server agent answered with its hostname"
 else rec a5-turn FAIL - "no assistant reply with the server's hostname in 300s"; fi
 
+hold allowed
+
 # ============================================================ deny closes ====
 say "a6: /connect attach deny closes it"
 BASE=$(count_pat srv 'may no longer open')
@@ -177,6 +189,7 @@ case $OUT in
   "503 "*"has not let $MAC_DEVICE open its agents"*) rec a7-refused-again PASS - "refused again after deny" ;;
   *) rec a7-refused-again FAIL - "expected 503 after deny, got: ${OUT:0:200}" ;;
 esac
+hold refused
 
 # ============================================================== leak scans ====
 say "scanning panes and logs"

@@ -121,7 +121,8 @@ export function AppSidebar({
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
   onManageProfiles: () => void;
-  onSelectSession: (id: string) => void;
+  /** Resolves true once the chat is open. */
+  onSelectSession: (id: string) => Promise<boolean>;
   onCreate: () => void;
   onDelete: (id: string) => void;
   /** A session's Properties: right-click (long press) its row for the Chat tab, or double-click its gem. */
@@ -369,9 +370,10 @@ export function AppSidebar({
                     <SidebarMenuItem>
                       <SidebarMenuButton
                         isActive={session.session_id === activeId}
-                        onClick={() => {
-                          setOpenMobile(false);
-                          onSelectSession(session.session_id);
+                        onClick={async () => {
+                          // On a phone the menu stays open until the chat does, so
+                          // the row's Opening… and any reason it failed stay in view.
+                          if (await onSelectSession(session.session_id)) setOpenMobile(false);
                         }}
                         title={
                           task
@@ -481,9 +483,9 @@ export function AppSidebar({
                     <SidebarMenuButton
                       disabled={!id}
                       isActive={Boolean(id) && id === activeId}
-                      onClick={() => {
-                        setOpenMobile(false);
-                        onSelectSession(id);
+                      onClick={async () => {
+                        // Closes the phone menu only once it opened: a refusal shows here.
+                        if (await onSelectSession(id)) setOpenMobile(false);
                       }}
                       title={`Open ${titleCase(agent.name)} on ${agent.device}`}
                       className="h-auto gap-3 overflow-visible py-2 pl-2.5"

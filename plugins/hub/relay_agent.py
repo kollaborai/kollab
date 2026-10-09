@@ -582,6 +582,8 @@ class RelayAgentBridge:
         """A one-shot local socket to agent@device's own socket (network_attach.py)."""
         # The open waits on the other computer: one secure request, up to 30 s.
         reply = await self._owner_call("relay.attach", {"handle": handle}, timeout=55)
+        if reply.get("refused"):
+            raise AttachRefused(reply["refused"])
         return reply["socket_path"]
 
     async def _rpc_attach(self, params):
@@ -595,7 +597,10 @@ class RelayAgentBridge:
         try:
             path = await self.network_attach.open(address.key, address.agent_id, parsed[0])
         except AttachRefused as refusal:
-            raise RelayError(str(refusal)) from None
+            # An answer, not a failure: the other computer's own words (who may
+            # open its agents, the command that allows it). A window that does not
+            # own the network asks through the owner RPC, which hides handler errors.
+            return {"refused": str(refusal)}
         return {"socket_path": path}
 
     async def attach_target(self, peer: str, agent_id: str, name: str) -> str:

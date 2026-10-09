@@ -27,3 +27,12 @@ test("in a chat with an agent on another computer, @names are that computer's", 
   assert.deepEqual(targets.agents, [{ name: "lapis", active: true, state: "working" }]);
   assert.deepEqual(targets.remote.map((agent) => agent.handle), ["ruby@devbox"]);
 });
+
+test("a failure reads as a sentence: no HTTP status, capitalized", async () => {
+  const { ApiError, errorText } = await import("../src/api.ts");
+  assert.equal(
+    errorText(new ApiError("503: could not open this agent: box has not let mac open its agents", 503, null)),
+    "Could not open this agent: box has not let mac open its agents",
+  );
+  assert.equal(errorText("engine unreachable"), "Engine unreachable");
+});

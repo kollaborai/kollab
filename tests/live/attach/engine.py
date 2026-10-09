@@ -37,14 +37,16 @@ def call(port, method, path, body=None, timeout=60):
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-            return response.status, (json.loads(raw) if raw else None)
+            return response.status, _body(response.read())
     except urllib.error.HTTPError as error:
-        raw = error.read()
-        try:
-            return error.code, json.loads(raw)
-        except ValueError:
-            return error.code, {"detail": raw.decode(errors="replace")}
+        return error.code, _body(error.read())
+
+
+def _body(raw):
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:  # POST /message streams the turn as server-sent events
+        return {"detail": raw.decode(errors="replace")}
 
 
 def quote(session_id):
@@ -100,8 +102,10 @@ def main(argv):
         return 1
     if command in ("history", "dump"):
         status, body = call(port, "GET", f"/sessions/{quote(args[0])}/history", timeout=120)
-        if command == "dump":
-            print(json.dumps(body, indent=1, default=str))
+        if command == "dump":  # what the chat shows: no system prompt, no injected context
+            for message in messages(body):
+                if message.get("role") in ("user", "assistant"):
+                    print(f"{message['role']}: {text_of(message)}")
         elif status == 200:
             print(f"{status} {len(messages(body))}")
         else:

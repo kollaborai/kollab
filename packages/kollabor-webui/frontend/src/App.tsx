@@ -34,6 +34,7 @@ import {
   type AgentPoolEntry,
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
+  errorText,
   type Profile,
   type SlashCommand,
   type Session,
@@ -507,7 +508,7 @@ export default function App() {
     })()
       .catch((reason) => {
         if (mounted && operation === operationRef.current) {
-          setError(reason instanceof Error ? reason.message : String(reason));
+          setError(errorText(reason));
         }
       })
       .finally(() => {
@@ -548,7 +549,7 @@ export default function App() {
       recoverPendingTurn(session.session_id, hasPendingPermission(nextState));
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -594,7 +595,7 @@ export default function App() {
       }
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -604,7 +605,8 @@ export default function App() {
     }
   };
 
-  const selectSession = async (sessionId: string) => {
+  /** Resolves true once the chat is open (false if it failed or a newer click took over). */
+  const selectSession = async (sessionId: string): Promise<boolean> => {
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -617,16 +619,16 @@ export default function App() {
         ? sessions
         : [...sessions, await api.getSession(sessionId)];
       const nextState = await loadState(sessionId, nextSessions);
-      if (operation !== operationRef.current) return;
+      if (operation !== operationRef.current) return false;
       setSessions(nextSessions);
       setActiveId(sessionId);
       setInitialState(nextState);
       setOpening(null);
       recoverPendingTurn(sessionId, hasPendingPermission(nextState));
+      return true;
     } catch (reason) {
       if (operation === operationRef.current) {
-        const message = reason instanceof Error ? reason.message : String(reason);
-        setOpening({ id: sessionId, error: message.replace(/^\d{3}: /, "") });
+        setOpening({ id: sessionId, error: errorText(reason) });
       }
     } finally {
       if (operation === operationRef.current) {
@@ -634,6 +636,7 @@ export default function App() {
         setBusyMessage("");
       }
     }
+    return false;
   };
 
   // The engine already emptied the conversation; reload it and remount the
@@ -720,7 +723,7 @@ export default function App() {
             setStudioOpen(true);
           }}
           onManageProfiles={() => setProfilesOpen(true)}
-          onSelectSession={(id) => void selectSession(id)}
+          onSelectSession={selectSession}
           onCreate={() => void createSession()}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}
