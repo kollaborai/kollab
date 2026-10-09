@@ -215,6 +215,7 @@ Shown in the palette and in `/connect help`:
 /connect unblock <route>           allow a blocked route's knocks again
 /connect allow <device> <agent>    let a device's agent message a local agent
 /connect deny <device> [agent]     revoke a device's access, cancel affected work
+/connect attach [allow|deny <device>]  who may open this computer's agents from theirs
 /connect revoke <device>           remove a device or peer
 /connect leave [domain]            disconnect, forget the network and stop reconnecting
 /connect help [all]                this list; all adds the manual-trust and reset commands

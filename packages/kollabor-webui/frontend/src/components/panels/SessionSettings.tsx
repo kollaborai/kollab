@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatSessionName } from "@/utils/session-display";
+import { sessionHeading } from "@/utils/session-display";
 import { titleCase } from "./panel-model";
 
 /**
@@ -40,7 +40,7 @@ export function SessionSettings({
     null,
   );
 
-  const sessionLabel = formatSessionName(session.name, session.session_id);
+  const sessionLabel = sessionHeading(session);
   const workspace = String(
     settings?.system?.cwd || session.workspace || "current project",
   );

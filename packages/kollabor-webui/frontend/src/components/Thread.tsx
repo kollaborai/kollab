@@ -7,6 +7,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ComposerPlaceholderContext,
+  ComposerLockContext,
   ComposerHubContext,
   Thread as AssistantThread,
 } from "@/components/assistant-ui/thread";
@@ -167,7 +168,9 @@ export const Thread: FC<{
   remoteAgents?: readonly NetworkAgent[];
   /** The session's project folder: @ offers only the live agents in it. */
   workspace?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "" }) => (
+  /** Why the composer is closed while another chat starts or loads; empty when open. */
+  locked?: string;
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "", locked = "" }) => (
   <PoolContext.Provider value={agents}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
     <WelcomeContext.Provider
@@ -183,13 +186,15 @@ export const Thread: FC<{
         {HUB_SEND_TOOL_UIS.map((HubSendToolUI, index) => (
           <HubSendToolUI key={index} />
         ))}
-        <AssistantThread
-          components={{ Welcome, ToolGroup, SystemMessage: HubNoteMessage }}
-          agents={agents}
-          commands={commands}
-          onOpenPanel={onOpenPanel}
-          attachmentsEnabled={attachmentsEnabled}
-        />
+        <ComposerLockContext.Provider value={locked}>
+          <AssistantThread
+            components={{ Welcome, ToolGroup, SystemMessage: HubNoteMessage }}
+            agents={agents}
+            commands={commands}
+            onOpenPanel={onOpenPanel}
+            attachmentsEnabled={attachmentsEnabled}
+          />
+        </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>
     </WelcomeContext.Provider>
   </ComposerHubContext.Provider>

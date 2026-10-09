@@ -329,6 +329,7 @@ class RelayClient:
         self.state.peer_trust = {}
         self.state.config_recipients = []
         self.state.links = []
+        self.state.attach_allowed = []
         self.state.vouched_by = {}
         self.state.revoked = []
         self._store.save()
@@ -361,6 +362,7 @@ class RelayClient:
             "peer_trust",
             "config_recipients",
             "links",
+            "attach_allowed",
         ):
             setattr(self.state, name, getattr(disk, name))
 
@@ -550,6 +552,9 @@ class RelayClient:
                 changed = True
             if key in self.state.links:
                 self.state.links.remove(key)
+                changed = True
+            if key in self.state.attach_allowed:
+                self.state.attach_allowed.remove(key)
                 changed = True
             if changed:
                 self._store.save()
@@ -871,13 +876,18 @@ class RelayClient:
         if len(raw.encode()) > MAX_FRAME:
             raise RelayError("relay frame too large")
         async with self._send_lock:
-            now = time.monotonic()
-            self._tokens = min(
-                SEND_BURST, self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND
-            )
-            self._token_time = now
-            if self._tokens < 1:
-                raise RelayError("relay send rate limit reached")
+            for waited in (False, True):
+                now = time.monotonic()
+                self._tokens = min(
+                    SEND_BURST, self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND
+                )
+                self._token_time = now
+                if self._tokens >= 1:
+                    break
+                if waited:
+                    raise RelayError("relay send rate limit reached")
+                # One wait, sized to refill a token: a burst is smoothed out, not dropped.
+                await asyncio.sleep((1 - self._tokens) / SEND_RATE_PER_SECOND)
             self._tokens -= 1
             if self._ws is None or self._ws.closed:
                 raise RelayError("relay is not connected")

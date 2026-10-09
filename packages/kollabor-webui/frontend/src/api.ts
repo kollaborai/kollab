@@ -16,10 +16,10 @@ export type Session = {
   total_output_tokens?: number;
   identity?: string;
   daemon_pid?: number;
-  /** False for metadata-only rows discovered from external runtimes. */
-  attachable?: boolean;
-  /** Actions supported by the backing runtime for this session row. */
-  actions_supported?: string[];
+  /** Started outside this engine (a terminal, another engine): it opens on first use and Delete is not offered, since the engine only detaches from it. */
+  external?: boolean;
+  /** The computer an agent opened through the network runs on (its id is agent@device); empty for this one. */
+  device?: string;
 };
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
@@ -483,6 +483,12 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+/** A failure as a sentence for the page: no HTTP status, capitalized. */
+export function errorText(reason: unknown): string {
+  const text = (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export class EngineApi {

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +30,7 @@ from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
+from .history_xml_tools import web_history
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,14 @@ class EngineSession:
         self.requested_identity = identity
         self.approval_mode = approval_mode
         self.mcp_server_names = mcp_server_names or []
+        # Started outside this engine (a terminal, another engine) and attached
+        # by adopt(): shutdown detaches. display_name is its own conversation's
+        # name, kept current by list_sessions.
+        self.external = False
+        self.display_name = ""
+        # The network name of the computer an agent runs on, when it is not this
+        # one (server.open_named_session of an agent@device). Empty here.
+        self.device = ""
 
         self.daemon: Optional[DaemonHandle] = None
 
@@ -151,6 +160,12 @@ class EngineSession:
         # truth; this is refreshed on demand so synchronous readers (to_dict,
         # the history route) don't have to await mid-render.
         self.history: List[Dict[str, Any]] = []
+        # The daemon's messages as sent, and the digest it gave for them: a
+        # refresh asks for only what follows (an agent on another computer
+        # would otherwise send its whole history over the network every turn).
+        self._raw_history: List[Dict[str, Any]] = []
+        self._history_anchor = ""
+        self._history_lock = asyncio.Lock()
 
         self.total_turns = 0
         self.total_input_tokens = 0
@@ -225,6 +240,44 @@ class EngineSession:
         )
         await self.refresh_history()
 
+    @classmethod
+    async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":
+        """Open a live agent this engine did not start (a discover_sessions row).
+
+        Nothing about the agent changes: its profile and approval mode are read
+        from it, never set, and closing the session only detaches.
+        """
+        session_id = str(found["session_id"])
+        session = cls(
+            session_id=session_id,
+            profile=None,
+            approval_mode="",
+            agent=str(found.get("agent") or "") or None,
+            identity=str(found.get("identity") or "") or None,
+        )
+        session.external = True
+        session.display_name = str(found.get("name") or "")
+        session.device = str(found.get("device") or "")
+        session.workspace = str(found.get("workspace") or "") or None
+        if found.get("created_at"):
+            started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
+            session.created_at = started.replace(tzinfo=None)
+        session.daemon = await get_daemon_pool().adopt(session_id, found)
+        try:
+            session.profile = await session.state.get_active_profile()
+            mode = (await session.state.get_permission_state()).approval_mode
+            session.approval_mode = str(mode or "").lower()
+            if session.device:
+                # Its folder is on that computer: what its own daemon reports.
+                session.workspace = (await session.state.get_system_info()).cwd or None
+        except Exception as e:
+            logger.debug("session %s: could not read its profile: %s", session_id, e)
+        session._event_task = asyncio.create_task(
+            session._track_events(), name=f"session-track-{session_id}"
+        )
+        await session.refresh_history()
+        return session
+
     async def shutdown(self) -> None:
         if self._event_task is not None:
             self._event_task.cancel()
@@ -282,40 +335,59 @@ class EngineSession:
 
 
     async def refresh_history(self) -> List[Dict[str, Any]]:
-        """Pull the daemon's conversation into the local mirror."""
-        try:
-            snapshot = await self.state.get_conversation()
-        except Exception as e:
-            logger.debug("session %s history refresh failed: %s", self.session_id, e)
+        """Pull the daemon's conversation into the local mirror.
+
+        Asks for only the messages past the ones already held, with the digest
+        the daemon gave for them; a daemon whose history changed (compaction,
+        /clear, /resume), or one too old to know, sends all of it.
+        """
+        async with self._history_lock:
+            held = self._raw_history
+            try:
+                snapshot = await self.state.get_conversation(
+                    since=len(held) or None, anchor=self._history_anchor or None
+                )
+            except Exception as e:
+                logger.debug("session %s history refresh failed: %s", self.session_id, e)
+                return self.history
+
+            messages = getattr(snapshot, "messages", None)
+            if messages is None and isinstance(snapshot, dict):
+                messages = snapshot.get("messages", [])
+
+            # StateService returns MessageDto snapshots with timestamps, metadata,
+            # and thinking. Keep the complete wire shape in the engine mirror;
+            # reducing messages to role/content here hides native tool-call IDs
+            # from both the trajectory projector and the restored chat runtime.
+            received: List[Dict[str, Any]] = []
+            for message in messages or []:
+                if isinstance(message, dict):
+                    received.append(message)
+                    continue
+                to_dict = getattr(message, "to_dict", None)
+                if callable(to_dict):
+                    received.append(to_dict())
+                    continue
+                received.append(
+                    {
+                        "role": getattr(message, "role", ""),
+                        "content": getattr(message, "content", "") or "",
+                        "timestamp": str(getattr(message, "timestamp", "") or ""),
+                        "metadata": dict(getattr(message, "metadata", None) or {}),
+                        "thinking": getattr(message, "thinking", None),
+                    }
+                )
+            since = getattr(snapshot, "since", None)
+            if since is not None and since > len(held):
+                # A tail past what is held cannot be joined; the next refresh
+                # sends no anchor and gets all of it.
+                self._history_anchor = ""
+                return self.history
+            self._raw_history = (held[:since] if since else []) + received
+            self._history_anchor = getattr(snapshot, "anchor", "") or ""
+            # XML tool turns in the shape the web renders for native tools.
+            self.history = web_history(self._raw_history)
             return self.history
-
-        messages = getattr(snapshot, "messages", None)
-        if messages is None and isinstance(snapshot, dict):
-            messages = snapshot.get("messages", [])
-
-        # StateService returns MessageDto snapshots with timestamps, metadata,
-        # and thinking. Keep the complete wire shape in the engine mirror;
-        # reducing messages to role/content here hides native tool-call IDs
-        # from both the trajectory projector and the restored chat runtime.
-        self.history = []
-        for message in messages or []:
-            if isinstance(message, dict):
-                self.history.append(message)
-                continue
-            to_dict = getattr(message, "to_dict", None)
-            if callable(to_dict):
-                self.history.append(to_dict())
-                continue
-            self.history.append(
-                {
-                    "role": getattr(message, "role", ""),
-                    "content": getattr(message, "content", "") or "",
-                    "timestamp": str(getattr(message, "timestamp", "") or ""),
-                    "metadata": dict(getattr(message, "metadata", None) or {}),
-                    "thinking": getattr(message, "thinking", None),
-                }
-            )
-        return self.history
 
     async def send_message(self, content: Any) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
@@ -415,7 +487,8 @@ class EngineSession:
         model = getattr(self.profile, "model", "")
         return {
             "session_id": self.session_id,
-            "name": session_display_name(self.session_id),
+            "name": self.display_name or session_display_name(self.session_id),
+            "external": self.external,
             "profile": getattr(self.profile, "name", str(self.profile or "")),
             "model": model,
             # What the daemon will send next (mirrored by apply_profile_mirror).
@@ -425,6 +498,7 @@ class EngineSession:
             ),
             "agent": agent_name,
             "workspace": self.workspace,
+            "device": self.device,
             "approval_mode": _APPROVAL_MODE_MAP.get(
                 self.approval_mode, ApprovalMode.TRUST_ALL
             ).value,

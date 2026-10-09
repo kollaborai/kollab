@@ -8,6 +8,8 @@ references) - snapshots are flat dicts suitable for json.dumps.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
@@ -52,6 +54,7 @@ class ConversationSnapshot(Snapshot):
     """A point-in-time snapshot of conversation state.
 
     Used by /save and anything else that needs the full conversation.
+    A reader that keeps a copy asks for only what it lacks (``tail``).
     """
 
     messages: list[MessageDto] = field(default_factory=list)
@@ -59,6 +62,10 @@ class ConversationSnapshot(Snapshot):
     started_at: str = ""  # ISO 8601 string
     message_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Set when ``messages`` holds only what follows the reader's first ``since``.
+    since: int | None = None
+    # Digest of the whole conversation: the reader passes it back as ``anchor``.
+    anchor: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,17 +74,47 @@ class ConversationSnapshot(Snapshot):
             "started_at": self.started_at,
             "message_count": self.message_count,
             "metadata": self.metadata,
+            "since": self.since,
+            "anchor": self.anchor,
         }
+
+    def tail(self, since: Any = None, anchor: Any = None) -> "ConversationSnapshot":
+        """This snapshot trimmed to what a reader holding a copy lacks.
+
+        ``since`` is how many messages the reader holds and ``anchor`` the digest
+        it was given for them. When its copy is still exactly the first ``since``
+        messages, only the rest stay, and ``since`` is set. Any change in that
+        prefix (compaction, /clear, /resume, a tool output packed in place)
+        keeps every message. Either way ``anchor`` becomes the digest of the
+        whole conversation, for the reader's next call.
+        """
+        want = since if isinstance(since, int) and not isinstance(since, bool) and since > 0 else None
+        digest, prefix = "", None
+        for index, message in enumerate(self.messages):
+            if index == want:
+                prefix = digest
+            raw = json.dumps(message.to_dict(), sort_keys=True, default=str, separators=(",", ":"))
+            digest = hashlib.sha256((digest + raw).encode()).hexdigest()
+        if want == len(self.messages):
+            prefix = digest
+        self.anchor = digest
+        if want is not None and isinstance(anchor, str) and anchor and prefix == anchor:
+            self.messages = self.messages[want:]
+            self.since = want
+        return self
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ConversationSnapshot":
         raw_messages = data.get("messages", [])
+        since = data.get("since")  # from another computer's daemon: only a count
         return cls(
             messages=[MessageDto.from_dict(m) for m in raw_messages],
             session_id=data.get("session_id", ""),
             started_at=data.get("started_at", ""),
             message_count=data.get("message_count", 0),
             metadata=data.get("metadata", {}),
+            since=since if isinstance(since, int) and not isinstance(since, bool) and since >= 0 else None,
+            anchor=data.get("anchor") or "",
         )
 
 

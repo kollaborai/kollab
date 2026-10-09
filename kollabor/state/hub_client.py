@@ -107,9 +107,13 @@ class HubStateClient:
 
     # === Read methods (mirror RemoteStateService) ===
 
-    async def get_conversation(self) -> ConversationSnapshot:
+    async def get_conversation(
+        self, since: int | None = None, anchor: str | None = None
+    ) -> ConversationSnapshot:
         result = await self._rpc.call(
-            "state.get_conversation", {}, timeout=self._timeout
+            "state.get_conversation",
+            {} if since is None else {"since": since, "anchor": anchor or ""},
+            timeout=self._timeout,
         )
         if not isinstance(result, dict):
             raise TypeError(

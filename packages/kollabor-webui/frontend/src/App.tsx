@@ -11,6 +11,7 @@ import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
+import { targetsOn } from "@/components/shell/agent-network";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
   PanelIntent,
@@ -33,6 +34,7 @@ import {
   type AgentPoolEntry,
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
+  errorText,
   type Profile,
   type SlashCommand,
   type Session,
@@ -43,7 +45,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { formatSessionName } from "@/utils/session-display";
+import { sessionHeading } from "@/utils/session-display";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -90,6 +92,7 @@ function RuntimeShell({
   refreshSignal,
   view,
   onViewChange: setView,
+  locked,
 }: {
   session: Session;
   profiles: Profile[];
@@ -108,12 +111,19 @@ function RuntimeShell({
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
+  /** Why the composer is closed while another chat starts or loads; empty when open. */
+  locked: string;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
+  // An agent on another computer reads @names in that computer's mesh.
+  const targets = useMemo(
+    () => (session.device ? targetsOn(session.device, remoteAgents) : { agents, remote: remoteAgents }),
+    [session.device, agents, remoteAgents],
+  );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
-  const sessionLabel = formatSessionName(session.name, session.session_id);
+  const sessionLabel = sessionHeading(session);
   // A typed /restart (/new, /clear) empties the daemon's conversation; once that
   // run ends, reset the thread the way the toolbar's Clear does. Only a run
   // seen in this mount counts, so the reloaded thread cannot loop.
@@ -224,7 +234,7 @@ function RuntimeShell({
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
           <Thread
-            agents={agents}
+            agents={targets.agents}
             commands={commands}
             onOpenPanel={onOpenSettings}
             attachmentsEnabled={
@@ -232,8 +242,9 @@ function RuntimeShell({
             }
             identity={session.identity}
             onOpenGem={onOpenProperties}
-            remoteAgents={remoteAgents}
+            remoteAgents={targets.remote}
             workspace={session.workspace ?? ""}
+            locked={locked}
           />
         ) : (
           <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -286,6 +297,9 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  // The sidebar row being opened, and why it could not be: a failed open keeps
+  // the chat that was open, so the reason shows under the row clicked.
+  const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
   // Bumped to remount the runtime: it reads its initial state only on mount.
@@ -395,7 +409,9 @@ export default function App() {
             // hub_message: another agent's message just landed in the
             // history, ahead of the reply it wakes. One that lands mid-turn
             // waits for turn_complete, which reloads the whole turn.
-            if (type === "hub_message" ? !midTurn : ["turn_complete", "error"].includes(type)) {
+            // permission_request: a turn this page did not start (typed in the
+            // agent's terminal) waits on a prompt this page can answer too.
+            if (type === "hub_message" ? !midTurn : ["turn_complete", "error", "permission_request"].includes(type)) {
               void refreshActiveState(activeId);
             }
             if (type === "turn_complete") midTurn = false;
@@ -478,7 +494,8 @@ export default function App() {
         profileResult.active || nextProfiles[0]?.name || "default",
       );
       setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
-      const first = [...result].reverse().find((session) => session.attachable !== false);
+      // Restore this engine's newest chat; an agent started elsewhere opens on a click.
+      const first = [...result].reverse().find((session) => !session.external);
       if (first) {
         setBusyMessage("Restoring session…");
         const firstState = await loadState(first.session_id, result);
@@ -491,7 +508,7 @@ export default function App() {
     })()
       .catch((reason) => {
         if (mounted && operation === operationRef.current) {
-          setError(reason instanceof Error ? reason.message : String(reason));
+          setError(errorText(reason));
         }
       })
       .finally(() => {
@@ -532,7 +549,7 @@ export default function App() {
       recoverPendingTurn(session.session_id, hasPendingPermission(nextState));
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -552,7 +569,7 @@ export default function App() {
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
-      const next = [...result].reverse().find((session) => session.attachable !== false);
+      const next = [...result].reverse().find((session) => !session.external);
       if (!next) {
         setActiveId(null);
         setInitialState(null);
@@ -578,7 +595,7 @@ export default function App() {
       }
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -588,20 +605,30 @@ export default function App() {
     }
   };
 
-  const selectSession = async (sessionId: string) => {
+  /** Resolves true once the chat is open (false if it failed or a newer click took over). */
+  const selectSession = async (sessionId: string): Promise<boolean> => {
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
     setBusyMessage("Loading conversation…");
+    setOpening({ id: sessionId });
     try {
-      const nextState = await loadState(sessionId, sessions);
-      if (operation !== operationRef.current) return;
+      // An agent on another computer (agent@device) is listed once the engine
+      // opens it, which asking for it does.
+      const nextSessions = sessions.some((item) => item.session_id === sessionId)
+        ? sessions
+        : [...sessions, await api.getSession(sessionId)];
+      const nextState = await loadState(sessionId, nextSessions);
+      if (operation !== operationRef.current) return false;
+      setSessions(nextSessions);
       setActiveId(sessionId);
       setInitialState(nextState);
+      setOpening(null);
       recoverPendingTurn(sessionId, hasPendingPermission(nextState));
+      return true;
     } catch (reason) {
       if (operation === operationRef.current) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setOpening({ id: sessionId, error: errorText(reason) });
       }
     } finally {
       if (operation === operationRef.current) {
@@ -609,6 +636,7 @@ export default function App() {
         setBusyMessage("");
       }
     }
+    return false;
   };
 
   // The engine already emptied the conversation; reload it and remount the
@@ -684,6 +712,7 @@ export default function App() {
           selectedBundle={selectedBundle}
           activeId={activeId}
           activeActivity={activeActivity}
+          opening={opening}
           busy={busy}
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}
@@ -694,7 +723,7 @@ export default function App() {
             setStudioOpen(true);
           }}
           onManageProfiles={() => setProfilesOpen(true)}
-          onSelectSession={(id) => void selectSession(id)}
+          onSelectSession={selectSession}
           onCreate={() => void createSession()}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}
@@ -731,6 +760,7 @@ export default function App() {
               api={api}
               sessionId={activeSession.session_id}
               initialState={initialState}
+              onStale={() => void resetThread(activeSession.session_id)}
             >
               <RuntimeShell
                 session={activeSession}
@@ -745,6 +775,7 @@ export default function App() {
                 onOpenProperties={() => openProperties(activeSession.session_id)}
                 view={sessionView}
                 onViewChange={setSessionView}
+                locked={busy ? busyMessage || "Loading…" : ""}
               />
             </EngineRuntimeProvider>
           ) : (

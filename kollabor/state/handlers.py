@@ -89,7 +89,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
-        snapshot = await state_service.get_conversation()
+        snapshot = await state_service.get_conversation(
+            since=params.get("since"), anchor=params.get("anchor")
+        )
         return snapshot.to_dict()
 
     async def _save_conversation(params: dict[str, Any]) -> dict[str, Any]:

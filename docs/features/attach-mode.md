@@ -76,6 +76,16 @@ Read methods (phase 2-4.5):
 - get_active_agent, list_agents, list_skills
 - get_system_prompt, list_contexts, get_active_context
 
+`get_conversation(since, anchor)` sends only what a caller's copy lacks. Each
+reply carries `anchor`, a rolling digest of the whole history. A caller that
+passes back how many messages it holds (`since`) and that anchor gets only the
+messages after them, with `since` set, while its copy is still exactly the
+daemon's first `since` messages. Any change in that part (compaction, /clear,
+/resume, a tool output packed in place) sends the whole history. The engine's
+mirror (`EngineSession.refresh_history`) works this way, so an agent opened on
+another computer does not send its whole history over the network every turn.
+A daemon too old to know the parameters ignores them and sends everything.
+
 Write methods (phase 4.5):
 - set_active_profile, set_agent, clear_agent
 - activate_skill, deactivate_skill, set_system_prompt

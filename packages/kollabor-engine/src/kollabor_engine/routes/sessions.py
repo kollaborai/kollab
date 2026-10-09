@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
@@ -327,15 +328,16 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
     """This computer's name and the agents on other computers, asked of a daemon.
 
     Every daemon in a workspace answers for the same relay, but a solo daemon has
-    none, so the first non-solo one that answers is asked. No answer means no
-    network to show: no remote rows.
+    none, so the first non-solo one that answers is asked. An agent opened on
+    another computer answers for that computer, so it is never asked. No answer
+    means no network to show: no remote rows.
     """
     fallback = socket.gethostname().split(".")[0]
     # ponytail: only this engine's sessions are asked, so after a restart the other
     # computers show once a chat runs here; asking a found daemon needs a read-only
     # RPC connection (today's only way in is a full attach).
     for session in registry.values():
-        if not session.alive or getattr(session, "solo", False):
+        if not session.alive or getattr(session, "solo", False) or getattr(session, "device", ""):
             continue
         try:
             snapshot = await asyncio.wait_for(session.state.get_hub_state(), timeout=3)
@@ -348,14 +350,28 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
 
 @router.get("")
 async def list_sessions():
-    """List local sessions plus running detached sessions found via hub presence."""
+    """List this engine's sessions plus every other live agent on this computer.
+
+    The others open on first use (server.open_named_session). This engine's own
+    daemons are in presence too, so they are matched by pid and listed once.
+    """
     await _reap_dead_sessions()
     registry = get_session_registry()
+    found = HubBridge().discover_sessions(use_cache=False)
+    # A terminal can switch conversations (/new, /resume): keep the name current.
+    names = {row.get("session_id"): row.get("name") for row in found}
+    for session in registry.values():
+        if getattr(session, "external", False) and names.get(session.session_id):
+            session.display_name = names[session.session_id]
     sessions = [s.to_dict() for s in registry.values()]
     local_ids = {str(item.get("session_id")) for item in sessions}
+    local_pids = {item.get("daemon_pid") for item in sessions} - {0, None}
+    pool = get_daemon_pool()
     discovered = [
-        item for item in HubBridge().discover_sessions(use_cache=False)
+        item for item in found
         if item.get("session_id") not in local_ids
+        and item.get("daemon_pid") not in local_pids
+        and not pool.owns(item)
     ]
     return {
         "sessions": sessions + discovered,
@@ -372,11 +388,6 @@ async def get_session(session_id: str):
     session = registry.get(session_id)
     if session:
         return session.to_dict()
-    # Detached daemons survive engine restarts; expose their presence record so
-    # clients can discover/reconnect instead of receiving a false 404.
-    for discovered in HubBridge().discover_sessions(use_cache=False):
-        if discovered.get("session_id") == session_id:
-            return discovered
     raise HTTPException(status_code=404, detail="Session not found")
 
 

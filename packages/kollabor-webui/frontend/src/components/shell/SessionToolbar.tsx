@@ -60,7 +60,7 @@ import {
   formatApprovalMode,
   normalizeApprovalMode,
 } from "@/utils/approval-mode";
-import { formatSessionName } from "@/utils/session-display";
+import { sessionHeading } from "@/utils/session-display";
 import {
   Select,
   SelectContent,
@@ -294,7 +294,7 @@ export function SessionToolbar({
   const allServerNames = Array.from(
     new Set([...configuredServerNames, ...servers.map(([name]) => name)]),
   );
-  const sessionLabel = formatSessionName(session.name, session.session_id);
+  const sessionLabel = sessionHeading(session);
   const connectedCount = servers.filter(
     ([, info]) => info.status === "connected",
   ).length;

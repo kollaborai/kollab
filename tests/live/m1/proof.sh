@@ -354,6 +354,8 @@ say "Story 3: shell -> server agent, then the same with a cron-like environment"
 KOLLAB="$M1_MAC_VENV/bin/kollab"
 ASK1="report the free disk space on / in one line"
 ASK2="report the free disk space on /var in one line"
+# A disk report names its numbers or is a bare df row ("183G  116G   60G  67% /").
+DISKISH='avail|free|disk|used|[0-9.]+[KMGTP]i?B?[[:space:]].*[0-9]+%'
 story3() { # story3 <step> <evidence-name> <ask> <env-prefix...>; runs in the Mac workspace
   local step=$1 name=$2 ask=$3; shift 3
   local rc=0 out
@@ -361,7 +363,7 @@ story3() { # story3 <step> <evidence-name> <ask> <env-prefix...>; runs in the Ma
   record mac "$name" "$(printf 'exit=%s\n%s' "$rc" "$out")"
   if [ "$rc" -ne 0 ]; then rec "$step" FAIL "$name.txt" "exit $rc (expected 0)"
   elif [ -z "$out" ]; then rec "$step" FAIL "$name.txt" "no reply printed"
-  elif ! grep -Eqi 'avail|free|disk|used' <<<"$out" || ! grep -Eq '[0-9]' <<<"$out"; then rec "$step" FAIL "$name.txt" "the printed reply is not a disk report (a stale or unrelated reply?): $(head -c 160 <<<"$out" | tr '\n' ' ')"
+  elif ! grep -Eqi -- "$DISKISH" <<<"$out" || ! grep -Eq '[0-9]' <<<"$out"; then rec "$step" FAIL "$name.txt" "the printed reply is not a disk report (a stale or unrelated reply?): $(head -c 160 <<<"$out" | tr '\n' ' ')"
   else rec "$step" PASS "$name.txt" "exit 0, disk report printed"; fi
 }
 # Let the Story 2 conversation finish first so the runs below start from a quiet pair of agents. (A
@@ -405,7 +407,6 @@ rm -f "$OV_A" "$OV_A.rc" "$OV_B" "$OV_B.rc"
 record mac s3-05-overlap-host "$(printf 'exit=%s\n%s' "$OV_RC_A" "$OV_OUT_A")"
 record mac s3-06-overlap-disk "$(printf 'exit=%s\n%s' "$OV_RC_B" "$OV_OUT_B")"
 SHELL4=$(shell_ok srv "$SRV_LOG0")
-DISKISH='avail|free|disk|used'
 if [ "$OV_RC_A" != 0 ] || [ "$OV_RC_B" != 0 ]; then
   rec s3-overlap FAIL s3-05-overlap-host.txt "exit codes host=$OV_RC_A disk=$OV_RC_B (expected 0 and 0; a shell that never saw its turn end waits out its 300s limit)"
 elif ! grep -Fqi -- "$SRV_HOSTNAME" <<<"$OV_OUT_A" || grep -Eqi -- "$DISKISH" <<<"$OV_OUT_A"; then

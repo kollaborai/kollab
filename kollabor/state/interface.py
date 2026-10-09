@@ -87,8 +87,14 @@ class StateService(Protocol):
 
     # === Conversation ===
 
-    async def get_conversation(self) -> ConversationSnapshot:
+    async def get_conversation(
+        self, since: int | None = None, anchor: str | None = None
+    ) -> ConversationSnapshot:
         """Return the current conversation history as a snapshot.
+
+        A caller that keeps a copy passes how many messages it holds
+        (``since``) and the ``anchor`` the last snapshot carried, and gets only
+        the rest while its copy still matches (ConversationSnapshot.tail).
 
         Used by /save and any other command that needs the full message list.
         The snapshot is a point-in-time copy; subsequent calls may return

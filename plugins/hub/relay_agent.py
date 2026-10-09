@@ -37,6 +37,7 @@ from .device_names import (
 )
 from .local_directory import LocalAgentDirectory
 from .models import HubMessage, MessageScope
+from .network_attach import ATTACH_METHODS, AttachRefused, NetworkAttach
 from .network_members import METHOD as MEMBERS_METHOD
 from .network_members import MembershipSync
 from .relay_commands import RelayCommands
@@ -191,6 +192,7 @@ class RelayAgentBridge:
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
         self.membership_sync: MembershipSync | None = None
+        self.network_attach: NetworkAttach | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
         self._wall_clock = time.time  # epoch seconds; tests swap it
@@ -576,6 +578,105 @@ class RelayAgentBridge:
             raise RelayError("ambiguous agent@device")
         return matches[0]["address"]
 
+    async def attach(self, handle: str) -> str:
+        """A one-shot local socket to agent@device's own socket (network_attach.py)."""
+        # The open waits on the other computer: one secure request, up to 30 s.
+        reply = await self._owner_call("relay.attach", {"handle": handle}, timeout=55)
+        if reply.get("refused"):
+            raise AttachRefused(reply["refused"])
+        return reply["socket_path"]
+
+    async def _rpc_attach(self, params):
+        handle = params.get("handle") if isinstance(params, dict) else None
+        parsed = parse_handle(handle) if isinstance(handle, str) else None
+        if parsed is None:
+            raise RelayError("open needs agent@device")
+        if self.network_attach is None:
+            raise RelayError("opening agents from the network is unavailable")
+        address = RelayAddress.parse(await self.resolve_handle(handle))
+        try:
+            path = await self.network_attach.open(address.key, address.agent_id, parsed[0])
+        except AttachRefused as refusal:
+            # An answer, not a failure: the other computer's own words (who may
+            # open its agents, the command that allows it). A window that does not
+            # own the network asks through the owner RPC, which hides handler errors.
+            return {"refused": str(refusal)}
+        return {"socket_path": path}
+
+    async def attach_target(self, peer: str, agent_id: str, name: str) -> str:
+        """The socket of a local agent ``peer`` may open, or AttachRefused saying why.
+
+        Opening an agent is the control a person has at this keyboard, so a
+        device needs a person here to allow it (/connect attach allow); network
+        trust alone is not enough on a network shared with other people.
+        """
+        state = self._state().state
+        here, there = self.device_name(), self._peer_name(peer)
+        if (
+            peer not in state.attach_allowed
+            or peer in state.links
+            or peer not in self.commands.client.state.approvals
+        ):
+            raise AttachRefused(
+                f"{here} has not let {there} open its agents. On {here}, run: "
+                f"/connect attach allow {there}"
+            )
+        trust = self.effective_trust(peer)
+        if trust == "manual":
+            raise AttachRefused(
+                f"{here} uses trust manual: its agents take requests only through "
+                "/connect authorize"
+            )
+        try:
+            agent = self._local_agent(agent_id)
+        except RelayError:
+            raise AttachRefused(f"{name} is not running on {here}") from None
+        if agent.name != name or not agent.socket_path:
+            raise AttachRefused(f"{name} is not running on {here}")
+        if trust == "agents" and name not in {
+            row["agent"]
+            for row in self.store.grants(self.commands.client.state.room)
+            if row["peer"] == peer
+        }:
+            raise AttachRefused(
+                f"{here} lets {there} reach only the agents it allowed, and {name} is not one"
+            )
+        return agent.socket_path
+
+    def attach_status(self) -> str:
+        state = self._state().state
+        approved = self.commands.client.state.approvals
+        names = sorted(self._peer_name(key) for key in state.attach_allowed if key in approved)
+        if not names:
+            return "no device may open this computer's agents; /connect attach allow <device>"
+        return "may open this computer's agents: " + ", ".join(names)
+
+    async def set_attach_allowed(self, peer_key: str, allowed: bool) -> str:
+        self._require_human_network_context(
+            "remote model turns cannot change who may open this computer's agents"
+        )
+        store = self._state()
+        name = self._peer_name(peer_key)
+        if allowed:
+            if (
+                peer_key not in self.commands.client.state.approvals
+                or peer_key in store.state.links
+            ):
+                raise RelayError(f"{name} is not a member of this network")
+            if peer_key not in store.state.attach_allowed:
+                store.state.attach_allowed.append(peer_key)
+                store.save()
+            return (
+                f"{name} may now open this computer's agents, "
+                "with the control you have at this keyboard"
+            )
+        if peer_key in store.state.attach_allowed:
+            store.state.attach_allowed.remove(peer_key)
+            store.save()
+        if self.network_attach is not None:
+            await self.network_attach.close_peer(peer_key)
+        return f"{name} may no longer open this computer's agents"
+
     async def start(self):
         rpc = self.plugin._rpc_server
         if rpc is None:
@@ -591,6 +692,7 @@ class RelayAgentBridge:
             "relay.enroll_device": self._rpc_enroll_device,
             "relay.enrollment_offer": self._rpc_enrollment_offer,
             "relay.knocks": self._rpc_knocks,
+            "relay.attach": self._rpc_attach,
         }.items():
             rpc.register(name, handler)
         await self._ensure_owner()
@@ -614,6 +716,12 @@ class RelayAgentBridge:
             self.commands.client.set_request_handler(self._receive)
             self.make_config_sync().start()
             self.make_membership_sync().start()
+            self.network_attach = NetworkAttach(
+                request=self.secure_transport.request,
+                target=self.attach_target,
+                peer_name=self._peer_name,
+                notice=self._config_notice,
+            )
             try:
                 from .peer_transport import PeerMeshRuntime
 
@@ -732,6 +840,9 @@ class RelayAgentBridge:
         if self.membership_sync is not None:
             await self.membership_sync.close()
             self.membership_sync = None
+        if self.network_attach is not None:
+            await self.network_attach.close()
+            self.network_attach = None
         if self.secure_transport is not None:
             self.secure_transport.close()
             self.secure_transport = None
@@ -803,7 +914,7 @@ class RelayAgentBridge:
         except (RelayError, OSError, ValueError):
             logger.debug("relay directory refresh unavailable")
 
-    async def _owner_call(self, method: str, params: dict) -> dict:
+    async def _owner_call(self, method: str, params: dict, timeout: float = 15) -> dict:
         await self._ensure_owner()
         if self.commands is not None:
             return await getattr(self, "_rpc_" + method.split(".")[1])(params)
@@ -811,7 +922,7 @@ class RelayAgentBridge:
         if record is None:
             raise RelayError("workspace relay owner is starting; retry shortly")
         return await local_relay_rpc(
-            record["socket_path"], method, params, auth=self._auth()
+            record["socket_path"], method, params, timeout=timeout, auth=self._auth()
         )
 
     async def command(self, value: str) -> str:
@@ -1036,11 +1147,12 @@ class RelayAgentBridge:
         ):
             raise RelayError("invalid local relay command")
         self._local_agent(params["agent_id"])
-        return {
-            "text": await self.commands.run(
-                params["value"], source_agent=params["agent_id"]
-            )
-        }
+        text = await self.commands.run(params["value"], source_agent=params["agent_id"])
+        if self.network_attach is not None:
+            # Trust, grants, revoke: an agent open from the network closes at
+            # once if the change withdrew it (it also re-checks on its own).
+            await self.network_attach.recheck()
+        return {"text": text}
 
     def _local_agent(self, agent_id):
         for agent in self.directory.agents(self.workspace):
@@ -1485,7 +1597,9 @@ class RelayAgentBridge:
             raise RelayError("peer is not approved")
         store = self._state()
         stranger = peer in store.state.links
-        if stranger and method in {"peer.forward", "peer.exchange", MEMBERS_METHOD}:
+        if stranger and (
+            method in {"peer.forward", "peer.exchange", MEMBERS_METHOD} or method in ATTACH_METHODS
+        ):
             # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")
         if method == "peer.forward" and not _secure:
@@ -1506,6 +1620,10 @@ class RelayAgentBridge:
             raise RelayError(
                 "conversation operations require an authenticated secure session"
             )
+        if method in ATTACH_METHODS:
+            if self.network_attach is None:
+                raise RelayError("opening agents from the network is unavailable")
+            return await self.network_attach.receive(peer, method, payload)
         if method == "directory":
             if payload != {}:
                 raise RelayError("invalid directory request")
@@ -1672,7 +1790,7 @@ class RelayAgentBridge:
     async def _receive_secure_application(self, peer, method, payload):
         if method not in {
             "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD
-        }:
+        } and method not in ATTACH_METHODS:
             raise RelayError("unsupported secure conversation operation")
         try:
             return await self._receive(peer, method, payload, _secure=True)
@@ -2344,7 +2462,7 @@ class RelayAgentBridge:
         return {p["key"]: p["session"] for p in client.peers() if p["key"] in approved}
 
     def _config_notice(self, text: str) -> None:
-        """One system line in the main pane about settings sync."""
+        """One system line in the main pane about the network (settings sync, attach)."""
         show = getattr(self.plugin, "show_network_notice", None)
         if show is not None:
             show(text)

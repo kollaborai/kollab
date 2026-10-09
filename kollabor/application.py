@@ -2132,11 +2132,16 @@ class TerminalLLMChat:
 
                 elif etype == "permission_request":
                     if self._rpc_client is not None:
-                        await self._attach_permission_bridge.handle_client_event(
-                            rpc_client=self._rpc_client,
-                            layout_manager=self.renderer.layout_manager,
-                            event=event,
-                            wait_for_rpc_reply=False,
+                        # In the background: this loop must keep reading, or it
+                        # would never see another window answer the prompt.
+                        self.create_background_task(
+                            self._attach_permission_bridge.handle_client_event(
+                                rpc_client=self._rpc_client,
+                                layout_manager=self.renderer.layout_manager,
+                                event=event,
+                                wait_for_rpc_reply=False,
+                            ),
+                            name="attach-permission-prompt",
                         )
                     else:
                         coordinator.display_message_sequence(
@@ -2148,6 +2153,12 @@ class TerminalLLMChat:
                                 ),
                             ]
                         )
+
+                elif etype in ("permission_granted", "permission_denied"):
+                    # Another window (the web UI, a second terminal) answered.
+                    self._attach_permission_bridge.handle_client_resolution(
+                        layout_manager=self.renderer.layout_manager, event=event
+                    )
 
                 elif etype == "heartbeat":
                     runtime = self.event_bus.get_service("attach_runtime_state")
@@ -2274,8 +2285,12 @@ class TerminalLLMChat:
         self._startup_ready.set()
 
     async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
-        """Route daemon permission prompts to the visible attach client."""
-        if not self.event_bus:
+        """Route daemon permission prompts to the visible attach client.
+
+        Only a --detached daemon: a session with its own terminal answers its
+        prompts there, even while the web UI or another window is attached.
+        """
+        if not self.event_bus or not getattr(self.args, "detached", False):
             return None
 
         display_tap = self.event_bus.get_service("display_tap")

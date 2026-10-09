@@ -825,6 +825,17 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     token = str(event.get("text") or "")
                     controller.append_text(token)
                     add_streamed_text("text", token)
+                elif event_type == "response":
+                    # The daemon's clean text for this reply: streamed tokens
+                    # carried the raw XML tool tags, which never render as
+                    # text. Drop the trailing streamed text part and put the
+                    # clean text in its place, before the tool cards arrive.
+                    clean_text = str(event.get("text") or "")
+                    while assistant_parts and assistant_parts[-1]["type"] == "text":
+                        assistant_parts.pop()
+                    if clean_text:
+                        assistant_parts.append({"type": "text", "text": clean_text})
+                    publish_progress()
                 elif event_type == "thinking":
                     thinking = str(event.get("text") or "")
                     controller.append_reasoning(thinking)

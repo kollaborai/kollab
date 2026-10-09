@@ -1,15 +1,18 @@
 """FastAPI application and session registry."""
 
+import asyncio
 import logging
 import time
 import traceback
-from typing import Dict
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request  # type: ignore[import-not-found]
+from fastapi import Depends, FastAPI, HTTPException, Request  # type: ignore[import-not-found]
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
 from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 
 from .auth import validate_token
+from .daemon_pool import get_daemon_pool
+from .hub_bridge import HubBridge
 from .session import EngineSession
 
 logger = logging.getLogger(__name__)
@@ -35,6 +38,64 @@ def _profile_has_configured_api_credentials(profile: object) -> bool:
 
 def get_session_registry() -> Dict[str, EngineSession]:
     return _sessions
+
+
+# Opens in flight, so concurrent requests for one agent share a single attach.
+_adopting: Dict[str, "asyncio.Future[Any]"] = {}
+
+
+async def _adopt(found: Dict[str, Any]) -> EngineSession:
+    session = await EngineSession.adopt(found)
+    # Registered before the open settles: a request that arrives after it
+    # finds the session instead of opening the agent a second time.
+    return _sessions.setdefault(session.session_id, session)
+
+
+async def _open_remote(handle: str) -> Optional[EngineSession]:
+    """An agent@device on another computer of this folder's network (remote_attach)."""
+    from .remote_attach import open_remote_agent
+
+    found = await open_remote_agent(handle, _sessions)
+    return await _adopt(found) if found else None
+
+
+async def open_named_session(request: Request) -> None:
+    """Attach the live agent a session route names, the first time one does.
+
+    Every live agent on this computer is listed (HubBridge.discover_sessions),
+    but only sessions in the registry answer the session routes. A terminal
+    agent or another engine's daemon gets its registry entry here, on the
+    first request that names it, and so does an agent@device on another
+    computer of this folder's network; an unknown id falls through to the
+    route's own 404.
+    """
+    session_id = request.path_params.get("session_id")
+    if not session_id or session_id in _sessions:
+        return
+    opening = _adopting.get(session_id)
+    if opening is None:
+        found = next(
+            (
+                row
+                for row in HubBridge().discover_sessions(use_cache=False)
+                # This engine's own daemon, still starting, is not another agent.
+                if row["session_id"] == session_id and not get_daemon_pool().owns(row)
+            ),
+            None,
+        )
+        if found is not None:
+            opening = asyncio.ensure_future(_adopt(found))
+        elif "@" in session_id:
+            opening = asyncio.ensure_future(_open_remote(session_id))
+        else:
+            return
+        _adopting[session_id] = opening
+        opening.add_done_callback(lambda _: _adopting.pop(session_id, None))
+    try:
+        await asyncio.shield(opening)
+    except Exception as e:
+        logger.warning("could not open session %s: %s", session_id, e)
+        raise HTTPException(status_code=503, detail=f"could not open this agent: {e}")
 
 
 def create_app() -> FastAPI:
@@ -117,12 +178,13 @@ def create_app() -> FastAPI:
     from .routes.profiles import router as profiles_router
     from .routes.sessions import router as sessions_router
 
-    app.include_router(sessions_router)
-    app.include_router(messages_router)
-    app.include_router(permissions_router)
+    opens = [Depends(open_named_session)]
+    app.include_router(sessions_router, dependencies=opens)
+    app.include_router(messages_router, dependencies=opens)
+    app.include_router(permissions_router, dependencies=opens)
     app.include_router(profiles_router)
     app.include_router(mcp_router)
-    app.include_router(panels_router)
+    app.include_router(panels_router, dependencies=opens)
 
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
@@ -169,25 +231,17 @@ def create_app() -> FastAPI:
             except Exception:
                 return "unknown"
 
-        # Aggregate providers from all sessions
-        providers = sorted(set(s.profile.provider for s in _sessions.values()))
-
-        # Aggregate MCP server status from all sessions (actual connection state)
-        mcp_status: Dict[str, str] = {}
-        for session in _sessions.values():
-            connections = session.mcp_integration.server_connections
-            for server_name, conn in connections.items():
-                if conn.initialized:
-                    mcp_status[server_name] = "connected"
-                elif server_name not in mcp_status:
-                    mcp_status[server_name] = "disconnected"
+        # The providers in use. An opened agent's profile is None until its daemon
+        # answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
+        providers = sorted(
+            {getattr(s.profile, "provider", "") or "" for s in _sessions.values()} - {""}
+        )
 
         return {
             "version": safe_ver("kollabor-engine"),
             "sessions": len(_sessions),
             "uptime": int(time.time() - _start_time),
             "providers": providers,
-            "mcp_servers": mcp_status,
             "session_ids": list(_sessions.keys()),
         }
 

@@ -364,6 +364,7 @@ class AgentSocketServer:
         on_input_inject: Optional[Callable] = None,
         on_network_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
+        on_network_attach: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -378,6 +379,7 @@ class AgentSocketServer:
         # operator only, same gate as get_output/get_status below.
         self._on_network_status = on_network_status
         self._on_network_send = on_network_send
+        self._on_network_attach = on_network_attach
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1574,6 +1576,15 @@ class AgentSocketServer:
                             writer.write((json.dumps(frame, default=str) + "\n").encode())
                             await writer.drain()
 
+                elif action == "network_attach":
+                    # Open agent@device here through the network
+                    # (plugins/hub/network_attach.py): answers a one-shot
+                    # socket the caller attaches on like any agent socket.
+                    # Local operator only, same as network_send.
+                    reply = await self._network_attach_reply(str(msg_data.get("to", "") or ""))
+                    writer.write((json.dumps(reply) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "rpc_request":
                     # Handshake-phase RPC: no concurrent writer, safe to write
                     # directly without a lock. Attached-phase RPC is handled
@@ -1603,6 +1614,15 @@ class AgentSocketServer:
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
+
+    async def _network_attach_reply(self, to: str) -> dict:
+        if not self._on_network_attach:
+            return {"type": "error", "msg": "this agent cannot open agents from the network"}
+        try:
+            path = await self._on_network_attach(to)
+        except Exception as exc:
+            return {"type": "error", "msg": str(exc) or type(exc).__name__}
+        return {"type": "network_attach", "socket_path": path}
 
     async def _network_send_frames(self, to: str, content: str, wait_seconds: int):
         """The frames that answer one `network_send`: the handler's stream, or
@@ -2538,6 +2558,40 @@ class AgentMessenger:
             return {"type": "error", "msg": "timed out waiting for the daemon"}
         except Exception as exc:
             logger.debug("network_send request failed for %s: %s", socket_path, exc)
+            return {"type": "error", "msg": str(exc) or type(exc).__name__}
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_network_attach(
+        socket_path: str, handle: str, *, timeout: float = 60.0
+    ) -> dict:
+        """Ask a local agent's daemon to open agent@device through the network.
+
+        Answers ``{"type": "network_attach", "socket_path": ...}``, a one-shot
+        socket to attach on like any agent socket, or ``{"type": "error",
+        "msg": ...}`` saying why not (the far device's own words when it
+        refused).
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(socket_path, timeout=5.0)
+            writer.write((json.dumps({"action": "network_attach", "to": handle}) + "\n").encode())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            reply = json.loads(line.decode().strip()) if line else None
+            if not isinstance(reply, dict):
+                return {"type": "error", "msg": "the agent did not answer"}
+            return reply
+        except asyncio.TimeoutError:
+            return {"type": "error", "msg": "timed out waiting for the other computer"}
+        except Exception as exc:
+            logger.debug("network_attach request failed for %s: %s", socket_path, exc)
             return {"type": "error", "msg": str(exc) or type(exc).__name__}
         finally:
             if writer:

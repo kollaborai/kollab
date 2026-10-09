@@ -198,6 +198,66 @@ def _assistant_history_usage_metadata(
     return metadata
 
 
+def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return XML tool calls in the display-only history shape.
+
+    ``{id, name, input}`` mirrors the JSONL logger's entries. The key stays
+    ``xml_tool_calls`` (never ``tool_calls``) so ``_prepare_messages`` cannot
+    send providers assistant tool_calls they never issued; the engine's
+    history mirror renames it for the web UI.
+    """
+    entries = []
+    for index, tool in enumerate(all_tools):
+        entries.append(
+            {
+                "id": tool.get("id", f"xml_{index}"),
+                "name": tool.get("type", "unknown"),
+                "input": {
+                    key: value
+                    for key, value in tool.items()
+                    if key not in ("type", "id", "raw", "_position")
+                },
+            }
+        )
+    return entries
+
+
+def _xml_display_metadata(
+    all_tools: List[Dict[str, Any]], response: str, clean_response: str
+) -> Dict[str, Any]:
+    """Display-only history metadata for a reply with XML tool tags.
+
+    The stored content stays the reply as the model wrote it: providers get it
+    back on every later request, so the model sees its own calls. The web UI
+    reads these keys instead, which ``_prepare_messages`` never sends to a
+    provider: ``display_content`` (the reply without its tags) and
+    ``xml_tool_calls``. The engine's history mirror turns them into the text
+    and tool cards it renders (kollabor_engine.history_xml_tools).
+    """
+    if not all_tools:
+        return {}
+    metadata: Dict[str, Any] = {"xml_tool_calls": _xml_tool_call_entries(all_tools)}
+    if clean_response != response:
+        metadata["display_content"] = clean_response or ""
+    return metadata
+
+
+def _xml_tool_result_entry(result: Any, content: str) -> Dict[str, Any]:
+    """One XML tool result, display-only, for its web tool card.
+
+    The batched results message joins every result into one text, and a single
+    result can span many lines, so the web pairs each card with its result by id.
+    """
+    entry: Dict[str, Any] = {
+        "id": result.tool_id,
+        "content": content,
+        "tool_execution_time": round(float(result.execution_time or 0), 3),
+    }
+    if not result.success:
+        entry["is_error"] = True
+    return entry
+
+
 class QueueProcessor:
     """Handles queue processing and LLM turn execution.
 
@@ -1385,6 +1445,13 @@ class QueueProcessor:
                 self.turn_completed = True
                 logger.debug("Plugin requested turn completion")
 
+            # A reply with XML tool tags: its streamed tokens carried the raw
+            # tags, so non-terminal clients get its clean text too. The engine
+            # swaps its streamed text for this before the tool cards arrive
+            # (kollabor_engine routes/messages).
+            if all_tools and clean_response != response:
+                publish_semantic(self.renderer, "response", text=clean_response)
+
             # Step 5: Display clean text (before tool results)
             # Pipe mode must emit only the terminal response for a logical
             # turn.  A tool-bearing response is an intermediate model turn;
@@ -1633,6 +1700,11 @@ class QueueProcessor:
                         }
                         for tc in raw_tool_calls
                     ]
+                # A native reply can still carry inline XML tags (plugin tags,
+                # mostly): display-only metadata, as on the XML path below.
+                assistant_metadata.update(
+                    _xml_display_metadata(all_tools, response, clean_response)
+                )
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1697,6 +1769,7 @@ class QueueProcessor:
                 history_results = list(xml_tool_results)
                 if history_results:
                     batched = []
+                    display_results = []
                     for result in history_results:
                         output = result.output if result.success else result.error
                         await self.conversation_logger.log_system_message(
@@ -1709,6 +1782,9 @@ class QueueProcessor:
                             self.tool_executor.format_result_for_conversation(result)
                         )
                         batched.append(f"Tool result: {tool_context}")
+                        display_results.append(
+                            _xml_tool_result_entry(result, tool_context)
+                        )
                         self._track_file_interaction(result)
                     if batched:
                         import uuid as _uuid
@@ -1717,7 +1793,10 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched),
-                            metadata={"tool_output_batch": True},
+                            metadata={
+                                "tool_output_batch": True,
+                                "xml_tool_results": display_results,
+                            },
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(
@@ -1726,16 +1805,22 @@ class QueueProcessor:
                             message=tool_msg,
                         )
             else:
-                # XML path: simple assistant message + batched tool results
+                # XML path: simple assistant message + batched tool results.
+                # The content keeps the tags, so the model sees its own calls;
+                # the web UI reads the display-only metadata.
+                xml_metadata = _assistant_history_usage_metadata(
+                    self.session_stats,
+                    thinking_duration,
+                    _last_provider_reasoning(self.api_service),
+                )
+                xml_metadata.update(
+                    _xml_display_metadata(all_tools, response, clean_response)
+                )
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
                         content=response,
-                        metadata=_assistant_history_usage_metadata(
-                            self.session_stats,
-                            thinking_duration,
-                            _last_provider_reasoning(self.api_service),
-                        ),
+                        metadata=xml_metadata,
                     ),
                     parent_uuid=parent_uuid,
                 )
@@ -1743,6 +1828,7 @@ class QueueProcessor:
                 history_results_xml = list(xml_tool_results)
                 if history_results_xml:
                     batched_tool_results = []
+                    display_results = []
                     for result in history_results_xml:
                         output = result.output if result.success else result.error
                         await self.conversation_logger.log_system_message(
@@ -1755,6 +1841,9 @@ class QueueProcessor:
                             self.tool_executor.format_result_for_conversation(result)
                         )
                         batched_tool_results.append(f"Tool result: {tool_context}")
+                        display_results.append(
+                            _xml_tool_result_entry(result, tool_context)
+                        )
                         self._track_file_interaction(result)
                     if batched_tool_results:
                         import uuid as _uuid
@@ -1763,7 +1852,10 @@ class QueueProcessor:
                         tool_msg = ConversationMessage(
                             role="user",
                             content="\n".join(batched_tool_results),
-                            metadata={"tool_output_batch": True},
+                            metadata={
+                                "tool_output_batch": True,
+                                "xml_tool_results": display_results,
+                            },
                         )
                         self.conversation_history.append(tool_msg)
                         self._ingest_tool_results(

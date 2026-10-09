@@ -118,15 +118,20 @@ async def _network_owner(
     One process per folder holds the network (the workspace lock); every other
     chat in that folder only gets a read-only Network panel. None when none of
     this engine's sessions runs it (a terminal window does, or an agent an
-    earlier engine left running): the chat keeps its read-only panel.
+    earlier engine left running): the chat keeps its read-only panel. An agent
+    opened on another computer shows that computer's network, so it neither
+    asks this computer's chats nor answers for them.
     """
     def folder(s: EngineSession) -> str:
         return getattr(s, "workspace", None) or os.getcwd()  # the daemon's cwd
 
-    peers = [
+    peers = [] if getattr(session, "device", "") else [
         other
         for other in get_session_registry().values()
-        if other is not session and other.alive and folder(other) == folder(session)
+        if other is not session
+        and other.alive
+        and not getattr(other, "device", "")
+        and folder(other) == folder(session)
     ]
     for candidate in (session, *peers):
         try:

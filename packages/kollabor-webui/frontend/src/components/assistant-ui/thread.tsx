@@ -115,6 +115,9 @@ const ThreadComponentsContext =
 /** The composer's placeholder; the app names the session's gem ("Message Lapis…"). */
 export const ComposerPlaceholderContext = createContext("Send a message...");
 
+/** Why the composer is closed while another chat starts or loads (shown as its placeholder); empty when open. */
+export const ComposerLockContext = createContext("");
+
 /** The chat's project folder and the agents on the network's other computers (agent@device), for @. */
 export const ComposerHubContext = createContext<{ workspace: string; remote: readonly NetworkAgent[] }>({
   workspace: "",
@@ -302,6 +305,9 @@ const Composer: FC<{
   const aui = useAui();
   const voice = useVoiceMode();
   const placeholder = useContext(ComposerPlaceholderContext);
+  // Text typed into a chat that is about to be swapped out would be lost, or
+  // sent to the chat being left.
+  const lock = useContext(ComposerLockContext);
   const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
   // The mic only exists where the session's live command list has /voicemode.
   const voiceAvailable = commands.some(
@@ -600,7 +606,8 @@ const Composer: FC<{
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
-                placeholder={placeholder}
+                placeholder={lock || placeholder}
+                disabled={Boolean(lock)}
                 className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-base leading-6 outline-none"
                 rows={1}
                 autoFocus

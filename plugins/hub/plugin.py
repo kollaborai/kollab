@@ -185,6 +185,9 @@ CONNECT_SUBCOMMANDS = [
         "allow", "<device> <agent>", "Let a device's agent message a local agent"
     ),
     SubcommandInfo("deny", "<device> [agent]", "Revoke a device's access"),
+    SubcommandInfo(
+        "attach", "[allow|deny <device>]", "Who may open this computer's agents from theirs"
+    ),
     SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
     SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
     SubcommandInfo(
@@ -4696,6 +4699,7 @@ class HubPlugin(BasePlugin):
                 on_input_inject=self._inject_attacher_input,
                 on_network_status=self._handle_network_status_request,
                 on_network_send=self._handle_network_send_request,
+                on_network_attach=self._handle_network_attach_request,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -13122,6 +13126,23 @@ class HubPlugin(BasePlugin):
             logger.debug("network_status: device/trust unavailable: %s", e)
 
         return {"network": network, "device": device, "trust": trust, "agents": agents}
+
+    async def _handle_network_attach_request(self, to: str) -> str:
+        """Answer a local `network_attach`: a one-shot socket to agent@device.
+
+        The web UI opens an agent on another computer through this
+        (plugins/hub/network_attach.py). Raises with the reason it cannot.
+        """
+        handle = parse_handle(to)
+        if handle is None:
+            raise ValueError(f"not an agent@device handle: {to!r}")
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            await self._start_relay_agent()
+            relay = getattr(self, "_relay_agent", None)
+        if relay is None or not hasattr(relay, "attach"):
+            raise ValueError("opening agents from the network is not available on this build")
+        return await relay.attach(format_handle(*handle))
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int

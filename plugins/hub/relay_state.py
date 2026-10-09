@@ -157,6 +157,9 @@ class RelayState:
     # Accepted strangers: devices in their own room, reached through the
     # directory only while both sides consent to the link.
     links: list[str] = field(default_factory=list)
+    # Member devices a person here allowed to open this device's agents
+    # (`/connect attach allow`): plugins/hub/network_attach.py.
+    attach_allowed: list[str] = field(default_factory=list)
     # Members approved because a member this device already approved vouched
     # for them (key -> the members that did). A device accepted first-hand, by
     # join code or as the inviter, has no entry. plugins/hub/network_members.py.
@@ -307,6 +310,14 @@ class RelayStateStore:
         ):
             raise RelayError("invalid stranger links")
         for key in value.links:
+            validate_public_key(key)
+        if (
+            not isinstance(value.attach_allowed, list)
+            or len(value.attach_allowed) > MAX_APPROVALS
+            or len(set(value.attach_allowed)) != len(value.attach_allowed)
+        ):
+            raise RelayError("invalid attach permissions")
+        for key in value.attach_allowed:
             validate_public_key(key)
         if (
             not isinstance(value.vouched_by, dict)

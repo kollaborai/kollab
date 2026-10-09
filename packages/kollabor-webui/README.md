@@ -31,10 +31,13 @@ if Node/npm is unavailable.
   Each session row shows its gem as a live 3D avatar that acts out what the
   agent is doing (thinking, typing, searching, messaging, error).
 - **Agents by computer**: the sidebar lists every agent under the computer it
-  runs on. This computer comes first (its chats, then agents running in a
-  terminal), then each of your other computers. Agents on other computers show
-  while a chat runs here and this computer is connected to your network; open
-  them from that computer.
+  runs on. This computer comes first: its chats and every agent running in a
+  terminal or as a daemon, each one click from a full chat (the web UI only
+  attaches to an agent it did not start, so it offers no Delete). Then each of
+  your other computers. Agents on other computers show
+  while a chat runs here and this computer is connected to your network. One
+  click opens one as a full chat, through the network, once that computer
+  allows this one: `/connect attach allow <this computer>`, run there.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →
