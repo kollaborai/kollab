@@ -44,7 +44,7 @@ B and C each get the same config keys, written to the workspace `.kollab/config.
 | `c1-endpoints` | B restarted with the endpoint keys is bound on `127.0.0.1:8801` and on the LAN discovery port |
 | `c2-c-joins` | C joined A's network by code; the code never shows on C (masked field); one new state dir |
 | `c3-members` | B lists C's agent and C lists B's, with no hand-made approvals |
-| `c4-c-relayless` | A dropped C; C restarted with `enabled=false`, shows no `via kollabor.ai`, listens on `127.0.0.1:8802` |
+| `c4-c-relayless` | A dropped C; C restarted with `enabled=false`, its status says `reconnect on launch disabled`, listens on `127.0.0.1:8802` |
 | `c5-a-sees-c` | A's `/connect status` lists `peridot@<C device>` again, with C on no relay: learned through B |
 | `c6-message` | `kollab --hub msg peridot@<C device> ...` from A exits 0 and prints C's answer (the reply word) |
 | `c7-sealed` | request and reply markers are in no line of B's pane history (3000) or `kollab.log`, and the request showed on C |
