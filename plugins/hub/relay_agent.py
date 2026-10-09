@@ -1240,6 +1240,13 @@ class RelayAgentBridge:
         if kind == "message":
             if open_trust:
                 remote = await self._remote_participant(destination)
+            elif self.store.open_request(
+                state.room, destination.key, params["thread_id"], agent.name
+            ):
+                # An answer on the thread of an open-trust sender's request that
+                # /connect allow let in goes back the way the request came.
+                open_trust = True
+                remote = await self._remote_participant(destination)
             else:
                 # Reject missing or mismatched human authorization before the
                 # directory lookup causes any network request to the peer.
@@ -1386,9 +1393,17 @@ class RelayAgentBridge:
         state = self._state().state
         # An open row waits in the outbox with no grant behind it. It goes out only
         # while the trust level still lets a message go without one, so raising
-        # trust to manual revokes it instead of letting the retry loop send it.
+        # trust to manual revokes it instead of letting the retry loop send it;
+        # an answer to an open request that /connect allow let in still goes.
         if (
-            item["open"] and not self.sends_without_grant(self.trust_level())
+            item["open"]
+            and not self.sends_without_grant(self.trust_level())
+            and not self.store.open_request(
+                state.room,
+                item["peer"],
+                item["payload"]["thread_id"],
+                item["payload"]["from_identity"],
+            )
         ) or not self.store.delivery_authorized(
             event_id,
             room=state.room,
@@ -2772,11 +2787,13 @@ class RelayAgentBridge:
             )
             return
         # A sender on manual trust marks its request as a task and waits for its
-        # result: run it as one whatever this device's trust.
-        as_task = record["payload"].get("task") is True
-        if self.effective_trust(record["peer"]) != "manual" and not as_task:
-            # Open and agents trust: an ordinary hub turn, no task envelope,
-            # no active-task bookkeeping (docs/specs/agent-network-simple-flow.md §6).
+        # result: run it as one whatever this device's trust. An unmarked request
+        # comes from a sender on open trust, which waits for no result: it is an
+        # ordinary hub turn here too (on manual trust, once /connect allow let it
+        # in) and its answers go back on its thread (relay_conversations.open_request).
+        if record["payload"].get("task") is not True:
+            # No task envelope, no active-task bookkeeping
+            # (docs/specs/agent-network-simple-flow.md §6).
             # One request at a time: the next reaches the model only after the
             # turn that handles this one has ended, so each turn answers one
             # request and its replies go on that request's thread.

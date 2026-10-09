@@ -576,7 +576,7 @@ back through the task envelope; a remote question waits for the human's
 `(answer with /connect answer 3 <text>)`. This is the Codex model, unchanged
 apart from the numbers, and it is only reachable through this setting.
 Switching to manual trust revokes any message still queued from open or agents trust, so nothing leaves without a human grant.
-Each device's trust is its own: a request from a manual device still runs as a task (status, cancel and a result back) on a device set to open.
+Each device's trust is its own: a request from a manual device still runs as a task (status, cancel and a result back) on a device set to open. The other way round, a message from an open device is an ordinary hub turn on a manual one: it gets in only from a device and agent the human allowed (`/connect allow <device> <agent>`), and the agent answers on that message's thread, as on open trust, until the message expires or `/connect deny`. Nothing else leaves the manual device without a human grant.
 
 ### Story 8: the sealed config follows Marco
 

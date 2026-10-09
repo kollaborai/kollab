@@ -317,6 +317,9 @@ device (`/connect allow` / `/connect deny`). `manual` is the original,
 human-gated model — every first message needs `/connect authorize` or
 `/connect send`, replies go through the task envelope, and a remote question
 waits for `/connect answer`; that is what the `help all` commands are for.
+Each device's trust is its own: a message from an `open` device reaches a
+`manual` one only through `/connect allow`, and the allowed agent answers on
+that message's thread.
 
 `/connect accept` and `/connect reject` take a device name; when two pending
 requests share a name, add the start of the device ID the Connect screen
