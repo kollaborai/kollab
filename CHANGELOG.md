@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An agent answering another device's request with `hub_msg` was told only "relay answer requires its exact target, thread_id, and question reply_to", tried again, and stopped on "Stuck loop detected". It is now told before it starts that its normal reply goes back to the sender.
 - A message to an agent on another computer (`koordinator@box`) could fail as "unknown agent@device" for up to 15 seconds after that agent came online. The name now asks the other computers again before it gives up.
 - A reply in which one generated image failed was lost whole, with "image generation completed without image data". The failed image now shows as a note and the rest of the reply stays.
+- An agent answering another device's message showed "unknown agent@device" when its `hub_msg` reply misspelled the asker's long device name, or "relay answer requires its exact target…" when it marked the reply `kind="answer"`. Both now reach the asker as the reply.
 
 ### Security
 - Another agent's message could end the block of agent notes the model reads before your turn: a `</agent_hud>` in its text closed the block early, so the words after it read as yours, to the model and in the web UI, where they showed as a message you sent. That covered any peer, including one on another computer. Agent tags inside a note are now escaped, and the web UI still shows the message as written.
