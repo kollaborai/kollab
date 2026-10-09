@@ -1,8 +1,8 @@
 """Fixtures shared by several tests/unit modules."""
 
 import pytest
-from kollabor_config import config_utils
 
+from kollabor_config import config_utils
 from plugins.hub import presence, relay_client
 from tests.unit.test_relay_agent_bridge import bridges  # noqa: F401
 
