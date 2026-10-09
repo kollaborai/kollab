@@ -720,6 +720,43 @@ class TestQueueProcessor(unittest.TestCase):
             [{"id": "mcp_tool_0", "name": "hub_msg", "input": arguments}],
         )
 
+    def test_a_text_call_beside_native_calls_is_an_echo_and_never_runs(self):
+        """gpt-5.6-luna called hub_msg natively and also ended its reply with
+        the arguments as a <tool_call> block (live story 7, 2026-10-09).
+        Running the block would send the message twice, or fail as a tool
+        named "unknown"; the reply still shows without it."""
+        from kollabor_agent.queue_processor import _xml_display_metadata
+        from kollabor_ai.response_parser import ResponseParser
+
+        self.tool_executor.plugin_handlers = {"hub_msg": MagicMock()}
+        self.native_tools_handler.mcp_integration.tool_registry = {}
+        reply = (
+            "Sent.\n<terminal>pwd</terminal>\n"
+            '<tool_call>{"to":"koordinator@server","message":"`uname -n`?"}</tool_call>\n'
+            '<tool_call>{"name":"hub_msg","arguments":{"to":"koordinator@server"}}</tool_call>\n'
+            '<functions.hub_msg>{"to":"koordinator@server"}</functions.hub_msg>'
+        )
+        parser = ResponseParser()
+        parsed = parser.parse_response(reply)
+        tools = parser.get_all_tools(parsed)
+
+        kept = self.processor._resolve_text_tool_calls(tools, has_native_tools=True)
+        self.assertEqual([tool["type"] for tool in kept], ["terminal"])
+        self.assertEqual(
+            _xml_display_metadata([], reply, parsed["content"], hid_text_calls=True),
+            {"display_content": parsed["content"]},
+        )
+        self.assertNotIn("<tool_call>", parsed["content"])
+
+        # Without native calls the named call runs as hub_msg (the two identical
+        # ones once, as duplicates always do), and the nameless one answers
+        # that it names no tool.
+        alone = self.processor._resolve_text_tool_calls(tools, has_native_tools=False)
+        self.assertEqual(
+            sorted(tool["type"] for tool in alone),
+            ["hub_msg", "malformed_tool", "terminal"],
+        )
+
     def _truncated_turn(self, continuation_text, continuation_stop):
         """Run one turn whose first reply is cut at the output limit."""
         replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])

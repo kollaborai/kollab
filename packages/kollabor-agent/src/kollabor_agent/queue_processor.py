@@ -27,7 +27,7 @@ from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
 
-from .tool_call_contract import resolve_text_tool_call
+from .tool_call_contract import is_text_written_call, resolve_text_tool_call
 from .tool_output_budget import (
     build_tool_output_store,
     pack_tool_history_and_results,
@@ -229,7 +229,10 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def _xml_display_metadata(
-    all_tools: List[Dict[str, Any]], response: str, clean_response: str
+    all_tools: List[Dict[str, Any]],
+    response: str,
+    clean_response: str,
+    hid_text_calls: bool = False,
 ) -> Dict[str, Any]:
     """Display-only history metadata for a reply with XML tool tags.
 
@@ -238,11 +241,15 @@ def _xml_display_metadata(
     reads these keys instead, which ``_prepare_messages`` never sends to a
     provider: ``display_content`` (the reply without its tags) and
     ``xml_tool_calls``. The engine's history mirror turns them into the text
-    and tool cards it renders (kollabor_engine.history_xml_tools).
+    and tool cards it renders (kollabor_engine.history_xml_tools). A reply whose
+    only tags were echoes of its native calls (``hid_text_calls``) gets just
+    ``display_content``.
     """
-    if not all_tools:
+    if not all_tools and not hid_text_calls:
         return {}
-    metadata: Dict[str, Any] = {"xml_tool_calls": _xml_tool_call_entries(all_tools)}
+    metadata: Dict[str, Any] = {}
+    if all_tools:
+        metadata["xml_tool_calls"] = _xml_tool_call_entries(all_tools)
     if clean_response != response:
         metadata["display_content"] = clean_response or ""
     return metadata
@@ -477,9 +484,21 @@ class QueueProcessor:
         """
         self.last_progress_at = time.monotonic()
 
-    def _resolve_text_tool_calls(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _resolve_text_tool_calls(
+        self, tools: List[Dict[str, Any]], has_native_tools: bool = False
+    ) -> List[Dict[str, Any]]:
         """Send each call written as text (<tool_call>, <functions.NAME>) to
-        the tool it names, with the names the native path uses."""
+        the tool it names, with the names the native path uses.
+
+        Beside native calls such a block echoes one of them (gpt-5.6-luna
+        repeated its hub_msg arguments as <tool_call>): it never runs, so no
+        call runs twice. Other tags (<terminal>, plugin tags) still run.
+        """
+        if has_native_tools:
+            echoes = [tool for tool in tools if is_text_written_call(tool)]
+            if echoes:
+                logger.info("Not running %d text-written call(s) beside native calls", len(echoes))
+                tools = [tool for tool in tools if not is_text_written_call(tool)]
         if not any(tool.get("type") == "mcp_tool" for tool in tools):
             return tools
         mcp = getattr(self._native_tools_handler, "mcp_integration", None)
@@ -1412,9 +1431,10 @@ class QueueProcessor:
 
             parsed_response = self.response_parser.parse_response(response)
             clean_response = parsed_response["content"]
-            all_tools = self._resolve_text_tool_calls(
-                self.response_parser.get_all_tools(parsed_response)
-            )
+            parsed_tools = self.response_parser.get_all_tools(parsed_response)
+            all_tools = self._resolve_text_tool_calls(parsed_tools, has_native_tools)
+            # Echoes left out of the run still leave the shown text clean.
+            hid_text_calls = len(all_tools) < len(parsed_tools)
 
             # Step 3: Emit LLM_THINKING (merge native reasoning + XML thinking)
             thinking_blocks = parsed_response.get("components", {}).get("thinking", [])
@@ -1472,7 +1492,7 @@ class QueueProcessor:
             # tags, so non-terminal clients get its clean text too. The engine
             # swaps its streamed text for this before the tool cards arrive
             # (kollabor_engine routes/messages).
-            if all_tools and clean_response != response:
+            if (all_tools or hid_text_calls) and clean_response != response:
                 publish_semantic(self.renderer, "response", text=clean_response)
 
             # Step 5: Display clean text (before tool results)
@@ -1726,7 +1746,7 @@ class QueueProcessor:
                 # A native reply can still carry inline XML tags (plugin tags,
                 # mostly): display-only metadata, as on the XML path below.
                 assistant_metadata.update(
-                    _xml_display_metadata(all_tools, response, clean_response)
+                    _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
                 self._add_message_fn(
                     ConversationMessage(
@@ -1837,7 +1857,7 @@ class QueueProcessor:
                     _last_provider_reasoning(self.api_service),
                 )
                 xml_metadata.update(
-                    _xml_display_metadata(all_tools, response, clean_response)
+                    _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
                 self._add_message_fn(
                     ConversationMessage(

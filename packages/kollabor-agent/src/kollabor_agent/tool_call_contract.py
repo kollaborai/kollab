@@ -176,6 +176,12 @@ def normalize_native_tool_call(
     return normalized
 
 
+def is_text_written_call(tool: dict[str, Any]) -> bool:
+    """A native-style call the model wrote as text: <tool_call>, <functions.NAME>."""
+    raw = str(tool.get("raw", "")).lstrip().lower()
+    return raw.startswith(("<tool_call>", "<functions."))
+
+
 def resolve_text_tool_call(
     tool: dict[str, Any],
     *,

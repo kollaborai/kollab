@@ -1233,17 +1233,22 @@ class ResponseParser:
         if content.startswith("{"):
             try:
                 data = json.loads(content, strict=False)
+            except json.JSONDecodeError:
+                data = None
+            if data is not None:
+                # Arguments alone (a model echoing its native call) name no
+                # tool; never run them as a tool called "unknown".
+                if not isinstance(data, dict) or not data.get("name"):
+                    raise ValueError("the call names no tool")
                 return {
                     "type": "mcp_tool",
                     "id": f"mcp_tool_{index}",
-                    "name": data.get("name", "unknown"),
+                    "name": data["name"],
                     "arguments": data.get("arguments", {}),
                     "content": "",
                     "raw": f"<tool_call>{content}</tool_call>",
                     "_position": position,
                 }
-            except json.JSONDecodeError:
-                pass
 
         # Simple name format: just the tool name, maybe with inline args
         # Handle: "search_nodes" or "search_nodes query=test"

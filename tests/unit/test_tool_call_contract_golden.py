@@ -405,6 +405,24 @@ def test_text_calls_go_only_to_builtin_and_plugin_tools():
     assert malformed["raw"] == '<functions.hub_msg>{"to": "lapis",</functions.hub_msg>'
 
 
+def test_a_tool_call_block_without_a_name_is_not_a_tool_named_unknown():
+    # gpt-5.6-luna called hub_msg natively and ended its reply with the same
+    # arguments as a nameless <tool_call> (live story 7, 2026-10-09).
+    parser = ResponseParser()
+    [call] = parser.get_all_tools(
+        parser.parse_response(
+            "Sent.\n"
+            '<tool_call>{"to":"koordinator@server","message":"Find out what '
+            '`uname -n` prints","wait":"true","force":"false","thread_id":"",'
+            '"reply_to":"","kind":"message"}</tool_call>'
+        )
+    )
+
+    assert call["type"] == "malformed_tool"
+    assert call["error"] == "the call names no tool"
+    assert call["raw"].startswith("<tool_call>")
+
+
 def test_a_text_call_that_cannot_be_read_tells_the_model_why():
     mcp = MagicMock()
     mcp.tool_registry = {}
