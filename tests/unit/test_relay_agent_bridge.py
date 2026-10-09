@@ -821,6 +821,9 @@ async def test_receiver_answer_by_hub_msg_is_refused_with_how_to_reply(bridges):
     # The model is told before it starts, so it need not learn it from the refusal.
     told = right_model.conversation_history[-1].content
     assert "returned to them automatically" in told and "not with hub_msg" in told
+    # ... and how to ask first: told only "not with hub_msg", a model asked its
+    # question as the final reply (live story 7 s9 on 902e20a).
+    assert 'kind="question"' in told
 
     refused = await in_turn(
         right_model,
@@ -2953,6 +2956,16 @@ async def test_cancel_stops_a_manual_senders_request_running_on_an_open_receiver
     assert cancelled.startswith(f"request 1 on {target}: ")
     assert task.finished
     assert right.store.task(task.record["id"])["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_device_is_known_by_its_own_name_a_bound_peer_or_the_roster(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    device = (await handle(left, right)).split("@")[1]
+    assert await left.device_known(device)
+    assert await left.device_known(left.device_name())
+    assert not await left.device_known("nowhere-box")
 
 
 @pytest.mark.asyncio

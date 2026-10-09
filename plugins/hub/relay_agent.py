@@ -480,6 +480,16 @@ class RelayAgentBridge:
                 names.update(row["device"] for row in rows if row.get("device"))
         return names
 
+    async def device_known(self, name: str) -> bool:
+        """Whether `name` is a device this network knows: this device, a bound
+        peer or a device on the live roster. A failed check counts as known."""
+        try:
+            return name in self._known_device_names() or any(
+                row["device"] == name for row in await self.remote_agents()
+            )
+        except Exception:
+            return True
+
     def bind_peer_device(self, key: str, name: str) -> bool:
         """Bind a human device name to a peer's key at accept time.
 

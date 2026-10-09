@@ -2789,28 +2789,20 @@ class HubPlugin(BasePlugin):
         """``target``, or the asker's handle when it misnames the asker.
 
         While a turn answers a remote request, models retype a long device name
-        wrong (koordinator@host-kollab-m1-dev29 for ...-m1-mac-0-14-1-dev29, or
-        their own device) and got "unknown agent@device". A handle with the
-        asker's agent name that names no online agent means the asker.
+        wrong (koordinator@host-kollab-m1-dev29 for ...-m1-mac-0-14-1-dev29) and
+        got "unknown agent@device". A handle with the asker's agent name and a
+        device this network does not know means the asker. A known device keeps
+        its own answer: relaying to an agent of that name there is a real ask.
         """
         turn = getattr(self, "_net_turn", None)
         typed, asker = parse_handle(target or ""), parse_handle(turn.handle if turn else "")
         if not typed or not asker or typed[0] != asker[0] or format_handle(*typed) == turn.handle:
             return target
-        from .relay_state import RelayError
-
-        try:
-            address = self._relay_agent.resolve_handle(format_handle(*typed))
-            if inspect.isawaitable(address):
-                await address
-        except RelayError as exc:
-            # resolve_handle's own wording: "ambiguous" names online agents.
-            if str(exc).startswith("unknown agent@device"):
-                logger.info("hub_msg to %s answers %s's request", target, turn.handle)
-                return turn.handle
-        except Exception:
-            pass
-        return target
+        known = getattr(getattr(self, "_relay_agent", None), "device_known", None)
+        if known is None or await known(typed[1]):
+            return target
+        logger.info("hub_msg to %s answers %s's request", target, turn.handle)
+        return turn.handle
 
     def network_turn_open(self) -> bool:
         """True while a delivered remote request's turn has not ended."""
@@ -7656,7 +7648,8 @@ class HubPlugin(BasePlugin):
                         f"{sender} on another machine is waiting for this. Your "
                         "final reply in this turn is returned to them "
                         "automatically: write the answer as your normal reply, "
-                        "not with hub_msg."
+                        "not with hub_msg. To ask them something first, send one "
+                        'hub_msg with kind="question" and wait for their answer.'
                     )
                 else:
                     guidance = (

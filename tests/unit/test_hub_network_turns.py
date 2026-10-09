@@ -197,7 +197,11 @@ async def test_a_reply_that_misnames_the_askers_device_still_reaches_the_asker()
             raise RelayError("unknown agent@device: run /connect status to see who is online")
         return f"relay:resolved:{handle}"
 
+    async def device_known(name):  # old-box is a joined device with no lapis online
+        return name in {"laptop-kollab", "home-server", "old-box"}
+
     plugin._relay_agent.resolve_handle = resolve
+    plugin._relay_agent.device_known = device_known
     await plugin._on_message_received(_request(T1, W1))
     await plugin._set_working({"messages": []})
     llm.is_processing = True
@@ -207,10 +211,14 @@ async def test_a_reply_that_misnames_the_askers_device_still_reaches_the_asker()
 
     misnamed = await hub_msg("lapis@laptop", "wg0 is healthy")
     other_device = await hub_msg("lapis@home-server", "fyi: wg0 is healthy")
+    offline_there = await hub_msg("lapis@old-box", "relayed: wg0 is healthy")
     other_name = await hub_msg("ops@laptop", "ops, wg0 is healthy")
 
     assert misnamed.success and misnamed.output == f"sent to {ASKER}"
-    assert other_device.success and not other_name.success
+    assert other_device.success
+    # A real device's offline agent and another name stay their own error.
+    assert "unknown agent@device" in (offline_there.error or "")
+    assert not other_name.success
     assert [(s["address"], s["thread_id"] == T1, s["reply_to"]) for s in _replies(sent)] == [
         (f"relay:resolved:{ASKER}", True, W1),
         ("relay:resolved:lapis@home-server", False, ""),
