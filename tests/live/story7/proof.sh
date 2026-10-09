@@ -180,7 +180,6 @@ except Exception:
 say "preflight ($GS_INSTALL)"
 m1_srv_paths
 SRV_HOSTNAME=$(m1_ssh uname -n)
-MAC_HOSTNAME=$(uname -n)
 
 code=$(curl -sS -o /dev/null -m 20 -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' https://kollabor.ai/relay/v1/enrollment/lookup || echo 000)
 case "$code" in
@@ -530,12 +529,17 @@ sleep 30   # the server agent winds down the cancelled turn
 # trust as they found it. A manual receiver lets an open sender in only after its human runs
 # /connect allow <device> <agent>. Until then it refuses (not_authorized) and only the SENDER's
 # screen says so; the receiver prints nothing. Its answer is a task result and must reach the
-# open sender. /connect deny at the end puts the Mac back.
+# open sender. /connect deny at the end puts the Mac back. The request reads a token only the
+# Mac's disk holds: a `uname -n` answer can come from memory (the Mac's context names its host
+# and s3 put the server's hostname in its history), so it proved nothing and once came back
+# with the server's name and no shell run.
 R_IN_MAC="${REMOTE}[[:space:]]*(->|→)"   # a message from the server agent, shown on the Mac
 R_IN_SRV="${BACK}[[:space:]]*(->|→)"     # a message from the Mac agent, shown on the server
 RV_AGENT=${BACK%@*}                      # the Mac agent the server's human names
 RV_PEER=${REMOTE#*@}                     # the server's device, as the Mac knows it
-RV_HOST=${MAC_HOSTNAME%%.*}              # uname -n on the Mac, without its domain
+RV_FILE=r4-token.txt                     # in the Mac agent's working folder
+RV_TOKEN="s7-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+printf '%s\n' "$RV_TOKEN" > "$M1_MAC_WS/$RV_FILE"
 RV_REFUSED_RE='conversation grant|hub_msg[]] rejected'   # the receiver's reason, or the tool's own prefix
 RV_OK=0; RV_LINE=""; RVB=""
 
@@ -554,7 +558,7 @@ fi
 # ================================================================== r2 ====
 say "r2: the open server agent's first message to the manual Mac agent is refused"
 RB1=$(count_pat srv "$RV_REFUSED_RE"); MIN0=$(count_pat mac "$R_IN_MAC"); MSH0=$(shell_ok mac "$(off_of mac)")
-cmd srv "Find out what \`uname -n\` prints on $BACK, using hub_msg. If it is rejected, quote the rejection text and stop."
+cmd srv "Find out what \`cat $RV_FILE\` prints on $BACK, using hub_msg. If it is rejected, quote the rejection text and stop."
 if wait_for srv "$RV_REFUSED_RE" 300 "$RB1"; then
   sleep 15   # the server agent finishes its turn
   cap srv r2-srv-refused; cap mac r2-mac-quiet
@@ -590,20 +594,20 @@ say "r4: the manual Mac agent runs the open server agent's request"
 MIN0=$(count_pat mac "$R_IN_MAC"); MSH0=$(shell_ok mac "$(off_of mac)")
 SB0=$(count_pat srv "$R_IN_SRV"); RJ0=$(log_grep srv 'secure conversation packet was rejected')
 sleep 10   # the server agent is done with the refused turn
-cmd srv "The Mac agent now allows your messages. Send it again: find out what \`uname -n\` prints on $BACK, using hub_msg."
+cmd srv "The Mac agent now allows your messages. Send it again: find out what \`cat $RV_FILE\` prints on $BACK, using hub_msg."
 if wait_for mac "$R_IN_MAC" 300 "$MIN0"; then
-  MSH1=$MSH0
-  for _ in $(seq 1 36); do   # the Mac agent runs the command, up to 3 minutes
-    MSH1=$(shell_ok mac "$(off_of mac)")
-    if [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then break; fi
+  MSH1=$MSH0; RV_SEEN=0
+  for _ in $(seq 1 36); do   # the Mac agent reads the file, up to 3 minutes
+    MSH1=$(shell_ok mac "$(off_of mac)"); RV_SEEN=$(count_pat mac "$RV_TOKEN")
+    if [ "${RV_SEEN:-0}" -gt 0 ] || [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then break; fi
     sleep 5
   done
   sleep 5; cap mac r4-mac-ran; cap srv r4-srv-after-resend
-  if [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then
+  if [ "${RV_SEEN:-0}" -gt 0 ] || [ "${MSH1:-0}" -gt "${MSH0:-0}" ]; then
     RV_OK=1
-    rec r4-request-runs-on-manual PASS r4-mac-ran.txt "the Mac showed the request from $REMOTE and ran it in its shell (shell runs $MSH0 -> $MSH1)"
+    rec r4-request-runs-on-manual PASS r4-mac-ran.txt "the Mac showed the request from $REMOTE and ran it (token lines on its screen: $RV_SEEN, shell runs $MSH0 -> $MSH1)"
   else
-    rec r4-request-runs-on-manual FAIL r4-mac-ran.txt "the Mac showed the request but its log shows no new shell tool run within 3 minutes (shell runs $MSH0 -> $MSH1)"
+    rec r4-request-runs-on-manual FAIL r4-mac-ran.txt "the Mac showed the request but neither showed the token from $RV_FILE nor ran its shell within 3 minutes (shell runs $MSH0 -> $MSH1)"
   fi
 else
   cap mac r4-mac-no-request; cap srv r4-srv-no-send
@@ -617,15 +621,17 @@ if [ "$RV_OK" != 1 ]; then
 elif wait_for srv "$R_IN_SRV" 300 "$SB0"; then
   sleep 5; cap srv r5-srv-reply; cap mac r5-mac-after
   RVB=$(block_after srv "$R_IN_SRV" | tail -n +2)
-  if [ -n "$RV_HOST" ] && grep -Fqi -- "$RV_HOST" <<<"$RVB"; then
-    rec r5-reply-to-open-sender PASS r5-srv-reply.txt "reply from $BACK with the Mac's hostname reached the open sender"
+  if grep -Fq -- "$RV_TOKEN" <<<"$RVB"; then
+    rec r5-reply-to-open-sender PASS r5-srv-reply.txt "reply from $BACK with the token from the Mac's $RV_FILE reached the open sender"
   else
-    rec r5-reply-to-open-sender FAIL r5-srv-reply.txt "a reply from $BACK arrived without the Mac's hostname ($RV_HOST)"
+    rec r5-reply-to-open-sender FAIL r5-srv-reply.txt "a reply from $BACK arrived without the token from the Mac's $RV_FILE ($RV_TOKEN)"
   fi
 else
   cap srv r5-srv-no-reply; cap mac r5-mac-after
   rec r5-reply-to-open-sender FAIL r5-srv-no-reply.txt "no reply from $BACK on the server within 300s of the Mac running the request (server log 'secure conversation packet was rejected' lines: $RJ0 -> $(log_grep srv 'secure conversation packet was rejected'); the Mac pane: r5-mac-after.txt)"
 fi
+
+rm -f "$M1_MAC_WS/$RV_FILE"
 
 # ================================================================== r6 ====
 say "r6: /connect deny puts the Mac back to no receiving grants"

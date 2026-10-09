@@ -7,8 +7,8 @@ The mirror, an open sender to a manual receiver (issue #123), runs between s8 an
 - r1 trust pair: `/connect trust manual` on the Mac and `/connect trust open` on the server, both confirmed on screen.
 - r2 the server agent messages the Mac agent and is refused (`sender has no conversation grant for this agent` on the server's screen); the Mac shows nothing, because a manual receiver prints no notice for a refused sender.
 - r3 `/connect allow <server device> <Mac agent>` on the Mac prints `conversation allowed: ... local tool permissions still apply`. It is the only way a manual receiver lets a non-manual device in.
-- r4 the server agent sends again; the Mac shows the request from the server agent and its log shows a new shell run.
-- r5 the Mac agent's reply reaches the server agent (a box from the Mac agent carrying the Mac's `uname -n`).
+- r4 the server agent sends again; the Mac shows the request from the server agent and runs it: the token shows on its screen, or its log shows a new shell run. The request asks for `cat r4-token.txt`, a random token the harness writes to the Mac's workspace before r2, so no agent can answer it from memory.
+- r5 the Mac agent's reply reaches the server agent (a box from the Mac agent carrying that token).
 - r6 `/connect deny` on the Mac revokes the grant. Trust is not changed anywhere in r1-r6: the Mac stays manual and the server stays open until s9 flips it.
 
 Preconditions for r1-r6: the setup rows passed (both agents listed by `/connect status`); nothing else. s1 already left the Mac on manual and the server is open until s9, so r1 only confirms the pair. When r5 fails, its note gives the server log's `secure conversation packet was rejected` count before and after the resend: growth means the open sender's runtime refused something the Mac sent.
