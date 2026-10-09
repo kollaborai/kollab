@@ -277,7 +277,8 @@ class OpenAIProvider(LLMProvider):
                                 )
 
         except Exception as e:
-            logger.error(f"OpenAI stream failed: {e}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"OpenAI stream failed: {e}")
             raise map_openai_error(e, "openai") from e
         finally:
             # Reset tool accumulator

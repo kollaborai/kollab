@@ -711,7 +711,8 @@ class OpenAIResponsesProvider(LLMProvider):
                         yield chunk
 
         except Exception as e:
-            logger.error(f"OpenAI Responses stream failed: {e}")
+            # Not an error yet: api_communication_service retries it and logs the final failure.
+            logger.warning(f"OpenAI Responses stream failed: {e}")
             if isinstance(e, ProviderError):
                 raise
             raise map_openai_error(e, "openai_responses") from e
