@@ -14,7 +14,7 @@ import re
 import secrets
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -176,13 +176,26 @@ def approve_all(*nodes):
                 node.bridge.bind_peer_device(other.key, other.name)
 
 
+HOST_ADDRESS = "192.0.2.7"
+
+
+def heard_from_this_host(receiver: Node, wire: dict, normalized: dict):
+    """A locator as the UDP discovery service hands it over: heard from this host's own address.
+
+    These nodes share one host and listen on loopback, which peer_transport accepts only
+    from a device heard on this host's own interface address.
+    """
+    receiver.mesh._own_addresses = lambda: frozenset({HOST_ADDRESS})
+    return replace(_normalize_candidate(wire, normalized), source=HOST_ADDRESS)
+
+
 def deliver_locator(receiver: Node, sender: Node) -> None:
     """What the UDP discovery service does with a datagram, minus the socket."""
     wire = sender.mesh._local_locator_wire(sender.mesh.local_session())
     assert wire is not None, "the sender produced no locator"
     normalized = receiver.mesh._verify_locator_wire(wire)
     assert normalized is not None, "the receiver rejected the locator"
-    candidate = _normalize_candidate(wire, normalized)
+    candidate = heard_from_this_host(receiver, wire, normalized)
     assert receiver.mesh.locator_store.accept_candidate(candidate) is True
     receiver.mesh._accept_locator_candidate(candidate)
 
@@ -861,7 +874,7 @@ async def test_links_between_members_stay_valid_across_thirty_concurrent_refresh
         clock["now"] += 15
         for receiver, sender in ((b, c), (c, b)):  # the UDP service re-announces each tick
             wire = sender.mesh._local_locator_wire(sender.mesh.local_session())
-            candidate = _normalize_candidate(wire, receiver.mesh._verify_locator_wire(wire))
+            candidate = heard_from_this_host(receiver, wire, receiver.mesh._verify_locator_wire(wire))
             receiver.mesh.locator_store.accept_candidate(candidate)  # False while unchanged
             receiver.mesh._accept_locator_candidate(candidate)
         await asyncio.gather(*(node.mesh.refresh() for node in (a, b, c)))
@@ -891,7 +904,7 @@ async def test_links_recover_when_a_member_drops_its_secure_sessions(mesh3, monk
             (c if round_number == 2 else b).bridge.secure_transport._clear_sessions()
         for receiver, sender in ((b, c), (c, b)):
             wire = sender.mesh._local_locator_wire(sender.mesh.local_session())
-            candidate = _normalize_candidate(wire, receiver.mesh._verify_locator_wire(wire))
+            candidate = heard_from_this_host(receiver, wire, receiver.mesh._verify_locator_wire(wire))
             receiver.mesh.locator_store.accept_candidate(candidate)
             receiver.mesh._accept_locator_candidate(candidate)
         for _pass in range(2):

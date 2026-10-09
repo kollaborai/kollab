@@ -69,4 +69,4 @@ Exit code 0 only if every row is PASS. Evidence is in `m3/evidence/<step>.txt` (
 
 - More than one hop, a stranger's route, and self-host relays (M4 has its own proof).
 - The direct-then-relay fallback (covered by unit tests: `test_a_refused_direct_endpoint_falls_back_to_the_relay`).
-- The open design call in `agent-reports/review-m3-m4.md` (a designation two approved devices both claim admits neither).
+- Two approved devices claiming one designation: the device approved first keeps it, even while its locator has expired (unit tests, `tests/unit/test_peer_transport_rules.py`).
