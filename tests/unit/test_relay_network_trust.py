@@ -190,7 +190,7 @@ async def test_resolve_handle_ambiguous(bridges):
     members, _ = bridges
     (left, *_), _ = members
 
-    async def two_rows_same_handle():
+    async def two_rows_same_handle(cached=True):
         return [
             {
                 "name": "sapphire",
