@@ -522,7 +522,8 @@ class RelayAgentBridge:
             result = await self._owner_call(
                 "relay.directory", {"peer": "", "cached": cached}
             )
-        except Exception:
+        except Exception as exc:
+            logger.info("relay directory read failed: %s", type(exc).__name__)
             return []
         rows = []
         for row in result.get("agents", []):
@@ -571,15 +572,23 @@ class RelayAgentBridge:
         # A miss in the cached roster asks the peers before it says unknown:
         # m1 refused a reply to an agent that had just come online, and the
         # same call worked seconds later, once that peer was read again.
+        rows = []
         for cached in (True, False) if parsed else ():
+            rows = await self.remote_agents(cached=cached)
             matches = [
                 row
-                for row in await self.remote_agents(cached=cached)
+                for row in rows
                 if row["name"] == parsed[0] and row["device"] == parsed[1]
             ]
             if matches:
                 break
         if not matches:
+            # Names only: which agents the roster held when this one was missing.
+            logger.info(
+                "agent@device %s is not on the roster: %s",
+                handle,
+                ", ".join(sorted(row["handle"] for row in rows)[:20]) or "empty",
+            )
             raise RelayError(
                 "unknown agent@device: run /connect status to see who is online"
             )
