@@ -49,6 +49,43 @@ def voice_preamble(voice, rules_sent):
     return f"{rules}{nudge}\n"
 
 
+def strip_voice_preamble(text):
+    """A stored voice turn as the user said it: what voice_preamble added is removed."""
+    if text.startswith(VOICE_RULES_MARK):
+        text = text.partition("]\n")[2]
+    if text.startswith(VOICE_NUDGE):
+        text = text.partition("\n")[2]
+    return text
+
+
+def turn_display_texts(messages):
+    """What each stored message shows on a screen; None shows it as stored.
+
+    The model's copy keeps everything. A screen shows a voice turn as the user
+    said it, a voice reply's display text, and "" for the lone period a reply
+    to speech uses to stay silent (the live terminal draws nothing for it).
+    """
+    from kollabor_ai.response_channels import display_response_text
+
+    shown, answers_voice = [], False
+    for message in messages:
+        role, content = message.get("role"), message.get("content")
+        metadata = message.get("metadata") or {}
+        text = None
+        if isinstance(content, str) and role == "user" and metadata.get("voice"):
+            text = strip_voice_preamble(content)
+        elif isinstance(content, str) and role == "assistant":
+            lowered = content.lower()
+            if answers_voice and content.strip() == "." and not metadata.get("tool_calls"):
+                text = ""
+            elif "<display_text" in lowered or "<spoken_text" in lowered:
+                text = display_response_text(content)
+        shown.append(text)
+        if role == "user" and not metadata.get("tool_output_batch"):
+            answers_voice = bool(metadata.get("voice"))
+    return shown
+
+
 def voice_instructions(voice):
     """The full rules plus this turn's playback and transcript data."""
     instructions = VOICE_INSTRUCTIONS

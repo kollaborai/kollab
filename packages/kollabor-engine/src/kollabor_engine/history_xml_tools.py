@@ -6,7 +6,9 @@ that providers never receive: ``display_content`` (the reply without its tags)
 and ``xml_tool_calls`` on the reply, ``xml_tool_results`` (one per call) on the
 batched results message. This rewrites the mirror into the shape the web
 history renders for native tools: the clean text, tool cards, and one
-role="tool" row per result. The daemon's conversation is untouched.
+role="tool" row per result. Voice turns show as the terminal shows them
+(``turn_display_texts``): what the user said, a reply's display text, nothing
+for a silent reply. The daemon's conversation is untouched.
 """
 
 from typing import Any, Dict, List
@@ -54,6 +56,22 @@ def _tool_row(entry: Dict[str, Any], index: int, timestamp: Any) -> Dict[str, An
 
 
 def web_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The history the web renders: XML tool turns in the native shape, voice
+    turns as screens show them. A history with neither is the same list.
+    """
+    from kollabor_voice.observer import turn_display_texts
+
+    shaped = _xml_tool_turns(history)
+    shown = turn_display_texts(shaped)
+    if all(text is None for text in shown):
+        return shaped
+    return [
+        message if text is None else dict(message, content=text)
+        for message, text in zip(shaped, shown)
+    ]
+
+
+def _xml_tool_turns(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The history with XML tool turns in the native shape.
 
     A history with no XML tool turn comes back as the same list. A batched

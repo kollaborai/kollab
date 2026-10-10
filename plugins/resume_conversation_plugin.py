@@ -972,7 +972,9 @@ class ResumeConversationPlugin:
         loaded_messages = []
         display_messages: List[tuple] = [("system", header, {})]
 
-        for msg in raw_messages:
+        from kollabor_voice.observer import turn_display_texts
+
+        for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
@@ -984,12 +986,8 @@ class ResumeConversationPlugin:
                 )
             )
 
-            if role in ("user", "assistant"):
-                visible = content
-                if role == "assistant" and isinstance(content, str):
-                    from kollabor_ai.response_channels import display_response_text
-
-                    visible = display_response_text(content)
+            if role in ("user", "assistant") and shown != "":
+                visible = content if shown is None else shown
                 display_messages.append((role, visible, {}))
 
         # In-place replace preserves list identity; see
@@ -1031,7 +1029,9 @@ class ResumeConversationPlugin:
         loaded_messages = []
         messages_for_display = [{"role": "system", "content": header}]
 
-        for msg in raw_messages:
+        from kollabor_voice.observer import turn_display_texts
+
+        for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
@@ -1043,8 +1043,9 @@ class ResumeConversationPlugin:
                 )
             )
 
-            if role in ("user", "assistant"):
-                messages_for_display.append({"role": role, "content": content})
+            if role in ("user", "assistant") and shown != "":
+                visible = content if shown is None else shown
+                messages_for_display.append({"role": role, "content": visible})
 
         # In-place replace preserves list identity; see
         # _replace_conversation_history docstring for the bug history.
