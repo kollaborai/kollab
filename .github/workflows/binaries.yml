@@ -57,6 +57,9 @@ jobs:
       - name: Build the binary and check that it runs
         env:
           VERSION: ${{ inputs.version }}
+          # science, the scie builder pex runs, reads the Python Standalone Builds
+          # release from the GitHub API; unauthenticated, runner IPs hit the rate limit.
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
         run: python scripts/build_binary.py --out dist/bin ${VERSION:+--expect-version "$VERSION"}
 
       # Its wheels are picked for glibc 2.28, so it must start on a distro that old.
