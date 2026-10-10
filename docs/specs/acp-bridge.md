@@ -154,7 +154,7 @@ tools. Then it opens a session with the folder as `cwd` and `kollab mcp hub` in
 | ready | a session is open and idle | a queued item: prompting |
 | prompting | `session/prompt` is sent | its stop reason: ready. A permission request: awaiting. Esc or Stop: cancelling. The process exits: failed |
 | awaiting | a permission request is open | it resolves (section 5): prompting |
-| cancelling | `session/cancel` is sent and open permission requests answer `cancelled` | the prompt resolves within 30 s: ready; otherwise the process group is killed: failed |
+| cancelling | `session/cancel` is sent and open permission requests answer `cancelled` | the prompt resolves within 30 s: ready; otherwise its process tree is killed: failed |
 | failed | any failure above, shown with its reason: exit code and last stderr line | a queued item: starting, as a new generation |
 | closed | the daemon stops or the profile changes | none |
 
@@ -174,14 +174,20 @@ tools. Then it opens a session with the folder as `cwd` and `kollab mcp hub` in
 - **`/clear`** closes the session with `session/close` when the agent
   advertises it, and otherwise restarts the process, so no old session keeps its
   MCP servers running.
-- **Shutdown** closes the session and stdin, then sends SIGTERM to the process
-  group after 5 s and SIGKILL after 5 more. The harness's own children, its
-  `kollab mcp hub` among them, go with it.
+- **Shutdown** closes the session and stdin. After 5 s it lists the adapter's
+  whole process tree with `psutil`, which also finds children that left the
+  process group with `setsid` (Claude Code's background shells do), sends each
+  SIGTERM, and SIGKILL after 5 more. `kollab mcp hub` is in that tree.
 
 ### Turns: one at a time, each with one owner
 
 The runner admits one prompt at a time. Everything else waits in a queue, first
-in first out, one item per prompt, so every turn has exactly one origin. A hub
+in first out. Your input and each request run as a prompt of their own, so each
+of those turns has exactly one origin. Replies and broadcasts, which nobody
+waits on, run together: whatever is waiting when a turn ends becomes one prompt,
+the newest 20 with a count of any older ones. At most 10 requests wait; past
+that, a new one gets "claude is busy" at once, with an end frame whose outcome
+is `busy`. A hub
 message is queued only when the hub's wake rule (`_decide_hub_wake`) would wake
 a kollab agent for it. Everything else is observed: shown in the agent's
 windows, never sent to the harness. So a line you type in another agent's
@@ -223,8 +229,9 @@ dreaming are off: the harness manages its own context.
 
 The answer to a request is the turn's **final message**: the
 `agent_message_chunk` text after the turn's last tool call or, when chunks carry
-message ids, the chunks of the last message id. Thoughts and tool output never
-join it. What the agent sends the requester with `hub_msg` during the turn
+message ids, the chunks of the last message id. When no text follows the last
+tool call, it is the last text written before that call. Thoughts and tool
+output never join it. What the agent sends the requester with `hub_msg` during the turn
 arrives first, as messages on the thread, and never stands in for it.
 
 When a request turn ends, the runner sends the requester two things on the
@@ -236,10 +243,11 @@ request's thread, both with the request's id as `reply_to`:
    agent's messages during the turn are not its answer.
 2. **The end frame**, `{replies, failed, outcome}`, with the outcome line as its
    text: the frame every network turn ends with today, plus `outcome`, the stop
-   reason or `error`. Every daemon takes a frame out on arrival, on this
-   computer as across machines: it settles waits and is never shown or given to
-   a model. A device on an older build refuses it; kollab keeps no
-   compatibility with older builds.
+   reason, `busy` or `error`. On this computer it travels as its own hub socket
+   action, `turn_end`, never as a message; across machines it rides the relay
+   as today. Either way it settles waits and is never shown or given to a
+   model. Older code refuses it rather than showing it: a daemon refuses an
+   unknown socket action, and a device refuses the new field.
 
 | Turn ends with | Message | Frame `outcome`, text |
 |---|---|---|
@@ -359,14 +367,17 @@ and network trust apply as for any agent.
 
 - It registers its wait before it sends, so a fast answer is never missed.
 - The end frame of the turn that handles the ask ends the wait: `answered`,
-  with the last message before it as `text`, or `ended` with the outcome line.
+  with the last message before it as `text`, `busy` when its outcome is
+  `busy`, or `ended` with the outcome line.
   Every agent sends one. A harness agent ends every request turn with it. A
   kollab agent handles a request from `hub_ask` the way it already handles a
   network request (`_NetworkTurn`): in one turn whose messages to the asker
   carry the request's thread and id, whose plain-text answer goes back when it
-  sent nothing on the thread, and which ends with the frame. A frame from
-  another device now reaches `hub_ask` waits as well as `kollab --hub msg`
-  waits.
+  sent nothing on the thread, and which ends with the frame. That binding has
+  one slot, so a kollab agent takes one bound request at a time, network or
+  `hub_ask`: the next waits until the open one's frame is sent, as the relay
+  already waits while `network_turn_open`. A frame from another device now
+  reaches `hub_ask` waits as well as `kollab --hub msg` waits.
 - Messages from that agent on the thread before its frame are consumed and come
   back, in order, in `earlier`.
 - A request from the agent asked, on any thread, is a question back: the wait
@@ -378,7 +389,8 @@ and network trust apply as for any agent.
 - Asking yourself is refused at once.
 - Asking a harness agent on this computer that is waiting in `hub_ask` on
   someone else returns `busy` at once; the question still waits for its next
-  turn. Across machines the timeout bounds the wait.
+  turn. A harness agent with 10 requests waiting refuses a new one, which ends
+  the wait as `busy` too. Across machines the timeout bounds the wait.
 - `timeout` is 300 s by default and at most 600. When it runs out the status is
   `timeout`; a later answer arrives as an ordinary reply, with no automatic
   answer to it, and its frame is dropped.
@@ -415,7 +427,9 @@ listed; `manual`: none).
 "agent_servers": {"kollab": {"type": "custom", "command": "kollab", "args": ["acp", "--attach", "lapis"]}}
 ```
 
-**Stdio.** stdout carries only ACP messages, one JSON object per line. No TUI,
+**Stdio.** stdout carries only ACP messages, one JSON object per line. At
+startup the process keeps a private duplicate of fd 1 for the protocol and
+points fd 1 at stderr, so no stray `print` can reach the stream. No TUI,
 banner or keyboard prompt ever starts. Logs go to kollab's log file; short
 diagnostics, never secrets, go to stderr. A failure before `initialize` is one
 stderr line and exit status 1; after it, a JSON-RPC error. Unknown methods
@@ -495,11 +509,11 @@ JetBrains and Buzz are claimed only after the same run.
 | Area | Gates |
 |---|---|
 | Permissions | two commands with the same title, and two argument lists that join to the same text, get separate decisions; requests offering only `allow_always`, no `reject_once`, several `allow_once`, or no options |
-| Turns | queued requests, your input and a broadcast run in order and answer the right recipients; a line typed in another window starts no turn; every stop reason reaches the requester as its message and frame, through `hub_ask` and `kollab --hub msg claude@device` |
-| Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame |
-| Lifecycle | `/clear` and shutdown leave no processes; a crash during a tool call is not retried; `usage_update` replaces the status bar's figures, never adds to them |
+| Turns | queued requests, your input and a broadcast run in order and answer the right recipients; 50 waiting replies and broadcasts run as one prompt; an 11th waiting request gets `busy`; a line typed in another window starts no turn; a turn that ends on a tool call answers with the text before it; every stop reason reaches the requester as its message and frame, through `hub_ask` and `kollab --hub msg claude@device` |
+| Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame; two local asks and a network request reaching one kollab agent at once are answered one by one, each on its own thread; a daemon on older code refuses a local frame |
+| Lifecycle | `/clear` and shutdown leave no processes, `setsid` children included; a crash during a tool call is not retried; `usage_update` replaces the status bar's figures, never adds to them |
 | Setup | a profile synced to a second device resolves its own adapter; a `#!/usr/bin/env node` adapter starts under `kollab service`; a missing adapter fails naming it |
-| Inbound | stdout carries only protocol lines; with `--attach`, a client cancel never stops a mesh turn, `session/set_mode` is refused, no `allow_always` is offered, and end of stdin leaves lapis running |
+| Inbound | stdout carries only protocol lines, even when kollab code prints; with `--attach`, a client cancel never stops a mesh turn, `session/set_mode` is refused, no `allow_always` is offered, and end of stdin leaves lapis running |
 | Network | a cross-device trust denial, and trust revoked while a request waits |
 
 A clean transcript is the bar on every live run.
@@ -509,7 +523,9 @@ A clean transcript is the bar on every live run.
 - Model choice: when an agent advertises its model as an ACP config option,
   `/model` could set it through `session/set_config_option`.
 - Notices: when an SDK release carries `session.notices`, advertise them
-  outbound and send mesh-started turns to attached clients.
+  outbound and send mesh-started turns to attached clients. They stay live
+  only: never history, never replayed by load or resume, never in a harness
+  prompt; a condition that still holds after a restore gets a new notice.
 - More profiles (goose, opencode, Cursor CLI) once their commands are checked.
 - Images and files in prompts, both ways.
 - ACP v2, in draft since 2026-07-20: revisit when it is stable.
