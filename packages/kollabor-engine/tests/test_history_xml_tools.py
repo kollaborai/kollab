@@ -128,3 +128,68 @@ def test_a_batch_written_before_results_were_kept_stays_as_it_was():
     ]
 
     assert web_history(history)[1] is old_batch
+
+
+def test_a_voice_reply_shows_its_display_text_not_its_fields():
+    raw = (
+        "<display_text>\nhere, koordinator — listening.\n\n[ok] item one\n</display_text>\n"
+        "<spoken_text>Yes, I'm here and listening.</spoken_text>"
+    )
+    history = [_message("user", "hello?"), _message("assistant", raw)]
+
+    shaped = web_history(history)
+
+    assert shaped[1]["content"].strip() == "here, koordinator — listening.\n\n[ok] item one"
+    assert shaped[0] is history[0]
+    assert history[1]["content"] == raw  # the daemon's own copy is untouched
+
+
+def test_a_voice_reply_keeps_code_that_shows_the_field_tags():
+    raw = (
+        "<display_text>Write it like this:\n```\n<spoken_text>hi</spoken_text>\n```"
+        "</display_text><spoken_text>Use the spoken field.</spoken_text>"
+    )
+
+    [reply] = web_history([_message("assistant", raw)])
+
+    assert "```\n<spoken_text>hi</spoken_text>\n```" in reply["content"]
+    assert "Use the spoken field." not in reply["content"]
+
+
+def test_a_voice_turn_shows_what_the_user_said():
+    from kollabor_voice.observer import voice_preamble
+
+    first = {"event_ids": ["a"], "transcript_context": [{"text": "earlier ] line"}]}
+    later = {"event_ids": ["b"], "uncertain_event_ids": ["b"]}
+    history = [
+        _message("user", voice_preamble(first, False) + "Hello, can you hear me?", {"voice": first}),
+        _message("user", voice_preamble(later, True) + "Are you there?", {"voice": later}),
+        # Saved before the nudge existed: the rules alone, then the words.
+        _message("user", "[Voice instructions: Respond concisely.]\nOld turn.", {"voice": {"event_ids": ["c"]}}),
+        _message("user", "[voice mode on: the user said this aloud] typed", {}),
+    ]
+
+    shown = [m["content"] for m in web_history(history)]
+
+    assert shown == ["Hello, can you hear me?", "Are you there?", "Old turn.", history[3]["content"]]
+    assert history[0]["content"].startswith("[Voice instructions: ")  # the daemon's copy
+
+
+def test_a_silent_reply_to_speech_shows_nothing():
+    heard = "[voice mode on: the user said this aloud]\n"
+    voice = {"voice": {"event_ids": ["a"]}}
+    history = [
+        _message("user", heard + "Hmm.", voice),
+        _message("assistant", "."),
+        _message("user", "typed"),
+        _message("assistant", "."),  # a typed turn's period is an answer
+        _message("user", heard + "Run it.", voice),
+        _message("assistant", "", {"tool_calls": [{"id": "t", "name": "terminal"}]}),
+        {"role": "tool", "content": "ok", "metadata": {"tool_call_id": "t"}},
+        _message("assistant", "."),  # still answering the speech, after its tool
+    ]
+
+    shaped = web_history(history)
+
+    assert [m["content"] for m in shaped] == ["Hmm.", "", "typed", ".", "Run it.", "", "ok", ""]
+    assert len(shaped) == len(history)  # rows stay, so the web's message ids line up

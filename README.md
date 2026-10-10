@@ -303,6 +303,13 @@ curl -sS https://raw.githubusercontent.com/kollaborai/kollab/main/install.sh | b
 kollab
 ```
 
+It installs the single-file `kollab` binary for your machine (macOS 11+, or Linux
+with glibc 2.28+, on x86_64 or arm64) into `~/.local/bin`: no Python needed.
+`/upgrade` swaps it for the latest release's binary; with automatic updates on
+(`/config`), each launch installs a newer release first and restarts into it. Every
+[release](https://github.com/kollaborai/kollab/releases) carries the binaries;
+elsewhere the installer falls back to the Python package below.
+
 Python package managers:
 
 ```bash

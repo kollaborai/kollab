@@ -107,6 +107,12 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def _kollab_command() -> List[str]:
     """Return the argv prefix that launches kollab in this environment."""
+    from kollabor.binary import running_binary
+
+    # The binary this engine runs from, so its daemons run the same version.
+    binary = running_binary()
+    if binary is not None:
+        return [str(binary)]
     console_script = shutil.which("kollab")
     if console_script:
         return [console_script]

@@ -1,0 +1,61 @@
+{
+  "name": "binary-chat",
+  "description": "The single-file kollab binary (scripts/build_binary.py) built from this checkout boots the TUI in a folder with no checkout and a throwaway HOME, then answers a chat through a fake model.",
+  "config": {
+    "command": "sh -c 'H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_HUB=1 exec \"$H/bin/kollab\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "build the binary"
+    },
+    {
+      "action": "shell",
+      "description": "build this checkout's binary into a throwaway HOME with a fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-binary.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -s \"$O/fake.pid\" ] && kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-binary.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\" \"$H/bin\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; python3 \"$R/scripts/build_binary.py\" --out \"$H/dist\" && cp \"$(ls \"$H\"/dist/kollab-* | grep -v \"\\.sha256$\")\" \"$H/bin/kollab\"",
+      "assert_contains": "built "
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 120,
+      "description": "the binary unpacked its own Python and the TUI is up"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "kollab v[0-9]+\\.[0-9]+\\.[0-9]+",
+      "description": "banner"
+    },
+    {
+      "action": "section",
+      "title": "chat through the binary"
+    },
+    {
+      "action": "type",
+      "text": "hello binary"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: hello binary",
+      "timeout": 60
+    },
+    {
+      "action": "section",
+      "title": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the fake model",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary.path\"); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

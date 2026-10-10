@@ -31,6 +31,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from kollabor.binary import kollab_argv
+
 from .dns.discovery import DOCUMENT_PATHS, WELL_KNOWN, DiscoveryError, DiscoveryTarget, normalize_target
 from .dns.discovery_publish import publish
 from .relay_backend import RelayLimits
@@ -317,7 +319,7 @@ def systemd_unit(settings: Settings) -> str:
     except (KeyError, OSError):
         user = "kollab"
     command = shlex.join(["kollab", "relay", "serve", *flags(settings)])
-    argv = [sys.executable, "-m", "kollabor_cli_main", "relay", "serve", *flags(settings, state=True)]
+    argv = [*kollab_argv(), "relay", "serve", *flags(settings, state=True)]
     return _render(
         _SYSTEMD,
         DOMAIN=settings.domain,

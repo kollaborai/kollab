@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import pytest
 
@@ -190,6 +191,7 @@ async def test_upgrade_command_reports_up_to_date_and_restarts_only_after_a_chan
 async def test_startup_auto_updates_when_release_available_and_enabled(monkeypatch):
     release = _release()
     app = object.__new__(TerminalLLMChat)
+    app.args = None
     app.config = _DummyConfig({"kollabor.updates.auto_update_enabled": True})
     app.version_check_service = _DummyVersionCheckService(release)
     app.renderer = _DummyRenderer()
@@ -217,6 +219,7 @@ async def test_startup_auto_updates_when_release_available_and_enabled(monkeypat
 async def test_startup_only_notifies_when_auto_update_disabled(monkeypatch):
     release = _release()
     app = object.__new__(TerminalLLMChat)
+    app.args = None
     app.config = _DummyConfig({"kollabor.updates.auto_update_enabled": False})
     app.version_check_service = _DummyVersionCheckService(release)
     app.renderer = _DummyRenderer()
@@ -270,3 +273,161 @@ async def test_upgrade_relaunches_the_launch_command_not_the_dead_attach(monkeyp
     relaunched = execs[0][1]
     assert relaunched[-2:] == ["--agent", "lapis"]
     assert "--attach" not in relaunched
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_only_notifies_so_the_launched_window_installs(monkeypatch):
+    from types import SimpleNamespace
+
+    app = object.__new__(TerminalLLMChat)
+    app.args = SimpleNamespace(detached=True)
+    app.config = _DummyConfig({"kollabor.updates.auto_update_enabled": True})
+    app.version_check_service = _DummyVersionCheckService(_release())
+    app.renderer = _DummyRenderer()
+
+    def fail_run_auto_update():
+        raise AssertionError("a daemon installed the update")
+
+    monkeypatch.setattr(application_module, "run_auto_update", fail_run_auto_update)
+
+    await app._check_for_updates()
+
+    assert any("Update available" in m for m in app.renderer.message_coordinator.messages)
+
+
+class _Tty:
+    """A terminal for stdout: isatty() is true and what is printed is kept."""
+
+    def __init__(self):
+        self.text = ""
+
+    def isatty(self):
+        return True
+
+    def write(self, text):
+        self.text += text
+
+    def flush(self):
+        pass
+
+
+@pytest.fixture
+def launch(monkeypatch):
+    """`kollab --agent lapis` in a terminal, auto-update on, v9.9.9 released."""
+    from types import SimpleNamespace
+
+    import kollabor.binary
+    import kollabor.cli as cli
+    import kollabor.updates as updates
+    import kollabor_config
+
+    stdout = _Tty()
+    terminal = SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(sys, "argv", ["kollab", "--agent", "lapis"])
+    # setenv first, so the variable the hook sets is removed again afterwards.
+    monkeypatch.setenv(cli.UPDATED_ENV, "")
+    monkeypatch.delenv(cli.UPDATED_ENV)
+    settings = {"kollabor.updates.auto_update_enabled": True}
+    monkeypatch.setattr(kollabor_config, "ConfigService", lambda *args, **kwargs: _DummyConfig(settings))
+    checks = []
+
+    async def newer(config):
+        checks.append(config)
+        return "9.9.9"
+
+    monkeypatch.setattr(cli, "_newer_release_version", newer)
+    monkeypatch.setattr(kollabor.binary, "kollab_argv", lambda: ["/opt/kollab"])
+    installed = updates.AutoUpdateResult(True, "Kollab upgraded: v0.1.0 -> v9.9.9 (via binary).", "binary")
+    monkeypatch.setattr(updates, "run_auto_update", lambda: installed)
+    execs = []
+    monkeypatch.setattr(cli.os, "execv", lambda *args: execs.append(args))
+
+    def run():
+        # Patched here, not in the fixture: pytest's capture swaps both streams per test phase.
+        with patch.object(sys, "stdin", terminal.stdin), patch.object(sys, "stdout", stdout):
+            cli._update_before_launch()
+
+    return SimpleNamespace(
+        cli=cli, settings=settings, checks=checks, execs=execs, stdout=stdout, terminal=terminal, run=run
+    )
+
+
+def test_launch_installs_a_newer_release_then_restarts_into_it(launch):
+    launch.run()
+
+    assert launch.execs == [("/opt/kollab", ["/opt/kollab", "--agent", "lapis"])]
+    assert os.environ[launch.cli.UPDATED_ENV] == "9.9.9"
+    assert "updating v" in launch.stdout.text and "-> v9.9.9" in launch.stdout.text
+    assert "Restarting..." in launch.stdout.text
+
+
+def test_the_restarted_launch_does_not_check_again(launch, monkeypatch):
+    monkeypatch.setenv(launch.cli.UPDATED_ENV, "9.9.9")
+
+    launch.run()
+
+    assert launch.checks == [] and launch.execs == []
+    # Popped, so the daemon this launch starts never inherits it.
+    assert launch.cli.UPDATED_ENV not in os.environ
+
+
+def test_launch_stays_on_this_version_when_the_install_fails(launch, monkeypatch):
+    import kollabor.updates as updates
+
+    failed = updates.AutoUpdateResult(False, "offline", "binary")
+    monkeypatch.setattr(updates, "run_auto_update", lambda: failed)
+
+    launch.run()
+
+    assert launch.execs == [] and launch.cli.UPDATED_ENV not in os.environ
+
+
+def test_launch_does_not_check_when_auto_update_is_off(launch):
+    launch.settings["kollabor.updates.auto_update_enabled"] = False
+
+    launch.run()
+
+    assert launch.checks == [] and launch.execs == []
+
+
+def test_a_failing_check_never_blocks_the_launch(launch, monkeypatch):
+    async def broken(config):
+        raise OSError("offline")
+
+    monkeypatch.setattr(launch.cli, "_newer_release_version", broken)
+
+    launch.run()
+
+    assert launch.execs == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--detached"], ["--attach", "lapis"], ["--hub", "status"], ["-p"], ["--update"], ["--web-ui"], ["--version"]],
+)
+def test_only_an_interactive_app_launch_updates_first(launch, monkeypatch, argv):
+    monkeypatch.setattr(sys, "argv", ["kollab", *argv])
+
+    launch.run()
+
+    assert launch.checks == [] and launch.execs == []
+
+
+def test_a_launch_without_a_terminal_does_not_update(launch, monkeypatch):
+    from types import SimpleNamespace
+
+    launch.terminal.stdin = SimpleNamespace(isatty=lambda: False)
+
+    launch.run()
+
+    assert launch.checks == [] and launch.execs == []
+
+
+def test_no_daemon_launches_update_too_but_never_fork_a_daemon(launch, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["kollab", "--no-daemon"])
+
+    with patch.object(sys, "stdin", launch.terminal.stdin):
+        assert launch.cli._should_use_daemon() is False
+    launch.run()
+
+    assert launch.execs == [("/opt/kollab", ["/opt/kollab", "--no-daemon"])]

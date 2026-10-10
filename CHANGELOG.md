@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-09
+
+### Added
+- Kollab ships as a single-file binary for macOS (11 and later) and Linux (glibc 2.28 and later) on x86_64 and arm64, attached to every GitHub release. The install script installs it, with no Python needed, and falls back to uv, pipx or pip elsewhere. In the binary, `/upgrade` and `kollab --update` download the latest release's binary, check its SHA-256 and that it starts, then swap it in and restart.
+- With automatic updates on (`/config` → Auto Update Kollab), launching kollab installs a newer release before anything starts, then restarts as the new version with the same arguments.
+
+### Fixed
+- With automatic updates on, a launch installed the same update twice at once, in the window and in its agent's daemon. Only the window you launch installs now; daemons report the release.
+- The install script reported success when uv, pipx or pip failed to install Kollab.
+- The web UI showed a voice reply's raw `<display_text>` and `<spoken_text>` fields, and the voice rules ahead of what you said. It now shows what you said, the reply's display text, and nothing for a reply that stayed silent (a lone "."), as the terminal does. `/resume` shows them the same way.
+
 ## [0.15.0] - 2026-10-09
 
 ### Added

@@ -2156,11 +2156,21 @@ def _should_use_daemon() -> bool:
     - info flags (-h, --help, --version, --reset-config, --update, --font-dir, --login)
     """
     args = sys.argv[1:]
+    if "--no-daemon" in args:
+        return False
+    return _interactive_app_launch(args) and _hub_is_enabled()
+
+
+def _interactive_app_launch(args: list[str]) -> bool:
+    """True when ``args`` start the interactive app, with or without a daemon.
+
+    False for daemons, attach clients, pipe mode, CLI actions (--hub, --web-ui,
+    --update, ...) and info flags.
+    """
     skip_flags = {
         "--detached",
         "-d",
         "--attach",
-        "--no-daemon",
         "--hub",
         "--org",
         "--web-ui",
@@ -2194,6 +2204,7 @@ def _should_use_daemon() -> bool:
     }
     daemon_launch_switches = {
         "--daemon",
+        "--no-daemon",
         "--simple",
         "--save",
         "--local",
@@ -2215,14 +2226,72 @@ def _should_use_daemon() -> bool:
                 return False
 
     # Skip if stdin is piped (non-interactive)
-    if not sys.stdin.isatty():
-        return False
+    return sys.stdin.isatty()
 
-    return _hub_is_enabled()
+
+# Set on the restart after a launch-time update so the new version does not check again.
+UPDATED_ENV = "KOLLAB_UPDATED_TO"
+
+
+async def _newer_release_version(config) -> Optional[str]:
+    """The newer release the version check knows of: its cache, or one quick request."""
+    from .updates import VersionCheckService
+
+    service = VersionCheckService(config, __version__)
+    service.timeout_seconds = min(service.timeout_seconds, 3)
+    await service.initialize()
+    try:
+        release = await service.check_for_updates()
+    finally:
+        await service.shutdown()
+    return release.version if release else None
+
+
+def _update_before_launch() -> None:
+    """Opted-in auto-update (kollabor.updates.auto_update_enabled) at an interactive launch.
+
+    A newer release is installed before this launch starts anything (TUI,
+    daemon, agent), then the launch restarts as the new version with the same
+    arguments, so nothing is interrupted. A failure leaves the launch on the
+    current version; the in-app check reports it and tries again.
+    """
+    if os.environ.pop(UPDATED_ENV, None) is not None:
+        return
+    args = sys.argv[1:]
+    if not sys.stdout.isatty() or not _interactive_app_launch(args):
+        return
+    try:
+        from kollabor_config import ConfigService
+        from kollabor_config.config_utils import get_config_directory
+
+        config = ConfigService(get_config_directory() / "config.json", None, fast_mode=True)
+        if not config.get("kollabor.updates.auto_update_enabled", False):
+            return
+        latest = asyncio.run(_newer_release_version(config))
+    except Exception as e:  # never block a launch on the update check
+        logging.getLogger(__name__).info(f"Launch update check failed: {e}")
+        return
+    if not latest:
+        return
+
+    from .binary import kollab_argv
+    from .updates import run_auto_update
+
+    print(f"kollab: updating v{__version__} -> v{latest}...", flush=True)
+    result = run_auto_update()
+    if not (result.success and result.changed):
+        logging.getLogger(__name__).info(f"Launch auto-update did not install v{latest}: {result.message}")
+        return
+    print(f"kollab: {result.message} Restarting...", flush=True)
+    os.environ[UPDATED_ENV] = latest
+    argv = [*kollab_argv(), *args]
+    os.execv(argv[0], argv)
 
 
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    _update_before_launch()
+
     # --detached: fork into a fully detached daemon process.
     # Shell backgrounding (&) doesn't work because zsh suspends
     # processes that touch the TTY (SIGTTOU). Instead, we fork,

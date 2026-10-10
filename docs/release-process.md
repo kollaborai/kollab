@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-03
+modified: 2026-10-09
 status: active
 ---
 # Release Process
@@ -32,43 +32,47 @@ Kollab uses SemVer-style versions:
 
 Use a `vX.Y.Z` Git tag for public releases.
 
-## Isolate Release Work From the Active Checkout
+## Release From Main, in Place
 
-Always prepare a release in a dedicated worktree based on the fetched target
-commit. This keeps release work isolated even when the active checkout is clean.
-Before starting, record the active checkout's `git status --short --branch`,
-`git rev-parse HEAD`, and the target remote commit. Review staged, unstaged, and
-untracked changes.
+Agents share one checkout on `main`. Never create a worktree, stash, reset,
+clean, restore, or switch branches in it, and never build a release from
+uncommitted files or a scratch clone: the checkout stays behind, dirty with
+work that already shipped. Commit the release on local `main` instead; the
+merge then fast-forwards it, so `main` ends clean and level by construction.
 
-- If the active checkout has any changes, do not edit or stage release files
-  there. Do not reset, stash, clean, restore, or switch that checkout.
-- Fetch the intended base and create a dedicated worktree and release branch at
-  that exact commit. Choose a path that does not already exist:
+1. Commit the release's work on `main` by explicit paths
+   (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'
+   uncommitted work stays uncommitted and out of the release.
+2. Commit the release prep the same way (every version, `uv.lock`, both
+   changelogs) as `chore: prepare release vX.Y.Z`.
+3. Everything committed on `main` ships: review `git log origin/main..HEAD`,
+   then push it and open the PR with
+   `git push origin "HEAD:refs/heads/release/X.Y.Z"`.
+4. Merge the PR with a merge commit, never squash or rebase, so local `main`
+   stays a parent of the merge.
+5. Bring `main` level and tag the merge:
 
-  ```bash
-  git fetch origin main
-  git worktree add -b release/X.Y.Z ../kollab-release-X.Y.Z origin/main
-  cd ../kollab-release-X.Y.Z
-  git status --short --branch
-  git rev-parse HEAD
-  ```
+   ```bash
+   git pull --ff-only origin main
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
 
-- Make and validate release changes only in that worktree. Stage explicit
-  release-owned paths; never use `git add -A` or `git add .` in a shared or
-  previously dirty checkout.
-- Before committing, verify the staged path list and diff contain only the
-  intended release metadata, lockfile, and changelog. Keep unrelated code and
-  documentation changes out of the release unless they are explicitly included
-  in the approved release scope.
-- Open the release-prep PR from the isolated branch. Wait for required CI checks,
-  merge it through the repository's normal process, and tag the exact resulting
-  commit on `main` only after verifying versions, changelog parity, and a clean
-  release commit. Push the tag deliberately to trigger publishing.
-- After merge or publication, do not automatically fast-forward, reset, clean,
-  or otherwise reconcile the original active checkout. Report that it remains
-  behind if applicable. Reconcile it only when explicitly requested, after
-  recording its status and proving the upstream commit does not overlap local
-  staged, unstaged, or untracked work; verify every local edit is preserved.
+6. Once publishing is green, install it:
+
+   ```bash
+   uv sync --all-extras                   # the checkout's own venv
+   KOLLAB_VERSION=X.Y.Z bash install.sh   # the release binary in ~/.local/bin
+   ```
+
+   The installer replaces a uv tool or pipx kollab at `~/.local/bin/kollab`, so
+   from then on `/upgrade` swaps the binary and never touches the checkout.
+
+Done means `main` matches `origin/main`, `git status` lists none of the
+release's files, and `kollab --version` reports X.Y.Z inside and outside the
+repo. Any file still dirty is work outside the release: name it in the release
+report. Running agents keep the code they started with; list them and ask
+before restarting any.
 
 ## Pre-Release Checklist
 
@@ -115,14 +119,21 @@ scripts/docker-runtime.sh smoke
 ## Publishing
 
 1. Confirm the release commit is clean and scanned.
-2. Create the release tag: `git tag vX.Y.Z`.
-3. Push the tag intentionally.
-4. Let the publish workflow build and upload packages.
-5. Verify the package page and install path after publication.
+2. Create the annotated release tag on the merge commit (Release From Main, in
+   Place, step 5).
+3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`.
+4. Let the publish workflow build and check the binaries on all four platforms,
+   publish the packages, then create the GitHub Release with the binaries attached.
+5. Verify the package page, the release's four binaries and their `.sha256`
+   files, and the install path after publication.
 6. Re-run the secret scan on the exact public commit.
+7. Install it locally (Release From Main, in Place, step 6) and check
+   `kollab --version` inside and outside the repo.
 
 ## Post-Release
 
+- [ ] `main` matches `origin/main`, `git status` lists none of the release's
+      files, and `kollab --version` reports X.Y.Z inside and outside the repo.
 - [ ] Create follow-up issues for deferred work.
 - [ ] Confirm installation instructions still work from a fresh environment.
 - [ ] Confirm the changelog entry is visible and human-readable.

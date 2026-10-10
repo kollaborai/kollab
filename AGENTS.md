@@ -16,16 +16,18 @@ do not invent V2 product tracks, legacy implementations, or compatibility obliga
 for nonexistent users. Preserve actual protocol contracts and private persistent
 state. Temporary rollback artifacts require an explicit retention/cleanup condition.
 
-## release worktree safety
+## releases and the shared checkout
 
-For every release, read `docs/release-process.md` and prepare it in a dedicated
-worktree from the fetched target commit. Leave the active checkout unchanged; if
-it contains staged, unstaged, or untracked user changes, do not edit or stage
-release files there. Stage only explicit release paths. Never broadly stage,
-reset, stash, clean, restore, or automatically fast-forward the user's checkout
-after the release merges. Preserve local edits and their staged/unstaged state;
-reconcile only on an explicit request after checking overlap and verifying the
-result.
+For every release, read `docs/release-process.md`. Agents share one checkout on
+`main`: never create a worktree, stash, reset, clean, restore, or switch branches
+in it, and never build a release from uncommitted files or a scratch clone.
+Commit the release on local `main` by explicit paths (other people's edits stay
+uncommitted and out of it), push `HEAD` to `release/X.Y.Z`, merge with a merge
+commit, then `git pull --ff-only origin main` and tag the merge. Once it is
+published, run `uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`
+(the release binary in `~/.local/bin`). The release is not done until
+`main` matches `origin/main`, `git status` lists none of the release's files,
+and `kollab --version` reports the new version.
 
 ## project snapshot
 
@@ -340,6 +342,9 @@ If you modify cross-cutting behavior, run broader tests before declaring success
 ## gotchas
 
 - repo may contain in-progress user edits; avoid reverting unrelated work
+- kollab also ships as a single-file binary (`scripts/build_binary.py`): code that
+  starts kollab again (re-exec, service units, spawned daemons) uses
+  `kollabor.binary.kollab_argv()`, never `sys.executable -m kollabor_cli_main`
 - `.env` exists and may contain secrets
 - some docs reference historical paths or older names; verify against live code
 - `README.md` is high-level; `CLAUDE.md` and package source are better for implementation details

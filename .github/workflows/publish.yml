@@ -9,7 +9,15 @@ permissions:
   contents: write
 
 jobs:
+  # Every platform's binary is built and checked before anything is published,
+  # so a release ships with its binaries or not at all.
+  binaries:
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ github.ref_name }}
+
   publish:
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,7 +36,7 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Verify release consistency
         # Enforce the release invariant on the pristine tagged commit BEFORE any
@@ -116,25 +124,6 @@ jobs:
           uv build --out-dir dist --package kollab
           twine upload dist/*
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          # Publish a GitHub Release for this tag. The in-app update check
-          # (VersionCheckService) queries /releases/latest, so without a
-          # Release the notification never fires even though PyPI has the new
-          # version. Idempotent: skip if the Release already exists.
-          if gh release view "v$VERSION" >/dev/null 2>&1; then
-            echo "Release v$VERSION already exists; skipping."
-          else
-            gh release create "v$VERSION" \
-              --title "v$VERSION" \
-              --generate-notes \
-              --verify-tag \
-              || echo "::warning::GitHub Release creation failed for v$VERSION"
-          fi
-
       - name: Commit version bump
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
@@ -166,3 +155,36 @@ jobs:
             -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" \
             https://api.github.com/repos/kollaborai/homebrew-tap/dispatches \
             -d "{\"event_type\":\"pypi-release\",\"client_payload\":{\"version\":\"${VERSION}\"}}"
+
+
+  # Its own job, so a failure here re-runs alone ("Re-run failed jobs") without
+  # publishing to PyPI twice.
+  release:
+    needs: [binaries, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: kollab-*
+          path: dist/bin
+          merge-multiple: true
+
+      - name: Create GitHub Release with the binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The in-app update check (VersionCheckService) and a binary's /upgrade
+          # read /releases/latest, and install.sh downloads its binary from it.
+          # gh creates the release as a draft, uploads the binaries, then
+          # publishes it, so the latest release never lacks them.
+          ls -l dist/bin
+          files=(dist/bin/*)
+          test "${#files[@]}" -eq 8 || { echo "::error::expected 4 binaries and 4 checksums"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/bin/* --clobber
+          else
+            gh release create "$TAG" dist/bin/* --title "$TAG" --generate-notes --verify-tag
+          fi

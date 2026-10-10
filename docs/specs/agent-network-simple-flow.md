@@ -90,6 +90,10 @@ device's roster as `agent@device`. A hub message to `agent@device` is
 delivered to that device, wakes that agent, and is observed by the rest of the
 network exactly as a local message is observed by the rest of the hub.
 
+**Agents from other harnesses.** Claude Code, Codex and any other ACP agent
+can run as a kollab agent (`docs/specs/acp-bridge.md`): a name in the roster,
+addressed as `agent@device`, under the same trust and hub rules.
+
 **Trust levels**, one per network:
 
 - `open` (default): every agent on every accepted device may message every

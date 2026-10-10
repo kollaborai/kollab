@@ -61,6 +61,39 @@ def test_legacy_resume_preview_only_displays_the_screen_field():
     assert plugin.llm_service.conversation_history[0].content == raw
 
 
+@pytest.mark.asyncio
+async def test_resumed_voice_turns_show_what_the_user_said():
+    from kollabor_voice.observer import voice_preamble
+
+    from kollabor.state.local import LocalStateService
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    voice = {"event_ids": ["one"], "uncertain_event_ids": ["one"]}
+    sent = voice_preamble(voice, rules_sent=False) + "Can you hear me?"
+    records = [
+        {"role": "user", "content": sent, "metadata": {"source": "voice", "voice": voice}},
+        {"role": "assistant", "content": "."},  # silent: the speech was not for it
+    ]
+    shown = [("user", "Can you hear me?")]
+
+    manager = SimpleNamespace(messages=records, current_session_id="a", load_session=lambda _: True)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_history=[])
+    result = await LocalStateService(llm, None).resume_conversation("saved")
+    assert [(m["role"], m["content"]) for m in result["messages"]] == shown
+    assert [m.content for m in llm.conversation_history] == [sent, "."]  # the model's copy
+
+    plugin = ResumeConversationPlugin(event_bus=Mock(), config={})
+    plugin.llm_service = SimpleNamespace(conversation_history=[], session_stats={})
+    plugin.conversation_manager = SimpleNamespace(messages=records)
+    display = plugin._prepare_session_display("header", "restored")
+    assert [(role, text) for role, text, _ in display if role != "system"] == shown
+
+    plugin.event_bus = SimpleNamespace(emit_with_hooks=AsyncMock())
+    await plugin._load_and_display_session("header", "restored")
+    emitted = plugin.event_bus.emit_with_hooks.call_args.args[1]["messages"]
+    assert [(m["role"], m["content"]) for m in emitted if m["role"] != "system"] == shown
+
+
 class TestResumeCommand:
     """Test suite for resume command functionality."""
 

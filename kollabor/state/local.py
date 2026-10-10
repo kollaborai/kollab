@@ -2908,11 +2908,12 @@ class LocalStateService(StateService):
         except Exception as e:
             raise ValueError(f"ConversationMessage import failed: {e}")
 
+        from kollabor_voice.observer import turn_display_texts
+
         loaded_messages: list[Any] = []
         display_messages: list[dict[str, Any]] = []
-        for msg in raw_messages:
-            if not isinstance(msg, dict):
-                continue
+        raw_messages = [msg for msg in raw_messages if isinstance(msg, dict)]
+        for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = str(msg.get("role", "user"))
             content = deepcopy(msg.get("content") or "")
             metadata = deepcopy(msg.get("metadata") or {})
@@ -2924,12 +2925,8 @@ class LocalStateService(StateService):
                     thinking=msg.get("thinking"),
                 )
             )
-            if role in ("user", "assistant"):
-                visible = content
-                if role == "assistant" and isinstance(content, str):
-                    from kollabor_ai.response_channels import display_response_text
-
-                    visible = display_response_text(content)
+            if role in ("user", "assistant") and shown != "":
+                visible = content if shown is None else shown
                 display_messages.append({"role": role, "content": visible})
 
         # Replace history IN PLACE (list-identity preservation).

@@ -1255,9 +1255,9 @@ Platform: {version_info['platform']}"""
     async def handle_upgrade(self, command: SlashCommand) -> CommandResult:
         """Handle /upgrade command - update Kollab and restart.
 
-        Detects the install method (source, pipx, brew, pip), runs the
-        appropriate update command, then restarts the application so
-        the new version loads immediately.
+        Detects the install method (binary, source, uv, pipx, brew, pip),
+        runs the matching update, then restarts the application so the new
+        version loads immediately.
 
         Args:
             command: Parsed slash command.
@@ -1327,10 +1327,12 @@ Platform: {version_info['platform']}"""
             except Exception:
                 pass
 
-            # Re-launch kollab with the same arguments
-            # execv replaces the current process entirely
-            argv = [sys.executable, "-m", "kollabor_cli_main", *relaunch_args]
-            os.execv(sys.executable, argv)
+            # Re-launch kollab with the same arguments; execv replaces this
+            # process. A binary restarts as its file, which now holds the upgrade.
+            from ....binary import kollab_argv
+
+            argv = [*kollab_argv(), *relaunch_args]
+            os.execv(argv[0], argv)
 
             # Should never reach here
             return CommandResult(
