@@ -4895,6 +4895,10 @@ class HubPlugin(BasePlugin):
                     self._endpoint_setup_error = bind_err
                 self._endpoint_uri = ""
 
+            # The window that forked this daemon looks the agent up in presence
+            # the moment it hears "ready"; until now the record had no socket.
+            self._presence.publish()
+
             # Signal daemon-ready if running in fork-daemon mode
             try:
                 from kollabor.daemon import signal_daemon_ready

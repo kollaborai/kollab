@@ -196,10 +196,12 @@ class RemoteAttach:
 def open_attach_target(value: str) -> tuple[str, Optional[str]]:
     """Resolve ``--attach`` input to ``(identity, local_socket)``.
 
-    A plain identity returns ``(identity, None)`` and attaches exactly as
-    before. ``identity@host`` opens the ssh forward and returns its local socket.
+    A plain identity returns the socket a bare ``kollab`` launch handed over in
+    ``KOLLAB_ATTACH_SOCKET`` (the daemon it just forked or found), else ``None``
+    and the app looks the identity up in presence. ``identity@host`` opens the
+    ssh forward and returns its local socket.
     """
     identity, host = parse_attach_target(value)
     if host is None:
-        return identity, None
+        return identity, os.environ.pop("KOLLAB_ATTACH_SOCKET", None) or None
     return identity, RemoteAttach(identity, host).open()

@@ -142,6 +142,30 @@ class WidgetContext:
 # =============================================================================
 
 
+VOICE_DECISION_WORDS = {"respond": "sent", "ignore": "ignored", "defer": "unsure"}
+
+
+def voice_classifier_label(state: dict) -> str:
+    """What the speech classifier did with the last words, e.g. "laya sent 2 pending".
+
+    "" when no classifier is configured. "stopped" means its request failed
+    and speech waits until /voicemode retry.
+    """
+    name = str(state.get("classifier_name") or "").strip().lower()
+    if not name:
+        return ""
+    name = "ai" if name == "provider" else name
+    if state.get("observer_error"):
+        word = "stopped"
+    elif state.get("observing"):
+        word = "deciding"
+    else:
+        decision = (state.get("last_decision") or {}).get("decision")
+        word = VOICE_DECISION_WORDS.get(decision, "ready")
+    pending = int(state.get("pending") or 0)
+    return f"{name} {word}" + (f" {pending} pending" if pending else "")
+
+
 def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
     """Render live microphone state from the event-bus voice service."""
     try:
@@ -154,6 +178,9 @@ def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
         if voice_state not in {"off", "starting", "listening", "error"}:
             voice_state = "error" if state.get("observer_error") else "off"
         label = f"mic {voice_state}"
+        classifier = voice_classifier_label(state) if voice_state != "off" else ""
+        if classifier:
+            label = f"{label} · {classifier}"
         transcript = state.get("last_transcript") or {}
         heard = str(transcript.get("text") or "").strip()
         if heard and voice_state in {"listening", "error"} and width >= 16:
@@ -164,6 +191,8 @@ def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
             "starting": T().warning[0],
             "error": T().warning[0],
         }.get(voice_state, T().text_dim)
+        if classifier and state.get("observer_error"):
+            color = T().warning[0]
         return _fg(_middle_truncate(label, max(1, width)), color)
     except Exception as e:
         logger.debug("microphone widget unavailable: %s", e, exc_info=True)

@@ -259,7 +259,9 @@ kollab --web-ui
 ```
 
 The flag starts the local engine when needed, launches `kollabor-webui`, reuses a
-healthy engine on port `7433`, and cleans up child processes on exit. For separate
+healthy engine on port `7433`, and cleans up child processes on exit. A second
+`kollab --web-ui` reuses the running UI; `kollab --web-ui --restart` stops it (and
+the engine it started) and starts both again, e.g. after an update. For separate
 development loops, see the [engine README](packages/kollabor-engine/README.md)
 and [web UI README](packages/kollabor-webui/README.md).
 
@@ -562,6 +564,7 @@ kollab --attach lapis           # interactively attach to a live identity
 kollab service install          # keep this folder's agent running at boot/login and after a crash
 kollab --hub status             # hub inspection without a TUI
 kollab --web-ui                 # local engine + browser UI
+kollab --web-ui --restart       # stop the running browser UI, start it again
 ```
 
 ## Repository Layout

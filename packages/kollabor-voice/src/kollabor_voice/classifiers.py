@@ -105,6 +105,9 @@ class VoiceDecision:
     detail: str = ""
     deferred_event_ids: list[str] = field(default_factory=list)
     context_event_ids: list[str] = field(default_factory=list)
+    # Per utterance: the state the model read and each pass's choice, for
+    # /voicemode classifier. Display only; never part of the decision.
+    trace: list[dict] = field(default_factory=list)
 
     def selected(self, records):
         available = {r["event_id"] for r in records}

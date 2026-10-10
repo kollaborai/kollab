@@ -347,6 +347,7 @@ Examples:
   kollab --attach lapis                     # Attach to agent 'lapis' and see its output
   kollab --attach lapis@devbox              # Attach to 'lapis' on devbox over ssh
   kollab --web-ui                           # Launch the engine + browser UI
+  kollab --web-ui --restart                 # Stop the running web UI, start it again
   kollab --reset-config                    # Reset configs to defaults with updated profiles
   kollab --update                          # Update this source checkout from Git
   kollab --sub list                         # Execute /sub list and exit
@@ -528,6 +529,13 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help="Open kollab in your browser (http://127.0.0.1:8080)",
+    )
+
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        default=False,
+        help="With --web-ui: stop the web UI running on its port, then start it again",
     )
 
     parser.add_argument(
@@ -971,8 +979,11 @@ async def async_main() -> None:
 
     # Handle --web-ui: spawn engine + browser UI and block until Ctrl+C.
     if args.web_ui:
-        await _handle_cli_web_ui()
+        await _handle_cli_web_ui(restart=args.restart)
         return
+    if args.restart:
+        print("Error: --restart works with --web-ui", file=sys.stderr)
+        sys.exit(2)
 
     # Handle --hub.
     # Bare `--hub` (or help) must launch full interactive TUI with hub plugin.
@@ -1915,6 +1926,46 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
+def _stop_webui(port: int, timeout: float = 20.0) -> bool:
+    """Stop the web UI listening on ``port``; True once nothing serves it.
+
+    SIGTERMs the ``kollab --web-ui`` launcher that owns the UI, so it stops the
+    engine it started too (its SIGTERM handler runs the same cleanup as
+    Ctrl+C, which a launcher started in the background ignores). A UI started
+    by hand is signalled itself. Escalates to SIGKILL after ``timeout``.
+    """
+    import socket
+
+    import psutil
+
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            if "kollabor_webui" not in " ".join(proc.info["cmdline"] or []):
+                continue
+            # psutil < 6 names it connections().
+            conns = getattr(proc, "net_connections", proc.connections)(kind="tcp")
+            if not any(c.status == psutil.CONN_LISTEN and c.laddr.port == port for c in conns):
+                continue
+            parent = proc.parent()
+            launcher = parent if parent and "--web-ui" in parent.cmdline() else None
+            target = launcher or proc
+            family = [target, *target.children(recursive=True)]
+            target.terminate()
+        except psutil.Error:
+            continue
+        _, alive = psutil.wait_procs([target], timeout=timeout)
+        if alive:
+            for p in family:
+                try:
+                    p.kill()
+                except psutil.Error:
+                    pass
+            psutil.wait_procs(family, timeout=5)
+        break
+    with socket.socket() as probe:
+        return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
 def _pick_engine_port(
     version: str, engine_version, port: int = 7433, tries: int = 10
 ) -> tuple[int, bool]:
@@ -1934,14 +1985,16 @@ def _pick_engine_port(
     raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
 
 
-async def _handle_cli_web_ui() -> None:
+async def _handle_cli_web_ui(restart: bool = False) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
     Both pieces already exist as installable console entry points
     (`kollabor_engine`, `kollabor_webui`); this just wires them together the
-    way the two READMEs describe running them by hand.
+    way the two READMEs describe running them by hand. ``restart`` stops the
+    web UI already on the port first (``--web-ui --restart``).
     """
     import json
+    import socket
     import subprocess
     import time
     import urllib.error
@@ -1962,6 +2015,33 @@ async def _handle_cli_web_ui() -> None:
                 return str(json.loads(resp.read()).get("version") or "unknown")
         except (urllib.error.URLError, OSError, ValueError):
             return "unknown"
+
+    def webui_running(port: int) -> bool:
+        """True when a Kollab web UI answers on `port`: its app titles /openapi.json."""
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/openapi.json", timeout=1) as resp:
+                return json.loads(resp.read()).get("info", {}).get("title") == "Kollab WebUI"
+        except (urllib.error.URLError, OSError, ValueError, AttributeError):
+            return False
+
+    if restart and webui_running(webui_port):
+        print(f"\n  stopping the kollab web ui on {webui_port}...")
+        if not _stop_webui(webui_port):
+            print(f"Error: the web ui on port {webui_port} did not stop", file=sys.stderr)
+            sys.exit(1)
+
+    # The UI keeps its port while it runs, so a second launch reuses it rather
+    # than die binding the port. Anything else on the port is not ours to reuse.
+    if webui_running(webui_port):
+        print(f"\n  kollab web ui already running\n  ui:     http://127.0.0.1:{webui_port}\n")
+        return
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", webui_port)) == 0:
+            print(
+                f"Error: port {webui_port} is in use by another program; set KOLLAB_WEBUI_PORT to a free port",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     try:
         engine_port, reuse = _pick_engine_port(__version__, engine_version)
@@ -2084,6 +2164,7 @@ def _should_use_daemon() -> bool:
         "--hub",
         "--org",
         "--web-ui",
+        "--restart",
         "-h",
         "--help",
         "-v",
@@ -2205,6 +2286,10 @@ def cli_main() -> None:
             # (--agent, --llm, query text) already went to the daemon.
             identity = os.path.basename(socket_path).replace(".sock", "")
             os.environ[LAUNCH_ARGS_ENV] = json.dumps(sys.argv[1:])
+            # Attach to the socket in hand. Looking the name up again can land
+            # before the new daemon's presence record lists its socket, and
+            # ends in "agent 'koordinator' not found" (2026-10-04, 2026-10-09).
+            os.environ["KOLLAB_ATTACH_SOCKET"] = socket_path
             sys.argv = [sys.argv[0], "--attach", identity]
 
             # Store daemon PID so cleanup knows to kill it on ctrl+c. A

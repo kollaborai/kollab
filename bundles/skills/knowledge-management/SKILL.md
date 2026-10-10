@@ -1024,7 +1024,7 @@ while this skill is active, these rules are MANDATORY:
       document when fresh
       don't rely on memory
 
-  [2] WRITE FOR FUTURE MARCO
+  [2] WRITE FOR YOUR FUTURE SELF
       assume you'll forget details
       include context and reasoning
       explain the "why" not just "what"

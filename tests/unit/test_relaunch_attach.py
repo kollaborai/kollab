@@ -23,6 +23,7 @@ import pytest
 
 import kollabor.cli as cli
 import kollabor.daemon as daemon
+from kollabor.attach_remote import open_attach_target
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 
@@ -193,13 +194,25 @@ def test_cli_main_attaches_to_the_live_daemon_and_never_forks(monkeypatch):
 
     async def fake_main():
         ran.append(list(sys.argv))
+        # The window attaches to this socket, never a second lookup by name.
+        ran.append(open_attach_target(sys.argv[2]))
 
     monkeypatch.setattr(cli, "async_main", fake_main)
     monkeypatch.setattr(cli, "_kill_owned_daemon", lambda: None)
     monkeypatch.setattr(sys, "argv", ["kollab", "--llm", "openai-oauth"])
-    for name in (daemon.LAUNCH_ARGS_ENV, "KOLLAB_DAEMON_PID"):
+    for name in (daemon.LAUNCH_ARGS_ENV, "KOLLAB_DAEMON_PID", "KOLLAB_ATTACH_SOCKET"):
         monkeypatch.setenv(name, "")
 
     cli.cli_main()
 
-    assert ran == [["kollab", "--attach", "koordinator"]]
+    assert ran == [
+        ["kollab", "--attach", "koordinator"],
+        ("koordinator", "/tmp/x/koordinator.sock"),
+    ]
+    # Handed over once: nothing the window starts later inherits it.
+    assert "KOLLAB_ATTACH_SOCKET" not in os.environ
+
+
+def test_attach_by_name_has_no_socket_without_a_handover(monkeypatch):
+    monkeypatch.delenv("KOLLAB_ATTACH_SOCKET", raising=False)
+    assert open_attach_target("lapis") == ("lapis", None)

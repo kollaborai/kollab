@@ -60,6 +60,10 @@ def _keyring_get(key_name: str) -> Optional[str]:
         return None
 
 
+# (profile name, plaintext key) pairs get_api_key() already tried to migrate.
+_KEYRING_MIGRATION_TRIED: set[tuple[str, str]] = set()
+
+
 def _keyring_set(key_name: str, value: str) -> bool:
     """Store a value in OS keyring (sync, graceful fallback).
 
@@ -341,14 +345,16 @@ class LLMProfile:
             )
             return ""
 
-        # 4. Plaintext key in config -- try to auto-migrate to keyring (once)
+        # 4. Plaintext key in config -- try to auto-migrate to keyring once per
+        # process. Profiles are rebuilt often (the engine every few seconds), so
+        # the mark lives at module level, not on the object. An OAuth access
+        # token is not an API key: it refreshes and never goes to the keyring.
         if raw:
-            if self.api_key_from_env:
+            if self.api_key_from_env or self.auth_type == "oauth":
                 return raw
-            if not getattr(self, "_keyring_migrated", False):
-                migrated = _keyring_set(self.name, raw)
-                if migrated:
-                    self._keyring_migrated = True
+            if (self.name, raw) not in _KEYRING_MIGRATION_TRIED:
+                _KEYRING_MIGRATION_TRIED.add((self.name, raw))
+                if _keyring_set(self.name, raw):
                     logger.info(
                         f"Profile '{self.name}': auto-migrated API key to OS keyring"
                     )

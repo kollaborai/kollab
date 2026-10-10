@@ -1,0 +1,62 @@
+{
+  "name": "voice classifier screen",
+  "description": "/voicemode classifier opens the two-pane decision screen; Esc returns to the prompt",
+  "config": {
+    "command": "sh -c 'cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec kollab --no-daemon'",
+    "app_init_sleep": 5,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "section",
+      "title": "Open the screen"
+    },
+    {
+      "action": "slash_command",
+      "command": "voicemode",
+      "subcommand": "classifier"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Events 0",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "No classifier calls yet"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Voice is off. /voicemode on, then speak."
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Classifier: "
+    },
+    {
+      "action": "section",
+      "title": "Esc closes it"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯ █",
+      "timeout": 6
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Voice Events"
+    }
+  ]
+}
