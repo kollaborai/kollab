@@ -906,6 +906,26 @@ class QueueProcessor:
             if coordinator and hasattr(coordinator, "force_ready"):
                 coordinator.force_ready()
 
+    def _voice_rules_in_context(self, voice: dict) -> bool:
+        """Whether this voice session's full rules are still in the conversation.
+
+        They ride the session's first voice turn (appended once, so the prompt
+        cache holds). A new session (epoch), or a history that compaction has
+        emptied of them, gets them again.
+        """
+        from kollabor_voice.observer import VOICE_RULES_MARK
+
+        for message in reversed(self.conversation_history):
+            sent = (getattr(message, "metadata", None) or {}).get("voice")
+            if (
+                message.role == "user"
+                and sent
+                and sent.get("epoch") == voice.get("epoch")
+                and VOICE_RULES_MARK in content_to_text(message.content)
+            ):
+                return True
+        return False
+
     async def process_message_batch(
         self,
         messages: List[MessageContent],
@@ -926,10 +946,13 @@ class QueueProcessor:
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
         if self.active_voice:
-            from kollabor_voice.observer import voice_instructions
+            from kollabor_voice.observer import voice_preamble
 
             combined_message = prepend_text(
-                f"[Voice instructions: {voice_instructions(self.active_voice)}]\n", combined_message
+                voice_preamble(
+                    self.active_voice, self._voice_rules_in_context(self.active_voice)
+                ),
+                combined_message,
             )
 
         # Add user message to conversation history

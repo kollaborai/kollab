@@ -77,7 +77,7 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
         raise ValueError("Transcript context exceeds its configured window")
     previous = list(transcript_context)
     groups = utterance_groups(records)
-    selected, probabilities, deferred, reasons = [], [], [], []
+    selected, probabilities, deferred, reasons, trace = [], [], [], [], []
     context_conflict = False
     minimum = manifest()["classifiers"]["laya"]["minimum_probability"]
     for group in groups:
@@ -112,28 +112,38 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
             deferred.extend(r["event_id"] for r in group)
             reasons.append("Speech and transcript history exceed Laya's context")
             continue
-        choice, confidence = _intent_choice(agent, state)
-        probabilities.append(confidence)
-        if confidence < minimum:
-            deferred.extend(r["event_id"] for r in group)
-            reasons.append("Laya is uncertain")
-            continue
-        if recent:
+        passes = [_intent_choice(agent, state)]
+        if recent or (passes[0][1] < minimum and state["recent_conversation"]):
             # The small head can over-weight history and suppress a clear new
-            # request. Treat a disagreement as uncertainty, not a blanket mute
-            # or permission to ignore a previous background-noise notice.
-            current_only = {
-                k: v for k, v in state.items() if k != "recent_transcripts"
+            # request ("Hello, can you hear me?" is 0.71 with history, 0.99
+            # alone), so the words are judged on their own too. A pass at or
+            # above the threshold decides; the agent is asked only when no pass
+            # is sure, or the sure ones disagree.
+            alone = {k: v for k, v in state.items() if k != "recent_transcripts"}
+            alone["recent_conversation"] = ""
+            passes.append(_intent_choice(agent, alone))
+        trace.append(
+            {
+                "state": state,
+                "passes": [
+                    {"label": label, "choice": choice, "probability": round(p, 3)}
+                    for label, (choice, p) in zip(("with context", "words alone"), passes)
+                ],
             }
-            current_only["recent_conversation"] = ""
-            direct_choice, direct_confidence = _intent_choice(agent, current_only)
-            probabilities.append(direct_confidence)
-            if direct_choice != choice or direct_confidence < minimum:
-                deferred.extend(r["event_id"] for r in group)
-                context_conflict |= direct_choice != choice
-                reasons.append("Laya needs the agent to resolve transcript context")
-                continue
-        if choice == "respond":
+        )
+        sure = [p for p in passes if p[1] >= minimum]
+        if not sure or len({c for c, _ in sure}) > 1:
+            probabilities.extend(p for _, p in passes)
+            deferred.extend(r["event_id"] for r in group)
+            context_conflict |= bool(sure)
+            reasons.append(
+                "Laya needs the agent to resolve transcript context"
+                if sure
+                else "Laya is uncertain"
+            )
+            continue
+        probabilities.extend(p for _, p in sure)
+        if sure[0][0] == "respond":
             selected.extend(r["event_id"] for r in group)
     return VoiceDecision(
         "respond" if selected else "defer" if deferred else "ignore",
@@ -149,6 +159,7 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
         ),
         deferred,
         [r["event_id"] for r in transcript_context],
+        trace,
     )
 
 

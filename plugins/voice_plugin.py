@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import os
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 
 from kollabor_events import EventType, Hook, HookPriority
@@ -58,6 +60,10 @@ class VoicePlugin(BasePlugin):
         self._classifier_generation = 0
         self._last_decision = None
         self._decision_deferred_ids = []
+        # /voicemode classifier: each classifier call, oldest first.
+        self._classifier_log = deque(maxlen=50)
+        self._classifier_seq = itertools.count(1)
+        self._classifier_entry = None
         self._speech_api = None
         self._speech_api_profile = None
         self._speech_api_lock = asyncio.Lock()
@@ -139,7 +145,7 @@ class VoicePlugin(BasePlugin):
         self._observer_error = self._routing_error
         self._allow_stale = True
         if name == "laya" and self._client and self.requested:
-            await self._client.call("classifier_prepare")
+            await self._prepare_classifier()
         self._retry.set()
         self._refresh()
         return f"Voice classifier: {CLASSIFIERS[name]}. Saved for this device; pending speech is preserved."
@@ -239,9 +245,15 @@ class VoicePlugin(BasePlugin):
         self._refresh()
         return "Voice Off"
 
+    async def _prepare_classifier(self):
+        # Cache the state the service just entered. Until the next heartbeat the
+        # observer would read the old "error" and latch it again.
+        prepared = await self._client.call("classifier_prepare")
+        self._state = {**self._state, "classifier": prepared}
+
     async def retry_voice(self):
         if self.classifier_name == "laya" and self._client and self.requested:
-            await self._client.call("classifier_prepare")
+            await self._prepare_classifier()
         if (
             self.requested
             and self._lease
@@ -401,9 +413,22 @@ class VoicePlugin(BasePlugin):
         )
 
     async def _observe_loop(self):
+        from kollabor_voice.observer import is_playback_echo
+
         while self.requested:
             if not self._pending:
                 await asyncio.sleep(0.15)
+                continue
+            # The microphone also hears this agent's own voice. Those lines stay
+            # in the voice transcript but are never classified or delivered.
+            echoes = [r for r in self._pending if is_playback_echo(r)]
+            if echoes:
+                dropped = {r["event_id"] for r in echoes}
+                self._pending[:] = [
+                    r for r in self._pending if r["event_id"] not in dropped
+                ]
+                self._log_classifier(echoes, echo=True)
+                logger.info("Dropped %d microphone line(s) echoing playback", len(echoes))
                 continue
             if self._observer_error:
                 await self._retry.wait()
@@ -434,6 +459,7 @@ class VoicePlugin(BasePlugin):
             records = self._pending[:8]
             epoch = self._lease["epoch"]
             classifier_generation = self._classifier_generation
+            self._classifier_entry = None
             try:
                 self._observing = True
                 newest = datetime.fromisoformat(records[-1]["ended_at"]).timestamp()
@@ -464,6 +490,10 @@ class VoicePlugin(BasePlugin):
                     records
                 ):
                     if len(records) < 8:
+                        if self._classifier_entry:
+                            self._classifier_entry["note"] = (
+                                "More speech arrived; decided again with it"
+                            )
                         continue
                 if not self.requested or epoch != self._lease["epoch"]:
                     return
@@ -506,6 +536,10 @@ class VoicePlugin(BasePlugin):
                         raise RuntimeError(
                             f"Voice delivery {result.get('status', 'unknown')}; pending speech was not replayed"
                         )
+                    if self._classifier_entry:
+                        self._classifier_entry["delivered"] = [
+                            r["event_id"] for r in selected
+                        ]
                 del self._pending[: len(records)]
                 self._remember_transcripts(records)
                 chosen = {r["event_id"] for r in selected}
@@ -521,6 +555,10 @@ class VoicePlugin(BasePlugin):
                 self._observer_error = (
                     str(exc) or "Voice observer timed out; /voicemode retry"
                 )
+                if self._classifier_entry is None:
+                    self._log_classifier(records, error=self._observer_error)
+                elif not self._classifier_entry.get("error"):
+                    self._classifier_entry["error"] = self._observer_error
                 logger.warning("Voice observation pending: %s", self._observer_error)
             finally:
                 self._observing = False
@@ -551,14 +589,44 @@ class VoicePlugin(BasePlugin):
             classifier = ProviderClassifier(self._observe_with_provider)
             context = ""
         self._decision_transcript_context = self._transcript_context_for(records)
-        decision = await classifier.decide(
-            DecisionRequest(
-                records, context, self._decision_transcript_context, self.context_lines
-            )
+        entry = self._classifier_entry = self._log_classifier(
+            records,
+            context=context,
+            transcript_context=self._decision_transcript_context,
         )
-        self._last_decision = decision.to_wire()
-        self._decision_deferred_ids = decision.deferred_event_ids
-        return decision.selected(records)
+        started = time.monotonic()
+        try:
+            decision = await classifier.decide(
+                DecisionRequest(
+                    records, context, self._decision_transcript_context, self.context_lines
+                )
+            )
+            self._last_decision = entry["decision"] = decision.to_wire()
+            self._decision_deferred_ids = decision.deferred_event_ids
+            return decision.selected(records)
+        except Exception as exc:
+            entry["error"] = str(exc) or type(exc).__name__
+            raise
+        finally:
+            entry["seconds"] = round(time.monotonic() - started, 3)
+
+    def classifier_log(self):
+        """Each classifier call: the request, the answer, what reached the agent."""
+        return list(self._classifier_log)
+
+    def _log_classifier(self, records, **fields):
+        entry = {
+            "seq": next(self._classifier_seq),
+            "at": time.time(),
+            "classifier": self.classifier_name,
+            "records": records,
+            "decision": None,
+            "error": None,
+            "delivered": [],
+            **fields,
+        }
+        self._classifier_log.append(entry)
+        return entry
 
     def _conversation_context(self):
         from kollabor_ai.message_content import content_to_text

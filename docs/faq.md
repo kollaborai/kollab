@@ -101,7 +101,8 @@ kollab --web-ui
 ```
 
 It starts or reuses the local engine on `127.0.0.1:7433` and serves the browser
-UI on `127.0.0.1:8080`. See the [engine README](../packages/kollabor-engine/README.md)
+UI on `127.0.0.1:8080`. `kollab --web-ui --restart` stops the running UI and the engine it
+started, then starts both again. See the [engine README](../packages/kollabor-engine/README.md)
 and [web UI README](../packages/kollabor-webui/README.md).
 
 ### How do I use pipe mode?

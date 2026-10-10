@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `kollab --web-ui --restart` stops the web UI running on its port, and the engine its launcher started, then starts both again (after an update, say). A second plain `kollab --web-ui` no longer crashes with "Address already in use": it prints the running UI's address.
+- `/voicemode classifier` opens a log of voice classifier decisions. Each call is on the left; on the right, what was heard, what the classifier read (transcript history, recent conversation, the agent's own speech), each pass's answer, the decision and what reached the agent. It updates while open. `/voicemode classifier laya|provider` still switches classifiers.
+- The status bar's mic shows what the classifier did with your last words: `laya sent`, `ignored`, `unsure`, `deciding` or `stopped`, and how many lines wait.
+
+### Changed
+- The voice rules reach the model once per voice session instead of with every voice message (about 290 words each time). Later voice messages carry `[voice mode on: the user said this aloud]`, plus `[intent unsure]` when the classifier was unsure. The rules are sent again when voice mode is turned back on or compaction removes them.
+- Laya decides on whichever pass is sure: the words alone, or the words with recent transcript history. History no longer turns clear speech into "unsure" ("Hello, can you hear me?" scored 0.71 with history and 0.99 alone, and the agent answered "."). The agent decides only when no pass is sure or the sure passes disagree. A Laya worker started before this update keeps the old rule until it restarts.
+
+### Fixed
+- A bare `kollab` could exit with "agent 'koordinator' not found" while listing koordinator as online: the window looked the new agent up before its presence record listed its socket. The agent now lists its socket before it reports ready, and the window attaches to the socket it was handed.
+- The web UI's engine stored the ChatGPT login token in the OS keyring (Keychain on macOS) as if it were an API key, every few seconds. Login tokens never go to the keyring, and a plaintext API key is moved there once per process.
+- The microphone's recording of the agent's own spoken reply came back as your words ("Yes, I can hear you."). A line that repeats the agent's overlapping speech is now dropped before the classifier and never reaches the agent.
+- After one slow Laya call, `/voicemode retry` left voice stuck on "Laya request stopped" with speech pending; only a second retry woke it.
+
 ## [0.14.2] - 2026-10-09
 
 ### Changed
@@ -283,7 +298,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trust, the device name and peer names no longer revert when the client saves stale state on `/connect leave`, `/connect rotate` or a reconnect.
 - `/connect leave` forgets the network, so the device can join another by code; `/connect leave <domain>` refuses a domain it is not on. `/connect knocks` reads the joined directory.
 - Bare `/connect` in a second window of the same workspace (no daemon) opens the Connect screen instead of printing status text. Only the first window can make a code, list requests or decide them, so the second shows the network and this device, says `another window in this workspace runs the network; use /connect there`, and offers no code or keys. `/connect code` there says the same line, and a workspace with no network shows `network none` instead of a code form whose submit could only fail. An attached window whose daemon lost the workspace to a single-process window gets the same screen from the daemon instead of the daemon's status text.
-- `/connect accept` and `/connect reject` name the device (`accepted ana-laptop. it is now a trusted device on marco-home.`) and never print a receipt; two requests with one name are told apart by the start of the fingerprint. `/connect allow` and `deny` print device names, and say they have no effect under `open` trust.
+- `/connect accept` and `/connect reject` name the device (`accepted ana-laptop. it is now a trusted device on home-net.`) and never print a receipt; two requests with one name are told apart by the start of the fingerprint. `/connect allow` and `deny` print device names, and say they have no effect under `open` trust.
 - The knock review has a selection (up/down) and `a`/`r` act on the marked row; a held key cannot decide the next knock or request unseen. One malformed knock no longer hides the others.
 - The code form starts a network on the directory when the code is left empty (first device), prints `joined <network> as <device>. trust: <level>` after an approved join, and keeps a pasted hyphenated or eight-letter domain out of the masked code field. Accepting a join no longer offers an OAuth login; each device runs its own `/login`.
 - Offline devices are not listed while the relay is unreachable or for peers the relay shows online; an accepted stranger is listed like any device once it has a name. `hub_capture`, `hub_spawn` and `hub_stop` refuse an `agent@device` target with a hint to message it.

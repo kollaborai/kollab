@@ -634,7 +634,7 @@ while this skill is active, these rules are MANDATORY:
       single source bias is real
       cross-verify claims across github, docs, community
 
-  [3] CONSIDER MARCO'S SPECIFIC CONTEXT
+  [3] CONSIDER THE USER'S SPECIFIC CONTEXT
       general recommendations aren't helpful
       tie everything to tech-dude's projects and goals
 

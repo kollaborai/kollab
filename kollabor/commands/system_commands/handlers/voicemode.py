@@ -40,7 +40,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
                             "classifier",
-                            "Choose laya or provider; preserves pending speech",
+                            "See each decision; add laya or provider to switch",
                         ),
                     ]
                 ],
@@ -82,16 +82,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             except (ValueError, OSError) as exc:
                 return CommandResult(success=False, message=str(exc), display_type="error")
         if action == "classifier":
-            from kollabor_voice.classifiers import CLASSIFIERS
-
-            return CommandResult(
-                success=True,
-                message=(
-                    f"Voice classifier: {CLASSIFIERS[plugin.classifier_name]}\n"
-                    "/voicemode classifier laya — local, shared persistent worker (default)\n"
-                    "/voicemode classifier provider — active AI provider"
-                ),
-            )
+            return await self._open_classifier_log(plugin)
         if action.startswith("classifier "):
             name = action.removeprefix("classifier ").strip()
             try:
@@ -114,6 +105,38 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         else:
             message = await plugin.start_voice()
         return CommandResult(success=True, message=message)
+
+    async def _open_classifier_log(self, plugin):
+        """Fullscreen: each classifier decision, what it saw and what it said."""
+        from kollabor_voice.classifiers import CLASSIFIERS
+
+        from kollabor_tui.altview.stack_manager import (
+            AltViewStackManager,
+            AltViewUnavailable,
+        )
+        from plugins.altview.voice_classifier_altview import VoiceClassifierAltView
+
+        stack_mgr = self.event_bus.get_service("altview_stack_manager")
+        if stack_mgr is None:
+            stack_mgr = AltViewStackManager(
+                self.event_bus, self.event_bus.get_service("renderer")
+            )
+            self.event_bus.register_service("altview_stack_manager", stack_mgr)
+        view = VoiceClassifierAltView()
+        view.set_plugin(plugin)
+        try:
+            await stack_mgr.push(view, "voice-classifier", reuse=False)
+        except AltViewUnavailable:
+            # No terminal (pipe mode, a detached daemon): name the classifier.
+            return CommandResult(
+                success=True,
+                message=(
+                    f"Voice classifier: {CLASSIFIERS[plugin.classifier_name]}\n"
+                    "/voicemode classifier laya — local, shared persistent worker (default)\n"
+                    "/voicemode classifier provider — active AI provider"
+                ),
+            )
+        return CommandResult(success=True, message="")
 
     async def _status(self, plugin):
         from kollabor_voice.client import VoiceClient

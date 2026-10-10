@@ -419,7 +419,7 @@ async def test_switching_classifier_fences_old_decision_and_reuses_pending(
     plugin.classifier_name = "provider"
     plugin.requested = True
     plugin._lease = {"epoch": "e", "token": "t"}
-    plugin._client = SimpleNamespace(call=AsyncMock())
+    plugin._client = SimpleNamespace(call=AsyncMock(return_value={"state": "ready"}))
     plugin._state = {"classifier": {"state": "ready"}}
     now = time.time()
     records = [
@@ -497,7 +497,15 @@ async def test_classifier_command_lists_and_validates_choices(tmp_path, monkeypa
     plugin = VoicePlugin(event_bus=bus, config={})
     bus.register_service("voice_plugin", plugin)
     handler = VoiceModeCommandHandler(None, bus)
-    result = await handler.handle_voicemode(SimpleNamespace(args=["classifier"]))
+    # With a terminal, bare `classifier` opens the decision screen; without one
+    # (here, as over the web) it names the choices.
+    from kollabor_tui.altview.stack_manager import unavailable_attempts
+
+    token = unavailable_attempts.set([])
+    try:
+        result = await handler.handle_voicemode(SimpleNamespace(args=["classifier"]))
+    finally:
+        unavailable_attempts.reset(token)
     assert (
         "laya" in result.message
         and "provider" in result.message
@@ -597,3 +605,102 @@ def test_microphone_widget_renders_off_state():
         "voice_plugin", SimpleNamespace(status=lambda: {"state": "off"})
     )
     assert "mic off" in render_microphone(20, WidgetContext(event_bus=bus))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["retry", "switch"])
+async def test_waking_the_observer_uses_the_state_it_prepared_not_the_stale_error(
+    entry, monkeypatch
+):
+    from kollabor_voice.store import utc
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.classifier_name = "laya"
+    plugin.requested = True
+    plugin._lease = {"epoch": "e", "token": "t"}
+    stopped = "Laya request stopped; /voicemode retry"
+    # The last heartbeat saw the stopped worker. The service answers the retry
+    # with the state it just entered, before the next heartbeat refreshes it.
+    plugin._state = {"classifier": {"state": "error", "detail": stopped}}
+    plugin._observer_error = stopped
+    plugin._client = SimpleNamespace(
+        call=AsyncMock(return_value={"state": "installing"})
+    )
+    now = time.time()
+    plugin._pending = [
+        {
+            "event_id": "a",
+            "text": "Please send this message to the AI.",
+            "started_at": utc(now - 2),
+            "ended_at": utc(now),
+        }
+    ]
+    observed = []
+
+    async def observe(records):
+        observed.append(list(records))
+        return []
+
+    plugin.observe_records = observe
+    task = asyncio.create_task(plugin._observe_loop())
+    await asyncio.sleep(0.05)
+    if entry == "retry":
+        assert await plugin.retry_voice() == "Voice retrying pending speech"
+    else:
+        monkeypatch.setattr(
+            "kollabor_voice.classifiers.save_classifier", lambda name: None
+        )
+        assert (await plugin.set_classifier("laya")).startswith("Voice classifier:")
+    await asyncio.sleep(0.05)
+    assert plugin._observer_error is None
+    assert not observed
+    plugin._state = {"classifier": {"state": "ready"}}
+    async with asyncio.timeout(2):
+        while not observed:
+            await asyncio.sleep(0.01)
+    plugin.requested = False
+    await asyncio.wait_for(task, 1)
+
+
+@pytest.mark.asyncio
+async def test_own_voice_echo_never_reaches_the_classifier_or_the_agent():
+    from kollabor_voice.store import utc
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.classifier_name = "provider"
+    plugin.requested = True
+    plugin._state = {"classifier": {"state": "ready"}}
+    plugin._lease = {"epoch": "e", "token": "t"}
+    plugin._client = SimpleNamespace(call=AsyncMock())
+    now = time.time()
+    echo = {
+        "event_id": "echo",
+        "text": "Yes, I can hear you.",
+        "started_at": utc(now - 4),
+        "ended_at": utc(now - 3),
+        "playback_overlap": [{"reply_id": "r", "text": "Yes, I can hear you."}],
+    }
+    request = {
+        "event_id": "request",
+        "text": "Please check the README.",
+        "started_at": utc(now - 1),
+        "ended_at": utc(now),
+    }
+    plugin._pending = [echo, request]
+    seen, delivered = [], []
+
+    async def observe(records):
+        seen.append([r["event_id"] for r in records])
+        return records
+
+    async def deliver(data):
+        delivered.append(data)
+        plugin.requested = False
+        return {"status": "queued"}
+
+    plugin.observe_records = observe
+    plugin._deliver = deliver
+    await asyncio.wait_for(asyncio.create_task(plugin._observe_loop()), 1)
+    assert seen == [["request"]]
+    assert [d["message"] for d in delivered] == ["Please check the README."]
+    assert plugin.status()["pending"] == 0
