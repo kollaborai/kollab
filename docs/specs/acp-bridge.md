@@ -36,7 +36,7 @@ Change a label there when this spec changes, then run it.
 | Reach it from another computer | `hub_msg to="claude@home-server"`. That device's trust decides |
 | Approve its tools in kollab | its permission requests are kollab prompts in its windows, under your approval mode; from another agent's window, a line says it is waiting |
 | Stop it, clear it, resume it | Esc or Stop, `/clear`, `/resume`. Kollab says whether the harness resumed or starts fresh |
-| Run kollab agents inside an ACP client | `kollab acp`, or `kollab acp --attach lapis`. Zed first; JetBrains and Buzz once their runs pass (section 9) |
+| Run kollab agents inside an ACP client | `kollab acp`, or `kollab acp --attach lapis`. Zed first; JetBrains, Buzz and T3 Code once their runs pass (section 9) |
 
 ## 2. What you can't do
 
@@ -519,7 +519,10 @@ rendered transcript kept as evidence.
 | missing login (`-32000`) | required | required | required |
 
 Clients: Zed first (initialize, a prompt, a permission, a cancel, attach).
-JetBrains and Buzz are claimed only after the same run.
+JetBrains, Buzz and T3 Code are claimed only after the same run. T3 Code
+opens with one `initialize` that carries both v1 and v2 fields and reads the
+generation from the answer's shape, so `kollab acp` answers version 1 in the v1
+shape (SDK 0.12.1 accepts that request).
 
 **Negative gates.** Each is a test before its phase closes:
 
@@ -530,7 +533,7 @@ JetBrains and Buzz are claimed only after the same run.
 | Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame; two local asks and a network request reaching one kollab agent at once are answered one by one, each on its own thread; a daemon on older code refuses a local frame; a harness agent waiting in `hub_ask` gets a far agent's answer mid-turn; a kollab agent that posts "checking" and then answers in plain text returns the plain text; an ask that reads like an acknowledgement still wakes, and a request that starts no turn ends with `skipped`; a kollab agent that hands off with `wait="true"` answers the ask only after its later turn |
 | Lifecycle | `/clear` and shutdown leave no processes, `setsid` children included; a crash during a tool call is not retried; `usage_update` replaces the status bar's figures, never adds to them |
 | Setup | a profile synced to a second device resolves its own adapter; a `#!/usr/bin/env node` adapter starts under `kollab service`; a missing adapter fails naming it |
-| Inbound | stdout carries only protocol lines, even when kollab code prints; with `--attach`, a client cancel never stops a mesh turn, `session/set_mode` is refused, no `allow_always` is offered, and end of stdin leaves lapis running |
+| Inbound | stdout carries only protocol lines, even when kollab code prints; an `initialize` carrying v2 fields, as T3 Code sends, gets a v1 answer; with `--attach`, a client cancel never stops a mesh turn, `session/set_mode` is refused, no `allow_always` is offered, and end of stdin leaves lapis running |
 | Network | a cross-device trust denial, and trust revoked while a request waits |
 
 A clean transcript is the bar on every live run.

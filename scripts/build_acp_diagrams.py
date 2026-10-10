@@ -73,7 +73,7 @@ def fig_overview():
         o.append(line(204, y + 22, 238, y + 22, "lnagent med"))
     o.append(line(238, 140, 238, 248, "lnagent med"))
     o.append(t(36, 300, "or any ACP client", "dimf", 11.5))
-    for i, s in enumerate(("qualified: Zed first;", "JetBrains and Buzz", "once their runs pass")):
+    for i, s in enumerate(("qualified: Zed first;", "JetBrains, Buzz, T3 Code", "once their runs pass")):
         o.append(t(36, 324 + i * 16, s, "dimf", 11))
     arrow(o, p, ACP, 238, 140, 273, 140)
     o.append(t(240, 128, "ACP", "m agentf", 11, "middle", 700))
