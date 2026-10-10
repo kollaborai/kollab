@@ -7,15 +7,21 @@ model picker. The input box stays usable during setup.
 
 Use `/voicemode status` to inspect setup/download progress, microphone activity,
 model warmup, transcription, speech playback and errors. The transcript file uses
-UTC timestamps. The compact status row shows mic state and, when space permits,
-the latest transcript; it does not show the selected classifier or input-level meter.
+UTC timestamps. The compact status row shows mic state, what the classifier did
+with your last words (`laya sent`, `ignored`, `unsure`, `deciding` or `stopped`, then
+how many lines wait) and, when space permits, the latest transcript. It has no
+input-level meter.
 
 - `/voicemode` toggles voice for this chat.
 - `/voicemode on` makes this chat the responding conversation.
 - `/voicemode off` releases its microphone lease and cancels unplayed speech.
 - `/voicemode status` shows the service, owner, devices, transcript and queues.
 - `/voicemode retry` retries failed setup or explicitly retries pending speech.
-- `/voicemode classifier` shows the selected classifier and both choices.
+- `/voicemode classifier` opens the decision log: each classifier call on the left;
+  on the right what was heard, what the classifier read (transcript history, recent
+  conversation, the agent's own speech), each pass's answer, the decision, and what
+  reached the agent. Lines dropped as the agent's own voice show as `echo`. It
+  updates while open. Without a terminal it names the classifier and both choices.
 - `/voicemode classifier laya` selects the default local classifier.
 - `/voicemode classifier provider` selects the active AI provider instead.
 - `/voicemode context` shows the recent transcript window (default 10 lines).
@@ -148,15 +154,30 @@ transcript lines include ignored speech and already admitted requests. They are
 context only and cannot be submitted again. The window clears when capture is
 restarted and never includes a different microphone owner's session.
 
-Laya compares its history-aware decision with the current utterance alone. If
-they disagree, the main agent receives the full history and new words to decide.
-This prevents a background-TV notice from acting as a blanket mute on a clear
-new request. If the full transcript window exceeds Laya's context, it also goes
-to the main agent intact. Confident background speech is ignored. Uncertain, unsupported-language
+Laya judges the utterance twice when history is present: once with the history
+and once on its own. A pass at or above the confidence threshold (0.8) decides,
+so history alone cannot push a clear request into doubt. The main agent
+receives the full history and new words to decide only when neither pass is sure
+or the sure passes disagree. This prevents a background-TV notice from acting as
+a blanket mute on a clear new request. If the full transcript window exceeds
+Laya's context, it also goes to the main agent intact. Confident background
+speech is ignored. Uncertain, unsupported-language
 or oversized utterances go to the main agent with a note asking it to decide
 whether the human expects a response. They do not block later speech.
 The main agent responds normally when addressed, or returns exactly `.` to stay
 silent. A response containing only that period never reaches speech synthesis.
+
+Before classification, a line that repeats what the assistant itself just spoke
+(the microphone hears its own playback) is matched against the overlapping
+playback text. Echo stays in the transcript but is never classified or
+delivered. A reply under three words counts as echo only when it equals a whole
+spoken sentence, so "stop" over a reply that says "stop" still arrives.
+
+The first voice turn of a session carries the full voice rules (the
+`<display_text>`/`<spoken_text>` fields and the silence rules). Later turns
+carry only `[voice mode on: the user said this aloud]`, plus `[intent unsure]`
+for speech Laya deferred. A new voice session, or a history that compaction
+emptied of the rules, sends them again.
 Invalid results or provider failures pause admission with a visible error;
 there is no automatic switch to another provider.
 `/voicemode status` names the selected classifier and reports actual setup/readiness.

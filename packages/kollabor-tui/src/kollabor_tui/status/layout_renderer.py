@@ -11,7 +11,7 @@ from kollabor_tui.design_system import T, solid, solid_fg
 from kollabor_tui.terminal_state import get_global_width
 from kollabor_tui.visual_effects import PulseEffect, ShimmerEffect, UltraShimmerEffect
 
-from .core_widgets import WidgetContext
+from .core_widgets import WidgetContext, voice_classifier_label
 from .layout_manager import RowConfig, StatusLayoutManager, WidgetConfig
 from .navigation_state import NavigationMode, SelectionType
 from .utils import fg as _fg
@@ -345,7 +345,9 @@ class StatusLayoutRenderer:
         voice_state = str(state.get("state") or "off").replace("_", " ").title()
         transcript = state.get("last_transcript") or {}
         text = str(transcript.get("text") or "").strip()
-        lines = [f"Voice {voice_state}", f"Heard: {text or 'none'}"]
+        classifier = voice_classifier_label(state) if voice_state != "Off" else ""
+        headline = f"Voice {voice_state}" + (f" · {classifier}" if classifier else "")
+        lines = [headline, f"Heard: {text or 'none'}"]
         max_width = max(1, int(width or self._terminal_width))
         return [line[:max_width] for line in lines]
 

@@ -145,7 +145,7 @@ class ConnectOutcome:
     status: ConnectStatus
     receipt_id: str | None = field(default=None, repr=False)
     # One line of non-secret text shown in place of the generic one, e.g.
-    # `joined marco-home as home-server. trust: open`.
+    # `joined home-net as home-server. trust: open`.
     detail: str = ""
     # A second line: for an approved join what happens to settings and logins,
     # for a failed one why.

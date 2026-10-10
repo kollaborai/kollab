@@ -685,7 +685,7 @@ while this skill is active, these rules are MANDATORY:
       not everything popular is meaningful
       focus on trends with substance
 
-  [3] ALWAYS TIE TO MARCO'S CONTEXT
+  [3] ALWAYS TIE TO THE USER'S CONTEXT
       general trends aren't helpful
       tech-dude-specific relevance is everything
 

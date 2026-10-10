@@ -242,6 +242,36 @@ class TestQueueProcessor(unittest.TestCase):
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
 
+    def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        self.add_message_fn.side_effect = (
+            lambda message, **_: self.conversation_history.append(message)
+        )
+
+        def say(text, **voice):
+            voice = {"epoch": "e1", "uncertain_event_ids": [], **voice}
+            self.loop.run_until_complete(self.processor.process_message_batch(
+                [QueuedInput(text, voice)], "parent"
+            ))
+            return self.conversation_history[-1].content
+
+        first = say("Hello, can you hear me?")
+        self.assertIn("<display_text>", first)
+        self.assertIn("<spoken_text>", first)
+        self.assertEqual(
+            say("Run the tests"),
+            "[voice mode on: the user said this aloud]\nRun the tests",
+        )
+        self.assertEqual(
+            say("hmm", uncertain_event_ids=["x"]),
+            "[voice mode on: the user said this aloud] [intent unsure]\nhmm",
+        )
+        # a new voice session, or rules that compaction dropped, send them again
+        self.assertIn("<display_text>", say("Hi again", epoch="e2"))
+        self.conversation_history.clear()
+        self.assertIn("<display_text>", say("After compaction"))
+
     def test_typed_overflow_cannot_drop_a_durably_admitted_voice_input(self):
         from kollabor_agent.queue_processor import QueuedInput
         self.processor.processing_queue = asyncio.Queue(maxsize=1)

@@ -295,6 +295,104 @@ def test_context_disagreement_defers_full_request_instead_of_dropping_or_admitti
     assert decision.confidence is None
 
 
+def _laya_agent(with_history, alone):
+    """Fake Laya head: (choice, probability) for the pass with history, and without."""
+
+    def classify(state, _):
+        has_history = bool(state.get("recent_transcripts") or state["recent_conversation"])
+        choice, p = with_history if has_history else alone
+        other = "respond" if choice == "ignore" else "ignore"
+        return {
+            "answers": {
+                "response": {"choice": choice, "probabilities": {choice: p, other: 1 - p}}
+            }
+        }
+
+    return SimpleNamespace(
+        cfg={"max_len": 1024, "head_max_len": 256},
+        tok=SimpleNamespace(encode=lambda _: [0]),
+        predict=classify,
+    )
+
+
+@pytest.mark.parametrize(
+    "with_history, alone, expected",
+    [
+        # history drags clear speech under 0.8: the pass that is sure decides
+        (("ignore", 0.71), ("respond", 0.99), "respond"),  # "Hello, can you hear me?"
+        (("respond", 0.71), ("respond", 0.99), "respond"),
+        (("respond", 0.607), ("ignore", 0.998), "ignore"),  # background chatter
+        (("ignore", 0.607), ("ignore", 0.998), "ignore"),
+        (("respond", 0.99), ("ignore", 0.6), "respond"),  # history is the sure one
+        # no pass is sure, or the sure ones split: the agent decides
+        (("ignore", 0.71), ("respond", 0.6), "defer"),
+        (("ignore", 0.99), ("respond", 0.99), "defer"),
+    ],
+)
+def test_sure_pass_decides_so_history_cannot_demote_clear_speech(
+    with_history, alone, expected
+):
+    from kollabor_voice.laya_worker import predict
+
+    history = [record(1, "The TV is background noise.")]
+    current = [record(2, "Hello, can you hear me?")]
+    decision = predict(_laya_agent(with_history, alone), current, "", history)
+    assert decision.decision == expected
+    assert decision.deferred_event_ids == (["2"] if expected == "defer" else [])
+    if expected == "respond" and with_history[1] < 0.8:
+        assert decision.confidence == alone[1]
+
+
+def test_conversation_context_alone_adds_a_second_pass_only_when_unsure():
+    from kollabor_voice.laya_worker import predict
+
+    current = [record(2, "Hello, can you hear me?")]
+    rescued = _laya_agent(("ignore", 0.71), ("respond", 0.99))
+    assert predict(rescued, current, "assistant: Done.", []).decision == "respond"
+    sure = _laya_agent(("respond", 0.95), ("ignore", 0.99))
+    assert predict(sure, current, "assistant: Done.", []).decision == "respond"
+
+
+def _heard(text, *spoken):
+    return {
+        "text": text,
+        "playback_overlap": [{"reply_id": "r", "text": s} for s in spoken],
+    }
+
+
+@pytest.mark.parametrize(
+    "text, spoken",
+    [
+        ("Yes, I can hear you.", ["Yes, I can hear you."]),
+        ("yes i can hear you", ["Yes, I can hear you."]),
+        ("I can hear you", ["Yes, I can hear you."]),  # a chunk of the reply
+        ("Yes I can here you", ["Yes, I can hear you."]),  # one transcription slip
+        ("Yes, I can hear you. Anything else?", ["Yes, I can hear you.", "Anything else?"]),
+        ("Okay.", ["Okay."]),
+        ("I'll handle it here.", ["I’ll handle it here."]),  # curly apostrophe
+    ],
+)
+def test_own_playback_picked_up_by_the_mic_is_echo(text, spoken):
+    from kollabor_voice.observer import is_playback_echo
+
+    assert is_playback_echo(_heard(text, *spoken))
+
+
+@pytest.mark.parametrize(
+    "text, spoken",
+    [
+        ("Hello, can you hear me?", ["Yes, I can hear you."]),  # the human, same room
+        ("Stop.", ["I will stop the music now."]),  # barge-in on a word the reply says
+        ("Run the unit tests please", ["Do you want me to check the build?"]),
+        ("Hello, can you hear me?", []),  # nothing was playing
+    ],
+)
+def test_the_humans_words_over_playback_are_not_echo(text, spoken):
+    from kollabor_voice.observer import is_playback_echo
+
+    assert not is_playback_echo(_heard(text, *spoken))
+
+
 @pytest.mark.asyncio
 async def test_context_command_defaults_validation_persistence_and_no_activation(
     plugin, tmp_path
@@ -322,3 +420,23 @@ async def test_context_command_defaults_validation_persistence_and_no_activation
     for invalid in (True, None, 0, 51):
         with pytest.raises(ValueError):
             save_context_lines(invalid)
+
+
+def test_decision_traces_what_laya_read_and_each_pass():
+    """`/voicemode classifier` shows this: the state read and both passes' answers."""
+    from kollabor_voice.classifiers import VoiceDecision
+    from kollabor_voice.laya_worker import predict
+
+    history = [record(1, "The TV is background noise.")]
+    current = [record(2, "Hello, can you hear me?")]
+    decision = predict(
+        _laya_agent(("ignore", 0.71), ("respond", 0.99)), current, "", history
+    )
+
+    [trace] = VoiceDecision.from_wire(decision.to_wire()).trace
+    assert trace["state"]["text"] == "Hello, can you hear me?"
+    assert trace["state"]["recent_transcripts"] == ["The TV is background noise."]
+    assert trace["passes"] == [
+        {"label": "with context", "choice": "ignore", "probability": 0.71},
+        {"label": "words alone", "choice": "respond", "probability": 0.99},
+    ]

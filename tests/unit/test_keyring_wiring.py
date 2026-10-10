@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor_ai.profile_manager import (
+    _KEYRING_MIGRATION_TRIED,
     KEYRING_SENTINEL_PREFIX,
     LLMProfile,
     ProfileManager,
@@ -176,12 +177,34 @@ class TestKeyringHelpers(unittest.TestCase):
 class TestGetApiKeyResolution(unittest.TestCase):
     """Test LLMProfile.get_api_key() resolution order."""
 
-    def _make_profile(self, name="test-profile", api_key=""):
+    def setUp(self):
+        _KEYRING_MIGRATION_TRIED.clear()
+
+    def _make_profile(self, name="test-profile", api_key="", auth_type=""):
         return LLMProfile(
             name=name,
             provider="anthropic",
             api_key=api_key,
+            auth_type=auth_type,
         )
+
+    @patch("kollabor_ai.profile_manager._keyring_set")
+    def test_plaintext_migrates_once_per_process(self, mock_set):
+        """Rebuilt profiles (the engine rebuilds every few seconds) write once."""
+        mock_set.return_value = True
+        for _ in range(3):
+            profile = self._make_profile(api_key="sk-ant-plaintext-key")
+            self.assertEqual(profile.get_api_key(), "sk-ant-plaintext-key")
+        mock_set.assert_called_once_with("test-profile", "sk-ant-plaintext-key")
+
+    @patch("kollabor_ai.profile_manager._keyring_set")
+    def test_oauth_access_token_never_goes_to_keyring(self, mock_set):
+        """The openai-oauth profile carries its access token in api_key."""
+        profile = self._make_profile(
+            name="openai-oauth", api_key="access-token", auth_type="oauth"
+        )
+        self.assertEqual(profile.get_api_key(), "access-token")
+        mock_set.assert_not_called()
 
     @patch.dict(os.environ, {"KOLLAB_TEST_PROFILE_API_KEY": "env-key"})
     def test_env_var_wins_over_everything(self):

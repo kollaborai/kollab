@@ -205,7 +205,7 @@ NO_NETWORK = "network none"
 
 
 def network_label(network: str, domain: str) -> str:
-    """`marco-home  via kollabor.ai`, or just the domain when it is the name."""
+    """`home-net  via kollabor.ai`, or just the domain when it is the name."""
     return domain if network == domain else f"{network}  via {domain}"
 
 
