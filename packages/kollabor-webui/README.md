@@ -137,7 +137,7 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 - `GET /sessions`
 - `DELETE /sessions/{session_id}`
 - `POST /sessions/{session_id}/assistant`
-- `POST /sessions/{session_id}/cancel`
+- `POST /sessions/{session_id}/cancel` (Stop; a closed assistant stream never cancels the turn)
 - `POST /sessions/{session_id}/permission`
 - `GET /sessions/{session_id}/permissions`
 - `POST /sessions/{session_id}/permissions/mode`

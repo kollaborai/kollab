@@ -37,7 +37,8 @@ while IFS= read -r line; do
 
     # Parse the method from the JSON (simple grep-based parsing)
     method=$(echo "$line" | grep -o '"method"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
-    id=$(echo "$line" | grep -o '"id"[[:space:]]*:[[:space:]]*[0-9]*' | sed 's/.*:[[:space:]]*//')
+    # Kollab sends uuid string ids; keep the quotes so the reply echoes it as sent.
+    id=$(echo "$line" | grep -oE '"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+)' | sed -E 's/^"id"[[:space:]]*:[[:space:]]*//')
 
     log "Method: $method, ID: $id"
 

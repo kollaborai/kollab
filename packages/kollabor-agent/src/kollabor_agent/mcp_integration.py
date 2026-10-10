@@ -913,7 +913,12 @@ class MCPIntegration:
             logger.warning("Failed to refresh native tools after MCP reload: %s", exc)
 
     async def cancel_active_connections(self) -> None:
-        """Stop in-flight MCP work so an ESC request returns promptly."""
+        """Stop in-flight MCP work so an ESC request returns promptly.
+
+        Only a server still starting or waiting on a request is closed; an
+        idle one keeps running, since a cancelled turn that never called it
+        has nothing to stop there.
+        """
         self._cancel_requested = True
 
         connections: list[MCPServerConnection] = []
@@ -921,7 +926,8 @@ class MCPIntegration:
             *self.server_connections.values(),
             *getattr(self, "_active_connections", set()),
         ]:
-            if not any(existing is connection for existing in connections):
+            busy = connection._pending_requests or not connection.initialized
+            if busy and not any(existing is connection for existing in connections):
                 connections.append(connection)
 
         if connections:

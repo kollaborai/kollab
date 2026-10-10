@@ -1,0 +1,85 @@
+{
+  "name": "web-chat-switch-keeps-turn",
+  "description": "A turn sent from the web UI keeps running when the page opens another chat mid-turn: the browser closes that chat's stream, and the engine must not cancel the agent (2026-10-10: switching to another agent's chat left the terminal at 'Request cancelled'). Plain kollab (daemon + this window) in a throwaway HOME, the engine from this checkout, a fake model that holds its answer (fake_llm.py 'slowreply'), no keyring. Stop (POST /cancel) must still end a turn.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-switch.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-web-switch.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-web-switch.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\"",
+      "assert_contains": "fake model on port"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "label": "the web UI sends a turn, then opens another chat"
+    },
+    {
+      "action": "shell",
+      "description": "send through the engine's assistant route and close the stream mid-turn",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-switch.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_send_then_leave.py\" \"slowreply web switch\"",
+      "assert_contains": "the agent finished the turn"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: slowreply web switch",
+      "timeout": 30,
+      "description": "the reply shows in the agent's terminal"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Request cancelled",
+      "description": "leaving the chat did not cancel the turn"
+    },
+    {
+      "action": "section",
+      "label": "Stop still cancels a turn"
+    },
+    {
+      "action": "shell",
+      "description": "send, leave, then press Stop (POST /cancel)",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-switch.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_send_then_leave.py\" --stop \"slowreply web stop\"",
+      "assert_contains": "the agent never finished the turn"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Request cancelled",
+      "timeout": 20,
+      "description": "the terminal shows the turn was cancelled"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "pong: slowreply web stop",
+      "description": "the stopped turn never answered"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-switch.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}
