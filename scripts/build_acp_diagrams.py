@@ -73,6 +73,8 @@ def fig_overview():
         o.append(line(204, y + 22, 238, y + 22, "lnagent med"))
     o.append(line(238, 140, 238, 248, "lnagent med"))
     o.append(t(36, 300, "or any ACP client", "dimf", 11.5))
+    for i, s in enumerate(("qualified: Zed first;", "JetBrains and Buzz", "once their runs pass")):
+        o.append(t(36, 324 + i * 16, s, "dimf", 11))
     arrow(o, p, ACP, 238, 140, 273, 140)
     o.append(t(240, 128, "ACP", "m agentf", 11, "middle", 700))
     # kollab on this machine
@@ -105,7 +107,7 @@ def fig_overview():
     o.append(t(276, 433, "the network", "", 13, None, 700))
     o.append(t(276, 450, "every agent above is agent@laptop on your other devices", "dimf", 11.5))
     return svg(W, 474,
-               "Kollab speaks ACP both ways: Zed, JetBrains, Buzz or any ACP client drives a kollab agent "
+               "Kollab speaks ACP both ways: an ACP client such as Zed drives a kollab agent "
                "through kollab acp, and kollab runs Claude Code, Codex and Gemini CLI as hub members over "
                "ACP; the network makes every one of them reachable from your other devices.",
                "".join(o), 760)
@@ -118,7 +120,7 @@ KOLLAB_OWNS = [
     ("Network and trust", "open, agents, manual: as for any agent"),
     ("Windows", "terminal, web UI and phone attach to it"),
     ("Permission prompts", "your approval mode, in every window"),
-    ("The transcript", "what you see; /resume reloads it"),
+    ("The transcript", "what you see; /resume: resumed or fresh"),
 ]
 HARNESS_OWNS = [
     ("Model and login", "Pro/Max, ChatGPT or an API key"),
@@ -132,7 +134,7 @@ WIRE = [
     (1, "session/new", "cwd + kollab's hub tools"),
     (1, "session/prompt", "your input and messages to claude"),
     (-1, "session/update", "text, thinking, tool cards, plan"),
-    (0, "session/request_permission", "you or your approval mode answer"),
+    (0, "session/request_permission", "an offered option, picked in kollab"),
     (1, "session/cancel", "Esc or Stop"),
     (-1, "stop reason", "end_turn, cancelled, refusal, …"),
 ]
@@ -192,10 +194,10 @@ STEPS = [
     (ACP, "cc", "claude", "session/request_permission", "Bash: pytest -q"),
     (YOU, "claude", "you", "permission prompt", "in every window attached to claude"),
     (YOU, "you", "claude", "a · approve once", ""),
-    (ACP, "claude", "cc", "allow_once", "the option Claude Code offered"),
+    (ACP, "claude", "cc", "selected option", "the allow-once option Claude Code offered"),
     ("band", "C", "the answer comes back"),
-    (ACP, "cc", "claude", "end_turn", "its last text is the review"),
-    (HUB, "claude", "lapis", "“2 issues: …”", "claude's final text, on lapis's thread"),
+    (ACP, "cc", "claude", "end_turn", "after its final message: the review"),
+    (HUB, "claude", "lapis", "“2 issues: …”", "its final message, on lapis's thread"),
     (YOU, "lapis", "you", "“claude found 2 issues: …”", ""),
 ]
 
@@ -247,9 +249,9 @@ def fig_sequence():
     return svg(W, height,
                "One request in 11 steps: you ask lapis to have claude review your diff; lapis sends a hub "
                "message; kollab turns it into an ACP prompt for Claude Code; Claude Code streams tool cards "
-               "and asks permission to run the tests; you approve in kollab's prompt; Claude Code ends its "
-               "turn, kollab sends its final text to lapis on lapis's thread, and lapis tells you what "
-               "claude found.",
+               "and asks permission to run the tests; you approve in kollab's prompt and kollab selects the "
+               "allow-once option Claude Code offered; Claude Code ends its turn, kollab sends its final "
+               "message to lapis on lapis's thread, and lapis tells you what claude found.",
                "".join(o), 760)
 
 
@@ -257,38 +259,41 @@ def fig_sequence():
 def fig_network():
     p = "a4"
     o = [markers(p)]
-    legend(o, p, [(NET, "kollab network · sealed"), (ACP, "ACP · stdio, inside one machine")])
-    panel(o, 20, 52, 270, 300, "laptop", "where you work")
-    box(o, 36, 124, 238, 50, "lapis", 'hub_msg to="claude@home-server"', sub_mono=True)
-    for i, s in enumerate(("claude@home-server is a name in the",
-                           "roster, like any agent@device;",
-                           "the web UI here opens it as a chat")):
-        o.append(t(36, 286 + i * 18, s, "dimf", 11.5))
-    panel(o, 365, 52, 270, 300, "the network", "relay or direct · sealed")
-    box(o, 381, 124, 238, 50, "relay", "forwards frames it can't read")
-    box(o, 381, 196, 238, 56, "home-server's trust decides", "open · agents · manual", sub_mono=True)
+    legend(o, p, [(NET, "kollab network · sealed"), (HUB, "kollab, inside home-server"), (ACP, "ACP · stdio, inside one machine")])
+    panel(o, 20, 52, 280, 360, "laptop", "where you work")
+    panel(o, 340, 52, 250, 360, "the network", "relay or direct · sealed")
+    panel(o, 630, 52, 350, 360, "home-server", "kollab + Claude Code installed")
+    box(o, 36, 124, 248, 50, "lapis", 'hub_msg to="claude@home-server"', sub_mono=True)
+    for i, s in enumerate(("claude@home-server is a name in",
+                           "the roster, like any agent@device;",
+                           "the web UI here opens it when",
+                           "home-server's trust allows")):
+        o.append(t(36, 300 + i * 18, s, "dimf", 11.5))
+    box(o, 356, 124, 218, 50, "relay", "forwards frames it can't read")
     for i, s in enumerate(("kollab's own protocol carries it:",
                            "ACP's remote transport is a draft,",
                            "so ACP never crosses the wire")):
-        o.append(t(381, 286 + i * 18, s, "dimf", 11.5))
-    panel(o, 710, 52, 270, 300, "home-server", "kollab + Claude Code installed")
-    box(o, 726, 124, 238, 50, "claude", "kollab agent · brain: Claude Code", cls="fbg lnagent")
-    arrow(o, p, ACP, 845, 176, 845, 214, both=True)
-    o.append(t(857, 199, "ACP · stdio", "m agentf", 11))
-    box(o, 726, 216, 238, 50, "claude-agent-acp", "Claude Code, logged in here", mono=True)
-    o.append(t(726, 286, "ACP never leaves this machine;", "agentf", 11.5, None, 700))
-    o.append(t(726, 304, "permission prompts go to every", "dimf", 11.5))
-    o.append(t(726, 322, "window that has claude open", "dimf", 11.5))
-    arrow(o, p, NET, 276, 149, 379, 149, both=True)
-    o.append(t(327, 141, "hub_msg", "m", 11, "middle"))
-    o.append(t(327, 166, "sealed", "m dimf", 11, "middle"))
-    arrow(o, p, NET, 621, 149, 724, 149, both=True)
-    o.append(t(672, 141, "delivered", "m", 11, "middle"))
-    o.append(t(672, 166, "both ways", "m dimf", 11, "middle"))
-    return svg(W, 372,
-               "Across machines: lapis on the laptop sends a hub message to claude@home-server; the "
-               "network carries it sealed, home-server's trust decides, and home-server's kollab hands it "
-               "to Claude Code over ACP on stdio. ACP never leaves home-server.",
+        o.append(t(356, 300 + i * 18, s, "dimf", 11.5))
+    # on home-server the trust check sits on the path, before the harness
+    box(o, 646, 124, 318, 50, "trust: open · agents · manual", "may lapis@laptop reach claude?", cls="fbg lnseal")
+    arrow(o, p, HUB, 805, 176, 805, 204)
+    o.append(t(815, 194, "allowed", "m dimf", 11))
+    box(o, 646, 206, 318, 50, "claude", "kollab agent · brain: Claude Code", cls="fbg lnagent")
+    arrow(o, p, ACP, 805, 258, 805, 290, both=True)
+    o.append(t(815, 278, "ACP · stdio", "m agentf", 11))
+    box(o, 646, 292, 318, 50, "claude-agent-acp", "Claude Code, logged in here", mono=True)
+    o.append(t(646, 370, "ACP never leaves this machine;", "agentf", 11.5, None, 700))
+    o.append(t(646, 388, "prompts go to the windows its trust lets open claude", "dimf", 11.5))
+    arrow(o, p, NET, 286, 149, 354, 149, both=True)
+    o.append(t(320, 141, "hub_msg", "m", 11, "middle"))
+    o.append(t(320, 166, "sealed", "m dimf", 11, "middle"))
+    arrow(o, p, NET, 576, 149, 644, 149, both=True)
+    o.append(t(610, 141, "delivered", "m", 11, "middle"))
+    o.append(t(610, 166, "both ways", "m dimf", 11, "middle"))
+    return svg(W, 432,
+               "Across machines: lapis on the laptop sends a hub message to claude@home-server; the network "
+               "carries it sealed; on home-server, trust decides first, then kollab hands the message to "
+               "Claude Code over ACP on stdio. ACP never leaves home-server.",
                "".join(o), 760)
 
 
