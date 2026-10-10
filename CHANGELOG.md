@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-09
+
 ### Added
 - Kollab ships as a single-file binary for macOS (11 and later) and Linux (glibc 2.28 and later) on x86_64 and arm64, attached to every GitHub release. The install script installs it, with no Python needed, and falls back to uv, pipx or pip elsewhere. In the binary, `/upgrade` and `kollab --update` download the latest release's binary, check its SHA-256 and that it starts, then swap it in and restart.
 - With automatic updates on (`/config` → Auto Update Kollab), launching kollab installs a newer release before anything starts, then restarts as the new version with the same arguments.
