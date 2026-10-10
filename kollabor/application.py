@@ -1598,7 +1598,11 @@ class TerminalLLMChat:
 
             # Display notification if newer version available
             if release_info:
-                if self.config.get("kollabor.updates.auto_update_enabled", False):
+                # The window the user launched installs updates; a daemon only
+                # notifies, so the two never install the same release at once.
+                if self.config.get(
+                    "kollabor.updates.auto_update_enabled", False
+                ) and not getattr(self.args, "detached", False):
                     update_result: AutoUpdateResult = await asyncio.to_thread(
                         run_auto_update
                     )

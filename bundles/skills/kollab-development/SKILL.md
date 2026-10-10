@@ -53,23 +53,18 @@ consumers or the maintainer, rather than inventing them.
 5. For DNS, `/connect`, relay, A2A, or deployment work, read
    [relay-change-guide.md](references/relay-change-guide.md) before editing.
 
-## Release worktree and checkout preservation
+## Releases and the shared checkout
 
-For any release request, read `docs/release-process.md` and prepare it in a
-dedicated worktree created from the fetched target commit. Record the active
-checkout's branch, HEAD, and staged/unstaged/untracked state first. If it is dirty,
-do not edit or stage release files there. Do not modify, reset, stash, clean,
-restore, or branch-switch the user's active checkout to make release preparation
-convenient.
-
-Stage an explicit list of release-owned files only. Review staged paths and the
-full staged diff before committing; never use broad staging in a shared checkout.
-Merge the release-prep PR through the normal CI gate, and tag only the verified
-merged commit after checking package versions and changelog parity. After merge
-or publish, leave the original checkout as-is; do not auto-sync or clean it.
-Reconcile local changes only when explicitly requested, after comparing each
-local staged, unstaged, and untracked change with upstream and verifying that
-reconciliation preserves all of them.
+For any release request, read `docs/release-process.md`. Agents share one
+checkout on `main`: never create a worktree, stash, reset, clean, restore, or
+switch branches in it, and never build a release from uncommitted files or a
+scratch clone. Commit the release on local `main` by explicit paths (other
+people's edits stay uncommitted and out of it), push `HEAD` to
+`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
+and tag the merge. Once it is published, run `uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`
+(the release binary in `~/.local/bin`). The release is not done until
+`main` matches `origin/main`, `git status` lists none of the release's files,
+and `kollab --version` reports the new version.
 
 ## Put the change in its existing owner
 

@@ -3402,9 +3402,13 @@ class HubPlugin(BasePlugin):
         # so we don't fork a second daemon layer.
         import sys
 
-        python = sys.executable
-        argv = [a for a in sys.argv if a != "--detached"]
-        exec_argv = [python] + argv
+        from kollabor.binary import running_binary
+
+        # A binary restarts as its file (it may hold an upgrade since); anything
+        # else reruns this interpreter on sys.argv[0].
+        argv = [a for a in sys.argv[1:] if a != "--detached"]
+        binary = running_binary()
+        exec_argv = [str(binary), *argv] if binary else [sys.executable, sys.argv[0], *argv]
 
         self._self_restart_requested = True
         self._self_restart_cmd = exec_argv

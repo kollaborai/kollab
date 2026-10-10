@@ -1,0 +1,73 @@
+name: Binaries
+
+# The single-file kollab binary for each platform (scripts/build_binary.py).
+# publish.yml calls this for every release tag and attaches the binaries to the
+# GitHub Release, where install.sh and /upgrade download them. Pull requests that
+# change the build or the code that installs a binary run it as a check.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/binaries.yml
+      - scripts/build_binary.py
+      - install.sh
+      - kollabor/binary.py
+      - kollabor/updates/auto_update.py
+      - pyproject.toml
+      - packages/*/pyproject.toml
+      - uv.lock
+  workflow_call:
+    inputs:
+      version:
+        description: The version every binary must report (a release tag such as v0.15.1)
+        required: true
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: binary/${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-14
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      # Builds the wheels from this commit, packs them with a portable CPython,
+      # then runs the binary: --version, kollab's imports and an HTTPS request.
+      - name: Build the binary and check that it runs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/build_binary.py --out dist/bin ${VERSION:+--expect-version "$VERSION"}
+
+      # Its wheels are picked for glibc 2.28, so it must start on a distro that old.
+      - name: Check it runs on the oldest supported Linux
+        if: runner.os == 'Linux'
+        run: docker run --rm -v "$PWD/dist/bin:/bin-dir:ro" almalinux:8 /bin-dir/kollab-${{ matrix.platform }} --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kollab-${{ matrix.platform }}
+          path: |
+            dist/bin/kollab-${{ matrix.platform }}
+            dist/bin/kollab-${{ matrix.platform }}.sha256
+          if-no-files-found: error

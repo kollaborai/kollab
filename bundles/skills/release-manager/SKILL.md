@@ -23,7 +23,8 @@ release scope
   = built wheel/sdist metadata
   = PyPI package metadata
   = fresh-install `kollab --version`
-  = GitHub Release/update-check marker
+  = local main (fast-forwarded to the merge) and every local `kollab --version`
+  = GitHub Release/update-check marker, carrying the four platform binaries
 ```
 
 The source tree must already contain the correct versions before the tag is created. Do
@@ -40,8 +41,12 @@ release source of truth.
   `git clean`, or tag deletion/rewriting to make a release appear clean.
 - A dirty checkout is a release blocker until every dirty path is classified. Do not
   assume generated files, documentation, or index artifacts are safe to ignore.
-- Prefer a dedicated clean release branch/worktree when the main checkout contains user
-  work. Do not move, stash, or copy another person's work without explicit authorization.
+- Agents share one checkout on `main`. Never create a worktree, stash, reset, clean, or
+  switch branches in it, and never build a release from uncommitted files or a scratch
+  clone. Commit the release on local `main` by explicit paths, push `HEAD` to
+  `release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
+  (`docs/release-process.md`). Do not move, stash, or copy another person's work without
+  explicit authorization.
 - Never reuse, delete, or force-move an existing tag. If a tag exists, inspect it and stop
   on any metadata or artifact mismatch; repair is a separate, explicitly authorized task.
 - Treat commit, tag, push, PyPI upload, GitHub Release creation, and Homebrew dispatch as
@@ -99,13 +104,13 @@ Do not report `released` or `done` while the state is earlier than `verified`.
    not valid evidence of the current package version. Do not silently skip or repair it.
 6. Inspect `.github/workflows/publish.yml` and any release-related scripts on every release;
    workflows are mutable and may have changed since the last release.
-7. If the checkout is dirty, produce a path-by-path classification and stop before release
-   mutation. The user must choose a clean release surface; do not decide that unrelated
-   files are disposable.
+7. If the checkout is dirty, classify every dirty path: in the release (commit it by path)
+   or someone's work in progress (leave it uncommitted, out of the release). Ask its owner
+   when unsure; do not decide that unrelated files are disposable.
 
 ## 2. Prepare the release commit
 
-Prepare one reviewable release change on the authorized release branch:
+Prepare one reviewable release commit on local `main`, committed by explicit paths:
 
 1. Update the root version and every workspace package version to exactly `X.Y.Z`.
 2. Update all inter-package minimum-version constraints that are part of the same release.
@@ -183,8 +188,9 @@ tag a partially validated build.
 
 Only after the pre-tag gates pass:
 
-1. Create an annotated tag on the exact release commit:
-   `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+1. Push `HEAD` to `release/X.Y.Z`, merge its PR with a merge commit (never squash) once
+   checks pass, and `git pull --ff-only origin main`. Then create an annotated tag on that
+   merge commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
 2. Verify the tag resolves to the recorded release commit and that the tag name matches all
    metadata before pushing it.
 3. Push the exact tag intentionally. Do not push `--tags` broadly.
@@ -216,13 +222,27 @@ Run the strongest available consumer proof:
    - bundled agents, skills, and update/release notes are present.
 4. Run `scripts/smoke_test.sh X.Y.Z` or its current replacement against the public package.
 5. Verify the GitHub Release tag, release notes, source commit, and workflow artifacts all
-   identify `X.Y.Z`.
+   identify `X.Y.Z`, and the release carries `kollab-macos-aarch64`, `kollab-macos-x86_64`,
+   `kollab-linux-x86_64` and `kollab-linux-aarch64`, each with its `.sha256`.
 6. Re-run the version parity probe against the post-release source branch. If the workflow
    committed a version bump back to `main`, verify that commit is the same intended version
    and did not overwrite unrelated work.
 
-The release is `verified` only when source, tag, workflow, PyPI, GitHub Release, and fresh
-install all agree. Otherwise report `published-partial` or `blocked`, never `done`.
+The release is `verified` only when source, tag, workflow, PyPI, GitHub Release, fresh
+install, and the local checkout (step 6) all agree. Otherwise report `published-partial` or
+`blocked`, never `done`.
+
+## 6. Leave main on the release, installed
+
+`main` is already level: the release was committed on it and fast-forwarded to the merge
+(step 4). Once publishing is green, run `uv sync --all-extras` (the checkout's venv) and
+`KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in `~/.local/bin`; it replaces a
+uv tool or pipx kollab there, so `/upgrade` never touches the checkout).
+
+Leaving `main` behind, dirty with released edits, or an older version installed is a failed
+release. Done means `main` matches `origin/main`, `git status` lists none of the release's
+files, and `kollab --version` reports `X.Y.Z` inside and outside the repo. Running agents
+keep the code they started with: list them, and ask before restarting any.
 
 ## Known failure guard: tag/version drift
 
@@ -255,6 +275,8 @@ packages: each package -> published/failed/unverified
 PyPI: exact package/version observations
 GitHub Release: exact tag/release observation
 fresh install: exact environment and `kollab --version` output
+local main: SHA equal to origin/main and the tag; files still dirty, none from the release
+local install: each `kollab --version` (repo .venv, ~/.local/bin binary) -> X.Y.Z
 changelog: root/package copy parity result
 dirty/unrelated work: preserved paths
 unverified: explicit remaining gaps

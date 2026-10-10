@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+from kollabor.binary import kollab_argv
 from kollabor.daemon import SERVICE_ENV
 
 SYSTEMD_DIR = Path("/etc/systemd/system")
@@ -45,8 +46,8 @@ def service_env(extra: dict[str, str]) -> dict[str, str]:
 
 
 def exec_argv() -> list[str]:
-    # This interpreter, so a venv or `uv tool` install keeps working.
-    return [sys.executable, "-m", "kollabor_cli_main", "--detached"]
+    # This same kollab: its binary, or this interpreter so a venv or `uv tool` install keeps working.
+    return [*kollab_argv(), "--detached"]
 
 
 def _user() -> str:

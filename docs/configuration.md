@@ -180,6 +180,8 @@ Kollab, or set:
 
 Automatic updates use the active install style when possible:
 
+- the binary from `install.sh`: downloads the latest release's binary for this
+  machine, checks its SHA-256 and that it starts, then replaces itself
 - source checkouts: safe fast-forward Git update plus editable reinstall
 - `uv tool`: `uv tool upgrade kollab`
 - `pipx`: `pipx upgrade kollab`
@@ -188,8 +190,14 @@ Automatic updates use the active install style when possible:
   and real formula SHA are available
 - pip fallback: current Python runs `python -m pip install --upgrade kollab`
 
-Restart Kollab after an automatic update so the running process picks up the new
-version.
+With automatic updates on, launching kollab in a terminal installs a newer
+release before anything starts (the chat, its agent, the daemon), then restarts
+as the new version with the same arguments, so nothing running is interrupted.
+The release comes from the startup check above (cached for
+`check_interval_hours`), so a release found during a session installs in the
+background and runs from the next launch. A failed install leaves the launch on
+the current version and shows why. Only the window you launch installs:
+detached agents and `kollab service` daemons just report the new release.
 
 ## Project Data Directory
 

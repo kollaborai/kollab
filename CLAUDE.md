@@ -524,6 +524,7 @@ python scripts/clean.py                        # Clean cache
 # Building
 python scripts/clean.py
 python -m build
+python scripts/build_binary.py   # single-file binary for this machine -> dist/bin/
 python -m twine upload --repository testpypi dist/*
 ```
 
@@ -868,23 +869,56 @@ required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
 **Correct order — prep PR BEFORE the tag** (source must already match the tag; do
 not rely on CI to repair it):
 
-1. Prep PR bumping *everything* to `X.Y.Z`, in one commit:
+1. Prep commit on local `main` (`git commit -- <paths>`; never a worktree, branch
+   switch, scratch clone or uncommitted files) bumping *everything* to `X.Y.Z`:
    - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
    - inter-package `kollabor-*>=` constraints, then `uv lock`
    - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
      `kollabor/updates/CHANGELOG.md` (keep them **byte-identical** — `cmp` them;
      the in-app update UI reads the packaged copy)
-2. Merge the prep PR.
+2. `git push origin "HEAD:refs/heads/release/X.Y.Z"`, open the PR, merge it with a
+   merge commit (never squash), then `git pull --ff-only origin main`.
 3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
    then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
+4. Once publishing is green: `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
+   `~/.local/bin`). Done = `main` matches
+   `origin/main`, `git status` lists none of the release's files, and
+   `kollab --version` reports `X.Y.Z` inside and outside the repo.
 
-The tag triggers `.github/workflows/publish.yml` → PyPI + GitHub Release +
-Homebrew tap. Its first step, **Verify release consistency**, fails the publish
+The tag triggers `.github/workflows/publish.yml` → the four platform binaries
+(`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew
+tap → GitHub Release with the binaries attached. Its first step, **Verify release consistency**, fails the publish
 if the tagged commit's versions/changelog don't already agree with the tag — so
 a tag cut without a prep PR fails fast instead of publishing silently.
 
 Canonical checklist: `docs/release-process.md`. Full agent playbook (not
 invocable from Claude Code — read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
+
+### Release Binaries
+
+Every release also ships `kollab` as one executable per platform
+(`kollab-macos-aarch64`, `kollab-macos-x86_64`, `kollab-linux-x86_64`,
+`kollab-linux-aarch64`, each with a `.sha256`): a pex scie holding a portable
+CPython 3.12 and every wheel, so it runs with no Python installed.
+`scripts/build_binary.py` builds and smoke-tests it for the machine it runs on,
+with wheels picked for macOS 11 and glibc 2.28, never for the build host;
+`.github/workflows/binaries.yml` runs it on each platform for every tag and for
+PRs that touch it. `install.sh` installs the binary first, and in a binary
+`/upgrade` swaps in the latest release's binary after checking its SHA-256 and
+that it starts (`kollabor/updates/auto_update.py:_upgrade_binary`).
+
+**Code that starts kollab again** (re-exec, service units, spawned daemons) uses
+`kollabor.binary.kollab_argv()`, never `sys.executable -m kollabor_cli_main`:
+inside a binary `sys.executable` is its unpacked venv, so an upgraded binary
+would keep restarting the old code. `tests/tmux/specs/binary_chat.json` builds
+the binary from the checkout and chats through it.
+
+With `kollabor.updates.auto_update_enabled`, an interactive launch installs a
+newer release before it starts anything, then execs itself as the new version
+(`kollabor/cli.py:_update_before_launch`; `KOLLAB_UPDATED_TO` stops a second
+check). In-app, only the launched window installs: a `--detached` daemon just
+reports the release, so the two never install it at once.
 
 ### Code Standards
 - PEP 8 with Black formatting (88-char) and ruff linting (120-char)

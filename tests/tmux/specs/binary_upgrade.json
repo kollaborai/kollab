@@ -1,0 +1,85 @@
+{
+  "name": "binary-upgrade",
+  "description": "An opted-in kollab binary launched normally (daemon + attached window) installs the newer release a local release server offers, restarts as it before anything starts, and chats; /upgrade then reports it up to date. Fixture: tests/tmux/lib/binary_upgrade_fixture.sh.",
+  "config": {
+    "command": "sh -c 'D=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"); cd \"$D/home/ws\" && HOME=\"$D/home\" exec \"$D/bin/kollab\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "two binaries and a release server"
+    },
+    {
+      "action": "shell",
+      "description": "build this version and the next one, serve the next one",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && { kill \"$(cat \"$O/server.pid\")\" \"$(cat \"$O/home/fake.pid\")\" 2>/dev/null || true; }; D=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.XXXXXX\"); printf %s \"$D\" > \"$P\"; bash \"$R/tests/tmux/lib/binary_upgrade_fixture.sh\" \"$D\"",
+      "assert_contains": "fixture ready"
+    },
+    {
+      "action": "section",
+      "title": "the launch installs the release and restarts into it"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 180,
+      "description": "the restarted window is up"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "kollab: updating v",
+      "description": "the launch installed it"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\\(via binary\\)\\. Restarting",
+      "description": "then restarted"
+    },
+    {
+      "action": "shell",
+      "description": "the installed binary is the new release",
+      "command": "D=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"); V=$(HOME=\"$D/home\" \"$D/bin/kollab\" --version | awk '{print $NF}'); test \"$V\" = \"$(cat \"$D/new-version\")\" && echo \"installed binary is v$V\"",
+      "assert_contains": "installed binary is v"
+    },
+    {
+      "action": "section",
+      "title": "it works and knows it is current"
+    },
+    {
+      "action": "type",
+      "text": "hello after the update"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: hello after the update",
+      "timeout": 60
+    },
+    {
+      "action": "slash_command",
+      "command": "upgrade"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "already up to date",
+      "timeout": 60
+    },
+    {
+      "action": "section",
+      "title": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent, the release server and the fake model",
+      "command": "D=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"); (cd \"$D/home/ws\" && HOME=\"$D/home\" \"$D/bin/kollab\" --hub stop all >/dev/null 2>&1); kill \"$(cat \"$D/server.pid\")\" \"$(cat \"$D/home/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}
