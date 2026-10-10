@@ -35,6 +35,7 @@ Change a label there when this spec changes, then run it.
 | Chat with it yourself | terminal attach, web UI, phone: it is a kollab agent |
 | Reach it from another computer | `hub_msg to="claude@home-server"`. That device's trust decides |
 | Approve its tools in kollab | its permission requests are kollab prompts in its windows, under your approval mode; from another agent's window, a line says it is waiting |
+| Steer it while it works | type to it, or have the agent whose request it is working on send a follow-up on that thread: the message joins the running turn through `_session/steering`, which the Claude Code and Codex adapters implement |
 | Stop it, clear it, resume it | Esc or Stop, `/clear`, `/resume`. Kollab says whether the harness resumed or starts fresh |
 | Run kollab agents inside an ACP client | `kollab acp`, or `kollab acp --attach lapis`. Zed first; JetBrains, Buzz and T3 Code once their runs pass (section 9) |
 
@@ -49,7 +50,8 @@ Change a label there when this spec changes, then run it.
 | Give it kollab's system prompt, skills or memory | ACP has no system prompt field | a short preface opens each session; its `CLAUDE.md` or `AGENTS.md` still apply |
 | Let it read the whole open channel | it gets only your input and messages addressed to it | message it, or broadcast |
 | Let it use kollab's tools | it runs its own tools | it gets kollab's hub tools only |
-| Interrupt a running turn with a message | ACP v1 runs one prompt at a time per session | the message waits for its next turn; Esc stops the turn |
+| Have another agent's new request join a running turn | its answer needs a turn of its own, or it would mix with the running one | it waits for the next turn |
+| Steer a harness whose adapter has no steering | ACP v1 has no steering method; `_session/steering` is an extension the adapters agreed on | your message waits for the next turn; Esc stops the turn |
 | Have harness agents ask each other in a circle inside one turn | each runs one prompt at a time | an agent waiting in `hub_ask` on someone else answers `busy` at once |
 | Run ACP across the internet | ACP's only finished transport is stdio; its remote transport is a draft | the kollab network carries `claude@device`; ACP stays on each machine |
 | Share its login between devices | the sealed config carries kollab's settings, not other harnesses' logins | log in once on each device that runs it |
@@ -202,6 +204,14 @@ outcome is `skipped`, as a network request does today.
 | request | an agent's hub message with no `reply_to` | that agent, on the request's thread, with the end frame (the answer, below) |
 | reply | an agent's hub message with `reply_to` that no `hub_ask` consumed | nobody: no automatic answer |
 | broadcast | an agent's message to everyone | nobody |
+
+**Steering.** Your input, and a message from the agent whose request the
+running turn answers, on that request's thread, join the running turn when the
+agent advertises steering (`_meta.steering.supported` in its `initialize`
+answer): kollab sends it with `_session/steering`, which claude-agent-acp and
+codex-acp implement, instead of queueing it. Its answer still goes where the
+turn's answer goes, so the turn keeps one origin. Without steering they wait
+for the next turn, and anything else always does.
 
 Requests and replies are told apart by `reply_to`, as the hub already tells a
 network request from a reply, and your messages by the hub's operator mark
@@ -515,6 +525,7 @@ rendered transcript kept as evidence.
 | a streamed turn with tool cards | required | required | required |
 | permission: approve, deny, timeout | required | when it asks | when it asks |
 | Esc during a tool call | required | required | required |
+| steering a running turn | required | required | when advertised |
 | resume or load | when advertised | when advertised | when advertised |
 | missing login (`-32000`) | required | required | required |
 
@@ -529,7 +540,7 @@ shape (SDK 0.12.1 accepts that request).
 | Area | Gates |
 |---|---|
 | Permissions | two commands with the same title, and two argument lists that join to the same text, get separate decisions; requests offering only `allow_always`, no `reject_once`, several `allow_once`, or no options |
-| Turns | queued requests, your input and a broadcast run in order and answer the right recipients; 50 waiting replies and broadcasts run as one prompt; an 11th waiting request gets `busy`; a line typed in another window starts no turn; a turn that ends on a tool call answers with the text before it; every stop reason reaches the requester as its message and frame, through `hub_ask` and `kollab --hub msg claude@device` |
+| Turns | queued requests, your input and a broadcast run in order and answer the right recipients; your message and the requester's same-thread follow-up join a running turn (`injected`), and another agent's new request never does; 50 waiting replies and broadcasts run as one prompt; an 11th waiting request gets `busy`; a line typed in another window starts no turn; a turn that ends on a tool call answers with the text before it; every stop reason reaches the requester as its message and frame, through `hub_ask` and `kollab --hub msg claude@device` |
 | Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame; two local asks and a network request reaching one kollab agent at once are answered one by one, each on its own thread; a daemon on older code refuses a local frame; a harness agent waiting in `hub_ask` gets a far agent's answer mid-turn; a kollab agent that posts "checking" and then answers in plain text returns the plain text; an ask that reads like an acknowledgement still wakes, and a request that starts no turn ends with `skipped`; a kollab agent that hands off with `wait="true"` answers the ask only after its later turn |
 | Lifecycle | `/clear` and shutdown leave no processes, `setsid` children included; a crash during a tool call is not retried; `usage_update` replaces the status bar's figures, never adds to them |
 | Setup | a profile synced to a second device resolves its own adapter; a `#!/usr/bin/env node` adapter starts under `kollab service`; a missing adapter fails naming it |
@@ -546,6 +557,12 @@ A clean transcript is the bar on every live run.
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness
   prompt; a condition that still holds after a restore gets a new notice.
+- Steering for kollab's own agents, by the same rule. Today a message that
+  arrives mid-turn waits for the turn to end: the relay delivers only while the
+  agent is idle (`relay_agent.py`), and the queue processor runs a mid-turn
+  message after the tool loop (`queue_processor.py`). Both are kollab's choice,
+  made so each turn answers one sender; the steering rule keeps that and lets
+  the follow-ups in.
 - More profiles (goose, opencode, Cursor CLI) once their commands are checked.
 - Images and files in prompts, both ways.
 - ACP v2, in draft since 2026-07-20: revisit when it is stable.
