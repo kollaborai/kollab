@@ -187,11 +187,14 @@ of those turns has exactly one origin. Replies and broadcasts, which nobody
 waits on, run together: whatever is waiting when a turn ends becomes one prompt,
 the newest 20 with a count of any older ones. At most 10 requests wait; past
 that, a new one gets "claude is busy" at once, with an end frame whose outcome
-is `busy`. A hub
-message is queued only when the hub's wake rule (`_decide_hub_wake`) would wake
-a kollab agent for it. Everything else is observed: shown in the agent's
-windows, never sent to the harness. So a line you type in another agent's
-window, which the hub mirrors to everyone, never starts a harness turn.
+is `busy`. A hub message is queued only when the hub's wake rule
+(`_decide_hub_wake`) would wake a kollab agent for it. Everything else is
+observed: shown in the agent's windows, never sent to the harness. So a line you
+type in another agent's window, which the hub mirrors to everyone, never starts
+a harness turn. A request from `hub_ask` always wakes the agent, as your own
+messages do: no content heuristic or fingerprint drops it, only a redelivered
+id. Any other request that starts no turn ends at once, with an end frame whose
+outcome is `skipped`, as a network request does today.
 
 | Item | Comes from | Its final message goes to |
 |---|---|---|
@@ -243,7 +246,7 @@ request's thread, both with the request's id as `reply_to`:
    agent's messages during the turn are not its answer.
 2. **The end frame**, `{replies, failed, outcome}`, with the outcome line as its
    text: the frame every network turn ends with today, plus `outcome`, the stop
-   reason, `busy` or `error`. On this computer it travels as its own hub socket
+   reason, `busy`, `skipped`, `timeout` or `error`. On this computer it travels as its own hub socket
    action, `turn_end`, never as a message; across machines it rides the relay
    as today. Either way it settles waits and is never shown or given to a
    model. Older code refuses it rather than showing it: a daemon refuses an
@@ -305,8 +308,8 @@ for it, in the order offered:
   and exactly one `allow_once` is offered. They pick it and record a grant for
   that exact operation, keyed on the workspace and the profile, in the bridge's
   own grant namespace, with the lifetimes of kollab's own: an `s` grant lives in
-  memory until the daemon stops, and a `p` grant is saved with the project's
-  approvals until `/permissions clear`.
+  memory until `/permissions clear` or the daemon stops, and a `p` grant is
+  saved with the project's approvals until `/permissions clear-project`.
 - `A` (always edits) appears for an `edit` call under the same conditions. As
   for kollab's own tools, it picks `allow_once` and switches the agent to
   `auto_approve_edits`.
@@ -336,8 +339,9 @@ one line, and the agent's web UI row gets a badge until the prompt closes:
 `claude is waiting for your OK: Bash pytest -q · open it: kollab --attach claude`.
 The line only points; the answer still comes from claude's own window.
 
-`/permissions` lists the bridge's grants under the agent and its profile, and
-`/permissions clear` removes them with the rest. The harness asks only for what
+`/permissions` lists the bridge's grants under the agent and its profile;
+`/permissions clear` and `/permissions clear-project` remove them with kollab's
+own. The harness asks only for what
 its own rules say needs asking: its allow list (Claude Code's
 `permissions.allow`, for one) runs without asking kollab.
 
@@ -366,18 +370,31 @@ and network trust apply as for any agent.
 **How `hub_ask` waits.**
 
 - It registers its wait before it sends, so a fast answer is never missed.
+- An ask carries an `ask` mark: in its metadata on this computer, and as a new
+  relay field across machines. A marked ask always wakes the agent asked,
+  kollab or harness (section 4).
+- A frame or a message that matches a registered wait is taken on arrival,
+  before the wake rule and before the relay's pump, which otherwise delivers
+  only while the agent is idle. A harness agent waiting in `hub_ask` is
+  mid-turn, so without this every answer from another device would time out.
 - The end frame of the turn that handles the ask ends the wait: `answered`,
-  with the last message before it as `text`, `busy` when its outcome is
-  `busy`, or `ended` with the outcome line.
-  Every agent sends one. A harness agent ends every request turn with it. A
-  kollab agent handles a request from `hub_ask` the way it already handles a
-  network request (`_NetworkTurn`): in one turn whose messages to the asker
-  carry the request's thread and id, whose plain-text answer goes back when it
-  sent nothing on the thread, and which ends with the frame. That binding has
-  one slot, so a kollab agent takes one bound request at a time, network or
-  `hub_ask`: the next waits until the open one's frame is sent, as the relay
-  already waits while `network_turn_open`. A frame from another device now
-  reaches `hub_ask` waits as well as `kollab --hub msg` waits.
+  with the last message before it as `text`; `busy` when its outcome is
+  `busy`; otherwise `ended`, with the outcome line. Every agent sends one. A
+  harness agent ends every request turn with it. A kollab agent binds a marked
+  ask the way it binds a network request today (`_NetworkTurn`): one turn whose
+  messages to the asker carry the request's thread and id, whose plain-text
+  answer always goes back when it wrote one (a network turn sends it only when
+  nothing went on the thread), and whose frame says `end_turn`, or `error` when
+  the turn failed.
+- A kollab agent that ends the bound turn by handing off with `wait="true"`
+  keeps the request bound: the frame waits for a later turn that ends without
+  one, and that turn's messages to the asker still carry the request's thread
+  and id. A binding held this way ends after 600 s, the longest a `hub_ask`
+  waits, with outcome `timeout`.
+- The binding has one slot, so a kollab agent takes one bound request at a
+  time, network or ask: the next waits until the open one's frame is sent, as
+  the relay already waits while `network_turn_open`. A frame from another
+  device now reaches `hub_ask` waits as well as `kollab --hub msg` waits.
 - Messages from that agent on the thread before its frame are consumed and come
   back, in order, in `earlier`.
 - A request from the agent asked, on any thread, is a question back: the wait
@@ -510,7 +527,7 @@ JetBrains and Buzz are claimed only after the same run.
 |---|---|
 | Permissions | two commands with the same title, and two argument lists that join to the same text, get separate decisions; requests offering only `allow_always`, no `reject_once`, several `allow_once`, or no options |
 | Turns | queued requests, your input and a broadcast run in order and answer the right recipients; 50 waiting replies and broadcasts run as one prompt; an 11th waiting request gets `busy`; a line typed in another window starts no turn; a turn that ends on a tool call answers with the text before it; every stop reason reaches the requester as its message and frame, through `hub_ask` and `kollab --hub msg claude@device` |
-| Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame; two local asks and a network request reaching one kollab agent at once are answered one by one, each on its own thread; a daemon on older code refuses a local frame |
+| Threads | a reply consumed exactly once and a new question kept apart from it; two agents named claude in two folders; self-ask, A→B→A and A→B→C→A; a late reply after a timeout; a far agent that fails ends a waiting `hub_ask` at once; a kollab agent that sends a progress note before its answer still ends the wait only at its frame; two local asks and a network request reaching one kollab agent at once are answered one by one, each on its own thread; a daemon on older code refuses a local frame; a harness agent waiting in `hub_ask` gets a far agent's answer mid-turn; a kollab agent that posts "checking" and then answers in plain text returns the plain text; an ask that reads like an acknowledgement still wakes, and a request that starts no turn ends with `skipped`; a kollab agent that hands off with `wait="true"` answers the ask only after its later turn |
 | Lifecycle | `/clear` and shutdown leave no processes, `setsid` children included; a crash during a tool call is not retried; `usage_update` replaces the status bar's figures, never adds to them |
 | Setup | a profile synced to a second device resolves its own adapter; a `#!/usr/bin/env node` adapter starts under `kollab service`; a missing adapter fails naming it |
 | Inbound | stdout carries only protocol lines, even when kollab code prints; with `--attach`, a client cancel never stops a mesh turn, `session/set_mode` is refused, no `allow_always` is offered, and end of stdin leaves lapis running |
