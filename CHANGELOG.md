@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-09
+
 ### Added
 - `kollab --web-ui --restart` stops the web UI running on its port, and the engine its launcher started, then starts both again (after an update, say). A second plain `kollab --web-ui` no longer crashes with "Address already in use": it prints the running UI's address.
 - `/voicemode classifier` opens a log of voice classifier decisions. Each call is on the left; on the right, what was heard, what the classifier read (transcript history, recent conversation, the agent's own speech), each pass's answer, the decision and what reached the agent. It updates while open. `/voicemode classifier laya|provider` still switches classifiers.
