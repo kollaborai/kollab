@@ -1,7 +1,6 @@
 """Configuration loading and plugin integration logic."""
 
 import logging
-import os
 import re
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
@@ -12,6 +11,7 @@ from kollabor_ai.prompt_renderer import render_system_prompt
 from kollabor_events.dict_utils import deep_merge
 from kollabor_events.error_utils import log_and_continue, safe_execute
 
+from .atomic_write import write_text_atomic
 from .config_utils import (
     get_existing_global_config_path,
     get_existing_local_config_path,
@@ -941,14 +941,11 @@ class ConfigLoader:
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            # 0600: API keys live in this file. Created tight, and a file an
-            # older version left loose is tightened on the next save.
-            descriptor = os.open(
-                save_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600
+            # 0600 and whole-file (write_text_atomic): API keys live in this
+            # file, and a file an older version left loose is tightened here.
+            write_text_atomic(
+                save_path, json.dumps(config_to_save, indent=2, ensure_ascii=False)
             )
-            with os.fdopen(descriptor, "w") as f:
-                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
-            os.chmod(save_path, 0o600)
             logger.info(f"Saved configuration to: {save_path}")
             return True
         except Exception as e:

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_ai.model_registry import supports_vision
+from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.config_utils import (
     get_existing_global_config_path,
     get_global_config_path,
@@ -1555,8 +1556,8 @@ class ProfileManager:
             # Save active profile
             config_data["kollabor"]["llm"]["active_profile"] = name
 
-            config_path.write_text(
-                json.dumps(config_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            write_text_atomic(
+                config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
             )
 
             logger.debug(f"Saved active profile to config: {name}")
@@ -1690,9 +1691,9 @@ class ProfileManager:
                     profile.name
                 ] = _build_profile_dict()
 
-                config_path.write_text(
+                write_text_atomic(
+                    config_path,
                     json.dumps(config_data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
                 )
 
                 logger.info(
@@ -2049,8 +2050,8 @@ class ProfileManager:
             del config_data["kollabor"]["llm"]["profiles"][name]
 
             # Write back
-            config_path.write_text(
-                json.dumps(config_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            write_text_atomic(
+                config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
             )
 
             logger.info(f"Deleted profile from config: {name}")

@@ -69,6 +69,11 @@ Kollab uses a layered configuration system. Settings are loaded and merged in th
 
 Default location for user-wide settings. Created automatically on first run.
 
+Config files are written whole (a temporary file renamed over the old one, mode
+`0600`), so kollab windows started together never read half a file. A file kollab
+cannot parse, such as a hand edit with a stray comma, is copied to
+`config.json.corrupt` before a fresh config takes its place.
+
 ### Project Config
 
 ```

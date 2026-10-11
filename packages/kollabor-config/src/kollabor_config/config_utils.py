@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .atomic_write import write_text_atomic
+
 logger = logging.getLogger(__name__)
 
 # Platform check
@@ -1134,8 +1136,7 @@ def set_default_agent(agent_name: str, level: str) -> bool:
     config["kollabor"]["llm"]["default_agent"] = {"name": agent_name, "level": level}
 
     # Save
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
 
     return True
 
@@ -1168,8 +1169,7 @@ def clear_default_agent(level: str) -> bool:
         config["kollabor"]["llm"].pop("default_agent", None)
 
     # Save
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
 
     return True
 
@@ -1337,8 +1337,7 @@ def set_default_profile(profile_name: str, level: str) -> bool:
     # Also set active_profile at this config level so it loads on startup
     config["kollabor"]["llm"]["active_profile"] = profile_name
 
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
 
     return True
 
@@ -1368,8 +1367,7 @@ def clear_default_profile(level: str) -> bool:
     if "kollabor" in config and "llm" in config["kollabor"]:
         config["kollabor"]["llm"].pop("default_profile", None)
 
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_text_atomic(config_path, json.dumps(config, indent=2, ensure_ascii=False))
 
     return True
 
