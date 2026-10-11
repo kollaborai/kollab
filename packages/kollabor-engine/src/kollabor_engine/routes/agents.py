@@ -8,8 +8,38 @@ from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import
 from ..gem_appearance import load_appearance, record_births, save_appearance
 from ..hub_bridge import HubBridge
 
+# plugins.hub.models.COORDINATOR_IDENTITY; kept here so the route imports no plugin.
+COORDINATOR_IDENTITY = "koordinator"
+
 router = APIRouter(prefix="/agents", tags=["agents"])
 _bridge = HubBridge()
+
+
+def ran_here() -> Dict[str, float]:
+    """Every agent that ran in this folder -> when it last did (epoch seconds).
+
+    An agent's vault stream (hub/vaults/<name>/stream.jsonl) gets a line
+    every session, so its mtime is the last time it ran here. ``_shared`` and
+    ``_archived`` are not agents.
+    """
+    try:
+        from plugins.hub.presence import get_hub_dir
+        from plugins.hub.vault import find_active_stream
+
+        vaults = list((get_hub_dir() / "vaults").iterdir())
+    except Exception:
+        return {}
+    ran: Dict[str, float] = {}
+    for vault in vaults:
+        if vault.name.startswith((".", "_")) or not vault.is_dir():
+            continue
+        try:
+            stat = find_active_stream(vault).stat()
+        except OSError:
+            continue
+        if stat.st_size:
+            ran[vault.name] = stat.st_mtime
+    return ran
 
 
 @router.get("")
@@ -36,7 +66,42 @@ async def list_agent_pool(
         if isinstance(agent, dict) and agent.get("identity")
     }
 
-    agents = []
+    # The first agent in a folder is its koordinator, as with a plain `kollab`
+    # (the hub's flock winner): offer it first while this folder has none.
+    # Each folder has its own, so one running elsewhere does not take it.
+    here = os.path.realpath(os.getcwd())
+    last_ran = ran_here().get
+    coordinator = next(
+        (
+            agent
+            for agent in live
+            if isinstance(agent, dict)
+            and agent.get("identity") == COORDINATOR_IDENTITY
+            and os.path.realpath(str(agent.get("project") or "")) == here
+        ),
+        None,
+    )
+    agents = [
+        {
+            "name": COORDINATOR_IDENTITY,
+            "identity": COORDINATOR_IDENTITY,
+            "agent_type": COORDINATOR_IDENTITY,
+            "role_aliases": [],
+            "personality": "",
+            "caste": "",
+            # Not a pool gem: the web UI gives it a born color.
+            "color": None,
+            "available": coordinator is None,
+            "active": coordinator is not None,
+            "pool": True,
+            "state": coordinator.get("state") if coordinator else "available",
+            "current_task": coordinator.get("current_task", "") if coordinator else "",
+            "agent_id": coordinator.get("agent_id", "") if coordinator else "",
+            "solo": bool(coordinator.get("solo")) if coordinator else False,
+            "project": here if coordinator else "",
+            "last_ran": last_ran(COORDINATOR_IDENTITY),
+        }
+    ]
     for identity in pool:
         name = str(getattr(identity, "name", "") or "")
         if not name:
@@ -62,6 +127,7 @@ async def list_agent_pool(
                 "solo": bool(current.get("solo")) if current else False,
                 # The folder it runs in (presence covers every project here).
                 "project": str(current.get("project") or "") if current else "",
+                "last_ran": last_ran(name),
             }
         )
 
