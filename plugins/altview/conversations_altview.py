@@ -346,10 +346,11 @@ class ConversationsAltView(AltView):
             role_display = f"[{role}]"
             lines.append({"type": f"role_{role}", "content": role_display})
 
-            # Content lines (wrapped)
-            content_lines = wrap_text(content, width - 3)
-            for cl in content_lines:
-                lines.append({"type": "content", "content": "  " + cl})
+            # Content lines (wrapped). wrap_text wraps one line, so split first:
+            # a newline left inside a row is drawn over by the row below it.
+            for line in content.split("\n"):
+                for cl in wrap_text(line, width - 3):
+                    lines.append({"type": "content", "content": "  " + cl})
 
             # Spacing
             lines.append({"type": "spacing", "content": ""})

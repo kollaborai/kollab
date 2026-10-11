@@ -28,6 +28,15 @@ SESSION_STAT_KEYS = (
 )
 
 
+def _tool_use_line(block: Dict[str, Any]) -> str:
+    """One display line for a logged tool_use block: ``[tool: name] {input}``."""
+    args = block.get("input")
+    if args and not isinstance(args, str):
+        args = json.dumps(args, ensure_ascii=False)
+    line = f"[tool: {block.get('name', 'unknown')}] {args or ''}".rstrip()
+    return line if len(line) <= 120 else line[:117] + "..."
+
+
 class ConversationManager:
     """Manage conversation state and history.
 
@@ -865,34 +874,39 @@ class ConversationManager:
                             # or before its timestamp; replay only the live tail.
                             continue
                         content = data.get("message", {}).get("content", "")
-                        if isinstance(content, list) and content:
-                            content = content[0].get("text", "")
+                        tool_uses: List[Dict[str, Any]] = []
+                        if isinstance(content, list):
+                            blocks = [b for b in content if isinstance(b, dict)]
+                            tool_uses = [
+                                b for b in blocks if b.get("type") == "tool_use"
+                            ]
+                            content = "\n".join(
+                                b["text"]
+                                for b in blocks
+                                if b.get("type", "text") == "text" and b.get("text")
+                            )
                         msg_uuid = data.get("uuid") or str(uuid4())
-                        messages.append(
-                            {
-                                "uuid": msg_uuid,
-                                "role": data.get("message", {}).get("role", msg_type),
-                                "content": content,
-                                "timestamp": data.get("timestamp"),
-                                "parent_uuid": None,
-                                # Resume rebuilds text-only history (tool_calls are
-                                # not restored), so only a turn without tool_use can
-                                # take its reasoning back in its original shape.
-                                "metadata": (
-                                    {"provider_reasoning": data["provider_reasoning"]}
-                                    if data.get("provider_reasoning")
-                                    and not any(
-                                        isinstance(item, dict)
-                                        and item.get("type") == "tool_use"
-                                        for item in (
-                                            data.get("message", {}).get("content") or []
-                                        )
-                                    )
-                                    else {}
-                                ),
-                                "session_id": session_file.stem.replace("session_", ""),
-                            }
-                        )
+                        message: Dict[str, Any] = {
+                            "uuid": msg_uuid,
+                            "role": data.get("message", {}).get("role", msg_type),
+                            "content": content,
+                            "timestamp": data.get("timestamp"),
+                            "parent_uuid": None,
+                            # Resume rebuilds text-only history (tool_calls are
+                            # not restored), so only a turn without tool_use can
+                            # take its reasoning back in its original shape.
+                            "metadata": (
+                                {"provider_reasoning": data["provider_reasoning"]}
+                                if data.get("provider_reasoning") and not tool_uses
+                                else {}
+                            ),
+                            "session_id": session_file.stem.replace("session_", ""),
+                        }
+                        if tool_uses:
+                            # Display-only (conversation browsers): kept out of
+                            # content/metadata, which resume hands to the model.
+                            message["tool_uses"] = tool_uses
+                        messages.append(message)
                         if msg_type == "user":
                             metadata["turn_count"] = metadata.get("turn_count", 0) + 1
 
@@ -1086,10 +1100,10 @@ class ConversationManager:
             message_list = []
             for i, msg in enumerate(self.messages):
                 content = msg.get("content", "")
+                tool_lines = [_tool_use_line(b) for b in msg.get("tool_uses", [])]
                 # Get first line, truncate if needed
-                first_line = content.split("\n")[0][:60]
-                if len(content.split("\n")[0]) > 60:
-                    first_line += "..."
+                first = "\n".join(filter(None, [content, *tool_lines])).split("\n")[0]
+                first_line = first[:60] + ("..." if len(first) > 60 else "")
 
                 message_list.append(
                     {
@@ -1098,9 +1112,10 @@ class ConversationManager:
                         "role": msg["role"],
                         "preview": first_line,
                         "timestamp": msg.get("timestamp", ""),
-                        "full_content": content[
-                            :200
-                        ],  # First 200 chars for hover/detail
+                        # First 200 chars of text for hover/detail, then tool calls
+                        "full_content": "\n".join(
+                            filter(None, [content[:200], *tool_lines])
+                        ),
                     }
                 )
 
