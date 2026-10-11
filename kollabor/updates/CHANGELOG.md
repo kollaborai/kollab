@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The web UI sidebar keeps every agent it knows. Agents that ran in this folder and are not running show as offline with when they last ran; a click starts one as itself. Agents on your other computers stay listed when no agent here is on the network (the last roster seen, kept a month) or after they leave it (offline, with when they were last seen); opening one with no agent here on the network starts this folder's koordinator to carry it.
+- The New Session gem list says when each gem last ran in this folder ("Ran 3d Ago").
+- New Session's workspace is a folder picker: the engine's folder, recent folders with their live agents, a folder browser, or a typed path.
+
+### Fixed
+- The web UI's New Session offers koordinator first, as a terminal does for the first agent in a folder. It was missing from the gem list, so a first web session started as lapis.
+- Starting several kollab windows at once could wipe `config.json`, profiles and API keys included: a window that read the file while another was writing it started from a blank config and saved that. Config files are now replaced whole (mode 0600), and one that cannot be read is copied to `config.json.corrupt` before a fresh one takes its place.
+- A first launch with no LLM provider opens the setup wizard by itself, as intended. The check looked for a fullscreen `setup` plugin that no longer exists, so a new install landed on a provider error instead. It now opens what `/setup` opens; Esc leaves it.
+- The `/conversations` preview shows an assistant turn's tool calls (`[tool: name] {input}`) instead of dropping them, including turns that were only tool calls. A message of several lines now gets a row per line there; the rows after the first were drawn over by the row below.
+- `/resume` brings back every text block of an assistant turn; it kept only the first, so a turn that opened with a tool call came back empty.
+- `/matrix` runs the AltView version, which pauses the render loop so it does not flicker, and any key leaves it. `/example` stays the fullscreen showcase; the AltView plugin reference moved to `/altview-example`.
+
+### Changed
+- The log warns when a fullscreen plugin hides an AltView with the same command name. It used to skip it silently at debug level.
+- The clean and modern renderers share one copy of their tool-row helpers (`kollabor_tui/_tool_detail.py`). Output is unchanged.
+
 ## [0.15.2] - 2026-10-10
 
 ### Fixed
