@@ -78,7 +78,7 @@ class FullScreenCommandIntegrator:
         # Plugins superseded by an AltView replacement: skip them here so the
         # AltView version (which pauses the render loop to prevent flicker)
         # wins the command instead of being shadowed by registration order.
-        superseded_by_altview = {"conversations_plugin"}
+        superseded_by_altview = {"conversations_plugin", "matrix_plugin"}
 
         # Scan for Python files in fullscreen directory
         for plugin_file in fullscreen_dir.glob("*.py"):

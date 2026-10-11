@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 class ExampleAltView(AltView):
     """Minimal interactive AltView with counter, background tasks, and sessions.
 
-    Registers as /example slash command. Demonstrates all lifecycle hooks
-    and design system rendering patterns.
+    Registers as /altview-example (plain /example is the fullscreen showcase).
+    Demonstrates all lifecycle hooks and design system rendering patterns.
 
     State that persists across suspend/resume:
         - frame_count: total frames rendered
@@ -47,13 +47,13 @@ class ExampleAltView(AltView):
 
     def __init__(self) -> None:
         metadata = AltViewMetadata(
-            plugin_type="example",
+            plugin_type="altview-example",
             description="Example AltView plugin",
             version="1.0.0",
             author="Kollabor",
             category="general",
             icon="[EX]",
-            aliases=["ex", "demo"],
+            aliases=[],
             supports_named_sessions=True,
             supports_background=True,
         )
