@@ -1,6 +1,6 @@
 {
   "name": "network-guided-setup-120",
-  "description": "First launch of 0.11.0 on a computer with no network, 120 columns: the one-time notice, then the two choices; Esc leaves. Runs with an empty HOME and its own marker file, so it never writes the real ~/.kollab marker and never reaches the live relay. It stops at the choices.",
+  "description": "First launch of 0.11.0 on a computer with no network, 120 columns: the one-time notice, then the two choices; Esc leaves. Runs with an empty HOME and its own marker file, so it never writes the real ~/.kollab marker and never reaches the live relay. It stops at the choices. It writes a config that marks setup done, so the first-run wizard does not take the screen first.",
   "config": {
     "command": "HOME=/tmp/kollab-guided-setup-120 KOLLAB_CONNECT_GUIDE_MARKER=/tmp/kollab-guided-setup-120/marker PYTHONPATH=\"$PWD:$(printf '%s:' $PWD/packages/*/src)\" ${KOLLAB_TEST_PYTHON:-python} main.py --no-daemon",
     "app_init_sleep": 5,
@@ -10,7 +10,7 @@
     "key_delay": 0.4
   },
   "setup": [
-    { "action": "shell", "command": "rm -rf /tmp/kollab-guided-setup-120 && mkdir -p /tmp/kollab-guided-setup-120" }
+    { "action": "shell", "command": "rm -rf /tmp/kollab-guided-setup-120 && mkdir -p /tmp/kollab-guided-setup-120/.kollab && printf '%s' '{\"application\":{\"setup_completed\":true}}' > /tmp/kollab-guided-setup-120/.kollab/config.json" }
   ],
   "steps": [
     { "action": "start_app" },

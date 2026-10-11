@@ -1,8 +1,8 @@
 {
   "name": "config-modal-width",
-  "description": "Verify the /config modal renders the Terminal Settings width controls (UI Width Mode, Min Width, Max Width). Runs against an isolated throwaway HOME with the hub disabled so it does not collide with a live ~/.kollab (daemon/state/mesh); wait_for gates the assert on the frame where the modal actually painted.",
+  "description": "Verify the /config modal renders the Terminal Settings width controls (UI Width Mode, Min Width, Max Width). Runs against an isolated throwaway HOME with the hub disabled so it does not collide with a live ~/.kollab (daemon/state/mesh); wait_for gates the assert on the frame where the modal actually painted. The seeded config marks setup done, so the first-run wizard does not take the screen first.",
   "config": {
-    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}},\\\"application\\\":{\\\"setup_completed\\\":true}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
     "show_captures": false,
     "app_init_sleep": 6,
     "term_width": 120,

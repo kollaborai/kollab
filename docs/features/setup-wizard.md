@@ -7,6 +7,15 @@ first LLM provider — no environment variables or hand-edited JSON required.
 /setup            # aliases: /onboard, /wizard
 ```
 
+## First launch
+
+With no usable provider (no profile, and no provider API key in the
+environment) the wizard opens by itself on the first interactive launch. It is
+the same screen `/setup` opens. Leaving it (Esc) saves
+`application.setup_completed`, so it does not open again; `/setup` always does.
+A detached daemon or a pipe run has no terminal, so it leaves the wizard for the
+next interactive launch.
+
 ## What it does
 
 1. **Provider** — pick from Anthropic, OpenAI (API key), OpenAI (ChatGPT
