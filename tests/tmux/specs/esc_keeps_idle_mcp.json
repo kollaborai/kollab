@@ -1,0 +1,81 @@
+{
+  "name": "esc-keeps-idle-mcp",
+  "description": "ESC while the model is answering cancels the turn but leaves MCP servers nobody is calling running (2026-10-10: every cancel closed every MCP server). Plain kollab (daemon + this window) in a throwaway HOME, one idle stdio MCP server (tests/tmux/mock_mcp_server.sh), a fake model that holds its answer (fake_llm.py 'slowreply'), no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model and one MCP server",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; mkdir -p \"$H/.kollab/mcp\"; printf '{\"servers\":{\"idle\":{\"type\":\"stdio\",\"command\":\"bash %s\",\"enabled\":true}}}' \"$R/tests/tmux/mock_mcp_server.sh\" > \"$H/.kollab/mcp/mcp_settings.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\"",
+      "assert_contains": "fake model on port"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "shell",
+      "description": "the MCP server is up",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.path\"); for _ in $(seq 60); do grep -q \"MCP server idle initialized\" \"$H\"/.kollab/projects/*/logs/kollab.log 2>/dev/null && break; sleep 0.5; done; D=$(python3 -c \"import glob,json,sys; print(*[json.load(open(f))['pid'] for f in glob.glob(sys.argv[1])])\" \"$H/.kollab/projects/*/hub/presence/*.json\"); for d in $D; do pgrep -P \"$d\"; done > \"$H/mcp.pids\"; echo \"mcp pids: $(tr \"\\n\" \" \" < \"$H/mcp.pids\")\"; test -s \"$H/mcp.pids\"",
+      "assert_contains": "mcp pids: [0-9]"
+    },
+    {
+      "action": "section",
+      "label": "ESC mid-turn"
+    },
+    {
+      "action": "type",
+      "text": "slowreply esc"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Request cancelled",
+      "timeout": 20,
+      "description": "the turn was cancelled"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2
+    },
+    {
+      "action": "shell",
+      "description": "the idle MCP server outlived the cancel",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.path\"); for p in $(cat \"$H/mcp.pids\"); do kill -0 \"$p\" 2>/dev/null && echo \"mcp $p still running\" || echo \"mcp $p gone\"; done",
+      "assert_contains": "still running",
+      "assert_not_contains": "gone"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-esc-mcp.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

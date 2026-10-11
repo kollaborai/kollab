@@ -8,6 +8,7 @@ call into the reply: <functions.terminal>{"command": ...}</functions.terminal>.
 "echocall" gets a native terminal call whose reply also copies calls as
 <tool_call> text, one without a name, as gpt-5.6-luna did; only the native one
 may run. The answer to a native tool result is "pong: the tool answered".
+"slowreply" holds the answer for SLOW_SECONDS, so a spec can act mid-turn.
 
 usage: fake_llm.py <port file>
 Binds a free port on 127.0.0.1 and writes it to <port file> once listening.
@@ -18,6 +19,8 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+SLOW_SECONDS = 8
 
 
 def _last_user_text(body):
@@ -86,6 +89,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if "slowreply" in _last_line(body) and not _answers_a_tool(body):
+            time.sleep(SLOW_SECONDS)
         reply = _reply(body)
         calls = _native_calls(body)
         finish = "tool_calls" if calls else "stop"

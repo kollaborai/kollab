@@ -728,6 +728,24 @@ class TestMCPIntegration(unittest.TestCase):
         self.assertTrue(mcp._cancel_requested)
         connection.close.assert_awaited_once_with()
 
+    def test_cancel_active_connections_keeps_idle_servers(self):
+        """ESC while the model streams must not kill servers nobody is calling."""
+        mcp = MCPIntegration.__new__(MCPIntegration)
+        idle = MagicMock(initialized=True, _pending_requests={})
+        calling = MagicMock(initialized=True, _pending_requests={"1": object()})
+        starting = MagicMock(initialized=False, _pending_requests={})
+        for connection in (idle, calling, starting):
+            connection.close = AsyncMock()
+        mcp.server_connections = {"idle": idle, "calling": calling}
+        mcp._active_connections = {starting}
+        mcp._cancel_requested = False
+
+        asyncio.run(mcp.cancel_active_connections())
+
+        idle.close.assert_not_awaited()
+        calling.close.assert_awaited_once_with()
+        starting.close.assert_awaited_once_with()
+
     @patch.object(MCPIntegration, "_load_mcp_config", return_value=None)
     def test_reload_does_not_count_closed_connections(self, mock_load):
         """A closed connection must not make a partial reload look healthy."""

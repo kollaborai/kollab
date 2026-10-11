@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-10-10
+
+### Fixed
+- Opening another chat in the web UI while an agent was answering cancelled that agent's turn (its terminal showed "Request cancelled"). Leaving a chat, closing the tab or losing the connection now leaves the turn running; only Stop cancels it.
+- Cancelling a turn (Esc, or Stop in the web UI) closed every MCP server, even ones the turn never called. It now stops only a server that is starting or still answering a call.
+
+### Changed
+- Web UI frontend packages updated: Vite 8, TypeScript 7, React 19.3, assistant-ui 0.15.27, Radix Dialog 1.2 and lucide-react 1.55.
+
 ## [0.15.1] - 2026-10-09
 
 ### Added

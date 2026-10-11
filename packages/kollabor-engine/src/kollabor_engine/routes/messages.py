@@ -229,21 +229,14 @@ def _assistant_tool_result(command: Dict[str, Any]) -> tuple[str, Any, str, str]
     return tool_call_id, result, decision, scope
 
 
-async def _cancel_assistant_turn(session, controller) -> None:
-    """Cancel the daemon turn when assistant-ui closes the stream."""
-    try:
-        await session.state.cancel_current_request()
-    except Exception as exc:
-        logger.debug(
-            "assistant turn cancellation failed for %s: %s", session.session_id, exc
-        )
-
-
-async def _assistant_next_event(session, queue, controller, timeout=None):
+async def _assistant_next_event(queue, controller, timeout=None):
     """Wait for either a daemon event or assistant-stream cancellation.
 
     Returns None once the stream is cancelled, and ``{}`` when ``timeout``
     seconds pass with neither (a cancelled ``queue.get()`` loses no event).
+    A closed stream (another chat opened, the tab closed, a phone dropped)
+    leaves the daemon's turn running; Stop cancels it through
+    ``POST /{session_id}/cancel``.
     """
     event_task = asyncio.create_task(queue.get())
     cancel_task = asyncio.create_task(controller.cancelled_event.wait())
@@ -255,7 +248,6 @@ async def _assistant_next_event(session, queue, controller, timeout=None):
         )
         if cancel_task in done:
             event_task.cancel()
-            await _cancel_assistant_turn(session, controller)
             return None
         if event_task not in done:
             return {}
@@ -810,7 +802,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
 
             while True:
                 event = await _assistant_next_event(
-                    session, queue, controller, timeout=held_text_due()
+                    queue, controller, timeout=held_text_due()
                 )
                 if event is None:
                     return
@@ -1016,9 +1008,6 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                 elif event_type == "daemon_closed":
                     controller.add_error("session daemon exited")
                     return
-        except asyncio.CancelledError:
-            await _cancel_assistant_turn(session, controller)
-            raise
         except Exception as exc:
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))

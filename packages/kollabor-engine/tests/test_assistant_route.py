@@ -417,7 +417,9 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
 
 
 @pytest.mark.asyncio
-async def test_assistant_transport_cancellation_cancels_daemon(monkeypatch):
+async def test_assistant_stream_close_leaves_daemon_turn_running(monkeypatch):
+    # Opening another chat unmounts this thread and closes its stream; the
+    # agent's turn must keep going (Stop cancels via POST /cancel instead).
     session = _FakeSession([])
     monkeypatch.setattr(
         messages, "get_session_registry", lambda: _FakeRegistry(session)
@@ -438,7 +440,7 @@ async def test_assistant_transport_cancellation_cancels_daemon(monkeypatch):
     captured["controller"].cancelled_event.set()
     await stream_task
 
-    session.state.cancel_current_request.assert_awaited_once_with()
+    session.state.cancel_current_request.assert_not_awaited()
     assert captured["controller"].errors == []
 
 
