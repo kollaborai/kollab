@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Web: fold a sidebar group away by clicking its name (This Computer, each network, Contacts). A folded group keeps its count, and the browser remembers what you folded. (#173)
+
+### Fixed
+- Web: agents on your other computers fill the sidebar's width again. The network section nested its rows two levels deep, which left each name a few letters wide and clipped the device name and its count. (#173)
+
 ### Changed
-- Web: the gems are soft now. Each is a smooth, breathing blob in its own color that changes shape, with pill eyes and a mouth that morph too, and its face turns with the body toward your cursor. Every agent is born with one of three motions that sticks: Mood Morph (its shape shows what it is doing), Jelly (it wobbles as it moves) or Shape Cycle (it cycles through shapes while idle).
+- Web: on a mouse-and-keyboard screen the UI is a step denser (90%), the chat text one size smaller, and tool calls start collapsed ("2 tool calls"; click to open). Touch screens keep their size. (#173)
 
 ## [0.15.5] - 2026-10-12
 
@@ -30,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The join code field shows one `*` per character typed and backspace removes one, instead of filling every star on the first keypress. (#159)
 - The web UI folds a live network answer into the right network block: an exact-name match now runs before the substring fallback, so an answer for "acme" no longer lands in "acme-lab-net". (#165)
 - The device record tolerates and normalizes the flat `primary_network` spelling, so a record written by an older layout no longer breaks the validator. (#167)
+
+### Changed
+- Web: the gems are soft now. Each is a smooth, breathing blob in its own color that changes shape, with pill eyes and a mouth that morph too, and its face turns with the body toward your cursor. Every agent is born with one of three motions that sticks: Mood Morph (its shape shows what it is doing), Jelly (it wobbles as it moves) or Shape Cycle (it cycles through shapes while idle).
 
 ## [0.15.3] - 2026-10-11
 

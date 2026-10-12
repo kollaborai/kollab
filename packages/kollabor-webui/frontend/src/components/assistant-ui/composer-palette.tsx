@@ -165,9 +165,9 @@ const PaletteContent: FC<{
 
   return (
     <>
-      <div className="text-muted-foreground flex items-center justify-between px-3 py-2 text-[11px] font-medium tracking-[0.12em] uppercase">
+      <div className="text-muted-foreground flex items-center justify-between px-3 py-2 text-[0.6875rem] font-medium tracking-[0.12em] uppercase">
         <span>{title}</span>
-        <span className="border-border/70 bg-muted/60 text-muted-foreground rounded-md border px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal">
+        <span className="border-border/70 bg-muted/60 text-muted-foreground rounded-md border px-1.5 py-0.5 font-mono text-[0.625rem] normal-case tracking-normal">
           {char} to search
         </span>
       </div>
@@ -200,7 +200,7 @@ const PaletteContent: FC<{
                 return (
                   <Fragment key={item.id}>
                     {showCategory ? (
-                      <div className="text-muted-foreground px-3 pb-1 pt-2 text-[10px] font-semibold tracking-[0.16em] uppercase first:pt-1">
+                      <div className="text-muted-foreground px-3 pb-1 pt-2 text-[0.625rem] font-semibold tracking-[0.16em] uppercase first:pt-1">
                         {prettyCategoryName(category!)}
                       </div>
                     ) : null}
@@ -219,13 +219,13 @@ const PaletteContent: FC<{
                           <span
                             className={cn(
                               "truncate font-medium",
-                              depth > 0 ? "text-[13px]" : "text-sm",
+                              depth > 0 ? "text-[0.8125rem]" : "text-sm",
                             )}
                           >
                             {item.label}
                           </span>
                           {item.type === "command" ? (
-                            <span className="text-muted-foreground/75 shrink-0 font-mono text-[10px]">
+                            <span className="text-muted-foreground/75 shrink-0 font-mono text-[0.625rem]">
                               /
                               {depth > 0
                                 ? (readMetadata(item, "commandPath") ??
@@ -234,7 +234,7 @@ const PaletteContent: FC<{
                             </span>
                           ) : null}
                           {readMetadata(item, "args") ? (
-                            <span className="text-muted-foreground/70 min-w-0 truncate font-mono text-[10px]">
+                            <span className="text-muted-foreground/70 min-w-0 truncate font-mono text-[0.625rem]">
                               {readMetadata(item, "args")}
                             </span>
                           ) : null}
@@ -246,12 +246,12 @@ const PaletteContent: FC<{
                         ) : null}
                       </span>
                       {readMetadata(item, "secondary") ? (
-                        <span className="text-muted-foreground group-data-[highlighted]:text-accent-foreground/70 hidden max-w-36 truncate text-[11px] sm:block">
+                        <span className="text-muted-foreground group-data-[highlighted]:text-accent-foreground/70 hidden max-w-36 truncate text-[0.6875rem] sm:block">
                           {readMetadata(item, "secondary")}
                         </span>
                       ) : null}
                       {readMetadata(item, "status") ? (
-                        <span className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium">
+                        <span className="flex shrink-0 items-center gap-1.5 text-[0.625rem] font-medium">
                           <span className="size-1.5 rounded-full bg-emerald-500" />
                           <span className="text-muted-foreground group-data-[highlighted]:text-accent-foreground/70">
                             {readMetadata(item, "status")}
@@ -267,7 +267,7 @@ const PaletteContent: FC<{
           )
         }
       </ComposerPrimitive.Unstable_TriggerPopoverItems>
-      <div className="text-muted-foreground/70 flex items-center gap-3 border-t border-border/50 px-3 py-1.5 text-[10px]">
+      <div className="text-muted-foreground/70 flex items-center gap-3 border-t border-border/50 px-3 py-1.5 text-[0.625rem]">
         <span>
           <kbd className="mr-0.5 rounded border border-border/70 px-1 font-mono">
             ↑↓

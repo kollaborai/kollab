@@ -427,7 +427,7 @@ export function SessionToolbar({
                           ) : null}
                           {/* A long command path must wrap anywhere, or its
                               width pushes the dialog past a phone screen. */}
-                          <span className="text-muted-foreground flex items-start gap-1 text-[11px] break-all">
+                          <span className="text-muted-foreground flex items-start gap-1 text-[0.6875rem] break-all">
                             <Terminal className="mt-0.5 size-3 shrink-0" />
                             {definition.command || "configured by agent"}
                           </span>

@@ -72,7 +72,7 @@ export function TrajectoryInspector({
             <PanelRight className="size-4" />
           </div>
           <div className="min-w-0">
-            <p className="text-muted-foreground text-[10px] font-semibold tracking-[0.14em] uppercase">
+            <p className="text-muted-foreground text-[0.625rem] font-semibold tracking-[0.14em] uppercase">
               Inspector
             </p>
             <p className="text-sm font-semibold">Record Details</p>
@@ -87,7 +87,7 @@ export function TrajectoryInspector({
             <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
               Choose a row to inspect its full input, output, or thinking content.
             </p>
-            <div className="text-muted-foreground mt-4 flex items-center justify-center gap-2 text-[10px]">
+            <div className="text-muted-foreground mt-4 flex items-center justify-center gap-2 text-[0.625rem]">
               <span className="inline-flex items-center gap-1 rounded-md bg-background/80 px-2 py-1 font-mono">
                 <ArrowDownUp className="size-3" />
                 ↑ ↓ navigate
@@ -117,13 +117,13 @@ export function TrajectoryInspector({
             <PanelRight className="size-4" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-muted-foreground text-[10px] font-semibold tracking-[0.14em] uppercase">
+            <p className="text-muted-foreground text-[0.625rem] font-semibold tracking-[0.14em] uppercase">
               Record {record.index}
             </p>
             <p className="mt-1 line-clamp-2 break-words text-sm font-semibold">
               {record.summary}
             </p>
-            <p className="text-muted-foreground mt-1 text-[11px]">
+            <p className="text-muted-foreground mt-1 text-[0.6875rem]">
               {formatKind(record.kind)} · turn {record.turn}
               {record.request ? ` · request ${record.request}` : ""}
             </p>
@@ -135,7 +135,7 @@ export function TrajectoryInspector({
             </Badge>
           )}
         </div>
-        <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[11px]">
+        <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[0.6875rem]">
           <span className="rounded-md border border-border/60 bg-background/60 px-2 py-1">
             {formatTimestamp(record.timestamp)}
           </span>
@@ -179,7 +179,7 @@ export function TrajectoryInspector({
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {detailValue(record, tab) ? (
-          <pre className="bg-background/20 whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed">
+          <pre className="bg-background/20 whitespace-pre-wrap break-words p-4 font-mono text-[0.6875rem] leading-relaxed">
             {detailValue(record, tab)}
           </pre>
         ) : (
