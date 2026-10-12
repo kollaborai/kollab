@@ -249,7 +249,7 @@ async def test_address_denied_message_names_host_ip_and_config_hint():
     text = str(denied.value)
     assert "example.com resolves to 10.0.0.5" in text
     assert "discovery_private_origins" in text
-    assert '"https://example.com": ["10.0.0.5/32"]' in text
+    assert '{"*": ["10.0.0.5/32"]}' in text
 
 
 @pytest.mark.asyncio
@@ -257,10 +257,12 @@ async def test_address_denied_message_is_actionable_for_ipv6_too():
     resolver = _PublicResolver(FakeDNS(["2001:db8::5"]), ())
     with pytest.raises(DiscoveryError) as denied:
         await resolver.resolve("example.com", 443)
-    assert '"https://example.com": ["2001:db8::5/128"]' in str(denied.value)
-
-
-# ------------------------------------------- wildcard discovery scope (#155)
+    message = str(denied.value)
+    assert "example.com resolves to 2001:db8::5" in message
+    assert "plugins.hub.discovery_private_origins" in message
+    # Short, valid-JSON hint in the "*" (any-origin) form, IPv6-correct (#155).
+    assert '{"*": ["2001:db8::5/128"]}' in message
+    assert len(message) <= 200
 
 
 @pytest.mark.asyncio

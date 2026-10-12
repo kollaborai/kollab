@@ -1012,10 +1012,14 @@ class HubPlugin(BasePlugin):
             return
 
         # Pipe mode: don't register presence or start socket server.
-        # One-shot queries shouldn't appear as agents on the hub mesh.
+        # One-shot queries shouldn't appear as agents on the hub mesh, but the
+        # slash commands (/connect <domain>, /hub status) must still exist or
+        # `kollab -p "/connect ..."` is told "Unknown command".
         if args and getattr(args, "pipe", False):
             logger.info("Hub plugin skipping presence — pipe mode")
             self.enabled = False
+            if self.command_registry:
+                self._register_commands()
             return
 
         # Get profile/agent info
@@ -9991,11 +9995,21 @@ class HubPlugin(BasePlugin):
                 """
                 return await self._start_connect_network(domain)
 
+            async def allow_origin(origin: str, cidrs: list) -> bool:
+                """Merge an approved discovery origin into the config, never
+                clobbering other origins; the form retries the attach on True.
+                """
+                return self._allow_discovery_origin(origin, cidrs)
+
             stack_mgr = self._altview_stack()
 
             await stack_mgr.push(
                 ConnectAltView(
-                    domain=domain, on_submit=submit, on_attach=attach, on_wait=wait
+                    domain=domain,
+                    on_submit=submit,
+                    on_attach=attach,
+                    on_wait=wait,
+                    on_allow_origin=allow_origin,
                 ),
                 "connect",
                 reuse=False,
@@ -10004,6 +10018,43 @@ class HubPlugin(BasePlugin):
         except Exception:
             # UI initialization failures must not include the private code.
             return "connect: private enrollment view is unavailable"
+
+    def _allow_discovery_origin(self, origin: str, cidrs: list) -> bool:
+        """Merge one origin -> CIDR entry into discovery_private_origins.
+
+        Existing origins (and any CIDRs already listed for this origin) are
+        kept; the merged mapping is persisted. Never clobbers.
+        """
+        if not origin or not isinstance(cidrs, list) or not cidrs:
+            return False
+        if self.config is None:
+            return False
+        key = "plugins.hub.discovery_private_origins"
+        try:
+            current = self.config.get(key, {})
+            if not isinstance(current, dict):
+                current = {}
+            merged = dict(current)
+            existing = merged.get(origin)
+            if not isinstance(existing, list) or any(
+                not isinstance(entry, str) for entry in existing
+            ):
+                existing = []
+            merged[origin] = existing + [
+                str(entry) for entry in cidrs if str(entry) not in existing
+            ]
+            if not self.config.set(key, merged):
+                return False
+            if not self.config.save_config():
+                logger.warning("approved origin %s kept in memory only", origin)
+            else:
+                logger.info("approved discovery origin %s: %s", origin, merged[origin])
+            return True
+        except Exception:
+            logger.warning(
+                "could not approve discovery origin %s", origin, exc_info=True
+            )
+            return False
 
     def _joined_line(self, domain: str) -> str:
         """`joined <network> as <device>. trust: <level>` once a join is approved."""

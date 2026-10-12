@@ -4,7 +4,7 @@ import asyncio
 import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -457,3 +457,112 @@ def test_guided_new_network_falls_back_on_a_reason_string():
     plugin._open_connect_screen.assert_not_awaited()
     # Both attempts got a real reason back, not a bare False.
     assert plugin._start_connect_network.await_count == 2
+
+
+# --------------------------------------------------------------------- #
+# beacon reason propagation (issue #155)
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_daemon_hub_connect_carries_reason(monkeypatch):
+    """The daemon passes the underlying failure through to the caller."""
+    from kollabor.state import handlers as state_handlers
+
+    class _FailingStateService:
+        async def hub_connect(self, command):
+            raise RuntimeError("discovery: address_denied")
+
+    captured = {}
+
+    class _RpcServer:
+        def register(self, name, handler):
+            captured[name] = handler
+
+    state_handlers.register_state_handlers(_RpcServer(), _FailingStateService())
+    result = await captured["state.hub_connect"]({"command": "start"})
+    assert result["error"] == "beacon command failed: discovery: address_denied"
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_raises_underlying_reason():
+    """The attach client raises the daemon's reason, not a generic string."""
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed: discovery: address_denied"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="discovery: address_denied"):
+        await service.hub_connect("start")
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_generic_when_daemon_says_nothing():
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="daemon beacon command failed"):
+        await service.hub_connect("start")
+
+
+# -------------------------------------------- pipe-mode command registration (#156)
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_registers_slash_commands(monkeypatch):
+    """`kollab -p "/connect ..."` needs the command registry even though the
+    hub plugin skips presence, socket server and status line in pipe mode.
+    """
+    registered = []
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = MagicMock()
+    plugin._register_commands = lambda: registered.append(True)
+    initialize_kwargs = {"command_registry": plugin.command_registry}
+
+    import kollabor.hub_env as hub_env
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_env, "hub_disabled_by_env", lambda: False)
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args, **initialize_kwargs)
+
+    assert registered, "pipe mode must still register slash commands"
+    assert plugin.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_skips_registration_without_a_registry(monkeypatch):
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = None
+
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args)
+    assert plugin.enabled is False
