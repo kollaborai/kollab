@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web: the gems are soft now. Each is a smooth, breathing blob in its own color that changes shape, with pill eyes and a mouth that morph too, and its face turns with the body toward your cursor. Every agent is born with one of three motions that sticks: Mood Morph (its shape shows what it is doing), Jelly (it wobbles as it moves) or Shape Cycle (it cycles through shapes while idle).
 
+## [0.15.4] - 2026-10-12
+
+### Added
+- A device can hold several network memberships at once. Each folder keeps its own membership keys while moving to the new device record, so peer approvals and conversations keep validating without re-joins, and the device record's primary choice owns the managed-config entry: joins never clobber it, and a stale entry is cleared only when no live workspace on the machine still claims it. (#158, #162, #164)
+- `/connect status` lists every membership with the primary marked, `/connect join` no longer leaves your current network first, `/connect leave` asks which network when you hold several, and the new `/connect primary <network>` sets the device's choice. (#166)
+- The relay runs one membership runtime per folder and network (up to eight), each with its own inbound approval checks. (#162)
+- The web UI sidebar groups agents Networks > Devices > Workspaces > Agents across every network the device is on, plus a contacts section built from knocks you accepted. (#163)
+
+### Fixed
+- `/connect start-network` no longer dies with a generic "could not submit the join request" when the domain resolves to a non-global address (a DNS or egress proxy like 198.18.0.0/15): the reason travels end to end, `address_denied` names the host, the IP and the config line to change, and the Connect screen offers to approve the range and retry, with a caution to only approve a DNS or proxy you trust. (#155, #159)
+- The join code field shows one `*` per character typed and backspace removes one, instead of filling every star on the first keypress. (#159)
+- The web UI folds a live network answer into the right network block: an exact-name match now runs before the substring fallback, so an answer for "acme" no longer lands in "acme-lab-net". (#165)
+- The device record tolerates and normalizes the flat `primary_network` spelling, so a record written by an older layout no longer breaks the validator. (#167)
+
 ## [0.15.3] - 2026-10-11
 
 ### Added
