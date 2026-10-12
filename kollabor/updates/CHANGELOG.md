@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web: on a mouse-and-keyboard screen the UI is a step denser (90%), the chat text one size smaller, and tool calls start collapsed ("2 tool calls"; click to open). Touch screens keep their size. (#173)
 
+## [0.15.5] - 2026-10-12
+
+### Fixed
+- The update check no longer treats a version cache holding the version you are already running as fresh for a full day: a cache that shows the current or an older version is refetched within the hour, so a release you just installed is announced instead of staying hidden until the next day. (#169, #170)
+- `kollab --update` now shows download progress (bytes and percent) on stderr, fails loudly after 30 seconds of no data and retries once — resuming from where the server allows, and restarting cleanly when it does not — sweeps stale `.kollab-upgrade-*` temp files older than an hour at startup, and unlinks its in-flight temp file on Ctrl-C or SIGTERM instead of leaving it behind. (#171, #172)
+
+
 ## [0.15.4] - 2026-10-12
 
 ### Added
