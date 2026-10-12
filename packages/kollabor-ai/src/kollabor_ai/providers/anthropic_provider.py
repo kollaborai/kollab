@@ -226,7 +226,7 @@ class AnthropicProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"Anthropic call failed: {e}")
+            logger.error(f"Anthropic call failed: {type(e).__name__}: {e}")
             if isinstance(e, ProviderError):
                 raise
             raise map_anthropic_error(e, "anthropic") from e

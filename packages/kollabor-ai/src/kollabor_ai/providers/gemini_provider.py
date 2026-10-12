@@ -208,7 +208,7 @@ class GeminiProvider(LLMProvider):
             logger.error(f"Gemini request failed: {mapped_error}")
             raise mapped_error from e
         except Exception as e:
-            logger.error(f"Gemini call failed: {e}")
+            logger.error(f"Gemini call failed: {type(e).__name__}: {e}")
             raise
         finally:
             await self._track_request_end()
