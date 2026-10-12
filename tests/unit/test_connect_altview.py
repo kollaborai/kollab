@@ -1,6 +1,8 @@
 """Security and input behavior for the private connect AltView."""
 
+import json
 import re
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,6 +15,33 @@ from plugins.altview.connect_altview import (
     ConnectSubmission,
     PrivateCode,
 )
+from plugins.hub.dns.discovery import DiscoveryError, _PublicResolver
+
+
+class FakeDNS:
+    def __init__(self, addresses):
+        self._addresses = addresses
+
+    async def resolve(self, host, kind, **kwargs):
+        from types import SimpleNamespace
+
+        if kind == "AAAA":
+            return []
+        return [SimpleNamespace(address=a) for a in self._addresses]
+
+
+def _plugin():
+    from plugins.hub import plugin as hub_plugin_module
+
+    plugin_cls = getattr(
+        hub_plugin_module,
+        next(
+            name
+            for name in dir(hub_plugin_module)
+            if name.lower().endswith("plugin") and name != "BasePlugin"
+        ),
+    )
+    return object.__new__(plugin_cls)
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -71,9 +100,9 @@ async def test_private_code_is_masked_and_length_is_not_rendered():
     rendered = renderer.text()
 
     assert re.search(r"domain\s+kollabor\.ai", rendered)
-    assert re.search(r"join code\s+\*{8}(?!\*)", rendered)
+    # One star per typed character: 12 chars -> 12 stars, no more (#156).
+    assert re.search(r"join code\s+\*{12}(?!\*)", rendered)
     assert "s3cr3t-value" not in rendered
-    assert "************" not in rendered
 
 
 @pytest.mark.asyncio
@@ -198,7 +227,10 @@ async def test_bracketed_paste_tab_does_not_change_focus_or_expose_code():
 
     await view.render_frame(0.0)
     assert "SYNTHETIC-SECRET" not in renderer.text()
-    assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
+    # Paste fills one star per pasted character, exactly like typing (#156):
+    # 15 code chars land in the field, the pasted Tab ends the code.
+    assert re.search(rf"join code\s+\*{{{len(view._code_chars)}}}(?!\*)", renderer.text())
+    assert "SYNTHETIC-SECRET" not in renderer.text()
 
     await view.handle_input(_named("Enter"))
 
@@ -370,7 +402,7 @@ async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
         captured["code"] = submission.code.reveal()
         return ConnectOutcome.approved()
 
-    for typed in ("7qk4m2xp", "7QK4-M2XP"):
+    for typed, stars in (("7qk4m2xp", 8), ("7QK4-M2XP", 9)):
         captured.clear()
         view = ConnectAltView(on_submit=submit)
         renderer = _FakeRenderer()
@@ -378,7 +410,8 @@ async def test_join_form_accepts_a_short_code_case_insensitive_dash_optional():
         await _type_code(view, typed)
         await view.render_frame(0.0)
 
-        assert re.search(r"join code\s+\*{8}(?!\*)", renderer.text())
+        # One star per typed character, dash included (#156).
+        assert re.search(rf"join code\s+\*{{{stars}}}(?!\*)", renderer.text())
         assert typed not in renderer.text()
 
         await view.handle_input(_named("Enter"))
@@ -504,3 +537,285 @@ async def test_the_form_hints_wrap_instead_of_being_cut_off_on_a_narrow_terminal
     flat = " ".join(" ".join(rows).split())
     assert "an empty code plus enter starts a network on kollabor.ai" in flat
     assert "run /connect code on a device already on the network" in flat
+
+
+# --------------------------------------------- start-network failure reasons (#155)
+
+
+def test_error_outcome_accepts_a_single_line_detail():
+    """ERROR outcomes may carry the start-network failure reason (#155)."""
+    outcome = ConnectOutcome.error("could not start a network: RuntimeError: no dns")
+    assert outcome.detail == "could not start a network: RuntimeError: no dns"
+    assert ConnectOutcome.error().detail == ""
+    # The old contract still works: submit-path failures keep a note.
+    assert ConnectOutcome.error(note="stale offer").note == "stale offer"
+
+
+@pytest.mark.parametrize("detail", ["two\nlines", "x" * 201, "bad \x00 control"])
+def test_error_outcome_detail_is_still_one_printable_line(detail):
+    with pytest.raises(ValueError):
+        ConnectOutcome.error(detail)
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_shows_the_start_network_reason():
+    """The empty-code path renders 'could not start the network' plus why."""
+
+    async def on_attach(domain: str) -> str:
+        return "connect: relay discovery is unavailable"
+
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error(), on_attach=on_attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    text = renderer.text()
+    assert "could not start the network" in text
+    assert "connect: relay discovery is unavailable" in text
+    assert "could not submit the join request" not in text
+
+
+@pytest.mark.asyncio
+async def test_attach_exception_becomes_a_printable_reason(caplog):
+    def on_attach(domain: str) -> bool:
+        raise RuntimeError("boom")
+
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error(), on_attach=on_attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    text = renderer.text()
+    assert "could not start the network" in text
+    assert "RuntimeError: boom" in text
+    assert any("start network failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_attach_without_reason_keeps_the_generic_submit_error():
+    """A callback that only says False (legacy) still gets the old copy."""
+    view = ConnectAltView(
+        on_submit=lambda _s: ConnectOutcome.error(), on_attach=lambda _d: False
+    )
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert "could not submit the join request" in renderer.text()
+    assert "could not start the network" not in renderer.text()
+
+@pytest.mark.asyncio
+async def _run_attach(attach_result):
+    """Drive the empty-code attach path with a stubbed start-network callback."""
+    view = ConnectAltView(
+        on_submit=lambda _s: ConnectOutcome.error(),
+        on_attach=lambda _d: attach_result,
+    )
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+    return view, renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_attach_success_still_connects():
+    view, text = await _run_attach(True)
+    assert view._outcome.status is ConnectStatus.CONNECTED
+
+
+# ------------------------------------------- join-code entry, one star/char (#156)
+
+
+@pytest.mark.asyncio
+async def test_first_keypress_shows_exactly_one_star():
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error())
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_key("7"))
+    await view.render_frame(0.0)
+
+    assert re.search(r"join code\s+\*(?!\*)", renderer.text())
+    assert "********" not in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_backspace_removes_one_star():
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error())
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await _type_code(view, "12345")
+    await view.handle_input(_named("Backspace"))
+    await view.render_frame(0.0)
+
+    assert re.search(r"join code\s+\*{4}(?!\*)", renderer.text())
+
+
+# ------------------------------------- denied-origin approve prompt (#156)
+
+
+@pytest.mark.asyncio
+async def test_denied_reason_offers_approve_and_retry_merges_config():
+    """address_denied + y merges the CIDR and attaches again; approved wins."""
+    plugin = _plugin()
+    approvals = []
+
+    async def attach(domain: str) -> str:
+        if approvals:
+            return True
+        approvals.append(domain)
+        return (
+            "kollabor.ai resolves to 198.18.0.7, outside the permitted address "
+            "scope. Behind a DNS or egress proxy, allow it with "
+            'plugins.hub.discovery_private_origins = {"*": ["198.18.0.7/32"]} '
+            "[address_denied]"
+        )
+
+    plugin.config = _FakeConfig()
+    plugin._start_connect_network = attach
+
+    async def allow(origin, cidrs):
+        plugin.config.saved.append(
+            ("plugins.hub.discovery_private_origins", {origin: cidrs})
+        )
+        return True
+
+    view = ConnectAltView(
+        on_submit=lambda _s: ConnectOutcome.error(), on_attach=attach,
+        on_allow_origin=allow,
+    )
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))  # empty code -> attach -> denied
+    await view.render_frame(0.0)
+
+    text = renderer.text()
+    assert "Add any origin (198.18.0.7/32) to the approved list? y/n" in text
+    assert "Only approve a network whose DNS or proxy you trust" in text
+
+    await view.handle_input(_key("y"))
+    await view.render_frame(0.0)
+
+    assert plugin.config.saved, "the merge callback never ran"
+    assert not view._origin_prompt
+    assert view.outcome == ConnectOutcome.connected()
+
+
+@pytest.mark.asyncio
+async def test_denied_reason_declined_keeps_error_without_merge():
+    plugin = _plugin()
+    plugin.config = _FakeConfig()
+
+    async def attach(domain: str) -> str:
+        return (
+            "kollabor.ai resolves to 198.18.0.7, outside the permitted address "
+            "scope [address_denied] "
+            'plugins.hub.discovery_private_origins = {"*": ["198.18.0.7/32"]}'
+        )
+
+    calls = []
+
+    async def allow(origin, cidrs):
+        calls.append(origin)
+        return True
+
+    view = ConnectAltView(
+        on_submit=lambda _s: ConnectOutcome.error(), on_attach=attach,
+        on_allow_origin=allow,
+    )
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.handle_input(_key("n"))
+    await view.render_frame(0.0)
+
+    assert calls == []
+    assert "could not start the network" in renderer.text()
+    assert "Add any origin" not in renderer.text()
+
+
+def test_denied_origin_needs_valid_json_snippet():
+    assert ConnectAltView._denied_origin(
+        'scope [address_denied] {"*": ["10.1.2.3/32"]}'
+    ) == ("*", ["10.1.2.3/32"])
+    assert ConnectAltView._denied_origin(
+        '{"https://kollabor.ai": ["203.0.113.9/32"]} address_denied'
+    ) == ("https://kollabor.ai", ["203.0.113.9/32"])
+    assert ConnectAltView._denied_origin("plain failure, no JSON") == (None, [])
+    assert ConnectAltView._denied_origin("address_denied {not json}") == (None, [])
+    assert ConnectAltView._denied_origin('{"*": "not-a-list"}') == (None, [])
+
+
+# ---------------------------------------- discovery hint is short JSON (#156)
+
+
+@pytest.mark.asyncio
+async def test_address_denied_hint_is_short_and_valid_json():
+    resolver = _PublicResolver(FakeDNS(["198.18.0.7"]), ())
+    with pytest.raises(DiscoveryError) as denied:
+        await resolver.resolve("kollabor.ai", 443)
+    text = str(denied.value)
+
+    assert len(text) <= 200
+    match = re.search(r"\{[^{}]*\}", text)
+    assert match, text
+    assert json.loads(match.group(0)) == {"*": ["198.18.0.7/32"]}
+
+
+@pytest.mark.asyncio
+async def test_address_denied_hint_is_valid_json_for_ipv6():
+    resolver = _PublicResolver(FakeDNS(["2001:db8::5"]), ())
+    with pytest.raises(DiscoveryError) as denied:
+        await resolver.resolve("kollabor.ai", 443)
+    text = str(denied.value)
+    match = re.search(r"\{[^{}]*\}", text)
+    assert json.loads(match.group(0)) == {"*": ["2001:db8::5/128"]}
+    assert len(text) <= 200
+
+
+class _FakeConfig:
+    """Minimal config service stand-in recording set() calls."""
+
+    def __init__(self):
+        self.values = {}
+        self.saved = []
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+        self.saved.append((key, value))
+        return True
+
+    def save_config(self):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_allow_discovery_origin_merges_never_clobbers():
+    plugin = _plugin()
+    plugin.config = _FakeConfig()
+    plugin.config.values["plugins.hub.discovery_private_origins"] = {
+        "https://kollabor.ai": ["203.0.113.0/24"],
+        "https://other.example": ["10.0.0.0/8"],
+    }
+
+    assert plugin._allow_discovery_origin("https://kollabor.ai", ["203.0.113.9/32"])
+
+    merged = plugin.config.values["plugins.hub.discovery_private_origins"]
+    assert merged["https://kollabor.ai"] == ["203.0.113.0/24", "203.0.113.9/32"]
+    assert merged["https://other.example"] == ["10.0.0.0/8"]
+
+
+@pytest.mark.asyncio
+async def test_allow_discovery_origin_rejects_empty_and_no_config():
+    plugin = _plugin()
+    plugin.config = None
+    assert plugin._allow_discovery_origin("*", ["10.0.0.0/8"]) is False
+    plugin.config = _FakeConfig()
+    assert plugin._allow_discovery_origin("", ["10.0.0.0/8"]) is False
+    assert plugin._allow_discovery_origin("*", []) is False

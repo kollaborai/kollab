@@ -543,7 +543,9 @@ class RelayCommands:
             raise ValueError(
                 "discovery_private_origins must be an origin-to-CIDR mapping"
             )
-        cidrs = scopes.get(requested.origin, [])
+        # An explicit origin entry wins; "*" covers any origin (e.g. a fake-IP
+        # egress proxy that answers for every host), same CIDR-list validation.
+        cidrs = scopes.get(requested.origin, scopes.get("*", []))
         if not isinstance(cidrs, list) or any(not isinstance(c, str) for c in cidrs):
             raise ValueError("private discovery scope must be a list of CIDRs")
         is_card = requested.url == requested.origin + "/.well-known/agent-card.json"
