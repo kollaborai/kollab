@@ -45,8 +45,11 @@ def release(monkeypatch, *, tag="v9.9.9", body=NEW, digest=None, assets=(NAME, f
     ).encode()
     opened = []
 
-    def fake_open(url, timeout):
+    def fake_open(url, timeout, headers=None):
         opened.append(url)
+        if headers:
+            for value in headers.values():
+                assert isinstance(value, str)
         if url not in files:
             raise OSError(f"HTTP Error 404: {url}")
         return io.BytesIO(files[url])
