@@ -4,7 +4,7 @@ import asyncio
 import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -314,13 +314,18 @@ def test_new_network_creates_then_opens_the_screen_with_the_steps():
 
 @pytest.mark.parametrize(
     "reply,started",
-    [("network mac-net via kollabor.ai", True), (NO_NETWORK, False), ("", False)],
+    [
+        ("network mac-net via kollabor.ai", True),
+        (NO_NETWORK, NO_NETWORK),
+        ("", "no reply from the relay owner"),
+    ],
 )
 def test_start_network_reads_the_first_line_of_the_reply(reply, started):
+    """True only once a network exists; else the reason says why it does not."""
     plugin = _plugin()
     plugin._attached = lambda: False
     plugin._run_connect_command = AsyncMock(return_value=reply)
-    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) is started
+    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) == started
 
 
 # ---------------------------------------------------------------- the texts
@@ -410,3 +415,155 @@ async def test_join_line_says_the_stand_in_once_when_no_name_comes():
     line = JoinLine(lambda: "", patience=30.0, clock=lambda: now[0])
     await line.say(said.append, poll=1.0, sleep=sleep)
     assert said == [post_join_line("")] and now[0] == 30.0
+
+
+# ------------------------------------------------- start-network reasons (#155)
+
+
+def test_start_network_failure_reasons_are_returned_not_swallowed():
+    """Every failure path returns a short human-readable reason (issue #155)."""
+    plugin = _plugin()
+    plugin._attached = lambda: False
+
+    # Not a target: say what was wrong with the input.
+    plugin._run_connect_command = AsyncMock()
+    reason = asyncio.run(plugin._start_connect_network("not a domain"))
+    assert reason == "'not a domain' is not a domain, URL or known network"
+    plugin._run_connect_command.assert_not_awaited()
+
+    # The relay call raised: name the exception and its message.
+    plugin._run_connect_command = AsyncMock(
+        side_effect=RuntimeError("relay discovery is unavailable")
+    )
+    reason = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert (
+        reason
+        == "could not start a network: RuntimeError: relay discovery is unavailable"
+    )
+
+
+def test_guided_new_network_falls_back_on_a_reason_string():
+    """A reason (not False) also counts as not-started for the guided setup."""
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: ""
+    plugin._start_connect_network = AsyncMock(
+        side_effect=["bad dns", "still bad dns"]
+    )
+    plugin._connect_has_network = AsyncMock(return_value=False)
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(return_value="")
+    plugin._open_connect_screen = AsyncMock()
+    assert "could not start a network" in asyncio.run(plugin._guided_new_network())
+    plugin._open_connect_screen.assert_not_awaited()
+    # Both attempts got a real reason back, not a bare False.
+    assert plugin._start_connect_network.await_count == 2
+
+
+# --------------------------------------------------------------------- #
+# beacon reason propagation (issue #155)
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_daemon_hub_connect_carries_reason(monkeypatch):
+    """The daemon passes the underlying failure through to the caller."""
+    from kollabor.state import handlers as state_handlers
+
+    class _FailingStateService:
+        async def hub_connect(self, command):
+            raise RuntimeError("discovery: address_denied")
+
+    captured = {}
+
+    class _RpcServer:
+        def register(self, name, handler):
+            captured[name] = handler
+
+    state_handlers.register_state_handlers(_RpcServer(), _FailingStateService())
+    result = await captured["state.hub_connect"]({"command": "start"})
+    # The daemon names the exception: f"{type(exc).__name__}: {exc}".
+    assert result["error"] == "RuntimeError: discovery: address_denied"
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_raises_underlying_reason():
+    """The attach client raises the daemon's reason, not a generic string."""
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed: discovery: address_denied"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="discovery: address_denied"):
+        await service.hub_connect("start")
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_generic_when_daemon_says_nothing():
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="beacon command failed"):
+        await service.hub_connect("start")
+
+
+# -------------------------------------------- pipe-mode command registration (#156)
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_registers_slash_commands(monkeypatch):
+    """`kollab -p "/connect ..."` needs the command registry even though the
+    hub plugin skips presence, socket server and status line in pipe mode.
+    """
+    registered = []
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = MagicMock()
+    plugin._register_commands = lambda: registered.append(True)
+    initialize_kwargs = {"command_registry": plugin.command_registry}
+
+    import kollabor.hub_env as hub_env
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_env, "hub_disabled_by_env", lambda: False)
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args, **initialize_kwargs)
+
+    assert registered, "pipe mode must still register slash commands"
+    assert plugin.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_skips_registration_without_a_registry(monkeypatch):
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = None
+
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args)
+    assert plugin.enabled is False

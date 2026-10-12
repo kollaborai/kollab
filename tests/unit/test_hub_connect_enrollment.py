@@ -411,11 +411,17 @@ async def test_the_form_starts_a_network_when_no_code_is_entered():
     assert await view._on_attach("kollabor.ai") is True
     plugin._run_connect_command.assert_awaited_once_with("kollabor.ai")
 
-    plugin._run_connect_command.return_value = "connect: relay discovery is unavailable"
-    assert await view._on_attach("kollabor.ai") is False
+    plugin._run_connect_command.return_value = (
+        "connect: relay discovery is unavailable"
+    )
+    assert await view._on_attach("kollabor.ai") == (
+        "connect: relay discovery is unavailable"
+    )
     plugin._run_connect_command.return_value = "network none\ncontact route none"
-    assert await view._on_attach("kollabor.ai") is False
-    assert await view._on_attach("not a domain") is False
+    assert await view._on_attach("kollabor.ai") == "network none"
+    assert await view._on_attach("not a domain") == (
+        "'not a domain' is not a domain, URL or known network"
+    )
 
 
 @pytest.mark.asyncio

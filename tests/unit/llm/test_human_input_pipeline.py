@@ -255,3 +255,123 @@ async def test_submit_rejects_when_primary_input_handler_fails():
     )
 
     assert result == {"status": "rejected", "reason": "input_processing_failed"}
+
+
+@pytest.mark.asyncio
+async def test_pipe_slash_command_runs_through_registry_and_prints(capsys):
+    """`kollab -p "/connect <domain>"` prints the outcome, no LLM call (#155)."""
+    bus, llm, calls, pending_tool = await _pipeline()
+    proxy = _StateLLMProxy(llm)
+    proxy.api_service = SimpleNamespace(is_provider_available=lambda: True)
+    renderer = SimpleNamespace(
+        pipe_mode=False,
+        message_renderer=SimpleNamespace(pipe_mode=False),
+    )
+    app = object.__new__(TerminalLLMChat)
+    app.renderer = renderer
+    app.llm_service = proxy
+    app.pipe_mode = False
+    app._startup_complete = False
+    app.running = False
+    app._initialize_llm_core = AsyncMock()
+    app._initialize_plugins = AsyncMock()
+    app.cleanup = AsyncMock()
+
+    slash_parser = SimpleNamespace(
+        parse_command=lambda text: SimpleNamespace(name="connect", args="relay.example")
+    )
+    printed = []
+
+    class _Result:
+        message = "network marco-home via relay.example"
+        display_type = None
+        success = True
+        ui_config = None
+
+    executor = SimpleNamespace(
+        execute_command=AsyncMock(return_value=_Result()),
+    )
+    app.event_bus = bus
+    app.input_handler = SimpleNamespace(
+        slash_parser=slash_parser, command_executor=executor
+    )
+    app._print_command_result = lambda result: printed.append(result.message)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await app.start_pipe_mode("/connect relay.example")
+
+    assert exc_info.value.code == 0
+    executor.execute_command.assert_awaited_once()
+    assert printed == ["network marco-home via relay.example"]
+    # The command must never reach the model as chat text.
+    assert calls == []
+    pending_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pipe_slash_command_prints_unknown_for_unparsed_input(capsys):
+    """An unparsable slash command says so instead of failing silently."""
+    bus, llm, calls, _ = await _pipeline()
+    proxy = _StateLLMProxy(llm)
+    proxy.api_service = SimpleNamespace(is_provider_available=lambda: True)
+    renderer = SimpleNamespace(
+        pipe_mode=False,
+        message_renderer=SimpleNamespace(pipe_mode=False),
+    )
+    app = object.__new__(TerminalLLMChat)
+    app.renderer = renderer
+    app.llm_service = proxy
+    app.pipe_mode = False
+    app._startup_complete = False
+    app.running = False
+    app._initialize_llm_core = AsyncMock()
+    app._initialize_plugins = AsyncMock()
+    app.cleanup = AsyncMock()
+    app.event_bus = bus
+    app.input_handler = SimpleNamespace(
+        slash_parser=SimpleNamespace(parse_command=lambda text: None),
+        command_executor=SimpleNamespace(execute_command=AsyncMock()),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await app.start_pipe_mode("/no-such-command")
+
+    assert exc_info.value.code == 2
+    assert "Unknown command" in capsys.readouterr().out
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_pipe_plain_text_still_reaches_the_llm():
+    """Non-slash pipe input is untouched by the command registry path."""
+    bus, llm, calls, _ = await _pipeline(cancel_pre=True)
+    proxy = _StateLLMProxy(llm, processing_states=[False])
+    proxy.api_service = SimpleNamespace(is_provider_available=lambda: True)
+    renderer = SimpleNamespace(
+        pipe_mode=False,
+        message_renderer=SimpleNamespace(pipe_mode=False),
+    )
+    app = object.__new__(TerminalLLMChat)
+    app.renderer = renderer
+    app.llm_service = proxy
+    app.pipe_mode = False
+    app._startup_complete = False
+    app.running = False
+    app._initialize_llm_core = AsyncMock()
+    app._initialize_plugins = AsyncMock()
+    app.cleanup = AsyncMock()
+
+    executor = SimpleNamespace(execute_command=AsyncMock())
+    app.event_bus = bus
+    app.input_handler = SimpleNamespace(
+        slash_parser=SimpleNamespace(parse_command=lambda text: None),
+        command_executor=executor,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await app.start_pipe_mode("ordinary question")
+
+    # The stub LLM queue stops pipe mode as before (exit 1), unchanged path.
+    assert exc_info.value.code == 1
+    executor.execute_command.assert_not_awaited()
+    assert calls == [("pre", "pipe", "ordinary question")]
