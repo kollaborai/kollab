@@ -194,7 +194,7 @@ function StudioBody({
                   <GemAvatar gem={agent.name} caste={agent.caste} color={agent.color} state="idle" live season="auto" size={28} />
                   <span className="flex min-w-0 flex-col leading-tight">
                     <span className="font-medium">{titleCase(agent.name)}</span>
-                    <span className="text-muted-foreground text-[11px]">
+                    <span className="text-muted-foreground text-[0.6875rem]">
                       {draft.gems?.[agent.name] ? "Custom" : titleCase(agent.caste || "")}
                     </span>
                   </span>
@@ -260,7 +260,7 @@ function StudioBody({
                         <label htmlFor="studio-hub" className="text-sm font-medium">
                           Hub
                         </label>
-                        <p className="text-muted-foreground text-[11px]">
+                        <p className="text-muted-foreground text-[0.6875rem]">
                           {chat.hub === null
                             ? "This session has no running agent, so there is nothing to switch."
                             : hub
@@ -329,12 +329,12 @@ function StudioBody({
                       Auto
                     </Chip>
                   </div>
-                  <p className="text-muted-foreground text-[11px]">
+                  <p className="text-muted-foreground text-[0.6875rem]">
                     Born hat: {bornHat ?? "None"}. Seasonal costumes cover it; Auto picks a hat for its caste.
                   </p>
                   {HAT_GROUPS.map((group) => (
                     <div key={group} className="flex flex-col gap-1.5">
-                      <p className="text-muted-foreground text-[11px] font-medium">{group}</p>
+                      <p className="text-muted-foreground text-[0.6875rem] font-medium">{group}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {HAT_STYLES.filter((hat) => hat.group === group).map((hat) => (
                           <Chip key={hat.id} active={target.hat === hat.id} onClick={() => set({ hat: hat.id })}>
@@ -378,7 +378,7 @@ function StudioBody({
                       />
                       Custom
                     </label>
-                    <p className="text-muted-foreground text-[11px]">
+                    <p className="text-muted-foreground text-[0.6875rem]">
                       The ringed swatch is {titleCase(current.name)}'s {current.color ? "pool" : "born"} color.
                     </p>
                   </div>
@@ -388,7 +388,7 @@ function StudioBody({
 
             {focus ? null : (
               <div className="shrink-0 border-t p-3">
-                <p className="text-muted-foreground mb-2 text-[11px] font-medium">Season · All Gems</p>
+                <p className="text-muted-foreground mb-2 text-[0.6875rem] font-medium">Season · All Gems</p>
                 <div className="flex flex-wrap gap-1.5">
                   <Chip active={season === "auto"} onClick={() => setDraft((prev) => ({ ...prev, season: "auto" }))}>
                     Auto
@@ -403,7 +403,7 @@ function StudioBody({
                     </Chip>
                   ))}
                 </div>
-                <p className="text-muted-foreground mt-2 text-[11px]">
+                <p className="text-muted-foreground mt-2 text-[0.6875rem]">
                   Auto: Halloween in October, Christmas in December.
                 </p>
               </div>
@@ -463,7 +463,7 @@ function EyeTile({
       aria-label={`${label} Eyes`}
       onClick={onClick}
       className={cn(
-        "flex flex-col items-center gap-1 rounded-lg border px-1 pt-3 pb-1.5 text-[11px] transition-colors",
+        "flex flex-col items-center gap-1 rounded-lg border px-1 pt-3 pb-1.5 text-[0.6875rem] transition-colors",
         active ? "border-primary bg-accent" : "border-transparent hover:bg-accent/50",
       )}
     >

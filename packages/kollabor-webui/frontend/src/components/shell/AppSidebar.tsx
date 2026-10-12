@@ -1,5 +1,5 @@
-import { useMemo, useState, type ComponentProps } from "react";
-import { Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { ChevronDown, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
@@ -9,6 +9,7 @@ import { KollabLogo } from "@/components/icons/kollab-logo";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -53,9 +54,6 @@ import {
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
@@ -69,7 +67,44 @@ import {
  */
 /** Why a row did not open, in full: it can name the command that allows it. */
 function OpenError({ text }: { text: string }) {
-  return <span className="text-destructive text-[11px] leading-snug break-words whitespace-normal">{text}</span>;
+  return <span className="text-destructive text-[0.6875rem] leading-snug break-words whitespace-normal">{text}</span>;
+}
+
+const FOLDED_KEY = "kollab.sidebar.folded";
+
+/** A sidebar group its label folds away; the count stays in view while it is folded. */
+function FoldGroup({
+  label,
+  count,
+  open,
+  onOpenChange,
+  children,
+}: {
+  label: ReactNode;
+  count?: number;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange} className="group/fold">
+      <SidebarGroup>
+        <SidebarGroupLabel
+          asChild
+          className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground w-full cursor-pointer"
+        >
+          <CollapsibleTrigger>
+            {label}
+            <span className="ml-auto flex shrink-0 items-center gap-1 pl-2">
+              {count === undefined ? null : <span className="tabular-nums">{count}</span>}
+              <ChevronDown className="size-3.5 transition-transform group-data-[state=closed]/fold:-rotate-90" />
+            </span>
+          </CollapsibleTrigger>
+        </SidebarGroupLabel>
+        <CollapsibleContent>{children}</CollapsibleContent>
+      </SidebarGroup>
+    </Collapsible>
+  );
 }
 
 export function AppSidebar({
@@ -180,6 +215,25 @@ export function AppSidebar({
     () => groupNetworkTree(network.networks, network.device, network.remote),
     [network.networks, network.device, network.remote],
   );
+  // Groups the viewer folded away, remembered in this browser only.
+  const [folded, setFolded] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(FOLDED_KEY) || "{}");
+      return saved && typeof saved === "object" ? saved : {};
+    } catch {
+      return {};
+    }
+  });
+  const fold = (key: string, open: boolean) =>
+    setFolded((prev) => {
+      const next = { ...prev, [key]: !open };
+      try {
+        localStorage.setItem(FOLDED_KEY, JSON.stringify(next));
+      } catch {
+        // Blocked storage (a private window): the fold lasts this visit.
+      }
+      return next;
+    });
   // An agent opened on another computer is a session too; it stays in its computer's group.
   const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
   const pickedGem = poolByName.get(selectedIdentity);
@@ -357,16 +411,21 @@ export function AppSidebar({
       </SidebarHeader>
 
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>
-            This Computer
-            {network.device ? (
-              <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal">
-                {`· ${network.device}`}
-              </span>
-            ) : null}
-            <span className="ml-auto tabular-nums">{localSessions.length}</span>
-          </SidebarGroupLabel>
+        <FoldGroup
+          label={
+            <>
+              This Computer
+              {network.device ? (
+                <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal">
+                  {`· ${network.device}`}
+                </span>
+              ) : null}
+            </>
+          }
+          count={localSessions.length}
+          open={!folded.local}
+          onOpenChange={(open) => fold("local", open)}
+        >
           <SidebarGroupContent>
             <SidebarMenu>
               {localSessions.map((session) => {
@@ -423,10 +482,10 @@ export function AppSidebar({
                           />
                         </span>
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="truncate text-[13px] leading-tight font-medium">
+                          <span className="truncate text-[0.8125rem] leading-tight font-medium">
                             {formatSessionName(session.name, session.session_id)}
                           </span>
-                          <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                          <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                             {note && !note.error ? (
                               "Opening…"
                             ) : task ? (
@@ -504,10 +563,10 @@ export function AppSidebar({
                       size={56}
                     />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-muted-foreground truncate text-[13px] leading-tight font-medium">
+                      <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
                         {titleCase(agent.identity)}
                       </span>
-                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                      <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                         Offline · {lastRanLabel(agent.last_ran)}
                       </span>
                     </div>
@@ -521,35 +580,38 @@ export function AppSidebar({
               ) : null}
             </SidebarMenu>
           </SidebarGroupContent>
-        </SidebarGroup>
+        </FoldGroup>
         {networkTree.map((net) => (
-          <SidebarGroup key={net.id}>
-            <SidebarGroupLabel>
-              {net.name || "Network"}
-              <span className="text-muted-foreground ml-1 truncate text-[10px]">
-                {net.name && net.trust ? ` ${net.trust}` : ""}
-              </span>
-            </SidebarGroupLabel>
+          <FoldGroup
+            key={net.id}
+            label={
+              <>
+                {net.name || "Network"}
+                <span className="text-muted-foreground ml-1 truncate text-[0.625rem]">
+                  {net.name && net.trust ? ` ${net.trust}` : ""}
+                </span>
+              </>
+            }
+            count={net.devices.reduce((sum, dev) => sum + dev.workspaces.reduce((n, ws) => n + ws.agents.length, 0), 0)}
+            open={!folded[`net:${net.id}`]}
+            onOpenChange={(open) => fold(`net:${net.id}`, open)}
+          >
             <SidebarGroupContent>
-              <SidebarMenuSub>
+              {/* Full-width rows under small headers: nested sub-menus indented both sides and left the names a few letters wide. */}
               {net.devices.map((dev) => (
-                <SidebarMenuSubItem key={dev.device} className="list-none">
-                  <SidebarMenuSub>
-                    <SidebarMenuSubItem>
-                      <SidebarMenuSubButton className="text-muted-foreground pointer-events-none h-6 cursor-default justify-between font-medium">
-                        {dev.device}
-                        <span className="text-[10px] tabular-nums">
-                          {dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
-                        </span>
-                      </SidebarMenuSubButton>
-                    </SidebarMenuSubItem>
-                    {dev.workspaces.map((ws) => (
-                      <SidebarMenuSubItem key={ws.label || "-"}>
-                        {ws.label ? (
-                          <SidebarMenuSubButton className="text-muted-foreground pointer-events-none h-5 cursor-default text-[11px]">
-                            {ws.label}
-                          </SidebarMenuSubButton>
-                        ) : null}
+                <Fragment key={dev.device}>
+                  <div className="text-muted-foreground flex h-6 items-center gap-2 px-2 text-xs" title={dev.device}>
+                    <span className="min-w-0 truncate">{dev.device}</span>
+                    <span className="ml-auto shrink-0 text-[0.625rem] tabular-nums">
+                      {dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
+                    </span>
+                  </div>
+                  {dev.workspaces.map((ws) => (
+                    <Fragment key={ws.label || "-"}>
+                      {ws.label ? (
+                        <p className="text-muted-foreground truncate px-2 text-[0.6875rem]">{ws.label}</p>
+                      ) : null}
+                      <SidebarMenu>
                         {ws.agents.map((agent) => {
                           // Opens through the network once that computer allows this one.
                           const id = agent.handle || "";
@@ -582,10 +644,10 @@ export function AppSidebar({
                                 size={56}
                               />
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                                <span className="truncate text-[13px] leading-tight font-medium">
+                                <span className="truncate text-[0.8125rem] leading-tight font-medium">
                                   {titleCase(agent.name)}
                                 </span>
-                                <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                                <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                                   {note && !note.error
                                     ? "Opening…"
                                     : agent.state === "offline"
@@ -602,18 +664,21 @@ export function AppSidebar({
                           </SidebarMenuItem>
                           );
                         })}
-                      </SidebarMenuSubItem>
-                    ))}
-                  </SidebarMenuSub>
-                </SidebarMenuSubItem>
+                      </SidebarMenu>
+                    </Fragment>
+                  ))}
+                </Fragment>
               ))}
-              </SidebarMenuSub>
             </SidebarGroupContent>
-          </SidebarGroup>
+          </FoldGroup>
         ))}
         {(network.contacts?.length ?? 0) > 0 ? (
-          <SidebarGroup>
-            <SidebarGroupLabel>Contacts</SidebarGroupLabel>
+          <FoldGroup
+            label="Contacts"
+            count={network.contacts?.length}
+            open={!folded.contacts}
+            onOpenChange={(open) => fold("contacts", open)}
+          >
             <SidebarGroupContent>
               <SidebarMenu>
                 {network.contacts?.map((contact) => (
@@ -633,10 +698,10 @@ export function AppSidebar({
                         size={40}
                       />
                       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="truncate text-[13px] leading-tight font-medium">
+                        <span className="truncate text-[0.8125rem] leading-tight font-medium">
                           {contact.label}
                         </span>
-                        <span className="truncate text-[11px] leading-tight">
+                        <span className="truncate text-[0.6875rem] leading-tight">
                           {contact.trust ? `${titleCase(contact.trust)} trust · ` : ""}
                           {"Ask /connect allow to work together"}
                         </span>
@@ -646,7 +711,7 @@ export function AppSidebar({
                 ))}
               </SidebarMenu>
             </SidebarGroupContent>
-          </SidebarGroup>
+          </FoldGroup>
         ) : null}
       </SidebarContent>
 
