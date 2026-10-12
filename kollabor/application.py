@@ -2888,6 +2888,25 @@ class TerminalLLMChat:
                 )
                 return
 
+            # A key kept in the OS keyring cannot be read with the keyring off
+            # (KOLLAB_NO_KEYRING, the tmux harness): a provider is set up, we
+            # just can't tell from here, so don't take the screen.
+            from kollabor_ai.profile_manager import KEYRING_SENTINEL_PREFIX
+            from kollabor_ai.providers.security import keyring_enabled
+
+            profiles = self.config.get("kollabor.llm.profiles", {}) or {}
+            if not keyring_enabled() and any(
+                isinstance(profile, dict)
+                and str(profile.get("api_key") or "").startswith(
+                    KEYRING_SENTINEL_PREFIX
+                )
+                for profile in profiles.values()
+            ):
+                logger.info(
+                    "Provider key is in the keyring, which is off; skipping wizard"
+                )
+                return
+
             # The wizard is the /setup command's AltView; run its handler so a
             # first launch opens exactly what typing /setup opens.
             setup_command = self.input_handler.command_registry.get_command("setup")

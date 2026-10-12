@@ -15,7 +15,7 @@ See ``TerminalLLMChat._check_first_run_wizard`` in ``kollabor/application.py``.
 import asyncio
 import types
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kollabor.application import TerminalLLMChat
 from kollabor_events.models import CommandResult
@@ -30,6 +30,7 @@ def _make_app(
     first_install=True,
     registry=None,
     probe_raises=False,
+    profiles=None,
 ):
     """Build a minimal stub carrying only what the gate reads."""
     app = types.SimpleNamespace()
@@ -37,9 +38,10 @@ def _make_app(
     app._is_first_install = first_install
 
     cfg = MagicMock()
-    cfg.get.side_effect = lambda key, default=None: (
-        setup_completed if key == "application.setup_completed" else default
-    )
+    values = {"application.setup_completed": setup_completed}
+    if profiles is not None:
+        values["kollabor.llm.profiles"] = profiles
+    cfg.get.side_effect = lambda key, default=None: values.get(key, default)
     cfg.save_key = MagicMock()
     app.config = cfg
 
@@ -137,6 +139,29 @@ class FirstRunWizardRealCommandTests(unittest.TestCase):
         view, name = stack.push.await_args.args[:2]
         self.assertEqual((type(view).__name__, name), ("SetupAltView", "setup"))
         app.config.save_key.assert_called_with("application.setup_completed", True)
+
+    def test_keyring_key_with_keyring_off_does_not_hijack_screen(self):
+        # The tmux harness and KOLLAB_NO_KEYRING switch the keyring off, so a
+        # key kept there cannot load: a provider is set up, not a first run.
+        app = _make_app(
+            provider_available=False,
+            profiles={"anthropic": {"api_key": "secret:keyring:anthropic"}},
+        )
+        with patch(
+            "kollabor_ai.providers.security.keyring_enabled", return_value=False
+        ):
+            _run(app)
+        app.setup_command.handler.assert_not_awaited()
+        app.config.save_key.assert_not_called()
+
+    def test_keyring_key_that_fails_with_keyring_on_still_opens_wizard(self):
+        app = _make_app(
+            provider_available=False,
+            profiles={"anthropic": {"api_key": "secret:keyring:anthropic"}},
+        )
+        with patch("kollabor_ai.providers.security.keyring_enabled", return_value=True):
+            _run(app)
+        app.setup_command.handler.assert_awaited_once()
 
 
 if __name__ == "__main__":
