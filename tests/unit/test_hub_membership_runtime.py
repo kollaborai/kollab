@@ -145,3 +145,73 @@ def test_unjoined_placeholder_is_not_a_membership(home, tmp_path):
     _membership_dir(workspace, home, "unjoined")
     memberships = Memberships(workspace)
     assert memberships.list() == []
+
+
+# -- relay.* network-arg dispatch (slice 3, part 2) -------------------------
+
+
+class _FakeClient:
+    def __init__(self, label: str):
+        self.label = label
+
+    def status(self):
+        return {"state": "online", "label": self.label}
+
+
+class _FakeCommands:
+    def __init__(self, label: str):
+        self.client = _FakeClient(label)
+
+
+def _bridge_for_dispatch(tmp_path, home, memberships_by_slug):
+    """Minimal RelayAgentBridge stand-in exercising _membership_commands."""
+    import plugins.hub.relay_agent as relay_agent
+
+    workspace = tmp_path / "project"
+    workspace.mkdir(exist_ok=True)
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge.workspace = workspace.resolve()
+    bridge.owner = relay_agent.WorkspaceRelayOwner(workspace)
+    bridge.memberships = Memberships(workspace)
+    bridge._membership_runtimes = {}
+    # primary runtime is the bridge's own commands facade
+    primary = bridge.memberships.primary()
+    bridge.commands = _FakeCommands(f"primary:{primary.slug}")
+    for slug, label in memberships_by_slug.items():
+        if slug != primary.slug:
+            bridge._membership_runtimes[slug] = _FakeCommands(label)
+    return bridge
+
+
+def test_membership_commands_resolves_none_to_primary_runtime(home, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    slug = origin_slug("https://relay.example.com")
+    _seed_state(_membership_dir(workspace, home, slug), "https://relay.example.com")
+    bridge = _bridge_for_dispatch(tmp_path, home, {})
+    import asyncio
+
+    commands = asyncio.run(bridge._membership_commands(None))
+    assert commands.client.status()["label"] == f"primary:{slug}"
+
+
+def test_membership_commands_secondary_builds_and_caches(home, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    slug_a = origin_slug("https://a.example.com")
+    slug_b = origin_slug("https://b.example.com")
+    _seed_state(_membership_dir(workspace, home, slug_a), "https://a.example.com")
+    _seed_state(_membership_dir(workspace, home, slug_b), "https://b.example.com")
+    # the NON-primary slug is the secondary under test
+    primary_slug = Memberships(workspace).primary().slug
+    secondary = slug_a if primary_slug == slug_b else slug_b
+    # seed the cache like an earlier call did
+    bridge = _bridge_for_dispatch(tmp_path, home, {secondary: f"secondary:{secondary}"})
+    import asyncio
+
+    commands = asyncio.run(bridge._membership_commands(secondary))
+    assert commands.client.status()["label"] == f"secondary:{secondary}"
+    cached = asyncio.run(bridge._membership_commands(secondary))
+    assert cached is commands  # cache hit, no rebuild
+    with pytest.raises(RelayError):
+        asyncio.run(bridge._membership_commands("unknown-slug"))

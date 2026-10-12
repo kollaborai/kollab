@@ -166,6 +166,7 @@ class RelayAgentBridge:
         self.workspace = Path(workspace).resolve()
         self.owner = WorkspaceRelayOwner(self.workspace, state_dir)
         self.memberships = Memberships(self.workspace)
+        self._membership_runtimes: dict[str, RelayCommands] = {}
         self.directory = directory or LocalAgentDirectory()
         self.commands: RelayCommands | None = None
         self.store: ConversationStore | None = None
@@ -687,6 +688,33 @@ class RelayAgentBridge:
             rpc.register(name, handler)
         await self._ensure_owner()
         self._loop_task = asyncio.create_task(self._run(), name="kollab-relay-agent")
+
+    async def _membership_commands(self, slug: str | None):
+        """RelayCommands for the named membership (None = primary).
+
+        The primary is the bridge's own commands instance (started by
+        _ensure_owner with the full service set). Secondary memberships
+        get lazily-constructed command instances bound to their state
+        dirs; today they answer status/directory queries, and richer
+        per-membership services stack on this hook in later slices.
+        """
+        if slug is None or slug == "":
+            if self.commands is None:
+                raise RelayError("workspace relay owner changed; retry")
+            return self.commands
+        membership = self.memberships.resolve(slug)
+        runtime = self._membership_runtimes.get(membership.slug)
+        if runtime is None:
+            if self.owner.owner() is None:
+                raise RelayError("workspace relay owner changed; retry")
+            runtime = RelayCommands(
+                self.workspace,
+                config=self.plugin.config,
+                state_dir=membership.state_dir,
+                agent_bridge=None,
+            )
+            self._membership_runtimes[membership.slug] = runtime
+        return runtime
 
     async def _ensure_owner(self):
         if self.commands is not None:
@@ -2289,11 +2317,10 @@ class RelayAgentBridge:
         return {"id": record["id"], "state": record["state"]}
 
     async def _rpc_status(self, params):
-        if params:
+        if set(params) - {"network"} or not isinstance(params.get("network", ""), str):
             raise RelayError("invalid local status")
-        if self.commands is None:
-            raise RelayError("workspace relay owner changed; retry")
-        return self.commands.client.status()
+        commands = await self._membership_commands(params.get("network") or None)
+        return commands.client.status()
 
     async def _rpc_directory(self, params):
         if self.commands is None:
