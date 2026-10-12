@@ -63,7 +63,10 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
     if (canvasRef.current) gemEngine.update(canvasRef.current, propsRef.current);
   }, [gem.gem, gem.caste, colorKey, gem.state, gem.live, gem.activity, gem.face, gem.hat, gem.follow, gem.season, gem.motion, key, size]);
 
-  const box: CSSProperties = { width: size, height: size };
+  // Sized in rem, so gems scale with the UI around them (styles.css shrinks the
+  // root font on mouse-driven screens); the engine still draws at `size` pixels.
+  const rem = (px: number) => `${px / 16}rem`;
+  const box: CSSProperties = { width: rem(size), height: rem(size) };
   const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true };
 
   if (fallback) {
@@ -86,7 +89,7 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
       <canvas
         ref={canvasRef}
         className="pointer-events-none absolute block"
-        style={{ left: -overhang, top: -overhang, width: size * GEM_PAD, height: size * GEM_PAD }}
+        style={{ left: rem(-overhang), top: rem(-overhang), width: rem(size * GEM_PAD), height: rem(size * GEM_PAD) }}
       />
     </span>
   );

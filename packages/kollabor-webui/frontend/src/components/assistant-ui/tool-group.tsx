@@ -233,7 +233,7 @@ const ToolGroupImpl: FC<ToolGroupProps> = ({ children, group }) =>
   group.indices.length === 1 ? (
     <>{children}</>
   ) : (
-    <ToolGroupRoot variant="ghost" defaultOpen>
+    <ToolGroupRoot variant="ghost">
       <ToolGroupTrigger
         count={group.indices.length}
         indices={group.indices}

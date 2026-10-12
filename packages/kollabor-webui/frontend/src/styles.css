@@ -140,6 +140,15 @@
   html, body, #root {
     height: 100%;
   }
+  /* Density follows the input, as design systems do: mouse-and-keyboard
+     screens get a denser UI a step under the browser default, touch screens
+     keep 16px for comfortable targets (and iOS zooms into smaller inputs).
+     Same test as Tailwind's pointer-fine: variant, which the chat text uses. */
+  @media (pointer: fine) {
+    html {
+      font-size: 90%;
+    }
+  }
 }
 
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));

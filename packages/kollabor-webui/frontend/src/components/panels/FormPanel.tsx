@@ -152,7 +152,7 @@ export function FormPanel({
                 </Button>
                 {target && paths[target as "local" | "global"] ? (
                   <span
-                    className="text-muted-foreground text-[11px] break-all"
+                    className="text-muted-foreground text-[0.6875rem] break-all"
                     title={paths[target as "local" | "global"] ?? undefined}
                   >
                     {paths[target as "local" | "global"]}
