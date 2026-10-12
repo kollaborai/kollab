@@ -248,6 +248,11 @@ def _blocks_from_legacy_index(
 ) -> List[Dict[str, Any]]:
     """Network blocks from the design-v1 workspace layout.
 
+    Speculative / migration-only (design v2 kept it for defensive reads): no
+    runtime writes this layout — slice 1 (#162) migrated writers to the device
+    record — so it appears only on machines the v1 experiment once touched.
+    Kept as a reader, never extended.
+
     ``~/.kollab/network/<digest>/index.json`` names the primary and order;
     membership state sits under ``memberships/<slug>/state.json``.
     """
@@ -374,7 +379,20 @@ def aggregate_network_snapshot(
     if blocks and is_live:
         target = None
         if live_network:
+            # Match passes, narrowest first (#163 fix-up): exact id, exact
+            # name, then substring. A substring pass alone mis-folds a live
+            # answer for "acme" into a primary "acme-lab-net" that merely
+            # contains the name, because blocks run primary-first.
             target = next((item for item in blocks if item["id"] == live_network), None)
+            if target is None:
+                target = next(
+                    (
+                        item
+                        for item in blocks
+                        if live_network == str(item.get("name") or "")
+                    ),
+                    None,
+                )
             if target is None:
                 target = next(
                     (

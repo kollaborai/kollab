@@ -262,3 +262,67 @@ def test_empty_machine_list_sessions_network_block(tmp_path, monkeypatch):
     )
 
     assert merged["networks"] == [] and isinstance(merged["contacts"], list)
+
+
+def test_live_answer_for_exact_name_beats_prefix_overlap_primary(tmp_path):
+    """A live answer naming "acme" must fold into the "acme" network, not the
+    primary "acme-lab-net" whose name merely contains it (#163 fix-up)."""
+    import hashlib
+
+    root = tmp_path
+    (root / "device").mkdir(parents=True, exist_ok=True)
+    (root / "device" / "device.json").write_text(
+        json.dumps(
+            {
+                "device_id": "d" * 32,
+                "device_name": "fixup-box",
+                "networks": {
+                    "lab"
+                    * 8: {
+                        "origin": "https://relay.acmelab.example",
+                        "network_name": "acme-lab-net",
+                        "joined_at": 1,
+                    },
+                    "acm" * 8
+                    + "e": {
+                        "origin": "https://relay.acme.example",
+                        "network_name": "acme",
+                        "joined_at": 2,
+                    },
+                },
+                "primary": "lab" * 8,
+            }
+        )
+    )
+    digest = hashlib.sha256(WORKSPACE.encode()).hexdigest()
+    for slug in ("lab" * 8, "acm" * 8 + "e"):
+        d = root / "workspaces" / digest / "networks" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(
+            json.dumps(
+                {"origin": "https://relay.example", "trust": "open", "links": []}
+            )
+        )
+
+    aggregate = aggregate_network_snapshot(
+        home=root,
+        workspace=WORKSPACE,
+        live={
+            "device": "fixup-box",
+            "network": "acme",
+            "remote": [
+                {
+                    "name": "lapis",
+                    "device": "peer",
+                    "handle": "lapis@peer",
+                    "state": "idle",
+                }
+            ],
+        },
+    )
+
+    by_name = {block["name"]: block for block in aggregate["networks"]}
+    assert by_name["acme"].get("live") is True
+    assert by_name["acme"]["devices"], "the live row folded into the exact-name network"
+    assert by_name["acme-lab-net"].get("live") is None
+    assert by_name["acme-lab-net"]["devices"] == []
