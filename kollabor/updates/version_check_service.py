@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import aiohttp
+from packaging.version import InvalidVersion, Version
 
 from .version_comparator import is_newer_version
 
@@ -34,6 +35,24 @@ class ReleaseInfo:
     name: str
     url: str
     is_prerelease: bool
+
+
+def _cache_shows_current_or_older(cached: str, current: str) -> bool:
+    """True when a cached "latest version" should be treated as stale.
+
+    The cache is worthless whenever it does not show a release strictly
+    newer than the running version: after an upgrade the cached value is
+    the pre-upgrade release, and keeping it would suppress the update
+    notice for a full interval (issue #169). Empty or unparseable cache
+    entries count as stale; only a strictly newer cached version is
+    trusted for the long TTL.
+    """
+    if not cached:
+        return True
+    try:
+        return Version(cached.lstrip("v")) <= Version(current.lstrip("v"))
+    except InvalidVersion:
+        return True
 
 
 class VersionCheckService:
@@ -302,10 +321,12 @@ class VersionCheckService:
     def _is_cache_valid(self) -> bool:
         """Check if cached data is still valid based on TTL.
 
-        Uses a shorter TTL (1 hour) when the cached version matches the
-        current version, so that new releases are detected promptly.
-        Uses the full configured TTL when an update is already cached,
-        to avoid re-fetching the same release info repeatedly.
+        Uses a shorter TTL (1 hour) when the cached version is not a
+        release strictly newer than the running version (it matches,
+        predates an upgrade, or is unparseable), so new releases are
+        detected promptly. Uses the full configured TTL only when the
+        cache already shows a newer release, to avoid re-fetching the
+        same release info repeatedly.
 
         Returns:
             True if cache is valid (age < TTL)
@@ -316,10 +337,12 @@ class VersionCheckService:
 
         age_seconds = current_time - last_check
 
-        # If cached version matches current, use a shorter re-check window
-        # so users learn about new releases within ~1 hour instead of 24h.
+        # A cache that does not show a release strictly newer than the
+        # running version is stale (an upgrade leaves the pre-upgrade
+        # release behind): re-check within ~1 hour so users learn about
+        # new releases promptly instead of after the full interval.
         cached_version = self.config.get("kollabor.updates.cached_latest_version", "")
-        if cached_version and cached_version == self.current_version:
+        if _cache_shows_current_or_older(cached_version, self.current_version):
             ttl_seconds = min(ttl_seconds, 3600)  # cap at 1 hour
 
         is_valid: bool = age_seconds < ttl_seconds
