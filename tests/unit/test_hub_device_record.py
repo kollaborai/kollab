@@ -198,3 +198,71 @@ def test_guards_accept_both_layouts(home, tmp_path):
     v2 = home / ".kollab" / "workspaces" / ("d" * 64) / "networks" / "abc123"
     assert is_machine_network_state_dir(v2) is True
     assert is_machine_network_state_dir(tmp_path / "elsewhere" / "work") is False
+
+
+# -- flat primary_network spelling interop (PR #164) ------------------------
+
+
+def test_flat_primary_network_spelling_loads_and_normalizes(home):
+    """A record written with device_primary's flat spelling must load, not
+    raise: the name resolves to the matching networks entry's slug."""
+    from plugins.hub.device_record import DeviceRecord, device_dir
+
+    record = DeviceRecord()
+    record.add_network("https://a.example.com", "alpha-net")
+    record.add_network("https://b.example.com", "beta-net")
+    # rewrite the record with the flat spelling naming beta
+    import json as _json
+
+    payload = _json.loads((device_dir() / "device.json").read_text())
+    payload.pop("primary", None)
+    payload["primary_network"] = "beta-net"
+    (device_dir() / "device.json").write_text(_json.dumps(payload))
+
+    reloaded = DeviceRecord()
+    slug_beta = next(
+        slug
+        for slug, entry in reloaded.networks().items()
+        if entry["network_name"] == "beta-net"
+    )
+    assert reloaded.primary == slug_beta
+
+
+def test_flat_spelling_with_unknown_name_keeps_no_primary(home):
+    """A flat name that matches no network entry is a damaged choice: it
+    loads as no primary rather than refusing the machine."""
+    from plugins.hub.device_record import DeviceRecord, device_dir
+
+    record = DeviceRecord()
+    record.add_network("https://a.example.com", "alpha-net")
+    import json as _json
+
+    payload = _json.loads((device_dir() / "device.json").read_text())
+    payload.pop("primary", None)
+    payload["primary_network"] = "no-such-network"
+    (device_dir() / "device.json").write_text(_json.dumps(payload))
+
+    reloaded = DeviceRecord()
+    assert reloaded.primary == ""
+
+
+def test_slug_spelling_wins_over_flat_when_both_present(home):
+    from plugins.hub.device_record import DeviceRecord, device_dir
+
+    record = DeviceRecord()
+    record.add_network("https://a.example.com", "alpha-net")
+    record.add_network("https://b.example.com", "beta-net")
+    import json as _json
+
+    slug_alpha = next(
+        slug
+        for slug, entry in record.networks().items()
+        if entry["network_name"] == "alpha-net"
+    )
+    payload = _json.loads((device_dir() / "device.json").read_text())
+    payload["primary"] = slug_alpha
+    payload["primary_network"] = "beta-net"  # stale flat field
+    (device_dir() / "device.json").write_text(_json.dumps(payload))
+
+    reloaded = DeviceRecord()
+    assert reloaded.primary == slug_alpha
