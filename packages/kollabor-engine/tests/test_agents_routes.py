@@ -79,7 +79,8 @@ class TestAgentPoolColor:
         by_name = {agent["name"]: agent for agent in body["agents"]}
         assert by_name["lapis"]["color"] == [30, 90, 180]
         assert by_name["ruby"]["color"] == [200, 20, 60]
-        assert body["count"] == 2
+        assert by_name["koordinator"]["color"] is None  # not a pool gem: the web UI gives it a born color
+        assert body["count"] == 3
 
     async def test_live_fields_still_flow(self, client, pool, monkeypatch):
         live = presence("a1", "lapis", "working", "fix tests")
@@ -96,7 +97,7 @@ class TestAgentPoolColor:
         assert by_name["ruby"]["available"] is True
         assert by_name["ruby"]["state"] == "available"
         assert body["active"] == ["lapis"]
-        assert body["available"] == ["ruby"]
+        assert body["available"] == ["koordinator", "ruby"]
 
     async def test_a_solo_agent_is_live_but_off_the_hub(self, client, pool, monkeypatch):
         solo = {**presence("a1", "lapis", "idle"), "solo": True}
@@ -120,18 +121,55 @@ class TestAgentPoolColor:
         assert by_name["ruby"]["project"] == ""
 
     async def test_every_live_agent_is_listed_but_only_pool_gems_launch(self, client, pool, monkeypatch):
-        live = [presence("a1", "koordinator", "idle"), presence("a2", "lapis-2", "working")]
+        live = [presence("a2", "lapis-2", "working"), presence("a3", "zoe", "idle")]
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge(live))
 
         body = (await client.get("/agents")).json()
 
         by_name = {agent["name"]: agent for agent in body["agents"]}
-        assert by_name["koordinator"]["active"] and by_name["koordinator"]["pool"] is False
-        assert by_name["koordinator"]["color"] is None  # no pool gem is its base: the web UI gives it a born color
+        assert by_name["zoe"]["active"] and by_name["zoe"]["pool"] is False
+        assert by_name["zoe"]["color"] is None  # no pool gem is its base: the web UI gives it a born color
         assert by_name["lapis-2"]["color"] == by_name["lapis"]["color"]  # wears its base gem
         assert by_name["lapis-2"]["state"] == "working"
         assert by_name["lapis"]["pool"] is True and by_name["lapis"]["available"]
+        assert "zoe" not in body["available"]
+
+    async def test_each_agent_says_when_it_last_ran_here(self, client, pool, monkeypatch, tmp_path):
+        monkeypatch.setattr("plugins.hub.presence.get_hub_dir", lambda: tmp_path)
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
+        stream = tmp_path / "vaults" / "lapis" / "stream.jsonl"
+        stream.parent.mkdir(parents=True)
+        stream.write_text('{"type": "session_start"}\n')
+        (tmp_path / "vaults" / "ruby").mkdir()  # an empty vault never ran
+
+        body = (await client.get("/agents")).json()
+
+        by_name = {agent["name"]: agent for agent in body["agents"]}
+        assert by_name["lapis"]["last_ran"] == stream.stat().st_mtime
+        assert by_name["ruby"]["last_ran"] is None
+        assert by_name["koordinator"]["last_ran"] is None
+
+    async def test_koordinator_comes_first_until_this_folder_runs_one(self, client, pool, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        elsewhere = {**presence("a1", "koordinator", "idle"), "project": "/somewhere/else"}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([elsewhere]))
+
+        body = (await client.get("/agents")).json()
+
+        first = body["agents"][0]
+        assert first["name"] == "koordinator" and first["agent_type"] == "koordinator"
+        assert first["pool"] is True and first["available"] is True
+        assert body["available"][0] == "koordinator"
+
+        here = {**presence("a2", "koordinator", "working"), "project": str(tmp_path)}
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([elsewhere, here]))
+
+        body = (await client.get("/agents")).json()
+
+        first = body["agents"][0]
+        assert first["active"] is True and first["agent_id"] == "a2"
         assert "koordinator" not in body["available"]
+        assert [agent["name"] for agent in body["agents"]].count("koordinator") == 1
 
     async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
@@ -150,7 +188,7 @@ class TestAgentPoolColor:
         )
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
 
-        [agent] = (await client.get("/agents")).json()["agents"]
+        _, agent = (await client.get("/agents")).json()["agents"]  # koordinator, opal
 
         assert agent["color"] == [128, 128, 128]
 

@@ -381,7 +381,9 @@ class DaemonPool:
     def all(self) -> List[DaemonHandle]:
         return list(self._daemons.values())
 
-    def _assign_identity(self, preferred: Optional[str] = None) -> str:
+    def _assign_identity(
+        self, preferred: Optional[str] = None, folder: Optional[str] = None
+    ) -> str:
         """Choose a live hub identity using the same pool as the CLI.
 
         Web sessions used to pin themselves to ``web-<session id>``. That
@@ -392,13 +394,22 @@ class DaemonPool:
         ``IdentityAssigner``.
         """
         active = self._bridge.get_agents(use_cache=False)
+        requested = (preferred or "").strip()
+        if requested == "koordinator":
+            # Every folder has its own koordinator; only this folder's holds it.
+            here = os.path.realpath(folder or os.getcwd())
+            active = [
+                agent
+                for agent in active
+                if isinstance(agent, dict)
+                and os.path.realpath(str(agent.get("project") or "")) == here
+            ]
         taken = {
             str(agent.get("identity") or "")
             for agent in active
             if isinstance(agent, dict) and agent.get("identity")
         }
 
-        requested = (preferred or "").strip()
         if requested and requested in taken:
             raise ValueError(
                 f"hub identity '{requested}' is already in use; choose another agent"
@@ -455,7 +466,7 @@ class DaemonPool:
             if existing is not None:
                 return existing
 
-            identity_name = self._assign_identity(identity)
+            identity_name = self._assign_identity(identity, workspace)
             argv = _kollab_command() + ["--detached", "--as", identity_name]
             if agent:
                 argv += ["--agent", agent]

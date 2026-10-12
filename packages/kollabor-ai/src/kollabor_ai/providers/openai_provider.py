@@ -191,7 +191,7 @@ class OpenAIProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenAI call failed: {e}")
+            logger.error(f"OpenAI call failed: {type(e).__name__}: {e}")
             response = getattr(e, "response", None)
             if response is not None:
                 logger.debug(

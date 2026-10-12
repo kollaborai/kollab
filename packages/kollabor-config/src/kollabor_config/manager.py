@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 from kollabor_events.dict_utils import safe_get, safe_set
 from kollabor_events.error_utils import safe_execute
 
+from .atomic_write import write_text_atomic
+
 logger = logging.getLogger(__name__)
 
 # Configuration version tracking
@@ -147,8 +149,7 @@ class ConfigManager:
         """
 
         def save_json():
-            with open(self.config_path, "w") as f:
-                json.dump(config, f, indent=2)
+            write_text_atomic(self.config_path, json.dumps(config, indent=2))
 
         success = safe_execute(
             save_json,

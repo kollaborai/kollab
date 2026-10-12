@@ -1,0 +1,27 @@
+{
+  "name": "matrix-altview",
+  "description": "/matrix runs the AltView version: the rain takes over the screen and any key leaves it (the old fullscreen plugin only left on q or Esc, so an x would have left it running). Isolated HOME, hub off, setup marked done so the first-run wizard stays out of the way.",
+  "config": {
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}},\\\"application\\\":{\\\"setup_completed\\\":true}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" KOLLAB_NO_KEYRING=1 python main.py --no-daemon'",
+    "app_init_sleep": 8,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 20, "description": "app ready at the prompt" },
+
+    { "action": "section", "title": "/matrix takes the screen" },
+    { "action": "slash_command", "command": "matrix" },
+    { "action": "sleep", "seconds": 2 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "❯", "description": "the prompt is hidden while the rain runs" },
+
+    { "action": "section", "title": "Any key leaves it" },
+    { "action": "send_keys", "keys": "x" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 10, "description": "an ordinary key (not q or Esc) returns to the prompt" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "❯", "description": "prompt is back" }
+  ]
+}

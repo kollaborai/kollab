@@ -15,8 +15,9 @@ export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
 };
 
 /**
- * A pool identity rendered as a live 3D gem with a face (see gem-engine.ts and
- * gem-face.ts). It breathes at rest, glows from inside while its agent works,
+ * A pool identity rendered as a live, soft 3D gem with a face (see gem-engine.ts,
+ * gem-blob.ts and gem-face.ts). It breathes and morphs at rest, turns toward the
+ * pointer, glows from inside while its agent works,
  * pulls out a laptop for long jobs, talks while it streams, fumes on errors,
  * dances when a turn lands, and goes dark and gray when nothing runs it.
  *
@@ -60,7 +61,7 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
   const colorKey = gem.color?.join(",") ?? "";
   useEffect(() => {
     if (canvasRef.current) gemEngine.update(canvasRef.current, propsRef.current);
-  }, [gem.gem, gem.caste, colorKey, gem.state, gem.live, gem.activity, gem.face, gem.hat, gem.follow, gem.season, size]);
+  }, [gem.gem, gem.caste, colorKey, gem.state, gem.live, gem.activity, gem.face, gem.hat, gem.follow, gem.season, gem.motion, key, size]);
 
   const box: CSSProperties = { width: size, height: size };
   const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true };
@@ -74,7 +75,7 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
         style={{
           ...box,
           background: `radial-gradient(circle at 35% 30%, #fff8 0, ${rgb} 45%, #0006 100%)`,
-          clipPath: "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)",
+          borderRadius: "46%",
         }}
       />
     );

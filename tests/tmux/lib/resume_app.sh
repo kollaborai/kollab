@@ -9,7 +9,10 @@ repo=$(cd "$(dirname "$0")/../../.." && pwd)
 py=$repo/.venv/bin/python
 [ -x "$py" ] || py=$(python -c 'import sys; print(sys.executable)')
 home=$(mktemp -d)
-mkdir -p "$home/work"
+mkdir -p "$home/work" "$home/.kollab"
+# No provider here, so a first launch would open the setup wizard over what
+# this spec checks; mark setup done (specs/first_run_setup_wizard.json covers it).
+printf '%s' '{"application":{"setup_completed":true}}' > "$home/.kollab/config.json"
 cd "$home/work"
 HOME=$home "$py" - <<'EOF'
 import asyncio

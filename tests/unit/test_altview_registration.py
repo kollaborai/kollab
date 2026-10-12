@@ -117,3 +117,57 @@ async def test_the_knock_screen_without_callbacks_is_empty_and_inert():
         key = KeyPress(name=char, code=ord(char), char=char, type=KeyType.PRINTABLE)
         assert await view.handle_input(key) is False
     assert view._message in ("", "knocks are not connected here")
+
+
+@pytest.mark.parametrize(
+    ("owner", "level"),
+    [("fullscreen_integrator", logging.WARNING), ("system", logging.DEBUG)],
+)
+def test_only_a_fullscreen_twin_shadowing_an_altview_is_warned(
+    caplog, restore_altview_modules, owner, level
+):
+    """#23: a fullscreen twin registered first hides its altview; say so."""
+    from kollabor.commands.registry import SlashCommandRegistry
+    from kollabor_events.models import CommandDefinition
+
+    registry = SlashCommandRegistry()
+    registry.register_command(
+        CommandDefinition(
+            name="matrix", description="twin", handler=MagicMock(), plugin_name=owner
+        )
+    )
+    integrator = AltViewCommandIntegrator(registry, MagicMock(), MagicMock())
+    matrix = next(c for c in ALL_CLASSES if c.id == "matrix_altview.MatrixAltView")
+
+    with caplog.at_level(logging.DEBUG, logger="kollabor.altview.command_integration"):
+        assert integrator._register_plugin_commands(matrix.values[0])
+
+    skips = [r for r in caplog.records if "Skipping AltView command" in r.getMessage()]
+    assert [(r.levelno, owner in r.getMessage()) for r in skips] == [(level, True)]
+
+
+def test_no_altview_is_hidden_by_a_fullscreen_twin(caplog, restore_altview_modules):
+    """#23 audit as a guard: with both integrators run over the real plugins/,
+    every altview that has a fullscreen twin wins it (twin superseded) or has a
+    command name of its own."""
+    from kollabor.commands.registry import SlashCommandRegistry
+    from kollabor.fullscreen.command_integration import FullScreenCommandIntegrator
+
+    registry = SlashCommandRegistry()
+    FullScreenCommandIntegrator(registry, MagicMock()).discover_and_register_plugins(
+        PLUGINS
+    )
+    integrator = AltViewCommandIntegrator(registry, MagicMock(), MagicMock())
+
+    with caplog.at_level(
+        logging.WARNING, logger="kollabor.altview.command_integration"
+    ):
+        integrator.discover_and_register_plugins(PLUGINS)
+
+    hidden = [
+        r.getMessage() for r in caplog.records if "Skipping AltView" in r.getMessage()
+    ]
+    assert hidden == []
+    assert registry.get_command("matrix").plugin_name == "altview_integrator"
+    assert registry.get_command("example").plugin_name == "fullscreen_integrator"
+    assert registry.get_command("altview-example").plugin_name == "altview_integrator"

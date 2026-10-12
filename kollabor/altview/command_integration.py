@@ -227,11 +227,15 @@ class AltViewCommandIntegrator:
                     "AltView command '%s' replacing existing command", plugin_name
                 )
 
-            # Skip if command already registered (e.g. by fullscreen_integrator)
+            # Skip if command already registered. A fullscreen twin that got
+            # there first silently hides this view, so say so; core commands
+            # (/login, /setup, /config) own theirs and open the view directly.
             elif existing_command is not None:
-                logger.debug(
-                    "Skipping AltView command '%s' - already registered",
+                shadowed = existing_command.plugin_name == "fullscreen_integrator"
+                (logger.warning if shadowed else logger.debug)(
+                    "Skipping AltView command '%s' - already registered by %s",
                     plugin_name,
+                    existing_command.plugin_name,
                 )
                 return True
 

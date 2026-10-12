@@ -1,46 +1,25 @@
-import {
-  AdditiveBlending,
-  AmbientLight,
-  BackSide,
-  BufferGeometry,
-  Color,
-  DirectionalLight,
-  DoubleSide,
-  Float32BufferAttribute,
-  Group,
-  Mesh,
-  MeshBasicMaterial,
-  MeshPhysicalMaterial,
-  NeutralToneMapping,
-  PerspectiveCamera,
-  PlaneGeometry,
-  PMREMGenerator,
-  PointLight,
-  Points,
-  PointsMaterial,
-  SRGBColorSpace,
-  Scene,
-  Sprite,
-  SpriteMaterial,
-  type Texture,
-  WebGLRenderer,
-} from "three";
+import { Color, Mesh, PerspectiveCamera, SRGBColorSpace, Scene, Vector3, Vector4, WebGLRenderer, type ShaderMaterial } from "three";
+import { HOME_SHAPE, SHAPES, bodyGeometry, bodyMaterial, bodyPoint, faceHeight, paintBody, type Shape } from "./gem-blob";
 import { drawEffects, drawHat, drawSeasonBody } from "./gem-dress";
 import {
   autoHat,
   drawFace,
+  eyeGap,
+  eyeShape,
+  gazeFor,
+  mouthShape,
   seasonFor,
   workPhase,
   type Activity,
   type EyeStyle,
+  type FaceAnchor,
   type FaceFrame,
   type HatStyle,
   type Season,
 } from "./gem-face";
-import { FACE_ANCHORS, gemGeometry } from "./gem-geometry";
+import { drawn } from "./gem-look";
 import { drawBackProps, drawHeld, drawProps } from "./gem-props";
 import { gemMood, gemSpec, type GemMood, type GemSpec } from "./gem-specs";
-import { softDot, stoneTexture } from "./gem-textures";
 
 /**
  * One WebGL context renders every gem avatar on the page.
@@ -52,9 +31,24 @@ import { softDot, stoneTexture } from "./gem-textures";
  * from gem-face.ts. The canvas is GEM_PAD times the layout box so hats,
  * laptops and flying keyboards have room around the stone.
  * Idle gems repaint at 30fps, busy gems every frame, offline gems once.
+ *
+ * The body is a soft gem (gem-blob.ts) that is always moving: it breathes,
+ * turns toward the pointer a beat after its eyes do, and morphs its shape in
+ * the way its motion says (GemMotion). The face is seated on the surface each
+ * frame, so it turns, squashes and wobbles with the body.
  */
 
 export const GEM_PAD = 1.6;
+
+/**
+ * How a gem's body moves: "mood" takes a shape for what it is doing (a cloud
+ * while thinking, round while talking, sharp on an error), "jelly" keeps its
+ * cut but wobbles and goes blobby when the pointer flies, "cycle" drifts
+ * through shapes on its own and snaps back to its cut when the pointer comes
+ * close. Each agent is born with one, drawn from its look key.
+ */
+export type GemMotion = "mood" | "jelly" | "cycle";
+export const GEM_MOTIONS: readonly GemMotion[] = ["mood", "jelly", "cycle"];
 
 export type GemProps = {
   gem?: string | null;
@@ -77,9 +71,30 @@ export type GemProps = {
   season?: Season | "auto";
   /** Whose look this is (gem-look.ts lookKey): two agents of one name move out of step. */
   lookKey?: string;
+  /** How the body moves; absent, the agent's born motion. */
+  motion?: GemMotion | null;
 };
 
 type Glint = { x: number; y: number; age: number; ttl: number; size: number; hue: number | null };
+
+/** A damped spring, stepped at 120 Hz so a long frame cannot throw it. Low damping overshoots, which reads as soft. */
+class Spring {
+  v = 0;
+  constructor(public x: number) {}
+  to(target: number, k: number, c: number, dt: number): number {
+    const steps = Math.max(1, Math.ceil(dt * 120));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i += 1) {
+      this.v += (k * (target - this.x) - c * this.v) * h;
+      this.x += this.v * h;
+    }
+    return this.x;
+  }
+  set(x: number) {
+    this.x = x;
+    this.v = 0;
+  }
+}
 
 type Avatar = {
   canvas: HTMLCanvasElement;
@@ -89,6 +104,9 @@ type Avatar = {
   base: Color;
   rgb: [number, number, number];
   mood: GemMood;
+  motion: GemMotion;
+  /** The shape its cut rests in, as an index into SHAPES. */
+  home: number;
   activity: Activity;
   activitySince: number;
   prev: Activity;
@@ -101,7 +119,6 @@ type Avatar = {
   lastRender: number;
   glow: number;
   burst: number;
-  yaw: number;
   bob: number;
   slide: number;
   roll: number;
@@ -114,27 +131,42 @@ type Avatar = {
   bubble: number;
   blinkAt: number;
   blink: number;
+  /** Where the pupils look, -1..1, on springs so a dart overshoots. */
   look: { x: number; y: number };
+  gaze: [Spring, Spring];
+  /** Where the body is turning to: the eyes' target, a beat late. */
+  lead: { x: number; y: number };
+  turn: [Spring, Spring];
+  /** The weight of each body shape (SHAPES). */
+  shape: Spring[];
+  /** Pill eye and shared mouth shape mixes (gem-face.ts eyeShape, mouthShape). */
+  eyes: Spring[];
+  lid: number;
+  mouth: Spring[];
+  mouthOpen: number;
+  /** When the next passing smile starts. */
+  cheerAt: number;
+  /** 0..1: how stirred up a jelly gem is. */
+  energy: number;
+  /** A cycling gem holds its cut until then. */
+  focusUntil: number;
+  wob: number;
+  shear: number;
   talk: number;
   glints: Glint[];
   glintCarry: number;
 };
 
-type Rig = {
-  group: Group;
-  body: Mesh<BufferGeometry, MeshPhysicalMaterial>;
-  inner?: Mesh<BufferGeometry, MeshPhysicalMaterial>;
-  core?: Sprite;
-  flecks?: Points<BufferGeometry, PointsMaterial>;
-  light: PointLight;
-  /** The stone's color comes from its pattern map, not the material color. */
-  textured: boolean;
-};
+/** An affine from face pixels to canvas pixels, and 0..1 for how squarely the patch faces the camera. */
+type Seat = { a: number; b: number; c: number; d: number; e: number; f: number; vis: number };
 
 const FOV = 28;
 const CAMERA_DISTANCE = 4.7;
 // World units across the frame: a unit-radius gem fills ~85% of it.
 const FRAME = 2 * Math.tan(((FOV / 2) * Math.PI) / 180) * CAMERA_DISTANCE;
+// The body renders across the whole padded canvas, so a hop or the scoot to
+// the laptop never clips it at the box's edge.
+const CANVAS_FOV = (2 * Math.atan(Math.tan(((FOV / 2) * Math.PI) / 180) * GEM_PAD) * 180) / Math.PI;
 const WORLD_TO_FRAME = 1 / FRAME;
 const MAX_PIXEL_RATIO = 2;
 // Milliseconds of drawing per frame. Past it the remaining gems wait a frame,
@@ -142,6 +174,10 @@ const MAX_PIXEL_RATIO = 2;
 const FRAME_BUDGET_MS = 8;
 const WHITE = new Color(1, 1, 1);
 const ANGRY = new Color("#ff2d20");
+/** Where the face, hat and props sit on the soft gem, as fractions of its box. */
+const ANCHOR: FaceAnchor = { x: 0.5, y: 0.5, gap: 1.15, hatY: 0.15, hatScale: 0.9 };
+/** How big the face is drawn against the body. */
+const FACE_SCALE = 1.24;
 const BUSY: ReadonlySet<Activity> = new Set([
   "thinking",
   "typing",
@@ -151,43 +187,19 @@ const BUSY: ReadonlySet<Activity> = new Set([
   "messaging",
   "tasking",
 ]);
+const shapeOf = (shape: Shape) => SHAPES.indexOf(shape);
+/** Mood motion: the shape for what the gem is doing; anything else rests in its cut. */
+const MOOD_SHAPES: Partial<Record<Activity, number>> = {
+  thinking: shapeOf("cloud"),
+  booting: shapeOf("cloud"),
+  speaking: shapeOf("dome"),
+  messaging: shapeOf("dome"),
+  dance: shapeOf("dome"),
+  waiting: shapeOf("dome"),
+  dreaming: shapeOf("pebble"),
+};
 
-/**
- * A jeweler's light box: hard strip lights and hot spots on near-black. Facets
- * mirror it as crisp flashes against dark gaps, the contrast that makes a cut
- * stone read as a gem instead of tinted plastic. Rotating it sweeps the
- * flashes across the facets.
- */
-function studioEnvironment(renderer: WebGLRenderer): Texture {
-  const studio = new Scene();
-  studio.background = new Color(0x030405);
-  const panel = (w: number, h: number, x: number, y: number, z: number, intensity: number, tint = 0xffffff) => {
-    const mesh = new Mesh(
-      new PlaneGeometry(w, h),
-      new MeshBasicMaterial({ color: new Color(tint).multiplyScalar(intensity), side: DoubleSide }),
-    );
-    mesh.position.set(x, y, z);
-    mesh.lookAt(0, 0, 0);
-    studio.add(mesh);
-  };
-  panel(7, 1.1, 0, 6, 2.5, 10);
-  panel(1.1, 7, -6, 1, 3, 7);
-  panel(1.1, 7, 6, 1, 3, 7);
-  panel(4, 3, 0, 2, 7, 3);
-  panel(1, 1, 3.5, -3, 5, 14);
-  panel(1.2, 1.2, -4, 4, -4, 11, 0xcfe3ff);
-  panel(9, 1, 0, -6, 0, 1.4);
-  const pmrem = new PMREMGenerator(renderer);
-  const texture = pmrem.fromScene(studio, 0.015).texture;
-  pmrem.dispose();
-  studio.traverse((object) => {
-    if (object instanceof Mesh) {
-      object.geometry.dispose();
-      (object.material as MeshBasicMaterial).dispose();
-    }
-  });
-  return texture;
-}
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 function colorFrom(props: GemProps, spec: GemSpec): Color {
   const rgb = props.color;
@@ -233,17 +245,36 @@ function activityFor(props: GemProps, mood: GemMood): Activity {
   }
 }
 
+const whose = (props: GemProps) => props.lookKey || props.gem || "unassigned";
+const motionFor = (props: GemProps): GemMotion => props.motion ?? drawn(whose(props), "motion", GEM_MOTIONS) ?? "mood";
+const homeFor = (spec: GemSpec) => shapeOf(HOME_SHAPE[spec.cut] ?? "brilliant");
+
+// Scratch space for seating the face.
+const P = new Vector3();
+const U = new Vector3();
+const V = new Vector3();
+const Q = new Vector3();
+const N = new Vector3();
+const c0 = { x: 0, y: 0 };
+const c1 = { x: 0, y: 0 };
+const c2 = { x: 0, y: 0 };
+const weights = new Float32Array(SHAPES.length);
+const tint = new Color();
+
 class GemEngine {
   private renderer: WebGLRenderer | null = null;
   private scene = new Scene();
-  private camera = new PerspectiveCamera(FOV, 1, 0.1, 20);
-  private key = new DirectionalLight(0xffffff, 2.6);
-  private rigs = new Map<string, Rig>();
-  private shown: Rig | null = null;
+  private camera = new PerspectiveCamera(CANVAS_FOV, 1, 0.1, 20);
+  private body: Mesh | null = null;
+  private material: ShaderMaterial | null = null;
+  /** Where the face is painted before it is trimmed to the body's silhouette. */
+  private paint: CanvasRenderingContext2D | null = null;
   private avatars = new Set<Avatar>();
   private byCanvas = new WeakMap<HTMLCanvasElement, Avatar>();
   private observer: IntersectionObserver | null = null;
   private pointer = { x: 0, y: 0, at: -Infinity };
+  /** Pointer speed in px/s, smoothed; it stirs jelly gems. */
+  private speed = 0;
   private bufferPx = 0;
   private raf = 0;
   private lastTick = 0;
@@ -269,9 +300,6 @@ class GemEngine {
       renderer.setPixelRatio(1);
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = false;
-      // Neutral keeps saturated stone colors true; ACES washes them toward pastel.
-      renderer.toneMapping = NeutralToneMapping;
-      renderer.toneMappingExposure = 1;
       renderer.outputColorSpace = SRGBColorSpace;
       canvas.addEventListener("webglcontextlost", (event) => {
         event.preventDefault();
@@ -282,11 +310,12 @@ class GemEngine {
         this.avatars.forEach((avatar) => (avatar.dirty = true));
         this.kick();
       });
-      this.scene.environment = studioEnvironment(renderer);
       this.camera.position.set(0, 0, CAMERA_DISTANCE);
-      const rim = new DirectionalLight(0x9ecbff, 1.1);
-      rim.position.set(-2.5, 1.8, -3);
-      this.scene.add(new AmbientLight(0xffffff, 0.25), this.key, rim);
+      this.camera.updateMatrixWorld();
+      this.material = bodyMaterial();
+      this.body = new Mesh(bodyGeometry(), this.material);
+      this.body.frustumCulled = false;
+      this.scene.add(this.body);
       this.renderer = renderer;
     } catch {
       this.failed = true;
@@ -304,7 +333,11 @@ class GemEngine {
     window.addEventListener(
       "pointermove",
       (event) => {
-        this.pointer = { x: event.clientX, y: event.clientY, at: performance.now() / 1000 };
+        const at = performance.now() / 1000;
+        const moved = Math.hypot(event.clientX - this.pointer.x, event.clientY - this.pointer.y);
+        const v = Math.min(6000, moved / Math.max(0.008, at - this.pointer.at));
+        this.speed = this.speed * 0.7 + v * 0.3;
+        this.pointer = { x: event.clientX, y: event.clientY, at };
       },
       { passive: true },
     );
@@ -328,6 +361,7 @@ class GemEngine {
     const base = colorFrom(props, spec);
     const mood = gemMood(props.state, props.live !== false);
     const now = performance.now() / 1000;
+    const home = homeFor(spec);
     const avatar: Avatar = {
       canvas,
       ctx,
@@ -336,19 +370,20 @@ class GemEngine {
       base,
       rgb: srgb(base),
       mood,
+      motion: motionFor(props),
+      home,
       activity: activityFor(props, mood),
       activitySince: now,
       prev: activityFor(props, mood),
       danceUntil: 0,
       px: 0,
       gemPx: 0,
-      seed: hashSeed(props.lookKey || props.gem || "unassigned"),
+      seed: hashSeed(whose(props)),
       visible: false,
       dirty: true,
       lastRender: 0,
       glow: 0,
       burst: 0,
-      yaw: 0,
       bob: 0,
       slide: 0,
       roll: 0,
@@ -359,6 +394,19 @@ class GemEngine {
       blinkAt: now + 1 + Math.random() * 3,
       blink: 1,
       look: { x: 0, y: 0 },
+      gaze: [new Spring(0), new Spring(0)],
+      lead: { x: 0, y: 0 },
+      turn: [new Spring(0), new Spring(0)],
+      shape: SHAPES.map((_, i) => new Spring(i === home ? 1 : 0)),
+      eyes: [1, 0, 0, 0].map((w) => new Spring(w)),
+      lid: 0,
+      mouth: [1, 0, 0, 0, 0].map((w) => new Spring(w)),
+      mouthOpen: 0,
+      cheerAt: now + 4 + Math.random() * 4,
+      energy: 0,
+      focusUntil: 0,
+      wob: 0,
+      shear: 0,
       talk: 0,
       glints: [],
       glintCarry: 0,
@@ -391,6 +439,9 @@ class GemEngine {
     avatar.mood = mood;
     avatar.props = props;
     avatar.spec = gemSpec(props.gem, props.caste);
+    avatar.home = homeFor(avatar.spec);
+    avatar.motion = motionFor(props);
+    avatar.seed = hashSeed(whose(props));
     avatar.base = colorFrom(props, avatar.spec);
     avatar.rgb = srgb(avatar.base);
     avatar.dirty = true;
@@ -416,9 +467,9 @@ class GemEngine {
       avatar.canvas.height = px;
     }
     avatar.gemPx = gemPx;
-    if (gemPx > this.bufferPx && this.renderer) {
-      this.bufferPx = gemPx;
-      this.renderer.setSize(gemPx, gemPx, false);
+    if (px > this.bufferPx && this.renderer) {
+      this.bufferPx = px;
+      this.renderer.setSize(px, px, false);
     }
   }
 
@@ -437,12 +488,13 @@ class GemEngine {
     const t = now / 1000;
     const dt = this.lastTick ? Math.min(0.1, t - this.lastTick) : 1 / 60;
     this.lastTick = t;
+    if (t - this.pointer.at > 0.08) this.speed *= Math.exp(-dt * 5);
     const started = performance.now();
     const strained = this.cost > 12;
     const list = [...this.avatars];
     const offset = list.length ? this.cursor % list.length : 0;
     let animating = false;
-    let drawn = 0;
+    let painted = 0;
     let resume = -1;
     for (let i = 0; i < list.length; i += 1) {
       const index = (offset + i) % list.length;
@@ -467,7 +519,7 @@ class GemEngine {
             : strained ? 1 / 15 : 1 / 30;
       if (interval !== Infinity) animating = true;
       if (!avatar.dirty && t - avatar.lastRender < interval) continue;
-      if (drawn > 0 && performance.now() - started > FRAME_BUDGET_MS) {
+      if (painted > 0 && performance.now() - started > FRAME_BUDGET_MS) {
         if (resume < 0) resume = index;
         animating = true;
         continue;
@@ -475,14 +527,14 @@ class GemEngine {
       this.draw(avatar, activity, t);
       avatar.lastRender = t;
       avatar.dirty = false;
-      drawn += 1;
+      painted += 1;
     }
     this.cursor = resume >= 0 ? resume : offset;
     this.cost += (performance.now() - started - this.cost) * 0.1;
     if (animating) this.raf = requestAnimationFrame(this.tick);
   };
 
-  /** Per-frame state: glow easing, the finish flash, blinks, gaze, glints. */
+  /** Per-frame state: glow easing, the finish flash, blinks, gaze, the body's springs, glints. */
   private advance(avatar: Avatar, activity: Activity, t: number, dt: number) {
     const s = avatar.seed;
     let target = 0;
@@ -515,10 +567,10 @@ class GemEngine {
     avatar.bubble = this.still ? bubble : avatar.bubble + (bubble - avatar.bubble) * (1 - Math.exp(-dt * 6));
     if (Math.abs(avatar.bubble - bubble) < 0.005) avatar.bubble = bubble;
 
-    // Blinks.
+    // Blinks, sometimes twice.
     if (t > avatar.blinkAt + 0.16) {
       const calm = BUSY.has(activity) ? 3.5 : 2.4;
-      avatar.blinkAt = t + calm + Math.random() * 3.6;
+      avatar.blinkAt = t + (Math.random() < 0.15 ? 0.1 : calm + Math.random() * 3.6);
     }
     const phase = t - avatar.blinkAt;
     avatar.blink = !this.still && phase >= 0 && phase <= 0.16 ? Math.abs(Math.cos((Math.PI * phase) / 0.16)) : 1;
@@ -526,6 +578,7 @@ class GemEngine {
     // Gaze: toward the pointer when it moved recently, else a slow wander.
     let tx = 0;
     let ty = 0;
+    let near = false;
     if (!this.still) {
       if (avatar.props.follow !== false && t - this.pointer.at < 4) {
         const rect = avatar.canvas.getBoundingClientRect();
@@ -535,14 +588,26 @@ class GemEngine {
         const reach = Math.min(1, dist / 160);
         tx = (dx / dist) * reach;
         ty = (dy / dist) * reach;
+        near = dist < Math.max(90, rect.width);
       } else {
         tx = Math.sin(t * 0.37 + s) * 0.35;
         ty = Math.sin(t * 0.29 + s * 2) * 0.2;
       }
     }
-    const ease = 1 - Math.exp(-dt * 10);
-    avatar.look.x += (tx - avatar.look.x) * ease;
-    avatar.look.y += (ty - avatar.look.y) * ease;
+    // The eyes dart on a stiff spring; the body follows a beat later.
+    avatar.look.x = avatar.gaze[0].to(tx, 260, 21, dt);
+    avatar.look.y = avatar.gaze[1].to(ty, 260, 21, dt);
+    const aim = gazeFor({ activity, look: { x: tx, y: ty }, t, desk: avatar.desk });
+    const lag = this.still ? 1 : 1 - Math.exp(-dt / 0.12);
+    avatar.lead.x += (aim.x - avatar.lead.x) * lag;
+    avatar.lead.y += (aim.y - avatar.lead.y) * lag;
+    if (this.still) {
+      avatar.turn.forEach((spring) => spring.set(0));
+    } else {
+      // Looking up turns further than looking down, which would hide the face.
+      avatar.turn[0].to(avatar.lead.x * 0.5, 55, 11, dt);
+      avatar.turn[1].to(avatar.lead.y * (avatar.lead.y > 0 ? 0.16 : 0.38), 55, 11, dt);
+    }
 
     // Syllable-ish mouth movement while streaming text.
     const talkTarget =
@@ -551,11 +616,26 @@ class GemEngine {
         : 0;
     avatar.talk += (Math.max(0, talkTarget) - avatar.talk) * (1 - Math.exp(-dt * 25));
 
+    // The body's shape, the pill eyes and the mouth morph on springs.
+    avatar.energy += (clamp(this.speed / 1600, 0, 1) + (BUSY.has(activity) ? 0.2 : 0) - avatar.energy) * (1 - Math.exp(-dt * 4));
+    const goal = this.shapeGoal(avatar, activity, t, near);
+    const [k, c] = avatar.motion === "jelly" ? [45, 7] : [70, 7.5];
+    avatar.shape.forEach((spring, i) => (this.still ? spring.set(goal[i]) : spring.to(goal[i], k, c, dt)));
+    if (t > avatar.cheerAt + 0.8) avatar.cheerAt = t + 4 + Math.random() * 5;
+    const cheer = activity === "idle" && t > avatar.cheerAt && !this.still;
+    const eyes = eyeShape(activity, t, cheer);
+    avatar.eyes.forEach((spring, i) => (this.still ? spring.set(eyes[i]) : spring.to(eyes[i], 170, 19, dt)));
+    const lid = activity === "error" ? 0.5 : work.furious ? 0.3 : 0;
+    avatar.lid = this.still ? lid : avatar.lid + (lid - avatar.lid) * (1 - Math.exp(-dt * 12));
+    const mouth = mouthShape(activity, t, avatar.talk, cheer);
+    avatar.mouth.forEach((spring, i) => (this.still ? spring.set(mouth.mix[i]) : spring.to(mouth.mix[i], 150, 17, dt)));
+    avatar.mouthOpen = mouth.open;
+
     const rate = this.still
       ? 0
       : BUSY.has(activity)
-        ? 1.8
-        : ({ dance: 2, error: 0, waiting: 0.7, dreaming: 0.3, idle: 0.35, booting: 2, offline: 0 } as Record<
+        ? 1
+        : ({ dance: 2, error: 0, waiting: 0.5, dreaming: 0.2, idle: 0.12, booting: 2, offline: 0 } as Record<
             string,
             number
           >)[activity] ?? 0.35;
@@ -570,7 +650,7 @@ class GemEngine {
         y: 0.44 + Math.sin(angle) * radius,
         age: 0,
         ttl: 0.45 + Math.random() * 0.45,
-        size: 0.07 + Math.random() * 0.1,
+        size: 0.045 + Math.random() * 0.06,
         hue: avatar.spec.fire && Math.random() < 0.7 ? Math.floor(Math.random() * 360) : null,
       });
     }
@@ -578,173 +658,118 @@ class GemEngine {
     avatar.glints = avatar.glints.filter((glint) => glint.age < glint.ttl);
   }
 
-  private rig(avatar: Avatar): Rig {
-    const key = `${avatar.props.gem || "unassigned"}|${avatar.base.getHexString()}`;
-    let rig = this.rigs.get(key);
-    if (rig) return rig;
-
-    const { spec, base } = avatar;
-    const geometry = gemGeometry(spec);
-    const group = new Group();
-    const light = new PointLight(base.clone().lerp(WHITE, 0.35), 0, 0, 2);
-    group.add(light);
-
-    let body: Mesh<BufferGeometry, MeshPhysicalMaterial>;
-    let inner: Rig["inner"];
-    let core: Rig["core"];
-    let flecks: Rig["flecks"];
-    let textured = false;
-
-    if (spec.finish === "faceted") {
-      // Back facets first, lit from inside by the point light, then a glassy
-      // front shell over them: the cheap, convincing way to fake refraction.
-      inner = new Mesh(
-        geometry,
-        new MeshPhysicalMaterial({
-          color: base,
-          emissive: base,
-          roughness: 0.04,
-          side: BackSide,
-          flatShading: true,
-          envMapIntensity: 1.8,
-        }),
-      );
-      inner.renderOrder = 1;
-      // The flashlight: a soft hot spot in the gem's own hue, pushed past 1.0
-      // so tone mapping blooms it toward white at the center only.
-      core = new Sprite(
-        new SpriteMaterial({
-          map: softDot(),
-          color: base.clone().multiplyScalar(3),
-          transparent: true,
-          opacity: 0,
-          blending: AdditiveBlending,
-          depthWrite: false,
-        }),
-      );
-      core.renderOrder = 2;
-      body = new Mesh(
-        geometry,
-        new MeshPhysicalMaterial({
-          color: base,
-          emissive: base,
-          metalness: 0,
-          roughness: 0,
-          clearcoat: 1,
-          clearcoatRoughness: 0,
-          ior: 1.76,
-          iridescence: spec.iridescence ?? 0.12,
-          iridescenceIOR: 1.6,
-          flatShading: true,
-          transparent: true,
-          opacity: 0.5,
-          depthWrite: false,
-          envMapIntensity: 3.2,
-        }),
-      );
-      body.renderOrder = 3;
-      group.add(inner, core, body);
+  /** The shape mix the body is heading for, by its motion. */
+  private shapeGoal(avatar: Avatar, activity: Activity, t: number, near: boolean): number[] {
+    const goal = SHAPES.map(() => 0);
+    const home = avatar.home;
+    const mood = () =>
+      activity === "error"
+        ? home === shapeOf("octa") ? shapeOf("brilliant") : shapeOf("octa")
+        : MOOD_SHAPES[activity] ?? home;
+    if (activity === "offline" || (this.still && avatar.motion !== "mood")) {
+      // Reduced motion keeps only the mood shapes, which snap: they say what the gem is doing.
+      goal[home] = 1;
+    } else if (avatar.motion === "jelly") {
+      // A fast pointer or a busy turn stirs it out of its cut into a blob.
+      const e = Math.min(1, avatar.energy);
+      goal[home] += 1 - e * 0.6;
+      goal[shapeOf("dome")] += e * 0.35;
+      goal[shapeOf("cloud")] += e * 0.25;
+    } else if (avatar.motion === "cycle" && activity === "idle") {
+      if (near) avatar.focusUntil = t + 1.5;
+      const loop = [home, shapeOf("dome"), shapeOf("cloud"), home === shapeOf("brilliant") ? shapeOf("crystal") : shapeOf("brilliant")];
+      goal[t < avatar.focusUntil ? home : loop[Math.floor(t / 2.6 + avatar.seed) % loop.length]] = 1;
     } else {
-      const metal = spec.finish === "metal";
-      const pearl = spec.finish === "pearl";
-      const map = spec.pattern ? stoneTexture(spec.pattern, base, avatar.seed) : null;
-      textured = map !== null;
-      body = new Mesh(
-        geometry,
-        new MeshPhysicalMaterial({
-          color: textured ? WHITE : base,
-          map,
-          // The pattern doubles as the emissive map, so a glowing stone lights
-          // up its own veins and play-of-color rather than a flat tint.
-          emissive: textured ? WHITE : base,
-          emissiveMap: map,
-          metalness: metal ? 1 : 0,
-          roughness: metal ? 0.3 : pearl ? 0.24 : 0.22,
-          clearcoat: metal ? 0.5 : 1,
-          clearcoatRoughness: 0.04,
-          iridescence: spec.iridescence ?? 0,
-          iridescenceIOR: pearl ? 1.45 : 1.8,
-          iridescenceThicknessRange: metal ? [250, 1100] : [180, 820],
-          sheen: pearl || spec.iridescence ? 0.8 : 0,
-          sheenColor: new Color(pearl ? "#ffd6e8" : spec.pattern === "moonstone" ? "#a8ccff" : "#ffffff"),
-          sheenRoughness: 0.4,
-          flatShading: metal,
-          envMapIntensity: metal ? 3.4 : 1.7,
-        }),
-      );
-      group.add(body);
-      if (spec.flecks) {
-        // Pyrite specks that twinkle, spread evenly over the visible face of
-        // the dome: sampled in the projected disc, then lifted onto the
-        // surface, so they don't bunch up along the silhouette.
-        const count = 28;
-        const positions = new Float32Array(count * 3);
-        const phases = new Float32Array(count);
-        if (!geometry.boundingBox) geometry.computeBoundingBox();
-        const box = geometry.boundingBox;
-        const sx = box ? box.max.x : 1;
-        const sy = box ? box.max.y : 1;
-        const sz = box ? box.max.z : 0.62;
-        for (let i = 0; i < count; i += 1) {
-          const angle = Math.random() * Math.PI * 2;
-          const radius = Math.sqrt(Math.random()) * 0.82;
-          const x = Math.cos(angle) * radius;
-          const y = Math.sin(angle) * radius;
-          const z = Math.sqrt(Math.max(0, 1 - x * x - y * y));
-          positions.set([x * sx * 1.01, y * sy * 1.01, z * sz * 1.01], i * 3);
-          phases[i] = Math.random() * Math.PI * 2;
-        }
-        const fleckGeometry = new BufferGeometry();
-        fleckGeometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
-        fleckGeometry.setAttribute("color", new Float32BufferAttribute(new Float32Array(count * 3), 3));
-        fleckGeometry.userData.phases = phases;
-        flecks = new Points(
-          fleckGeometry,
-          new PointsMaterial({
-            size: 2,
-            sizeAttenuation: false,
-            vertexColors: true,
-            transparent: true,
-            blending: AdditiveBlending,
-            depthWrite: false,
-          }),
-        );
-        flecks.renderOrder = 4;
-        group.add(flecks);
-      }
+      goal[mood()] = 1;
     }
+    return goal;
+  }
 
-    group.visible = false;
-    this.scene.add(group);
-    rig = { group, body, inner, core, flecks, light, textured };
-    this.rigs.set(key, rig);
-    return rig;
+  /** A cleared scratch canvas at least px across, shared by every gem. */
+  private paintLayer(px: number): CanvasRenderingContext2D | null {
+    if (!this.paint) this.paint = document.createElement("canvas").getContext("2d");
+    const paint = this.paint;
+    if (!paint) return null;
+    if (paint.canvas.width < px) {
+      paint.canvas.width = px;
+      paint.canvas.height = px;
+    }
+    paint.setTransform(1, 0, 0, 1, 0, 0);
+    paint.clearRect(0, 0, px, px);
+    return paint;
+  }
+
+  /** A body-local point on the canvas (px across), in pixels. */
+  private project(local: Vector3, px: number, out: { x: number; y: number }) {
+    if (!this.body) return;
+    Q.copy(local).applyMatrix4(this.body.matrixWorld).project(this.camera);
+    out.x = (Q.x + 1) * 0.5 * px;
+    out.y = (1 - Q.y) * 0.5 * px;
+  }
+
+  /**
+   * Seats the face on the front of the body, its eye line centered at (fx, fy):
+   * the affine that draws face pixels (a front-facing face at box scale) onto
+   * the canvas. It runs through three points pinned to the surface, either eye
+   * and the mouth, so the face turns, foreshortens, squashes and wobbles with
+   * the body and the far eye wraps toward the edge instead of hanging off it.
+   */
+  private seat(avatar: Avatar, fx: number, fy: number, eye: number, t: number, px: number, g: number): Seat {
+    const { wob, shear } = avatar;
+    const body = this.body;
+    // Face pixels to surface directions: the eyes sit EYE (of the box) either
+    // side of the center, the mouth MOUTH below it. The spread is angular, so a
+    // narrow crystal wears a smaller face than a round dome.
+    const EYE = eye;
+    const MOUTH = 0.13;
+    const k = (FACE_SCALE * FRAME) / 0.95;
+    bodyPoint(weights, fx - EYE * k, fy, 1, wob, t, shear, U);
+    bodyPoint(weights, fx + EYE * k, fy, 1, wob, t, shear, V);
+    bodyPoint(weights, fx, fy - MOUTH * k, 1, wob, t, shear, P);
+    this.project(U, px, c0);
+    this.project(V, px, c1);
+    this.project(P, px, c2);
+    const e = (c0.x + c1.x) / 2;
+    const f = (c0.y + c1.y) / 2;
+    // Fade it out as it turns away, so it never shows through the back.
+    let vis = 1;
+    if (body) {
+      U.applyMatrix4(body.matrixWorld);
+      V.applyMatrix4(body.matrixWorld);
+      P.applyMatrix4(body.matrixWorld);
+      Q.addVectors(U, V).multiplyScalar(0.5);
+      N.subVectors(V, U).cross(P.sub(Q).negate()).normalize();
+      vis = clamp((N.dot(Q.sub(this.camera.position).negate().normalize()) - 0.15) / 0.3, 0, 1);
+    }
+    return {
+      a: (c1.x - c0.x) / (2 * EYE * g),
+      b: (c1.y - c0.y) / (2 * EYE * g),
+      c: (c2.x - e) / (MOUTH * g),
+      d: (c2.y - f) / (MOUTH * g),
+      e,
+      f,
+      vis,
+    };
   }
 
   private draw(avatar: Avatar, activity: Activity, t: number) {
     const renderer = this.renderer;
-    if (!renderer) return;
-    const rig = this.rig(avatar);
-    if (this.shown !== rig) {
-      if (this.shown) this.shown.group.visible = false;
-      rig.group.visible = true;
-      this.shown = rig;
-    }
+    const body = this.body;
+    if (!renderer || !body) return;
     const glow = Math.min(1.1, avatar.glow + avatar.burst * 0.7);
-    this.pose(avatar, rig, activity, t, glow);
+    this.pose(avatar, activity, t, glow);
 
     const g = avatar.gemPx;
     const px = avatar.px;
-    // Whole pixels: at a half-pixel offset the copy below blends in the row and
-    // column just outside the gem's square, where another gem's pixels remain.
     const o = Math.floor((px - g) / 2);
-    renderer.setViewport(0, 0, g, g);
-    renderer.setScissor(0, 0, g, g);
+    renderer.setViewport(0, 0, px, px);
+    renderer.setScissor(0, 0, px, px);
     renderer.setScissorTest(true);
     renderer.clear();
     renderer.render(this.scene, this.camera);
 
     const ctx = avatar.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, px, px);
     const glowColor = activity === "error" ? ANGRY.clone() : avatar.base.clone().lerp(WHITE, 0.3);
     const lift = avatar.bob * g * WORLD_TO_FRAME;
@@ -760,8 +785,6 @@ class GemEngine {
     }
 
     const face = avatar.props.face ?? "pill";
-    const anchor = FACE_ANCHORS[avatar.spec.cut];
-    const sway = avatar.yaw * g * 0.09;
     const season = avatar.props.season === "auto" ? seasonFor() : (avatar.props.season ?? "none");
     const hatProp = avatar.props.hat ?? "auto";
     const base = avatar.base;
@@ -771,8 +794,8 @@ class GemEngine {
       since: t - avatar.activitySince,
       prev: avatar.prev,
       box: { x: o, y: o, s: g },
-      anchor,
-      shift: { x: sway, y: 0 },
+      anchor: ANCHOR,
+      shift: { x: 0, y: 0 },
       look: avatar.look,
       blink: avatar.blink,
       activity,
@@ -788,46 +811,79 @@ class GemEngine {
       bubble: avatar.bubble,
       seed: avatar.seed,
       still: this.still,
+      eyeShape: avatar.eyes.map((spring) => spring.x),
+      lid: avatar.lid,
+      mouthShape: avatar.mouth.map((spring) => spring.x),
+      mouthOpen: avatar.mouthOpen,
     };
     if (face !== "none") drawBackProps(frame);
-    // WebGL's viewport origin is bottom-left; the gem sits in the buffer's
-    // bottom-left corner.
-    ctx.drawImage(renderer.domElement, 0, this.bufferPx - g, g, g, o, o, g, g);
+    // WebGL's viewport origin is bottom-left; the canvas's render sits in the
+    // buffer's bottom-left corner.
+    ctx.drawImage(renderer.domElement, 0, this.bufferPx - px, px, px, 0, 0, px, px);
     this.drawGlints(avatar, o + slideX, o - lift, g);
+    if (face === "none") return;
 
-    if (face !== "none") {
-      // The face, hat and held tools ride the body: its hop, shake, lean and squash.
-      ctx.save();
-      ctx.translate(center + slideX, center - lift);
-      ctx.rotate(-avatar.roll);
-      ctx.scale(1 - avatar.stretch * 0.04, 1 + avatar.stretch * 0.06);
-      ctx.translate(-center, -center);
-      // When the gem turns (a spin, or side-on to its laptop) whatever is on
-      // its front wraps around the body: it slides toward the edge as it
-      // narrows, and hides while it is round the back.
-      const turn = Math.cos(avatar.spin);
-      if (turn > 0.04) {
-        const offset = Math.sin(avatar.spin) * g * 0.24;
-        const fx = o + anchor.x * g + sway + offset;
-        const front = { ...frame, shift: { x: sway + offset, y: 0 } };
-        ctx.save();
-        ctx.translate(fx, 0);
-        ctx.scale(turn, 1);
-        ctx.translate(-fx, 0);
-        drawFace(front);
-        drawSeasonBody(front);
-        ctx.restore();
-      }
-      drawHat(frame);
-      drawHeld(frame);
-      ctx.restore();
-      drawProps(frame);
-      drawEffects(frame);
+    // The face, hat and held tools are seated on the surface, so they ride the
+    // body: its turn toward the pointer, hop, shake, lean, squash and wobble.
+    body.updateMatrixWorld(true);
+    avatar.shape.forEach((spring, i) => (weights[i] = spring.x));
+    const { lead } = avatar;
+    const up = -lead.y * (lead.y < 0 ? 0.1 : 0.05);
+    const local: FaceFrame = { ...frame, box: { x: -ANCHOR.x * g, y: -ANCHOR.y * g, s: g } };
+    const seat = this.seat(avatar, lead.x * 0.08, faceHeight(weights) + 0.1 + up, eyeGap(local) / (2 * g), t, px, g);
+    // A fast dart stretches the face along it.
+    const vx = Math.abs(avatar.gaze[0].v);
+    const vy = Math.abs(avatar.gaze[1].v);
+    const sx = 1 + Math.min(vx * 0.04, 0.24) - Math.min(vy * 0.02, 0.12);
+    const sy = 1 + Math.min(vy * 0.04, 0.24) - Math.min(vx * 0.02, 0.12);
+    // The hat sits on the crown and tilts with the body, but never turns flat.
+    // It goes on first, so a face turned toward a headphone cup passes in front.
+    bodyPoint(weights, 0, 1, 0, avatar.wob, t, avatar.shear, P);
+    this.project(P, px, c0);
+    this.project(U.set(0, 0.05, 0).add(P), px, c1);
+    const crown = Math.atan2(c1.x - c0.x, -(c1.y - c0.y));
+    const near = CAMERA_DISTANCE / (CAMERA_DISTANCE - P.applyMatrix4(body.matrixWorld).z);
+    ctx.save();
+    ctx.setTransform(Math.cos(crown) * near, Math.sin(crown) * near, -Math.sin(crown) * near, Math.cos(crown) * near, c0.x, c0.y);
+    drawHat({ ...frame, box: { x: -0.5 * g, y: -ANCHOR.hatY * g, s: g } });
+    ctx.restore();
+
+    // The face and holiday lights are paint on the body: drawn apart, trimmed
+    // to its silhouette (wide shades on a turned gem never stick out), then laid on.
+    const paint = this.paintLayer(px);
+    if (paint && seat.vis > 0.01) {
+      paint.globalAlpha = seat.vis;
+      paint.setTransform(seat.a, seat.b, seat.c, seat.d, seat.e, seat.f);
+      paint.scale(sx, sy);
+      drawFace({ ...local, ctx: paint });
+      // Upright at the face, at the body's scale: the lights hang below the mouth.
+      const tilt = Math.atan2(-seat.c, seat.d);
+      const scale = Math.hypot(seat.c, seat.d) / FACE_SCALE;
+      paint.setTransform(Math.cos(tilt) * scale, Math.sin(tilt) * scale, -Math.sin(tilt) * scale, Math.cos(tilt) * scale, seat.e, seat.f);
+      drawSeasonBody({ ...frame, ctx: paint, box: { x: -ANCHOR.x * g, y: (0.09 - ANCHOR.y) * g, s: g } });
+      paint.setTransform(1, 0, 0, 1, 0, 0);
+      paint.globalAlpha = 1;
+      paint.globalCompositeOperation = "destination-in";
+      paint.drawImage(renderer.domElement, 0, this.bufferPx - px, px, px, 0, 0, px, px);
+      paint.globalCompositeOperation = "source-over";
+      ctx.drawImage(paint.canvas, 0, 0, px, px, 0, 0, px, px);
     }
+
+    // Tools in hand ride the face.
+    ctx.save();
+    ctx.setTransform(seat.a, seat.b, seat.c, seat.d, seat.e, seat.f);
+    drawHeld(local);
+    ctx.restore();
+    drawProps(frame);
+    drawEffects(frame);
   }
 
-  private pose(avatar: Avatar, rig: Rig, activity: Activity, t: number, glow: number) {
-    const { mood, seed: s, spec, look } = avatar;
+  /** The body's pose, shape and colors for this frame. */
+  private pose(avatar: Avatar, activity: Activity, t: number, glow: number) {
+    const body = this.body;
+    const material = this.material;
+    if (!body || !material) return;
+    const { mood, seed: s, look } = avatar;
     let yaw = 0;
     let pitch = 0;
     let bob = 0;
@@ -835,11 +891,15 @@ class GemEngine {
     let slide = 0;
     let stretch = 0;
     let spin = 0;
+    let breath = 0;
     if (!this.still && activity !== "offline") {
       const speed = BUSY.has(activity) ? 1.6 : activity === "dreaming" ? 0.45 : 1;
-      yaw = 0.24 * Math.sin(t * 0.55 * speed + s) + look.x * 0.25;
-      pitch = 0.09 * Math.sin(t * 0.41 * speed + s * 1.7) + look.y * 0.14;
+      yaw = avatar.turn[0].x;
+      pitch = avatar.turn[1].x;
       bob = 0.045 * Math.sin(t * 1.15 * speed + s * 2.3);
+      // Leaning into a fast turn.
+      roll = clamp(-avatar.turn[0].v * 0.07, -0.18, 0.18);
+      breath = Math.sin(t * (activity === "dreaming" ? 1.1 : 1.9) + s);
       // Hunched over the keys, bouncing with the typing, as far as the gem
       // has turned to the laptop (a snap here read as a jump cut).
       const work = workPhase(activity, t - avatar.activitySince);
@@ -875,80 +935,45 @@ class GemEngine {
         spin = (t * 2.4 + s) % (Math.PI * 2);
       }
     }
-    // At the laptop the gem turns side-on and scoots left to make room.
-    spin += avatar.desk * 0.95;
+    // At the laptop the gem turns toward it and scoots left to make room; not
+    // fully side-on, or the face (tongue out, furious) would wrap out of view.
+    spin += avatar.desk * 0.75;
     slide -= avatar.desk * 0.26;
-    yaw *= 1 - avatar.desk * 0.7;
-    rig.group.rotation.set(pitch + 0.08, yaw + spin - 0.22, roll);
-    rig.group.position.set(slide, bob, 0);
-    rig.group.scale.set(1 - stretch * 0.04, 1 + stretch * 0.06, 1 - stretch * 0.04);
-    avatar.yaw = yaw - look.x * 0.25;
+    yaw *= 1 - avatar.desk;
+    const amp = activity === "dreaming" ? 0.05 : 0.03;
+    const wide = (1 - amp * 0.5 * breath) * (1 - stretch * 0.04);
+    body.rotation.set(0.12 + pitch, yaw + spin, roll);
+    body.position.set(slide, bob, 0);
+    body.scale.set(wide, (1 + amp * breath) * (1 + stretch * 0.06), wide);
     avatar.bob = bob;
     avatar.slide = slide;
     avatar.roll = roll;
     avatar.spin = spin;
     avatar.stretch = stretch;
 
-    // Light sweeping across the facets is what makes them flash.
-    const busy = BUSY.has(activity) || activity === "dance";
-    const sweep = this.still ? s : t * (busy ? 1.5 : 0.35) + s;
-    this.scene.environmentRotation.set(0, sweep, 0);
-    const orbit = this.still ? s : t * (busy ? 1.2 : 0.5) + s;
-    this.key.position.set(Math.cos(orbit) * 3, 2.4, 2.2 + Math.sin(orbit) * 1.5);
+    const moving = !this.still && activity !== "offline";
+    const jelly = avatar.motion === "jelly" && moving;
+    avatar.wob = !moving ? 0 : jelly ? 0.022 + avatar.energy * 0.05 : 0.008;
+    avatar.shear = jelly ? clamp(-avatar.turn[0].v * 0.16, -0.3, 0.3) : 0;
+    const u = material.uniforms;
+    const w = avatar.shape;
+    (u.uW0.value as Vector4).set(w[0].x, w[1].x, w[2].x, w[3].x);
+    (u.uW1.value as Vector4).set(w[4].x, w[5].x, w[6].x, w[7].x);
+    u.uWob.value = avatar.wob;
+    u.uTime.value = t;
+    u.uShear.value = avatar.shear;
 
     const offline = activity === "offline";
-    const color = avatar.base.clone();
+    tint.copy(avatar.base);
     if (offline) {
-      const gray = color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722;
-      color.lerp(new Color(gray, gray, gray), 0.72).multiplyScalar(0.55);
+      const gray = tint.r * 0.2126 + tint.g * 0.7152 + tint.b * 0.0722;
+      tint.setRGB(gray, gray, gray).multiplyScalar(0.55);
     } else if (activity === "error") {
-      color.lerp(ANGRY, 0.55);
+      tint.lerp(ANGRY, 0.55);
     }
-    if (rig.textured) {
-      // The map carries the color; dim, gray or redden it through the multiplier.
-      if (activity === "error") rig.body.material.color.copy(ANGRY).lerp(WHITE, 0.45);
-      else rig.body.material.color.setScalar(offline ? 0.32 : 1);
-      rig.body.material.emissive.setScalar(offline ? 0 : 1);
-    } else {
-      rig.body.material.color.copy(color);
-      rig.body.material.emissive.copy(color);
-    }
-    if (spec.finish === "faceted") {
-      rig.body.material.emissiveIntensity = glow * 0.25;
-      if (rig.inner) {
-        rig.inner.material.color.copy(color);
-        rig.inner.material.emissive.copy(color);
-        rig.inner.material.emissiveIntensity = offline ? 0.01 : 0.04 + glow * 0.55;
-      }
-      // The light wanders inside the stone, so different facets catch it in
-      // turn: a flashlight moving behind the gem.
-      const wander = this.still ? 0 : 1;
-      const lx = Math.cos(t * 2.1 + s) * 0.34 * wander;
-      const ly = Math.sin(t * 1.7 + s * 1.3) * 0.26 * wander;
-      rig.light.color.copy(activity === "error" ? ANGRY : avatar.base.clone().lerp(WHITE, 0.35));
-      rig.light.intensity = glow * 16;
-      rig.light.position.set(lx, ly, 0.1);
-      if (rig.core) {
-        rig.core.material.color.copy(color).multiplyScalar(3);
-        rig.core.material.opacity = Math.min(0.8, glow * 0.7);
-        rig.core.scale.setScalar(0.9 + 0.5 * Math.min(glow, 1.2));
-        rig.core.position.set(lx * 0.6, ly * 0.6, 0.05);
-      }
-    } else {
-      rig.body.material.emissiveIntensity = (offline ? 0 : rig.textured ? 0.03 : 0.04) + glow * 0.6;
-      rig.light.intensity = 0;
-    }
-    if (rig.flecks) {
-      const colors = rig.flecks.geometry.getAttribute("color") as Float32BufferAttribute;
-      const phases = rig.flecks.geometry.userData.phases as Float32Array;
-      const gold = new Color(spec.flecks);
-      for (let i = 0; i < phases.length; i += 1) {
-        const twinkle = this.still ? 0.6 : Math.max(0, Math.sin(t * 2.2 + phases[i])) ** 4;
-        const level = offline ? 0.12 : 0.3 + 0.7 * twinkle + glow * 0.6;
-        colors.setXYZ(i, gold.r * level, gold.g * level, gold.b * level);
-      }
-      colors.needsUpdate = true;
-    }
+    paintBody(material, tint, offline);
+    if (activity === "error") (u.uGlowColor.value as Color).copy(ANGRY);
+    u.uGlow.value = offline ? 0 : Math.min(0.8, glow * 0.85);
   }
 
   private drawGlints(avatar: Avatar, ox: number, oy: number, g: number) {

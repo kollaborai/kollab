@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from .atomic_write import keep_unreadable_copy, write_text_atomic
 from .config_utils import (
     get_global_config_path,
     get_global_config_path_candidates,
@@ -130,6 +131,7 @@ class ConfigService:
                 raw = {}
         except Exception as e:
             logger.warning("Could not read config for migration: %s", e)
+            keep_unreadable_copy(save_path)
             raw = {}
 
         additive_defaults = {
@@ -169,10 +171,7 @@ class ConfigService:
 
         try:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            save_path.write_text(
-                json.dumps(raw, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            write_text_atomic(save_path, json.dumps(raw, indent=2, ensure_ascii=False))
             logger.info("Migrated config defaults for app version %s", app_version)
         except Exception as e:
             logger.error("Failed to write migrated config: %s", e)
@@ -282,15 +281,21 @@ class ConfigService:
                     existing = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Could not read {save_path}, starting fresh: {e}")
+                # The fresh dict replaces the file: keep what could not be read.
+                keep_unreadable_copy(save_path)
 
         # 4. Patch the single key into the existing dict
         safe_set(existing, key_path, value)
 
-        # 5. Write back
+        # 5. Write back whole, so another kollab reading right now never finds half
+        # a file (it would start blank and save that over the profiles and keys).
+        # ponytail: no cross-process lock, so two saves at the same instant can still
+        # drop one key (never the file); flock a sibling .lock if that ever matters.
         save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(save_path, "w") as f:
-                json.dump(existing, f, indent=2, ensure_ascii=False)
+            write_text_atomic(
+                save_path, json.dumps(existing, indent=2, ensure_ascii=False)
+            )
             self._note_own_write(save_path)
             logger.info(f"Saved {key_path} to {save_path}")
             return True

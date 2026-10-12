@@ -28,17 +28,27 @@ if Node/npm is unavailable.
 
 - **Sidebar**: New Session starts a session with the current picks in one
   click; the options button next to it opens Agent, Gem, Model and Workspace.
+  The gem list starts with koordinator while this folder runs none (a terminal
+  makes the first agent in a folder its koordinator) and says when each gem
+  last ran here ("Ran 3d Ago", from its vault). Workspace is a folder picker:
+  the engine's folder, recent folders with their live agents, a folder
+  browser, or a typed path.
   Each session row shows its gem as a live 3D avatar that acts out what the
   agent is doing (thinking, typing, searching, messaging, error).
 - **Agents by computer**: the sidebar lists every agent under the computer it
   runs on. This computer comes first: its chats and every agent running in a
   terminal or as a daemon, each one click from a full chat (the web UI only
-  attaches to an agent it did not start, so it offers no Delete). Then each of
-  your other computers. Agents on other computers show
-  while a chat runs here and this computer is connected to your network. One
-  click opens one as a full chat, through the network, as that computer's
-  trust allows: under `open` (the default) every computer of your network,
-  under `agents` only the agents it lets this one message, under `manual` none.
+  attaches to an agent it did not start, so it offers no Delete). Agents that
+  ran in this folder and are not running follow as offline; a click starts one
+  as itself, and its vault brings back what it knew. Then each of your other
+  computers. The engine keeps every agent the network has listed for a month
+  (`~/.kollab/engine-network.json`): one that left shows offline with when it
+  was last seen, and with no agent here on the network the last roster shows.
+  Opening one then first starts this folder's koordinator to carry the
+  network. One click opens one as a full chat, through the network, as that
+  computer's trust allows: under `open` (the default) every computer of your
+  network, under `agents` only the agents it lets this one message, under
+  `manual` none.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →
@@ -134,7 +144,7 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 ## Engine endpoints used
 
 - `POST /sessions`
-- `GET /sessions`
+- `GET /sessions` (with `offline`, agents that ran in the engine's folder, and `network`)
 - `DELETE /sessions/{session_id}`
 - `POST /sessions/{session_id}/assistant`
 - `POST /sessions/{session_id}/cancel` (Stop; a closed assistant stream never cancels the turn)
@@ -145,7 +155,8 @@ upgrade. `src/dev/gem-lab.html` previews every gem, activity, hat and season.
 - `GET/POST/PUT/DELETE /profiles...`
 - `GET/POST/PUT/DELETE /mcp/servers...`
 - `GET/POST /sessions/{session_id}/mcp...`
-- `GET /agents` (gem pool: colors, live state, hub agent ids)
+- `GET /agents` (gem pool: colors, live state, hub agent ids, `last_ran`)
+- `GET /workspaces`, `GET /workspaces/browse?path=` (New Session's folder picker)
 - `GET/PUT /agents/appearance` (Gem Studio looks)
 - `GET /hub/agents`
 - `POST /hub/messages`

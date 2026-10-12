@@ -317,7 +317,7 @@ class OpenRouterProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenRouter API call failed: {e}")
+            logger.error(f"OpenRouter API call failed: {type(e).__name__}: {e}")
             raise map_openai_error(e, "openrouter") from e
 
         finally:

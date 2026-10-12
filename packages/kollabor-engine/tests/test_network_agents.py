@@ -8,6 +8,11 @@ from kollabor_engine.routes import sessions as sessions_route
 REMOTE = [{"name": "lapis", "device": "prod-box", "handle": "lapis@prod-box", "state": "idle"}]
 
 
+def seen(network):
+    """The remote rows without the roster's last_seen stamp."""
+    return [{k: v for k, v in row.items() if k != "last_seen"} for row in network["remote"]]
+
+
 class DaemonState:
     """Stands in for a daemon's state RPC: answers get_hub_state or raises."""
 
@@ -55,7 +60,8 @@ async def test_network_block_names_this_computer_and_its_remote_agents(registry)
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"] == {"device": "devbox", "remote": REMOTE}
+    assert result["network"]["device"] == "devbox" and result["network"]["live"] is True
+    assert seen(result["network"]) == REMOTE
 
 
 @pytest.mark.asyncio
@@ -65,7 +71,7 @@ async def test_a_daemon_that_fails_is_skipped_for_one_that_answers(registry):
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"]["remote"] == REMOTE
+    assert seen(result["network"]) == REMOTE
 
 
 @pytest.mark.asyncio
@@ -77,7 +83,7 @@ async def test_solo_daemon_has_no_relay_so_it_is_not_asked(registry, monkeypatch
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"] == {"device": "devbox", "remote": []}
+    assert result["network"] == {"device": "devbox", "remote": [], "live": False}
 
 
 @pytest.mark.asyncio
@@ -87,4 +93,4 @@ async def test_no_answer_means_no_remote_rows(registry, monkeypatch):
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"] == {"device": "devbox", "remote": []}
+    assert result["network"] == {"device": "devbox", "remote": [], "live": False}

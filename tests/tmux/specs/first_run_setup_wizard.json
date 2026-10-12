@@ -1,0 +1,35 @@
+{
+  "name": "first-run-setup-wizard",
+  "description": "A first launch with no LLM provider opens the setup wizard on its own (the same screen /setup opens), Esc leaves it, and the launch is remembered. Runs with an empty HOME, the hub off and the environment cleared (so no provider key auto-activates a profile), so it never touches the real ~/.kollab or a live daemon.",
+  "config": {
+    "command": "bash -lc 'source .venv/bin/activate 2>/dev/null; exec env -i HOME=/tmp/kollab-first-run-wizard PATH=\"$PATH\" TERM=\"$TERM\" LANG=en_US.UTF-8 KOLLAB_NO_KEYRING=1 python main.py --no-daemon'",
+    "app_init_sleep": 8,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40
+  },
+  "setup": [
+    { "action": "shell", "command": "rm -rf /tmp/kollab-first-run-wizard && mkdir -p /tmp/kollab-first-run-wizard/.kollab && printf '%s' '{\"plugins\":{\"hub\":{\"enabled\":false}}}' > /tmp/kollab-first-run-wizard/.kollab/config.json" }
+  ],
+  "steps": [
+    { "action": "start_app" },
+
+    { "action": "section", "title": "The wizard opens by itself" },
+    { "action": "wait_for", "pattern": "Provider Setup", "timeout": 40, "description": "wizard header appears without typing /setup" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Which provider", "description": "wizard prompt renders" },
+    { "action": "assert_contains", "pattern": "Anthropic", "description": "provider list renders" },
+
+    { "action": "section", "title": "Esc leaves it and the launch is remembered" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1.5 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Provider Setup", "description": "wizard closed" },
+    { "action": "shell", "command": "grep -rq setup_completed /tmp/kollab-first-run-wizard/.kollab", "description": "setup_completed saved, so the next launch does not nag" }
+  ],
+  "teardown": [
+    { "action": "shell", "command": "rm -rf /tmp/kollab-first-run-wizard", "allow_failure": true }
+  ]
+}

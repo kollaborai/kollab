@@ -192,6 +192,10 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(hub_router)
 
+    from .routes.workspaces import router as workspaces_router
+
+    app.include_router(workspaces_router)
+
     from .routes.hub_ws import router as hub_ws_router
 
     app.include_router(hub_ws_router)

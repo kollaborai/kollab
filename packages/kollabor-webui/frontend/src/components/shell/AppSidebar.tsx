@@ -1,11 +1,13 @@
 import { useMemo, useState, type ComponentProps } from "react";
 import { Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
-import type { AgentBundleEntry, AgentNetwork, AgentPoolEntry, Profile, Session } from "@/api";
+import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
 import { groupRemoteByDevice } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
+import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
+import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -14,7 +16,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Popover,
@@ -71,8 +72,10 @@ function OpenError({ text }: { text: string }) {
 export function AppSidebar({
   sessions,
   profiles,
+  api,
   agents,
   network,
+  offline,
   bundles,
   selectedProfile,
   selectedIdentity,
@@ -93,6 +96,8 @@ export function AppSidebar({
   // already carries the DOM `onSelect` handler, and the collision widens the
   // callback argument to `string | SyntheticEvent`.
   onSelectSession,
+  onSelectRemote,
+  onStartOffline,
   onCreate,
   onDelete,
   onProperties,
@@ -100,8 +105,12 @@ export function AppSidebar({
 }: ComponentProps<typeof Sidebar> & {
   sessions: Session[];
   profiles: Profile[];
+  /** For the workspace picker's folder lists. */
+  api: EngineApi;
   agents: AgentPoolEntry[];
   network: AgentNetwork;
+  /** Agents that ran in this folder and are not running; a click starts one. */
+  offline: OfflineAgent[];
   bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
@@ -123,6 +132,10 @@ export function AppSidebar({
   onManageProfiles: () => void;
   /** Resolves true once the chat is open. */
   onSelectSession: (id: string) => Promise<boolean>;
+  /** Opens an agent on another computer, first starting an agent here to carry the network if none is on it. */
+  onSelectRemote: (handle: string) => Promise<boolean>;
+  /** Starts an offline agent as itself; resolves true once its chat is open. */
+  onStartOffline: (identity: string, workspace: string) => Promise<boolean>;
   onCreate: () => void;
   onDelete: (id: string) => void;
   /** A session's Properties: right-click (long press) its row for the Chat tab, or double-click its gem. */
@@ -217,7 +230,7 @@ export function AppSidebar({
             <PopoverContent
               side="bottom"
               align="start"
-              collisionPadding={12}
+              collisionPadding={16}
               className="w-80 p-0"
             >
               <div className="flex items-center gap-3 border-b px-4 py-3">
@@ -266,13 +279,19 @@ export function AppSidebar({
                   disabled={!agents.length}
                 >
                   <SelectTrigger id="new-session-gem" size="sm" className="w-full">
-                    <SelectValue placeholder="Next Free Gem" />
+                    {/* The name only: the list's "Ran 3d Ago" tag would crowd the field. */}
+                    <SelectValue placeholder="Next Free Gem">
+                      {selectedIdentity ? titleCase(selectedIdentity) : undefined}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {gemOptions.map((agent) => (
                       <SelectItem key={agent.name} value={agent.name} disabled={agent.active}>
                         {titleCase(agent.name)}
                         {agent.active ? " · In Use" : ""}
+                        {!agent.active && agent.last_ran ? (
+                          <span className="text-muted-foreground"> · {lastRanLabel(agent.last_ran)}</span>
+                        ) : null}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -304,13 +323,7 @@ export function AppSidebar({
                 <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
                   Workspace
                 </Label>
-                <Input
-                  id="new-session-workspace"
-                  placeholder="Project folder"
-                  value={workspacePath}
-                  onChange={(event) => onWorkspaceChange(event.target.value)}
-                  className="h-8 text-xs"
-                />
+                <WorkspacePicker api={api} value={workspacePath} onChange={onWorkspaceChange} />
               </div>
               <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
                 <Button
@@ -459,7 +472,40 @@ export function AppSidebar({
                 </ContextMenu>
                 );
               })}
-              {!localSessions.length ? (
+              {offline.map((agent) => (
+                <SidebarMenuItem key={`offline:${agent.identity}`}>
+                  <SidebarMenuButton
+                    disabled={busy}
+                    onClick={async () => {
+                      if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
+                    }}
+                    title={`Start ${titleCase(agent.identity)} in ${agent.workspace}`}
+                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                    data-testid={`offline-${agent.identity}`}
+                  >
+                    <GemAvatar
+                      gem={agent.identity}
+                      where={agent.workspace}
+                      caste={poolByName.get(agent.identity)?.caste}
+                      color={poolByName.get(agent.identity)?.color}
+                      state="offline"
+                      live={false}
+                      season="auto"
+                      follow
+                      size={56}
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="text-muted-foreground truncate text-[13px] leading-tight font-medium">
+                        {titleCase(agent.identity)}
+                      </span>
+                      <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                        Offline · {lastRanLabel(agent.last_ran)}
+                      </span>
+                    </div>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+              {!localSessions.length && !offline.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
                   No sessions yet.
                 </p>
@@ -479,6 +525,9 @@ export function AppSidebar({
                   // Opens through the network once that computer allows this one.
                   const id = agent.handle || "";
                   const note = id && opening?.id === id ? opening : null;
+                  // Not up, or unknown: no agent here is on the network to say (a click starts one).
+                  const up = network.live !== false && agent.state !== "offline";
+                  const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
                   return (
                   <SidebarMenuItem key={id || `${agent.name}@${agent.device}`}>
                     <SidebarMenuButton
@@ -486,7 +535,7 @@ export function AppSidebar({
                       isActive={Boolean(id) && id === activeId}
                       onClick={async () => {
                         // Closes the phone menu only once it opened: a refusal shows here.
-                        if (await onSelectSession(id)) setOpenMobile(false);
+                        if (await onSelectRemote(id)) setOpenMobile(false);
                       }}
                       title={`Open ${titleCase(agent.name)} on ${agent.device}`}
                       className="h-auto gap-3 overflow-visible py-2 pl-2.5"
@@ -496,8 +545,8 @@ export function AppSidebar({
                         where={agent.device}
                         caste={poolByName.get(agent.name)?.caste}
                         color={poolByName.get(agent.name)?.color}
-                        state="idle"
-                        live
+                        state={up ? "idle" : "offline"}
+                        live={up}
                         activity={id && id === activeId ? activeActivity : null}
                         season="auto"
                         follow
@@ -508,7 +557,15 @@ export function AppSidebar({
                           {titleCase(agent.name)}
                         </span>
                         <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                          {note && !note.error ? "Opening…" : agent.state ? titleCase(agent.state) : "Online"}
+                          {note && !note.error
+                            ? "Opening…"
+                            : agent.state === "offline"
+                              ? ["Offline", seen].filter(Boolean).join(" · ")
+                              : network.live === false
+                                ? seen || "Not Connected"
+                                : agent.state
+                                  ? titleCase(agent.state)
+                                  : "Online"}
                         </span>
                         {note?.error ? <OpenError text={note.error} /> : null}
                       </div>
