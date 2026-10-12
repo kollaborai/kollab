@@ -31,11 +31,6 @@ from nacl.exceptions import CryptoError
 from nacl.public import Box
 from nacl.signing import VerifyKey
 
-from kollabor_config.managed_config import (
-    clear_managed_config,
-    read_managed_config,
-)
-
 from .device_names import (
     NAME_RE,
     contact_route_hex,
@@ -43,7 +38,7 @@ from .device_names import (
     default_network_name,
     key_label,
 )
-from .config_sync import is_machine_network_state_dir
+from .device_primary import reconcile_join_with_choice, retire_primary_network
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -138,7 +133,6 @@ SEND_RATE_PER_SECOND = 8
 
 
 @dataclass
-
 class _ApplicationPending:
     peer: str
     local_session: str
@@ -305,16 +299,18 @@ class RelayClient:
         return origin
 
     def _forget_stale_primary(self) -> None:
-        """A join names this device's primary; a managed-config record left by
-        another one (a wiped workspace, an earlier network) would refuse every
-        bundle from the new primary as other_primary, for good. The record is
-        machine-global, so only a state living in this machine's own
-        ``~/.kollab/network`` may touch it."""
-        if not is_machine_network_state_dir(self.state_dir):
-            return
-        stale = read_managed_config()
-        if stale is not None and stale.primary_key != self.state.inviter:
-            clear_managed_config(primary_key=stale.primary_key)
+        """A join must never take the machine's managed-config primary entry
+        from another workspace: that was the silent takeover where the last
+        workspace to join won the machine's one record (issue #121). The
+        entry belongs to the device record's primary-network choice, so a
+        join only reconciles with that choice (plugins/hub/device_primary.py
+        -- and even clearing there needs the join to be for the chosen
+        network itself, clearing a leftover of an older primary of it)."""
+        reconcile_join_with_choice(
+            state_dir=self.state_dir,
+            origin=self.state.origin,
+            joined_primary_key=self.state.inviter,
+        )
 
     def rotate_room(self):
         if self._task is not None and not self._task.done():
@@ -337,13 +333,24 @@ class RelayClient:
         """Disconnect for good: forget the directory, the room and every peer.
 
         A device that left can then join any network by code, which needs an
-        empty origin, no inviter and no approvals.
+        empty origin, no inviter and no approvals. Leaving the machine's
+        chosen primary network (and only then, with no other workspace on
+        this machine still holding it) releases the managed-config primary
+        entry: the device record's choice, not a join, decided it.
         """
         await self.close(disable=True)
+        departing_primary = self.state.inviter
+        departing_origin = self.state.origin
+        state_dir = self.state_dir
         self.state.origin = ""
         self.rotate_room()
         self.state.network_name = ""  # rotate keeps the name; leaving forgets it
         self._store.save()
+        retire_primary_network(
+            departing_primary,
+            state_dir=state_dir,
+            state_origin=departing_origin,
+        )
 
     def _adopt_bridge_fields(self) -> None:
         """Take the fields the agent bridge writes through its own state store.
@@ -400,7 +407,10 @@ class RelayClient:
             self.state.config_told_refused,
         ):
             self._adopt_bridge_fields()
-            self.state.config_told_skipped, self.state.config_told_refused = skipped, refused
+            self.state.config_told_skipped, self.state.config_told_refused = (
+                skipped,
+                refused,
+            )
             self._store.save()
 
     def add_config_recipient(self, key: str) -> None:
@@ -481,9 +491,15 @@ class RelayClient:
         named = set()
         for key, name in members:
             named.add(key)
-            if key == self.public_key or key in self.state.links or key in self.state.revoked:
+            if (
+                key == self.public_key
+                or key in self.state.links
+                or key in self.state.revoked
+            ):
                 continue
-            first_hand = key in self.state.approvals and key not in self.state.vouched_by
+            first_hand = (
+                key in self.state.approvals and key not in self.state.vouched_by
+            )
             if key not in self.state.approvals:
                 try:
                     self.approve(key)
@@ -524,7 +540,11 @@ class RelayClient:
         try:
             self._adopt_bridge_fields()
             changed = False
-            if announce and key not in self.state.links and key not in self.state.revoked:
+            if (
+                announce
+                and key not in self.state.links
+                and key not in self.state.revoked
+            ):
                 if key != self.public_key:
                     self.state.revoked.append(key)
                     del self.state.revoked[:-MAX_REVOKED]
@@ -793,7 +813,9 @@ class RelayClient:
                     "key": self.public_key,
                     "session": self._session_id,
                 }
-                if any(registered.get(field) != value for field, value in expected.items()):
+                if any(
+                    registered.get(field) != value for field, value in expected.items()
+                ):
                     raise RelayError("relay registration rejected")
                 self._set_peers(await self._receive_frame(ws))
                 self._state, self._error = "online", ""
@@ -874,7 +896,8 @@ class RelayClient:
             for waited in (False, True):
                 now = time.monotonic()
                 self._tokens = min(
-                    SEND_BURST, self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND
+                    SEND_BURST,
+                    self._tokens + (now - self._token_time) * SEND_RATE_PER_SECOND,
                 )
                 self._token_time = now
                 if self._tokens >= 1:
@@ -1171,7 +1194,9 @@ class RelayClient:
                 if code == "invalid_frame":
                     control[2].set_result({"type": control[0], "result": "outdated"})
                 else:
-                    control[2].set_exception(RelayError("relay transport error: " + code))
+                    control[2].set_exception(
+                        RelayError("relay transport error: " + code)
+                    )
             if request_id is not None and not pending and not application:
                 # The directory refused a knock or an answer this device sent.
                 self._dispatch_knock(
@@ -1200,7 +1225,9 @@ class RelayClient:
             # the connection.
             self._counts["ignored_frames"] += 1
 
-    def set_knock_handler(self, handler: Callable[[dict], Awaitable[None]] | None) -> None:
+    def set_knock_handler(
+        self, handler: Callable[[dict], Awaitable[None]] | None
+    ) -> None:
         """Where knocks, answers and knock results go (plugins/hub/knocks.py)."""
         self._knock_handler = handler
 
@@ -1217,13 +1244,17 @@ class RelayClient:
         def done(task: asyncio.Task) -> None:
             self._knock_tasks.discard(task)
             if not task.cancelled() and task.exception() is not None:
-                _LOGGER.warning("knock handling failed: %s", type(task.exception()).__name__)
+                _LOGGER.warning(
+                    "knock handling failed: %s", type(task.exception()).__name__
+                )
 
         task = asyncio.create_task(handler(frame), context=contextvars.Context())
         self._knock_tasks.add(task)
         task.add_done_callback(done)
 
-    async def _control_request(self, frame: dict, reply: str, echo: tuple[str, object]) -> dict:
+    async def _control_request(
+        self, frame: dict, reply: str, echo: tuple[str, object]
+    ) -> dict:
         async with self._control_lock:
             if self._state != "online":
                 raise RelayError("relay is not connected")
@@ -1257,7 +1288,9 @@ class RelayClient:
             or key == self.public_key
             or contact_route_hex(key) != route
         ):
-            _LOGGER.warning("the directory answered a route lookup with a key that does not fit")
+            _LOGGER.warning(
+                "the directory answered a route lookup with a key that does not fit"
+            )
             return "unavailable", ""
         return "found", key
 
@@ -1272,14 +1305,29 @@ class RelayClient:
         result = reply.get("result")
         return result if isinstance(result, str) else "busy"
 
-    async def send_knock(self, to: str, knock_id: str, ticket: dict, ciphertext: str) -> None:
+    async def send_knock(
+        self, to: str, knock_id: str, ticket: dict, ciphertext: str
+    ) -> None:
         await self._send_frame(
-            {"type": "knock", "to": to, "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+            {
+                "type": "knock",
+                "to": to,
+                "id": knock_id,
+                "ticket": ticket,
+                "ciphertext": ciphertext,
+            }
         )
 
-    async def send_knock_answer(self, knock_id: str, ticket: dict, ciphertext: str) -> None:
+    async def send_knock_answer(
+        self, knock_id: str, ticket: dict, ciphertext: str
+    ) -> None:
         await self._send_frame(
-            {"type": "knock_answer", "id": knock_id, "ticket": ticket, "ciphertext": ciphertext}
+            {
+                "type": "knock_answer",
+                "id": knock_id,
+                "ticket": ticket,
+                "ciphertext": ciphertext,
+            }
         )
 
     async def _receive_encrypted(self, frame):
@@ -1367,7 +1415,9 @@ class RelayClient:
                 "workspace_id",
             }:
                 raise RelayError("invalid pong")
-            payload = {name: payload[name] for name in ("reply_to", "label", "workspace_id")}
+            payload = {
+                name: payload[name] for name in ("reply_to", "label", "workspace_id")
+            }
             if (
                 not isinstance(payload["label"], str)
                 or not 1 <= len(payload["label"]) <= 80
