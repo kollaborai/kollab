@@ -208,6 +208,9 @@ CONNECT_SUBCOMMANDS = [
     SubcommandInfo("revoke", "<device>", "Remove a device or peer"),
     SubcommandInfo("leave", "[domain]", "Disconnect and stop reconnecting"),
     SubcommandInfo(
+        "primary", "<network>", "Choose which network's primary manages this device"
+    ),
+    SubcommandInfo(
         "help", "[all]", "This list; all adds the manual-trust and reset commands"
     ),
 ]
