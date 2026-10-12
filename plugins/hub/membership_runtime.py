@@ -20,6 +20,7 @@ membership key.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -154,3 +155,48 @@ class Memberships:
             return Memberships(workspace).primary().state_dir
         except RelayError:
             return default_workspace_state_dir(workspace)
+
+
+class MembershipContext:
+    """One membership's runtime pieces: commands, store, transport, mesh.
+
+    The PRIMARY membership's pieces stay where they live today (flat fields
+    on RelayAgentBridge) for N=1 back-compat; MembershipContext is how a
+    SECONDARY membership gets the same service set compositionally:
+
+        - RelayCommands bound to the membership's state dir (its own
+          RelayClient/RelayState/knock service),
+        - SecureConversationTransport over that client (conversations are
+          scoped per membership: RelayAddress embeds the membership's
+          workspace identity, and the client's approval check
+          (relay_client._call_application) already validates inbound peers
+          against THIS membership's approvals),
+        - an inbound adapter registered on the client so requests arrive
+          slug-addressed at the bridge (the bridge dispatches per
+          membership instead of reading primary-only fields).
+
+    PeerMeshRuntime/config-sync stay primary-only for now (design v2 §4:
+    sealed bundles flow from the primary network; direct endpoints on
+    secondaries are a later opt-in).
+    """
+
+    def __init__(self, membership: Membership, commands, transport, *, inbound):
+        self.membership = membership
+        self.commands = commands
+        self.transport = transport
+        self.inbound = inbound  # bridge-bound async (peer, method, payload)
+        self.resume_task: object | None = None
+
+    async def start(self):
+        self.commands.client.set_request_handler(self.inbound)
+        self.resume_task = asyncio.create_task(
+            self.commands.resume(), name=f"kollab-relay-resume-{self.membership.slug}"
+        )
+
+    async def close(self):
+        task, self.resume_task = self.resume_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.commands.client.set_request_handler(None)
+        await self.commands.close()

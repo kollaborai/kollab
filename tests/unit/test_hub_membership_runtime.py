@@ -27,6 +27,8 @@ from plugins.hub.device_record import (
 )
 from plugins.hub.membership_runtime import (
     MAX_MEMBERSHIPS_PER_WORKSPACE,
+    Membership,
+    MembershipContext,
     Memberships,
 )
 from plugins.hub.relay_state import RelayError
@@ -215,3 +217,121 @@ def test_membership_commands_secondary_builds_and_caches(home, tmp_path):
     assert cached is commands  # cache hit, no rebuild
     with pytest.raises(RelayError):
         asyncio.run(bridge._membership_commands("unknown-slug"))
+
+
+# -- slice 3 fan-out: MembershipContext lifecycle + slug-addressed inbound --
+
+
+class _RecordingCommands:
+    def __init__(self):
+        self.handlers = []
+        self.closed = False
+
+        class _Client:
+            def __init__(inner):
+                inner.state_dir = Path("/unused")
+                inner.handler = None
+
+            def set_request_handler(inner, handler):
+                inner.handler = handler
+
+        self.client = _Client()
+
+    async def resume(self):
+        self.resumed = True
+
+    async def close(self):
+        self.closed = True
+
+
+class _RecordingTransport:
+    def __init__(self):
+        self.identity_response_calls = []
+
+    def identity_response(self, peer, payload):
+        self.identity_response_calls.append((peer, payload))
+        return {"ok": True}
+
+
+def test_membership_context_registers_inbound_and_closes_cleanly():
+    import asyncio
+
+    commands = _RecordingCommands()
+    transport = _RecordingTransport()
+    inbound_calls = []
+
+    async def inbound(peer, method, payload):
+        inbound_calls.append((peer, method, payload))
+        return {"echo": True}
+
+    membership = Membership(slug="slug-x", state_dir=Path("/tmp/x"))
+    context = MembershipContext(membership, commands, transport, inbound=inbound)
+
+    async def scenario():
+        await context.start()
+        handler = commands.client.handler
+        result = await handler("peerkey", "directory", {})
+        await context.close()
+        return result
+
+    result = asyncio.run(scenario())
+    assert result == {"echo": True} and inbound_calls == [("peerkey", "directory", {})]
+    assert commands.closed is True
+    assert commands.client.handler is None  # adapter detached
+
+
+def test_receive_membership_validates_against_its_own_state(tmp_path, home):
+    """A secondary's inbound must consult ITS approvals, not the primary's."""
+    import asyncio
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    slug_a = origin_slug("https://a.example.com")
+    slug_b = origin_slug("https://b.example.com")
+    dir_a = _membership_dir(workspace, home, slug_a)
+    dir_b = _membership_dir(workspace, home, slug_b)
+    _seed_state(dir_a, "https://a.example.com")
+    _seed_state(dir_b, "https://b.example.com")
+
+    import plugins.hub.relay_agent as relay_agent
+
+    bridge = relay_agent.RelayAgentBridge.__new__(relay_agent.RelayAgentBridge)
+    bridge.workspace = workspace.resolve()
+    bridge.memberships = Memberships(workspace)
+    bridge._membership_contexts = {}
+    bridge.commands = None  # no primary: proves secondary path is self-contained
+
+    class _State:
+        class state:
+            links = set()
+            approvals = {"peer-of-b": True}
+
+        workspace_id = "b" * 32
+
+    class _Client:
+        state_dir = dir_b
+        state = _State.state  # approvals contain ONLY b's peer
+
+    class _CommandsB:
+        client = _Client()
+
+    context = MembershipContext(
+        Membership(slug=slug_b, state_dir=dir_b),
+        _CommandsB(),
+        _RecordingTransport(),
+        inbound=None,
+    )
+    bridge._membership_contexts[slug_b] = context
+
+    async def scenario(peer):
+        return await bridge._receive_membership(slug_b, peer, "directory", {})
+
+    # peer known to b's state: passes the approval gate and proceeds to the
+    # secure-session requirement (enforced further down _receive) — proving
+    # validation used THIS membership's state, not the (absent) primary's.
+    with pytest.raises(RelayError, match="authenticated secure session"):
+        asyncio.run(scenario("peer-of-b"))
+
+    # peer unknown to b's state: refused at the membership's own approval gate
+    with pytest.raises(RelayError, match="peer is not approved"):
+        asyncio.run(scenario("stranger"))
