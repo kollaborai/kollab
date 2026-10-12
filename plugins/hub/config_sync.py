@@ -266,6 +266,27 @@ CONFIG_PARTS = ("config.json",)
 MCP_PARTS = ("mcp", "mcp_settings.json")
 
 
+def is_machine_network_state_dir(state_dir: Path, root: Path | None = None) -> bool:
+    """True when ``state_dir`` is a network-state directory this machine owns.
+
+    Both layouts count: the v1 ``~/.kollab/network/<digest>`` and the v2
+    ``~/.kollab/workspaces/<digest>/networks/<slug>`` (issue #158 slice 1).
+    Used by machine-global guards (join floor, stale primary) so a state
+    living in a test root or another machine's checkout never touches this
+    machine's records.
+    """
+    base = kollab_root(root)
+    try:
+        state_dir = Path(state_dir).resolve()
+    except OSError:
+        return False
+    if state_dir.parent == base / "network":
+        return True
+    if state_dir.parent.name == "networks" and state_dir.parent.parent.parent == base / "workspaces":
+        return True
+    return False
+
+
 def mcp_settings_path(root: Path | None = None) -> Path:
     return kollab_root(root).joinpath(*MCP_PARTS)
 
@@ -344,7 +365,7 @@ def record_join_floor(
     alone (`RelayClient._forget_stale_primary`). It is written by `_write_json`,
     so never through a link, 0600 in a 0700 folder.
     """
-    if state_dir.parent != kollab_root() / "network":
+    if not is_machine_network_state_dir(state_dir):
         return
     clear_join_floor()
     if revision is None and digest is None:
