@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Web: the gems are soft now. Each is a smooth, breathing blob in its own color that changes shape, with pill eyes and a mouth that morph too, and its face turns with the body toward your cursor. Every agent is born with one of three motions that sticks: Mood Morph (its shape shows what it is doing), Jelly (it wobbles as it moves) or Shape Cycle (it cycles through shapes while idle).
+
 ## [0.15.3] - 2026-10-11
 
 ### Added

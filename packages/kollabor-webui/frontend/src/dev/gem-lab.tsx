@@ -2,6 +2,7 @@ import { StrictMode, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "../styles.css";
 import { GemAvatar } from "@/components/gems/GemAvatar";
+import { GEM_MOTIONS, type GemMotion } from "@/components/gems/gem-engine";
 import {
   EYE_STYLES,
   HAT_STYLES,
@@ -13,7 +14,7 @@ import {
 } from "@/components/gems/gem-face";
 
 // Dev-only gem studio (vite serves /gem-lab.html; the build only takes
-// index.html): compare eye styles, hats, seasons and activities on the pool.
+// index.html): compare eye styles, hats, seasons, motions and activities on the pool.
 const POOL: [string, number[], string][] = [
   ["lapis", [30, 90, 180], "communication"], ["sapphire", [15, 82, 186], "communication"],
   ["aquamarine", [100, 200, 235], "communication"], ["zircon", [70, 130, 200], "communication"],
@@ -58,12 +59,15 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+const MOTION_LABELS: Record<GemMotion, string> = { mood: "Mood Morph", jelly: "Jelly", cycle: "Shape Cycle" };
+
 function Lab() {
   const [size, setSize] = useState(96);
   const [activity, setActivity] = useState<Activity>("idle");
   const [hat, setHat] = useState<HatStyle | "auto">("auto");
   const [season, setSeason] = useState<Season | "auto">("auto");
   const [face, setFace] = useState<EyeStyle>("disney");
+  const [motion, setMotion] = useState<GemMotion | null>(null);
   const [group, setGroup] = useState("All");
   const [light, setLight] = useState(false);
   const [view, setView] = useState<"styles" | "pool">("styles");
@@ -78,6 +82,7 @@ function Lab() {
           face={style}
           hat={hat}
           season={season}
+          motion={motion}
           activity={activity === "offline" || activity === "booting" ? null : activity}
           state={activity === "booting" ? "booting" : activity === "offline" ? "" : "working"}
           live={activity !== "offline"}
@@ -103,6 +108,12 @@ function Lab() {
         <Row label="Activity">
           {ACTIVITIES.map((a) => (
             <Chip key={a} active={a === activity} onClick={() => setActivity(a)}>{a}</Chip>
+          ))}
+        </Row>
+        <Row label="Motion">
+          <Chip active={motion === null} onClick={() => setMotion(null)}>Born</Chip>
+          {GEM_MOTIONS.map((m) => (
+            <Chip key={m} active={m === motion} onClick={() => setMotion(m)}>{MOTION_LABELS[m]}</Chip>
           ))}
         </Row>
         <Row label="Season">
