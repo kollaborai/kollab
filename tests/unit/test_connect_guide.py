@@ -4,7 +4,7 @@ import asyncio
 import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -535,3 +535,60 @@ async def test_remote_hub_connect_generic_when_daemon_says_nothing():
     service = RemoteStateService(_Rpc())
     with pytest.raises(ValueError, match="daemon beacon command failed"):
         await service.hub_connect("start")
+
+
+# -------------------------------------------- pipe-mode command registration (#156)
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_registers_slash_commands(monkeypatch):
+    """`kollab -p "/connect ..."` needs the command registry even though the
+    hub plugin skips presence, socket server and status line in pipe mode.
+    """
+    registered = []
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = MagicMock()
+    plugin._register_commands = lambda: registered.append(True)
+    initialize_kwargs = {"command_registry": plugin.command_registry}
+
+    import kollabor.hub_env as hub_env
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_env, "hub_disabled_by_env", lambda: False)
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args, **initialize_kwargs)
+
+    assert registered, "pipe mode must still register slash commands"
+    assert plugin.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_pipe_mode_skips_registration_without_a_registry(monkeypatch):
+    plugin = _plugin()
+    pipe_args = SimpleNamespace(pipe=True)
+    plugin.enabled = True
+    plugin._cli_args = pipe_args
+    plugin.event_bus = MagicMock()
+    plugin.config = MagicMock()
+    plugin.config.get.return_value = True
+    plugin._nudge_engine = None
+    plugin._hub_config_reload_registered = True
+    plugin.args = pipe_args
+    plugin.command_registry = None
+
+    import plugins.hub.plugin as hub_module
+
+    monkeypatch.setattr(hub_module, "hub_disabled_by_env", lambda: False)
+
+    await plugin.initialize(pipe_args)
+    assert plugin.enabled is False

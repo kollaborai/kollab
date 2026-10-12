@@ -255,3 +255,41 @@ async def test_submit_rejects_when_primary_input_handler_fails():
     )
 
     assert result == {"status": "rejected", "reason": "input_processing_failed"}
+
+
+@pytest.mark.asyncio
+async def test_pipe_command_failure_exits_without_unbound_local_error():
+    """sys.exit on a failed pipe command must not hit the local `import sys`
+    shadow (UnboundLocalError) further down start_pipe_mode (#156)."""
+    bus, llm, calls, _ = await _pipeline(cancel_pre=True)
+    proxy = _StateLLMProxy(llm)
+    proxy.api_service = SimpleNamespace(is_provider_available=lambda: True)
+    renderer = SimpleNamespace(
+        pipe_mode=False,
+        message_renderer=SimpleNamespace(pipe_mode=False),
+    )
+    app = object.__new__(TerminalLLMChat)
+    app.renderer = renderer
+    app.llm_service = proxy
+    app.event_bus = bus
+    app.pipe_mode = False
+    app._startup_complete = False
+    app.running = False
+    app._initialize_llm_core = AsyncMock()
+    app._initialize_plugins = AsyncMock()
+    app.cleanup = AsyncMock()
+
+    slash_parser = SimpleNamespace()
+    slash_parser.is_slash_command = lambda text: text.startswith("/")
+    bus.get_service = lambda name: slash_parser if name == "slash_parser" else None
+
+    async def failing_execute(payload):
+        return 1  # command failure -> sys.exit(1) inside start_pipe_mode
+
+    app._execute_cli_command = failing_execute
+
+    with pytest.raises(SystemExit) as exc_info:
+        await app.start_pipe_mode("/connect join.example.net")
+
+    assert exc_info.value.code == 1
+    assert not isinstance(exc_info.value, NameError)

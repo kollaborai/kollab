@@ -255,4 +255,6 @@ async def test_address_denied_names_host_ip_and_config_hint():
     message = str(err.value)
     assert "example.com resolves to 198.18.0.7" in message
     assert "plugins.hub.discovery_private_origins" in message
-    assert "'https://example.com': ['198.18.0.7/32']" in message
+    # Short, valid-JSON hint in the "*" (any-origin) form (#156 follow-up).
+    assert '{"*": ["198.18.0.7/32"]}' in message
+    assert len(message) <= 200

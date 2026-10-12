@@ -293,12 +293,19 @@ class _PublicResolver(aiohttp.abc.AbstractResolver):
                     forbidden = forbidden or bool(ip.ipv4_mapped or ip.sixtofour or ip.teredo)
                 allowed = ip.is_global or any(ip in net for net in self.networks)
                 if forbidden or not allowed:
+                    # One short printable line (the ConnectOutcome detail filter
+                    # is 200 chars) with a valid JSON snippet: the "*" form
+                    # covers any origin behind such a resolver, the host form
+                    # just this one. /max_prefixlen keeps IPv6 hints correct.
+                    cidr = ipaddress.ip_network(
+                        f"{ip}/{ip.max_prefixlen}", strict=False
+                    )
                     raise DiscoveryError(
                         "address_denied",
                         f"{host} resolves to {ip}, outside the permitted address "
-                        "scope. If this host uses a DNS or egress proxy, allow it "
-                        "with plugins.hub.discovery_private_origins = "
-                        f"{{'https://{host}': ['{ip}/32']}}",
+                        "scope. Behind a DNS or egress proxy, allow it with "
+                        "plugins.hub.discovery_private_origins = "
+                        f'{{"*": ["{cidr}"]}}',
                     )
                 addresses.append(
                     {

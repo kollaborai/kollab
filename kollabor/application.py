@@ -1450,8 +1450,6 @@ class TerminalLLMChat:
                 piped_input, source=UserInputSource.PIPE
             )
             if submission.get("status") in {"cancelled", "rejected"}:
-                import sys
-
                 logger.warning(
                     "Pipe input was not submitted (%s)", submission["status"]
                 )
@@ -1490,8 +1488,6 @@ class TerminalLLMChat:
 
             if timed_out:
                 # Timeout expired before processing completed
-                import sys
-
                 logger.warning(
                     f"Pipe mode timeout reached after {timeout}s - processing incomplete"
                 )

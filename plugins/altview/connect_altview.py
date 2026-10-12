@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
 import textwrap
@@ -210,6 +211,9 @@ ConnectAttachCallback = Callable[[str], bool | str | Awaitable[bool | str]]
 # Where a submitted request stands: (receipt id, domain) -> pending, approved,
 # rejected or error. It raises when it cannot tell (the form keeps waiting).
 ConnectWaitCallback = Callable[[str, str], ConnectOutcome | Awaitable[ConnectOutcome]]
+# Asks the user (via config) to allow a discovery origin: (origin, cidrs) ->
+# whether the approved list now contains it. The view retries the attach on True.
+ConnectAllowOriginCallback = Callable[[str, list[str]], bool | Awaitable[bool]]
 
 
 def _failure_note(exc: Exception) -> str:
@@ -237,6 +241,7 @@ class ConnectAltView(AltView):
         on_submit: ConnectSubmitCallback | None = None,
         on_attach: ConnectAttachCallback | None = None,
         on_wait: ConnectWaitCallback | None = None,
+        on_allow_origin: ConnectAllowOriginCallback | None = None,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect",
@@ -254,6 +259,7 @@ class ConnectAltView(AltView):
         self._on_submit = on_submit
         self._on_attach = on_attach
         self._on_wait = on_wait
+        self._on_allow_origin = on_allow_origin
         self._sent = False  # the relay holds a request from this form
         self._attach_failed = False  # the empty-code first-device path failed
         self._wait_note = ""
@@ -269,6 +275,8 @@ class ConnectAltView(AltView):
         self.cancelled = False
         self._paste_active = False
         self._paste_from = 0
+        self._origin_prompt: str | None = None
+        self._origin_cidrs: list[str] = []
 
     @property
     def outcome(self) -> ConnectOutcome | None:
@@ -296,6 +304,8 @@ class ConnectAltView(AltView):
         self._attach_failed = False
         self._wait_note = ""
         self._paste_active = False
+        self._origin_prompt: str | None = None
+        self._origin_cidrs: list[str] = []
 
     async def render_frame(self, delta_time: float) -> bool:
         renderer = self._renderer
@@ -326,6 +336,16 @@ class ConnectAltView(AltView):
             self._paste_active = False
             self._move_pasted_code()
             self.request_render()
+            return False
+
+        if self._stage == "outcome" and self._origin_prompt:
+            if key_press.name in ("Escape", "Enter"):
+                return True
+            if key_press.char and key_press.char.lower() == "y":
+                await self._allow_origin_and_retry()
+            elif key_press.char and key_press.char.lower() == "n":
+                self._origin_prompt = None
+                self.request_render()
             return False
 
         if self._stage == "entry":
@@ -382,7 +402,9 @@ class ConnectAltView(AltView):
     def _render_entry(self, y: int, width: int) -> None:
         self._write_line(1, y, "network".ljust(_LABEL_WIDTH) + "none", width, _entry_row)
         self._write_line(1, y + 2, self._field("domain", self._visible_domain()), width, _entry_row)
-        code_display = "********" if self._code_chars else "(enter privately)"
+        # One star per typed character, never more: the length is the only
+        # feedback, so eight stars on the first keypress would lie.
+        code_display = "*" * len(self._code_chars) if self._code_chars else "(enter privately)"
         self._write_line(1, y + 3, self._field("join code", code_display), width, _entry_row)
         if self._validation_error:
             self._write_line(2, y + 5, self._validation_error, width, _bad)
@@ -432,6 +454,24 @@ class ConnectAltView(AltView):
 
         self._write_line(2, y, message, width, lambda text: paint_status(text, kind))
         row = y + 1
+        if self._origin_prompt and kind == "bad":
+            origin, cidrs = self._origin_prompt, self._origin_cidrs
+            label = origin if origin and origin != "*" else "any origin"
+            prompt = (
+                f"Add {label} ({', '.join(cidrs)}) to the approved list? y/n"
+                if cidrs
+                else f"Add {label} to the approved list? y/n"
+            )
+            self._write_line(2, row, prompt, width, paint_tip)
+            row += 1
+            for line in textwrap.wrap(
+                "Only approve a network whose DNS or proxy you trust (a sandbox, "
+                "corporate proxy or VPN): a spoofed DNS answer could point "
+                "Kollab at internal machines.",
+                max(10, width - 3),
+            ):
+                self._write_line(2, row, line, width, _dim)
+                row += 1
         if outcome is not None and outcome.note:
             for line in textwrap.wrap(outcome.note, max(10, width - 3)):
                 self._write_line(2, row, line, width, _dim)
@@ -531,6 +571,9 @@ class ConnectAltView(AltView):
                 self._attach_failed = True
                 reason = result if isinstance(result, str) else ""
                 reason = ConnectAltView._filter_text(reason.strip(), 200)
+                self._origin_prompt, self._origin_cidrs = ConnectAltView._denied_origin(
+                    reason
+                )
                 self._outcome = ConnectOutcome.error(note=reason)
         except asyncio.CancelledError:
             self._outcome = ConnectOutcome.error()
@@ -541,6 +584,52 @@ class ConnectAltView(AltView):
             self._attach_failed = True
             self._outcome = ConnectOutcome.error(note=_failure_note(exc))
         self._stage = "outcome"
+        self.request_render()
+
+    @staticmethod
+    def _denied_origin(reason: str) -> tuple[str | None, list[str]]:
+        """An address_denied reason and the CIDR it suggests, if any.
+
+        Returns (origin-or-"*", [cidr]) so the form can offer to approve it;
+        (None, []) for any other failure.
+        """
+        if "address_denied" not in reason:
+            return None, []
+        match = re.search(r"\{[^{}]*\}", reason)
+        if match is None:
+            return None, []
+        try:
+            snippet = json.loads(match.group(0))
+        except ValueError:
+            return None, []
+        if not isinstance(snippet, dict):
+            return None, []
+        for origin, cidrs in snippet.items():
+            if (
+                isinstance(origin, str)
+                and isinstance(cidrs, list)
+                and cidrs
+                and all(isinstance(entry, str) for entry in cidrs)
+            ):
+                return origin, cidrs
+        return None, []
+
+    async def _allow_origin_and_retry(self) -> None:
+        """Merge the denied origin into the approved list, then attach again."""
+        origin, cidrs = (
+            (self._origin_prompt, self._origin_cidrs)
+            if self._origin_prompt
+            else (None, [])
+        )
+        allowed = self._on_allow_origin(origin, cidrs) if self._on_allow_origin else False
+        if inspect.isawaitable(allowed):
+            allowed = await allowed
+        self._origin_prompt = None
+        self._origin_cidrs = []
+        if allowed is True:
+            await self._attach()
+            return
+        self._validation_error = "could not update the approved list"
         self.request_render()
 
     async def _submit(self) -> None:
@@ -1162,7 +1251,10 @@ class ConnectGuideAltView(AltView):
     """
 
     def __init__(
-        self, *, has_network: bool = False, on_answer: Callable[[], Any] | None = None
+        self,
+        *,
+        has_network: bool = False,
+        on_answer: Callable[[], Any] | None = None,
     ) -> None:
         metadata = AltViewMetadata(
             plugin_type="connect-guide",
