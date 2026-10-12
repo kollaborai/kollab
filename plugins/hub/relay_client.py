@@ -33,7 +33,6 @@ from nacl.signing import VerifyKey
 
 from kollabor_config.managed_config import (
     clear_managed_config,
-    managed_config_path,
     read_managed_config,
 )
 
@@ -44,6 +43,7 @@ from .device_names import (
     default_network_name,
     key_label,
 )
+from .config_sync import is_machine_network_state_dir
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -310,7 +310,7 @@ class RelayClient:
         bundle from the new primary as other_primary, for good. The record is
         machine-global, so only a state living in this machine's own
         ``~/.kollab/network`` may touch it."""
-        if self.state_dir.parent != managed_config_path().parent.parent / "network":
+        if not is_machine_network_state_dir(self.state_dir):
             return
         stale = read_managed_config()
         if stale is not None and stale.primary_key != self.state.inviter:

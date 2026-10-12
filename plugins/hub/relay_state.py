@@ -195,12 +195,52 @@ class RelayState:
         )
 
 
+def default_workspace_state_dir(workspace: Path) -> Path:
+    """Where a workspace's primary network state lives when a caller does not
+    pin one: the v2 device/workspace layout once it exists, else the v1
+    ``~/.kollab/network/<digest>`` (created on first use as before)."""
+    from .device_record import migrate_legacy_network_state, workspace_dir
+
+    try:
+        migrated = migrate_legacy_network_state(workspace)
+    except RelayError:
+        migrated = False  # unreadable legacy state: leave v1 alone, surface later
+    base = workspace_dir(workspace)
+    networks = base / "networks"
+    if networks.is_dir():
+        slugs = sorted(
+            entry.name
+            for entry in networks.iterdir()
+            if entry.is_dir() and entry.name != "unjoined"
+        )
+        if slugs:
+            record = _load_device_primary(networks)
+            target = record if record in slugs else slugs[0]
+            return networks / target
+        if (base / "networks" / "unjoined").is_dir():
+            return base / "networks" / "unjoined"
+    digest = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()
+    return Path.home() / ".kollab" / "network" / digest
+
+
+def _load_device_primary(networks: Path) -> str:
+    """The slug this machine's device record names primary, if any."""
+    try:
+        from .device_record import DeviceRecord
+
+        record = DeviceRecord()
+        primary = record.primary
+        return primary if primary else ""
+    except Exception:
+        return ""
+
+
 class RelayStateStore:
     """No state, seed or invitation is written inside the workspace."""
 
     def __init__(self, workspace: Path, state_dir: Path | None):
         digest = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()
-        self.path = state_dir or Path.home() / ".kollab" / "network" / digest
+        self.path = state_dir or default_workspace_state_dir(workspace)
         if self.path.is_symlink():
             raise RelayError("relay state directory must not be a symbolic link")
         self.path.mkdir(mode=0o700, parents=True, exist_ok=True)

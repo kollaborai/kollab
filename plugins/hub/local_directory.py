@@ -237,21 +237,50 @@ class LocalAgentDirectory:
             for fd in reversed(opened):
                 os.close(fd)
 
-    def _workspace_id(self, root: int, workspace: Path) -> str:
+    def _workspace_state_parts(self, root: int, workspace: Path) -> list[list[str]]:
+        """Directory chains that may hold this workspace's RelayState: the v2
+        workspace-record layout first, then the v1 per-folder network dir."""
         digest = hashlib.sha256(str(workspace).encode()).hexdigest()
-        opened = []
+        chains: list[list[str]] = []
+        # v2: workspaces/<digest>/networks/<slug>/state.json (any slug)
         try:
-            for part in ("network", digest):
-                root = _directory_fd(part, parent=root)
-                opened.append(root)
-            value = _json_file(root, "state.json").get("workspace_id")
-            if isinstance(value, str) and _HEX_ID.fullmatch(value):
-                return value
-        except (OSError, ValueError, UnicodeError, RecursionError):
+            workspaces = _directory_fd("workspaces", parent=root)
+            try:
+                workspace_fd = _directory_fd(digest, parent=workspaces)
+                try:
+                    networks = _directory_fd("networks", parent=workspace_fd)
+                    try:
+                        slugs = os.listdir(networks)
+                    finally:
+                        os.close(networks)
+                    for slug in sorted(slugs):
+                        chains.append(["workspaces", digest, "networks", slug])
+                finally:
+                    os.close(workspace_fd)
+            finally:
+                os.close(workspaces)
+        except (OSError, LocalDirectoryError):
             pass
-        finally:
-            for fd in reversed(opened):
-                os.close(fd)
+        chains.append(["network", digest])  # v1 fallback
+        return chains
+
+    def _workspace_id(self, root: int, workspace: Path) -> str:
+        for parts in self._workspace_state_parts(root, workspace):
+            opened = []
+            try:
+                directory = root
+                for part in parts:
+                    directory = _directory_fd(part, parent=directory)
+                    opened.append(directory)
+                value = _json_file(directory, "state.json").get("workspace_id")
+                if isinstance(value, str) and _HEX_ID.fullmatch(value):
+                    return value
+            except (OSError, ValueError, UnicodeError, RecursionError):
+                pass
+            finally:
+                for fd in reversed(opened):
+                    os.close(fd)
+        # (the offline fallback follows)
         # Stable offline identifier without creating networking credentials.
         # Once connected, the existing relay workspace identity takes precedence.
         return hashlib.sha256(f"{self.machine_id}:{workspace}".encode()).hexdigest()[:32]

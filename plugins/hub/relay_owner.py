@@ -94,8 +94,9 @@ class WorkspaceRelayOwner:
     """
 
     def __init__(self, workspace: Path, state_dir: Path | None = None):
-        digest = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()
-        self.state_dir = state_dir or Path.home() / ".kollab" / "network" / digest
+        from .relay_state import default_workspace_state_dir
+
+        self.state_dir = state_dir or default_workspace_state_dir(workspace)
         self._fd: int | None = None
         self._claim = ""
         self._record: dict | None = None

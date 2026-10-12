@@ -50,6 +50,7 @@ from .relay_conversations import (
     RelayAddress,
     validate_message,
 )
+from .membership_runtime import MembershipContext, Memberships
 from .relay_owner import WorkspaceRelayOwner, local_relay_rpc
 from .relay_state import (
     ID,
@@ -164,6 +165,9 @@ class RelayAgentBridge:
         self.plugin = plugin
         self.workspace = Path(workspace).resolve()
         self.owner = WorkspaceRelayOwner(self.workspace, state_dir)
+        self.memberships = Memberships(self.workspace)
+        self._membership_runtimes: dict[str, RelayCommands] = {}
+        self._membership_contexts: dict[str, MembershipContext] = {}
         self.directory = directory or LocalAgentDirectory()
         self.commands: RelayCommands | None = None
         self.store: ConversationStore | None = None
@@ -686,14 +690,119 @@ class RelayAgentBridge:
         await self._ensure_owner()
         self._loop_task = asyncio.create_task(self._run(), name="kollab-relay-agent")
 
+    def _start_secondary_memberships(self) -> None:
+        """Bring every non-primary membership online behind the owner lock.
+
+        Compositional by design (PR #162 slice 3): each secondary gets its
+        own RelayCommands + SecureConversationTransport over its own client.
+        Inbound requests are slug-addressed into _receive_membership so
+        validation (approvals, links, grants) always reads THAT membership's
+        state. Config-sync and peer mesh stay primary-only (design v2 §4).
+        """
+        if self.owner.owner() is None:
+            return
+        try:
+            primary = self.memberships.primary().slug
+        except RelayError:
+            return
+        for membership in self.memberships.list():
+            if membership.slug == primary or membership.slug in self._membership_contexts:
+                continue
+            try:
+                commands = RelayCommands(
+                    self.workspace,
+                    config=self.plugin.config,
+                    state_dir=membership.state_dir,
+                    agent_bridge=None,
+                )
+                transport = SecureConversationTransport(
+                    commands.client, commands.client._store.key.encode()
+                )
+                slug = membership.slug
+                context = MembershipContext(
+                    membership,
+                    commands,
+                    transport,
+                    inbound=lambda peer, method, payload, _slug=slug: (
+                        self._receive_membership(_slug, peer, method, payload)
+                    ),
+                )
+            except RelayError:
+                # A secondary with unreadable state must not take the
+                # primary down; it stays offline until re-created.
+                logger.warning(
+                    "secondary network membership %s failed to start", membership.slug
+                )
+                continue
+            self._membership_contexts[membership.slug] = context
+            context.start()
+
+    def _stop_secondary_memberships(self) -> None:
+        contexts, self._membership_contexts = self._membership_contexts, {}
+        for context in contexts.values():
+            try:
+                asyncio.get_running_loop().create_task(context.close())
+            except RuntimeError:
+                pass
+
+    async def _receive_membership(self, slug, peer, method, payload, *, _secure=False):
+        """Slug-addressed inbound entry: route into the shared _receive body
+        with THIS membership's client/transport/store in scope."""
+        context = self._membership_contexts.get(slug)
+        if context is None:
+            raise RelayError("network membership is no longer active")
+        return await self._receive(
+            peer,
+            method,
+            payload,
+            _secure=_secure,
+            _commands=context.commands,
+            _transport=context.transport,
+        )
+
+    async def _membership_commands(self, slug: str | None):
+        """RelayCommands for the named membership (None = primary).
+
+        The primary is the bridge's own commands instance (started by
+        _ensure_owner with the full service set). Secondary memberships
+        get lazily-constructed command instances bound to their state
+        dirs; today they answer status/directory queries, and richer
+        per-membership services stack on this hook in later slices.
+        """
+        if slug is None or slug == "":
+            if self.commands is None:
+                raise RelayError("workspace relay owner changed; retry")
+            return self.commands
+        membership = self.memberships.resolve(slug)
+        runtime = self._membership_runtimes.get(membership.slug)
+        if runtime is None:
+            if self.owner.owner() is None:
+                raise RelayError("workspace relay owner changed; retry")
+            runtime = RelayCommands(
+                self.workspace,
+                config=self.plugin.config,
+                state_dir=membership.state_dir,
+                agent_bridge=None,
+            )
+            self._membership_runtimes[membership.slug] = runtime
+        return runtime
+
     async def _ensure_owner(self):
         if self.commands is not None:
             return
         if self.owner.acquire(self.identity.socket_path, self.identity.agent_id):
+            # Slice 3: with several memberships the commands instance binds to
+            # the PRIMARY membership's state dir (the registry resolves it;
+            # N=1 keeps today's behavior because the primary is the only one).
+            try:
+                membership = self.memberships.resolve(None)
+                membership_dir = membership.state_dir
+            except RelayError:
+                membership_dir = self.owner.state_dir
             self.commands = RelayCommands(
                 self.workspace,
                 config=self.plugin.config,
-                state_dir=self.owner.state_dir,
+                state_dir=membership_dir,
                 agent_bridge=self,
             )
             self.plugin._relay_commands = self.commands
@@ -796,11 +905,19 @@ class RelayAgentBridge:
                 self.commands.resume(), name="kollab-relay-resume"
             )
             self._ensure_enrollment_issuer().start_recovery()
+            self._start_secondary_memberships()
 
     async def close(self):
         self._closed = True
         if self.active and not self.active.finished:
             await self._stop_active("interrupted", "receiving agent stopped")
+        # Secondaries close before the primary's task teardown: their
+        # inbound adapters must be detached while their clients can still
+        # respond to in-flight requests.
+        contexts = list(self._membership_contexts.values())
+        self._membership_contexts.clear()
+        for context in contexts:
+            await context.close()
         tasks = (
             self._loop_task,
             self._resume_task,
@@ -1594,11 +1711,29 @@ class RelayAgentBridge:
             }
         return receipt
 
-    async def _receive(self, peer, method, payload, *, _secure=False):
-        client = self.commands.client
+    async def _receive(
+        self,
+        peer,
+        method,
+        payload,
+        *,
+        _secure=False,
+        _commands=None,
+        _transport=None,
+    ):
+        # Slice 3 fan-out: a secondary membership's inbound arrives
+        # slug-addressed via _receive_membership with ITS commands and
+        # transport; unqualified calls keep the primary's (today's path).
+        commands = _commands if _commands is not None else self.commands
+        if commands is None:
+            raise RelayError("workspace relay owner changed; retry")
+        client = commands.client
         if peer not in client.state.approvals:
             raise RelayError("peer is not approved")
-        store = self._state()
+        if _commands is not None:
+            store = RelayStateStore(self.workspace, commands.client.state_dir)
+        else:
+            store = self._state()
         stranger = peer in store.state.links
         if stranger and (
             method in {"peer.forward", "peer.exchange", MEMBERS_METHOD} or method in ATTACH_METHODS
@@ -1609,14 +1744,15 @@ class RelayAgentBridge:
             if self.peer_mesh is None:
                 raise RelayError("peer forwarding is unavailable")
             return await self.peer_mesh.handle_forward(peer, payload)
+        transport = _transport if _transport is not None else self.secure_transport
         if method == "secure_identity":
-            if self.secure_transport is None:
+            if transport is None:
                 raise RelayError("secure conversation transport is unavailable")
-            return self.secure_transport.identity_response(peer, payload)
+            return transport.identity_response(peer, payload)
         if method == "secure_packet":
-            if self.secure_transport is None:
+            if transport is None:
                 raise RelayError("secure conversation transport is unavailable")
-            return await self.secure_transport.handle_packet(
+            return await transport.handle_packet(
                 peer, payload, self._receive_secure_application
             )
         if not _secure:
@@ -2279,11 +2415,10 @@ class RelayAgentBridge:
         return {"id": record["id"], "state": record["state"]}
 
     async def _rpc_status(self, params):
-        if params:
+        if set(params) - {"network"} or not isinstance(params.get("network", ""), str):
             raise RelayError("invalid local status")
-        if self.commands is None:
-            raise RelayError("workspace relay owner changed; retry")
-        return self.commands.client.status()
+        commands = await self._membership_commands(params.get("network") or None)
+        return commands.client.status()
 
     async def _rpc_directory(self, params):
         if self.commands is None:
