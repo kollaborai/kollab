@@ -45,6 +45,20 @@ def no_real_vaults(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_memberships(tmp_path, monkeypatch):
+    """Network memberships (#158 aggregate) read from a temp root, not the
+    developer's real device record."""
+    import kollabor_engine.network_aggregate as network_aggregate  # type: ignore[import-not-found]
+
+    monkeypatch.setattr(
+        network_aggregate,
+        "_root",
+        lambda home=None: home if home is not None else tmp_path,
+    )
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
 def no_real_recent_workspaces(tmp_path, monkeypatch):
     """Recent workspaces go to a temp file."""
     import kollabor_engine.routes.workspaces as workspaces  # type: ignore[import-not-found]

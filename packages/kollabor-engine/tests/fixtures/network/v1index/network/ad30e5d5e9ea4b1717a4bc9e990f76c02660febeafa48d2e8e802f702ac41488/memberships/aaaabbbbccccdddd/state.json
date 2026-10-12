@@ -1,0 +1,1 @@
+{"origin": "https://relay.v1one.example", "network_name": "v1-one", "trust": "open", "peer_devices": {"1111": "named-peer"}, "peer_trust": {}, "links": ["1111", "2222"]}

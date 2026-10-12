@@ -20,6 +20,8 @@ export type Session = {
   external?: boolean;
   /** The computer an agent opened through the network runs on (its id is agent@device); empty for this one. */
   device?: string;
+  /** The network the opening went through, once memberships carry it (#158). */
+  network?: string;
 };
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
@@ -167,14 +169,48 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  /** The workspace (folder label) the agent runs in, once memberships carry it (#158). */
+  workspace?: string;
+  /** The network the agent runs on, once memberships carry it (#158). */
+  network?: string;
   /** When the network last listed it (epoch seconds); state "offline" once it left. */
   last_seen?: number;
 };
 
+/** An accepted knock contact (#158): a peer device this one linked across rooms.
+ * Nothing is permitted with one until `/connect allow` — the section is
+ * display-only in the web UI. */
+export type ContactPeer = { key: string; label: string; device?: string; trust?: string };
+
+/** One workspace's agents on one device, one network (#158). */
+export type NetworkWorkspaceGroup = { label: string; agents: NetworkAgent[] };
+
+/** One device's workspaces on one network (#158). */
+export type NetworkDeviceGroup = { device: string; workspaces: NetworkWorkspaceGroup[] };
+
+/** One network this device belongs to (#158): its devices grouped by workspace. */
+export type NetworkGroup = {
+  id: string;
+  name: string;
+  trust?: string;
+  live?: boolean;
+  devices: NetworkDeviceGroup[];
+};
+
 /** This computer's relay name and the agents on other computers; `remote` is empty off a network.
  * `live: false`: no agent here is on the network, so `remote` is the last roster seen and opening
- * one first starts an agent in `folder` to carry the network. */
-export type AgentNetwork = { device: string; remote: NetworkAgent[]; live?: boolean; folder?: string };
+ * one first starts an agent in `folder` to carry the network.
+ * Multi-network (#158): `networks` groups those rows per membership
+ * (NETWORKS > DEVICES > WORKSPACES > AGENTS) and `contacts` lists accepted
+ * knock contacts; an engine without them falls back to the flat fields. */
+export type AgentNetwork = {
+  device: string;
+  remote: NetworkAgent[];
+  live?: boolean;
+  folder?: string;
+  networks?: NetworkGroup[];
+  contacts?: ContactPeer[];
+};
 
 /** A folder a session can run in; `live` counts the agents running there. */
 export type WorkspaceEntry = { path: string; name: string; live: number };

@@ -492,13 +492,19 @@ async def test_skipped_mcp_servers_are_named_once_per_distinct_set(tmp_path):
 
     here, gone = {"command": sys.executable}, {"command": "no-such-mcp-server-xyz"}
     assert await push(1, {"here": here, "gone": gone}) == {"ok": True}
-    assert await push(2, {"here": here, "gone": gone}, model="claude-opus-5-6") == {"ok": True}
+    assert await push(2, {"here": here, "gone": gone}, model="claude-opus-5-6") == {
+        "ok": True
+    }
 
     written = json.loads((server / "mcp" / "mcp_settings.json").read_text())
     assert written["servers"] == {"here": here}
-    assert notices == ["Skipped MCP servers not installed here: gone"]  # once, not per bundle
+    assert notices == [
+        "Skipped MCP servers not installed here: gone"
+    ]  # once, not per bundle
 
-    await push(3, {"here": here, "gone": gone, "lost": gone})  # a different set speaks again
+    await push(
+        3, {"here": here, "gone": gone, "lost": gone}
+    )  # a different set speaks again
     assert notices[1:] == ["Skipped MCP servers not installed here: gone, lost"]
 
 
@@ -509,10 +515,16 @@ SYNC_IS_OFF = (
 
 
 @pytest.mark.asyncio
-async def test_a_workspace_that_lost_the_machines_record_to_a_later_join_says_so_once(
+async def test_a_join_never_takes_the_machines_record_from_another_workspace(
     tmp_path, monkeypatch
 ):
-    """Two workspaces on one machine share one managed-config record; the latest join wins."""
+    """The device record's primary-network choice owns the managed-config entry.
+
+    Two workspaces on one machine, each on its own network, used to steal the
+    machine's one record from each other: the latest join cleared the other's
+    entry (the #121 takeover). Now a join never touches it; the loser of old
+    keeps syncing, and the workspace that joined second is told sync is off
+    here, once, until its network is chosen explicitly."""
     machine = tmp_path / "machine"
     monkeypatch.setenv("HOME", str(machine))
     mac_a, mac_b = tmp_path / "mac-a", tmp_path / "mac-b"  # the two primaries
@@ -520,33 +532,65 @@ async def test_a_workspace_that_lost_the_machines_record_to_a_later_join_says_so
     secondary_a, secondary_b = SigningKey.generate(), SigningKey.generate()
     key_a, key_b = bytes(primary_a.verify_key).hex(), bytes(primary_b.verify_key).hex()
     lines_a, lines_b = [], []
-    first = secondary_service(secondary_a, primary_a, lines_a)  # no root: this machine's ~/.kollab
+    first = secondary_service(
+        secondary_a, primary_a, lines_a
+    )  # no root: this machine's ~/.kollab
     second = secondary_service(secondary_b, primary_b, lines_b)
+
+    # The machine chose network alpha: the device record names it.
+    (machine / ".kollab" / "device").mkdir(parents=True, exist_ok=True)
+    write_json(
+        machine / ".kollab" / "device" / "device.json",
+        {
+            "device_id": "0123456789abcdef0123456789abcdef",
+            "device_name": "machine",
+            "networks": {
+                "aaaaaaaaaaaaaaaa": {
+                    "origin": "alpha.example",
+                    "network_name": "alpha",
+                    "joined_at": 1,
+                },
+                "bbbbbbbbbbbbbbbb": {
+                    "origin": "beta.example",
+                    "network_name": "beta",
+                    "joined_at": 2,
+                },
+            },
+            "primary": "aaaaaaaaaaaaaaaa",
+        },
+    )
 
     def bundle(mac, primary, secondary, revision):
         write_json(mac / "config.json", primary_settings(model=f"model-{revision}"))
         snapshot = cs.SnapshotBuilder(root=mac, keyring_get={}.get).build()
         return core_call(snapshot, primary, secondary, revision)
 
-    assert await first.receive(key_a, bundle(mac_a, primary_a, secondary_a, 1)) == {"ok": True}
+    assert await first.receive(key_a, bundle(mac_a, primary_a, secondary_a, 1)) == {
+        "ok": True
+    }
     assert read_managed_config().primary_key == key_a
 
-    # The second workspace joins its own network: the latest join takes the record.
+    # The second workspace joins beta, another network: the join must leave
+    # the machine's record with alpha's primary.
     RelayClient._forget_stale_primary(
         SimpleNamespace(
             state_dir=machine / ".kollab" / "network" / "workspace-b",
-            state=SimpleNamespace(inviter=key_b),
+            state=SimpleNamespace(origin="beta.example", inviter=key_b),
         )
     )
-    assert await second.receive(key_b, bundle(mac_b, primary_b, secondary_b, 1)) == {"ok": True}
-    assert read_managed_config().primary_key == key_b
+    assert read_managed_config().primary_key == key_a  # untouched, not stolen
+    reply = await second.receive(key_b, bundle(mac_b, primary_b, secondary_b, 1))
+    assert reply == {"error": "other_primary"}  # beta is not the chosen network
 
-    for revision in (2, 3):  # the first workspace is refused on every bundle
-        reply = await first.receive(key_a, bundle(mac_a, primary_a, secondary_a, revision))
-        assert reply == {"error": "other_primary"}
+    for revision in (2, 3):  # the first workspace keeps syncing through it all
+        reply = await first.receive(
+            key_a, bundle(mac_a, primary_a, secondary_a, revision)
+        )
+        assert reply == {"ok": True}
+    assert read_managed_config().primary_key == key_a
 
-    assert lines_a == [SYNC_IS_OFF]  # said once, not once per bundle
-    assert lines_b == []  # the workspace that won has nothing to report
+    assert lines_b == [SYNC_IS_OFF]  # said once, not once per bundle
+    assert lines_a == []  # the workspace that owns the record has nothing to report
 
 
 @pytest.mark.asyncio
@@ -562,7 +606,6 @@ async def test_the_relay_agent_shows_config_sync_notices_in_the_main_pane(networ
     await sync_once(net)
 
     assert lines == ["Skipped MCP servers not installed here: ghost"]
-
 
 
 @pytest.mark.asyncio
@@ -586,13 +629,17 @@ async def test_a_restart_stays_quiet_until_the_set_of_skipped_servers_changes(tm
         write_json(mac / "mcp" / "mcp_settings.json", {"servers": servers})
         snapshot = cs.SnapshotBuilder(root=mac, keyring_get={}.get).build()
         call = core_call(snapshot, primary, secondary, revision)
-        assert await service.receive(bytes(primary.verify_key).hex(), call) == {"ok": True}
+        assert await service.receive(bytes(primary.verify_key).hex(), call) == {
+            "ok": True
+        }
         return lines
 
     here, gone = {"command": sys.executable}, {"command": "no-such-mcp-server-xyz"}
     said = "Skipped MCP servers not installed here: "
     assert await launch_and_receive(1, {"here": here, "gone": gone}) == [said + "gone"]
-    assert await launch_and_receive(2, {"here": here, "gone": gone}) == []  # same set after a restart
+    assert (
+        await launch_and_receive(2, {"here": here, "gone": gone}) == []
+    )  # same set after a restart
     assert await launch_and_receive(3, {"here": here, "gone": gone, "lost": gone}) == [
         said + "gone, lost"
     ]
@@ -600,7 +647,9 @@ async def test_a_restart_stays_quiet_until_the_set_of_skipped_servers_changes(tm
     assert await launch_and_receive(5, {"here": here, "gone": gone}) == [said + "gone"]
 
 
-def test_the_refusal_is_said_once_across_restarts_and_again_after_it_clears(tmp_path, monkeypatch):
+def test_the_refusal_is_said_once_across_restarts_and_again_after_it_clears(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HOME", str(tmp_path))
     kept = [("", False)]
 
@@ -629,7 +678,9 @@ def test_the_refusal_is_said_once_across_restarts_and_again_after_it_clears(tmp_
 
 
 @pytest.mark.asyncio
-async def test_the_relay_agent_keeps_what_the_service_said_in_the_network_state(network):
+async def test_the_relay_agent_keeps_what_the_service_said_in_the_network_state(
+    network,
+):
     net = network
     net["right"].plugin.show_network_notice = lambda _text: None
     write_json(
@@ -640,7 +691,9 @@ async def test_the_relay_agent_keeps_what_the_service_said_in_the_network_state(
     await sync_once(net)
 
     client = net["right"].commands.client
-    kept = RelayStateStore(client.workspace, client.state_dir).state  # what a restart loads
+    kept = RelayStateStore(
+        client.workspace, client.state_dir
+    ).state  # what a restart loads
     assert kept.config_told_skipped and "ghost" not in kept.config_told_skipped
     restarted = net["right"].make_config_sync()
     assert restarted._told_skipped == kept.config_told_skipped

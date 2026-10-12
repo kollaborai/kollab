@@ -1,0 +1,1 @@
+{"origin": "https://relay.home.example", "network_name": "home-net", "trust": "open", "peer_devices": {"aabb": "server-box"}, "peer_trust": {"aabb": "agents"}, "links": ["aabb"]}
