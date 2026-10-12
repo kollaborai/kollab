@@ -464,7 +464,7 @@ class OpenAIResponsesProvider(LLMProvider):
             return unified_response
 
         except Exception as e:
-            logger.error(f"OpenAI Responses call failed: {e}")
+            logger.error(f"OpenAI Responses call failed: {type(e).__name__}: {e}")
             if isinstance(e, ProviderError):
                 raise
             raise map_openai_error(e, "openai_responses") from e

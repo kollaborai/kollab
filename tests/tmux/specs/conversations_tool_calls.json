@@ -1,0 +1,37 @@
+{
+  "name": "conversations-tool-calls",
+  "description": "/conversations previews an assistant turn's tool calls (issue #25): a saved session whose assistant turn called bash shows `[tool: bash] {...}` under its text instead of dropping the call. Seeds one session into an empty HOME, hub off, setup marked done so the first-run wizard stays out of the way.",
+  "config": {
+    "command": "bash -lc 'source .venv/bin/activate 2>/dev/null; HOME=/tmp/kollab-conv-tools KOLLAB_NO_KEYRING=1 python main.py --no-daemon'",
+    "app_init_sleep": 8,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "command": "rm -rf /tmp/kollab-conv-tools && mkdir -p /tmp/kollab-conv-tools/.kollab && printf '%s' '{\"plugins\":{\"hub\":{\"enabled\":false}},\"application\":{\"setup_completed\":true}}' > /tmp/kollab-conv-tools/.kollab/config.json && d=/tmp/kollab-conv-tools/.kollab/projects/$(pwd | sed 's#^/##; s#/#_#g')/conversations && mkdir -p \"$d\" && printf '%s\\n' '{\"type\":\"conversation_metadata\",\"startTime\":\"2026-10-10T00:00:00Z\",\"cwd\":\"/work\",\"gitBranch\":\"main\"}' '{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-10-10T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"list the files\"}}' '{\"type\":\"assistant\",\"uuid\":\"a2\",\"timestamp\":\"2026-10-10T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Checking the directory.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"ls -la\"}}]}}' '{\"type\":\"user\",\"uuid\":\"u3\",\"timestamp\":\"2026-10-10T00:00:03Z\",\"message\":{\"role\":\"user\",\"content\":\"thanks\"}}' > \"$d/2610100000-spec-session.jsonl\"",
+      "description": "seed one saved session whose assistant turn made a bash tool call"
+    }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 20, "description": "app ready at the prompt" },
+
+    { "action": "section", "title": "Open the browser" },
+    { "action": "slash_command", "command": "conversations" },
+    { "action": "wait_for", "pattern": "spec-session", "timeout": 10, "description": "the seeded session is listed" },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "Checking the directory\\.", "description": "the assistant's text shows" },
+    { "action": "assert_contains", "pattern": "\\[tool: bash\\] \\{\"command\": \"ls -la\"\\}", "description": "its tool call shows under the text" },
+
+    { "action": "section", "title": "Esc closes it" },
+    { "action": "escape" },
+    { "action": "wait_for", "pattern": "❯", "timeout": 10, "description": "prompt is back" },
+    { "action": "assert_not_contains", "pattern": "spec-session", "description": "browser closed" }
+  ],
+  "teardown": [
+    { "action": "shell", "command": "rm -rf /tmp/kollab-conv-tools", "allow_failure": true }
+  ]
+}

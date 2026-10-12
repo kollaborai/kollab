@@ -12,7 +12,7 @@ Suitable for pipe mode, accessibility, or terminals with no color support.
 import logging
 from typing import List, Optional
 
-from kollabor_tui.clean_renderer import (
+from kollabor_tui._tool_detail import (
     _clean_tool_detail,
     _format_tool_summary,
     _normalize_tool_label,

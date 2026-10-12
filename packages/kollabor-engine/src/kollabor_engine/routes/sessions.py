@@ -1,11 +1,15 @@
 """Session lifecycle routes."""
 
 import asyncio
+import json
 import logging
+import os
 import re
 import socket
 import threading
+import time
 from contextlib import aclosing
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
@@ -18,6 +22,7 @@ from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge, network_daemons
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
+from .workspaces import remember_workspace
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -301,6 +306,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
 
         registry[session_id] = session
         logger.info("Session %s created", session_id)
+        remember_workspace(getattr(session, "workspace", None))
         return session.to_dict()
     finally:
         _release_session_id(session_id)
@@ -333,9 +339,11 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
     no chat runs here yet, and the network must still show and open. The first
     one on a network answers; a solo daemon has none. An agent opened on another
     computer answers for that computer, so it is never asked. No answer means
-    no network to show: no remote rows.
+    no network to show: no remote rows. ``folder`` is where the answering
+    daemon runs, the folder whose network it is.
     """
     fallback = socket.gethostname().split(".")[0]
+    here = os.path.realpath(os.getcwd())
     asked: set = set()
     for session in registry.values():
         asked.update({session.session_id, getattr(getattr(session, "daemon", None), "pid", 0)})
@@ -347,14 +355,108 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
             logger.debug("Session %s network read failed: %s", session.session_id, exc)
             continue
         if snapshot.device:
-            return {"device": snapshot.device, "remote": snapshot.remote}
+            folder = getattr(session, "workspace", None) or here
+            return {"device": snapshot.device, "remote": snapshot.remote, "folder": folder}
     try:
         async with aclosing(network_daemons(asked - {0, None})) as found:
-            async for _row, status in found:
-                return {"device": status.get("device") or fallback, "remote": status.get("agents") or []}
+            async for row, status in found:
+                return {
+                    "device": status.get("device") or fallback,
+                    "remote": status.get("agents") or [],
+                    "folder": row.get("workspace") or here,
+                }
     except Exception as exc:
         logger.debug("Local daemon network read failed: %s", exc)
     return {"device": fallback, "remote": []}
+
+
+# Every agent the network has shown, so the sidebar keeps them while they are
+# offline or no agent here is on the network (packages/kollabor-webui/README.md).
+NETWORK_CACHE = "engine-network.json"
+NETWORK_CACHE_DAYS = 30
+
+
+def _network_cache_path() -> Path:
+    from kollabor_config.config_utils import get_config_directory
+
+    return get_config_directory() / NETWORK_CACHE
+
+
+def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    """The live network plus every agent seen on it lately.
+
+    ``live`` is ``_network_snapshot``'s answer. With a daemon here on the
+    network, its agents show as they are and the ones it no longer lists show
+    with ``state: "offline"``. With none, the last network seen shows with
+    ``live: False``: nothing here can tell who is up, and opening one first
+    starts an agent in ``folder`` to carry the network. Each row keeps
+    ``last_seen`` (epoch seconds).
+    """
+    now = time.time() if now is None else now
+    path = _network_cache_path()
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    seen = cache.get("agents") if isinstance(cache.get("agents"), dict) else {}
+
+    if live.get("folder"):
+        if cache.get("device") != live["device"]:
+            seen = {}  # another network: what this one saw no longer applies
+        current = {}
+        for row in live.get("remote") or []:
+            handle = row.get("handle") or f"{row.get('name', '')}@{row.get('device', '')}"
+            last_seen = float((seen.get(handle) or {}).get("last_seen") or 0)
+            # A minute's precision: the roster is written only when it changes.
+            current[handle] = {**row, "handle": handle, "last_seen": last_seen if now - last_seen < 60 else now}
+        kept = {
+            handle: {**row, "state": "offline"}
+            for handle, row in seen.items()
+            if handle not in current and now - float(row.get("last_seen") or 0) < NETWORK_CACHE_DAYS * 86400
+        }
+        stored = {"device": live["device"], "folder": live["folder"], "agents": {**kept, **current}}
+        try:
+            if stored != cache:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(stored))
+        except OSError as exc:
+            logger.debug("Could not save the network roster: %s", exc)
+        remote = list(current.values()) + sorted(kept.values(), key=lambda r: -float(r.get("last_seen") or 0))
+        return {"device": live["device"], "remote": remote, "live": True}
+
+    if not seen or not cache.get("folder"):
+        return {"device": live.get("device", ""), "remote": [], "live": False}
+    remote = sorted(seen.values(), key=lambda r: -float(r.get("last_seen") or 0))
+    return {"device": cache.get("device") or live.get("device", ""), "remote": remote,
+            "live": False, "folder": cache["folder"]}
+
+
+def _offline_agents(found: List[Dict[str, Any]], registry: Dict[str, EngineSession]) -> List[Dict[str, Any]]:
+    """Agents that ran in this engine's folder and are not running now.
+
+    The sidebar lists them as offline; opening one starts it again (its vault
+    brings back what it knew).
+    """
+    from .agents import ran_here
+
+    here = os.path.realpath(os.getcwd())
+
+    def in_here(folder: Any) -> bool:
+        return bool(folder) and os.path.realpath(str(folder)) == here
+
+    running = {str(row.get("identity") or "") for row in found if in_here(row.get("workspace"))}
+    running.update(
+        str(getattr(getattr(s, "daemon", None), "identity", "") or getattr(s, "identity", "") or "")
+        for s in registry.values()
+        if in_here(getattr(s, "workspace", None) or here)
+    )
+    return [
+        {"identity": name, "workspace": here, "last_ran": last_ran}
+        for name, last_ran in sorted(ran_here().items(), key=lambda item: -item[1])
+        if name not in running
+    ]
 
 
 @router.get("")
@@ -386,7 +488,8 @@ async def list_sessions():
         "sessions": sessions + discovered,
         "discovered": discovered,
         "active_count": len(sessions) + len(discovered),
-        "network": await _network_snapshot(registry),
+        "offline": _offline_agents(found, registry),
+        "network": _network_view(await _network_snapshot(registry)),
     }
 
 

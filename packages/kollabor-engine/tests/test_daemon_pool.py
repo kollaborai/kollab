@@ -62,6 +62,19 @@ def test_requested_busy_identity_is_rejected() -> None:
         pool._assign_identity("lapis")
 
 
+def test_koordinator_is_held_per_folder(tmp_path) -> None:
+    pool = daemon_pool.DaemonPool()
+    elsewhere = {"identity": "koordinator", "project": str(tmp_path / "other")}
+    pool._bridge.get_agents = lambda use_cache=False: [elsewhere]
+
+    assert pool._assign_identity("koordinator", str(tmp_path)) == "koordinator"
+
+    here = {"identity": "koordinator", "project": str(tmp_path)}
+    pool._bridge.get_agents = lambda use_cache=False: [elsewhere, here]
+    with pytest.raises(ValueError, match="koordinator.*already in use"):
+        pool._assign_identity("koordinator", str(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_spawn_closes_dead_existing_handle_before_replacement():
     pool = daemon_pool.DaemonPool()

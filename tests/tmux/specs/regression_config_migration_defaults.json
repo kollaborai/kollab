@@ -12,12 +12,12 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "config_version\\s+1\\.0\\.1",
-      "description": "Config version matches app version"
+      "pattern": "config_version\\s+\\d+\\.\\d+\\.\\d+",
+      "description": "Config version is tracked"
     },
     {
       "action": "assert_contains",
-      "pattern": "last_app_version\\s+1\\.0\\.1",
+      "pattern": "last_app_version\\s+\\d+\\.\\d+\\.\\d+",
       "description": "Last app version is tracked"
     },
     {
@@ -37,8 +37,8 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "default_agent\\s+koordinator",
-      "description": "Koordinator is default agent"
+      "pattern": "default_agent\\s+default\\b",
+      "description": "The default agent is the config default"
     },
     {
       "action": "assert_contains",

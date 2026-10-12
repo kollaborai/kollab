@@ -31,6 +31,7 @@ import {
   EngineApi,
   type AgentBundleEntry,
   type AgentNetwork,
+  type OfflineAgent,
   type AgentPoolEntry,
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
@@ -260,6 +261,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
   const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
+  const [offline, setOffline] = useState<OfflineAgent[]>([]);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
@@ -339,6 +341,7 @@ export default function App() {
     const next = result.sessions || [];
     setSessions(next);
     setNetwork(result.network ?? { device: "", remote: [] });
+    setOffline(result.offline ?? []);
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -520,7 +523,8 @@ export default function App() {
     };
   }, [loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
-  const createSession = async () => {
+  /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
+  const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -533,21 +537,24 @@ export default function App() {
         profile: selectedProfile || "default",
         // Pin what New Session shows. "default" is only a placeholder until
         // such a bundle exists (the first daemon start seeds it).
-        agent: bundles.some((bundle) => bundle.name === selectedBundle)
-          ? selectedBundle
-          : undefined,
-        identity: selectedIdentity || undefined,
+        agent: pick.identity
+          ? pick.agent
+          : bundles.some((bundle) => bundle.name === selectedBundle)
+            ? selectedBundle
+            : undefined,
+        identity: pick.identity || selectedIdentity || undefined,
         approval_mode: "trust_all",
-        workspace: workspacePath.trim() || undefined,
+        workspace: pick.workspace || workspacePath.trim() || undefined,
       });
       const result = await loadSessions();
       await refreshAgentPool();
-      if (operation !== operationRef.current) return;
+      if (operation !== operationRef.current) return false;
       const nextState = await loadState(session.session_id, result);
-      if (operation !== operationRef.current) return;
+      if (operation !== operationRef.current) return false;
       setActiveId(session.session_id);
       setInitialState(nextState);
       recoverPendingTurn(session.session_id, hasPendingPermission(nextState));
+      return true;
     } catch (reason) {
       if (operation === operationRef.current) {
         setError(errorText(reason));
@@ -558,6 +565,57 @@ export default function App() {
         setBusyMessage("");
       }
     }
+    return false;
+  };
+
+  /** Start an agent that ran here before, as itself: its vault brings back what it knew. */
+  const startOffline = (identity: string, workspace: string) => {
+    const bundle =
+      identity === "koordinator" ? identity : agents.find((agent) => agent.name === identity)?.agent_type;
+    return createSession({
+      identity,
+      agent: bundle && bundles.some((item) => item.name === bundle) ? bundle : undefined,
+      workspace,
+    });
+  };
+
+  /** Open an agent on another computer. With no agent here on the network, start this
+   * folder's koordinator to carry it first (GET /sessions `network.live`). */
+  const selectRemote = async (handle: string): Promise<boolean> => {
+    if (network.live !== false) return selectSession(handle);
+    setOpening({ id: handle });
+    try {
+      const carrier = {
+        profile: selectedProfile || "default",
+        approval_mode: "trust_all",
+        workspace: network.folder || undefined,
+      };
+      await api
+        .createSession({ ...carrier, identity: "koordinator", agent: "koordinator" })
+        .catch(() => api.createSession(carrier));
+      const deadline = Date.now() + 45_000;
+      let liveSince = 0;
+      while (Date.now() < deadline) {
+        const result = await api.listSessions();
+        const remote = result.network?.live ? result.network.remote : [];
+        if (remote.some((agent) => agent.handle === handle && agent.state !== "offline")) {
+          await loadSessions();
+          return selectSession(handle);
+        }
+        // A carrier that just joined answers before its relay directory arrives (read every
+        // 15 s, plugins/hub/relay_agent.py:remote_agents), and until then every saved agent
+        // reads offline: only give up once it has had time to list (seen live: ~18 s).
+        // ponytail: fixed grace; a "directory read" flag in network_status could end it early.
+        if (result.network?.live && !liveSince) liveSince = Date.now();
+        if (liveSince && Date.now() - liveSince > 25_000 && remote.some((agent) => agent.handle === handle)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await loadSessions();
+      setOpening({ id: handle, error: `${handle} is not on the network right now.` });
+    } catch (reason) {
+      setOpening({ id: handle, error: errorText(reason) });
+    }
+    return false;
   };
 
   const deleteSession = async (sessionId: string) => {
@@ -704,8 +762,10 @@ export default function App() {
         <AppSidebar
           sessions={sessions}
           profiles={profiles}
+          api={api}
           agents={agents}
           network={network}
+          offline={offline}
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}
@@ -726,6 +786,8 @@ export default function App() {
           }}
           onManageProfiles={() => setProfilesOpen(true)}
           onSelectSession={selectSession}
+          onSelectRemote={selectRemote}
+          onStartOffline={startOffline}
           onCreate={() => void createSession()}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}

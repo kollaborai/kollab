@@ -1,8 +1,8 @@
 {
   "name": "loadout-list",
-  "description": "Regression spec for /loadout: opens the loadout picker (LoadoutListAltView) and returns cleanly to the input prompt on Esc.",
+  "description": "Regression spec for /loadout: opens the loadout picker (LoadoutListAltView) and returns cleanly to the input prompt on Esc. The seeded config marks setup done, so the first-run wizard does not take the screen first.",
   "config": {
-    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "command": "bash -lc 'R=$(pwd); H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}},\\\"application\\\":{\\\"setup_completed\\\":true}}\" > \"$H/.kollab/config.json\"; ln -s \"$R/plugins\" \"$H/plugins\"; cd \"$H\"; HOME=\"$H\" PYTHONPATH=\"$R\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "show_captures": false,
     "app_init_sleep": 8,
     "term_width": 120,

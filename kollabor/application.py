@@ -2888,50 +2888,39 @@ class TerminalLLMChat:
                 )
                 return
 
-            # Check if we have the fullscreen integrator
-            if (
-                not hasattr(self, "fullscreen_integrator")
-                or not self.fullscreen_integrator
+            # A key kept in the OS keyring cannot be read with the keyring off
+            # (KOLLAB_NO_KEYRING, the tmux harness): a provider is set up, we
+            # just can't tell from here, so don't take the screen.
+            from kollabor_ai.profile_manager import KEYRING_SENTINEL_PREFIX
+            from kollabor_ai.providers.security import keyring_enabled
+
+            profiles = self.config.get("kollabor.llm.profiles", {}) or {}
+            if not keyring_enabled() and any(
+                isinstance(profile, dict)
+                and str(profile.get("api_key") or "").startswith(
+                    KEYRING_SENTINEL_PREFIX
+                )
+                for profile in profiles.values()
             ):
-                logger.warning("Fullscreen integrator not available, skipping wizard")
+                logger.info(
+                    "Provider key is in the keyring, which is off; skipping wizard"
+                )
                 return
 
-            # Check if setup plugin is registered
-            if "setup" not in self.fullscreen_integrator.registered_plugins:
-                logger.info("Setup wizard plugin not found, skipping")
+            # The wizard is the /setup command's AltView; run its handler so a
+            # first launch opens exactly what typing /setup opens.
+            setup_command = self.input_handler.command_registry.get_command("setup")
+            if setup_command is None or setup_command.handler is None:
+                logger.warning("Setup command not registered, skipping wizard")
                 return
 
             logger.info("First run detected - launching setup wizard")
+            from kollabor_events.models import SlashCommand
 
-            # Get the setup plugin instance and pass managers
-            plugin_class = self.fullscreen_integrator.registered_plugins["setup"]
-            from kollabor_tui.fullscreen.plugin import PluginMetadata
-
-            plugin_instance = plugin_class(
-                PluginMetadata(name="setup", version="1.0.0")
+            result = await setup_command.handler(
+                SlashCommand(name="setup", raw_input="/setup")
             )
-            plugin_instance.set_managers(self.config, self.profile_manager)  # type: ignore[attr-defined]
-
-            # Ensure fullscreen manager is initialized (it's lazily created in command handlers)
-            if not self.fullscreen_integrator._fullscreen_manager:
-                from kollabor_tui.fullscreen import FullScreenManager
-
-                self.fullscreen_integrator._fullscreen_manager = FullScreenManager(  # type: ignore[assignment]
-                    self.fullscreen_integrator.event_bus,
-                    self.fullscreen_integrator.terminal_renderer,
-                )
-
-            # Register and launch
-            self.fullscreen_integrator._fullscreen_manager.register_plugin(plugin_instance)  # type: ignore[attr-defined]
-            await self.fullscreen_integrator._fullscreen_manager.launch_plugin("setup")  # type: ignore[attr-defined]
-
-            # Check wizard completion status and mark setup as completed
-            if plugin_instance.completed:  # type: ignore[attr-defined]
-                logger.info("Setup wizard completed successfully")
-            elif plugin_instance.skipped:  # type: ignore[attr-defined]
-                logger.info("Setup wizard skipped by user")
-            else:
-                logger.info("Setup wizard exited")
+            logger.info("Setup wizard finished: %s", result.message or result.success)
 
             # Mark setup as completed to avoid showing wizard on next startup
             self.config.save_key("application.setup_completed", True)

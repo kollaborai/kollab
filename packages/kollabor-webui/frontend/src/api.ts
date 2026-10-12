@@ -146,7 +146,9 @@ export type AgentPoolEntry = {
   solo?: boolean;
   /** The folder the live agent runs in, on this computer. */
   project?: string;
-  /** False for a live agent the pool does not name (koordinator, lapis-2): listed, never launched as. */
+  /** When it last ran in the engine's folder (epoch seconds, its vault stream); null if never. */
+  last_ran?: number | null;
+  /** False for a live agent the pool does not name (lapis-2): listed, never launched as. Koordinator is launchable (first in the list). */
   pool?: boolean;
 };
 
@@ -165,10 +167,20 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  /** When the network last listed it (epoch seconds); state "offline" once it left. */
+  last_seen?: number;
 };
 
-/** This computer's relay name and the agents on other computers; `remote` is empty off a network. */
-export type AgentNetwork = { device: string; remote: NetworkAgent[] };
+/** This computer's relay name and the agents on other computers; `remote` is empty off a network.
+ * `live: false`: no agent here is on the network, so `remote` is the last roster seen and opening
+ * one first starts an agent in `folder` to carry the network. */
+export type AgentNetwork = { device: string; remote: NetworkAgent[]; live?: boolean; folder?: string };
+
+/** A folder a session can run in; `live` counts the agents running there. */
+export type WorkspaceEntry = { path: string; name: string; live: number };
+
+/** An agent that ran in the engine's folder and is not running: opening it starts it again. */
+export type OfflineAgent = { identity: string; workspace: string; last_ran: number };
 
 export type SlashParameter = {
   name: string;
@@ -597,7 +609,7 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[]; network?: AgentNetwork }>("/sessions");
+    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork }>("/sessions");
   }
 
   getSession(sessionId: string) {
@@ -860,6 +872,18 @@ export class EngineApi {
       method: "PUT",
       body: JSON.stringify(appearance),
     });
+  }
+
+  /** The engine's folder (New Session's default) and the recent ones, with their live agents. */
+  listWorkspaces() {
+    return this.json<{ home: WorkspaceEntry; recent: WorkspaceEntry[] }>("/workspaces");
+  }
+
+  /** A folder's subfolders (empty path: the home folder). */
+  browseWorkspace(path = "") {
+    return this.json<{ path: string; name: string; parent: string | null; dirs: string[] }>(
+      `/workspaces/browse?path=${encodeURIComponent(path)}`,
+    );
   }
 
   /**

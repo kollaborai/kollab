@@ -63,13 +63,15 @@ def local_agents(monkeypatch, tmp_path):
 
     monkeypatch.setattr(HubBridge, "discover_sessions", lambda self, use_cache=True: rows)
     monkeypatch.setattr(AgentMessenger, "request_network_status", network_status)
-    return SimpleNamespace(answers=answers, asked=asked)
+    return SimpleNamespace(answers=answers, asked=asked, home=tmp_path)
 
 
 @pytest.mark.asyncio
 async def test_with_no_chat_here_an_agent_on_this_computer_answers(registry, local_agents):
     # After a restart no chat runs here yet: the other computers still show.
-    assert await sessions_route._network_snapshot(registry) == {"device": "mac-box", "remote": ROWS}
+    assert await sessions_route._network_snapshot(registry) == {
+        "device": "mac-box", "remote": ROWS, "folder": str(local_agents.home)
+    }
     # This engine's folder first; once it answers no other agent is asked.
     assert local_agents.asked == ["/s/home.sock"]
 
@@ -99,7 +101,8 @@ async def test_a_chat_here_on_no_network_does_not_hide_the_network(registry, loc
 async def test_a_chat_here_on_the_network_answers_first(registry, local_agents):
     registry["a-chat"] = _chat("a-chat", 33, device="mac-box", remote=ROWS)
 
-    assert await sessions_route._network_snapshot(registry) == {"device": "mac-box", "remote": ROWS}
+    network = await sessions_route._network_snapshot(registry)
+    assert (network["device"], network["remote"]) == ("mac-box", ROWS)
     assert local_agents.asked == []
 
 

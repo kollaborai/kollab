@@ -1,8 +1,8 @@
 {
   "name": "setup-wizard",
-  "description": "Verify /setup opens the guided provider wizard, advances a step, and cancels cleanly. Launches with an isolated HOME and the hub disabled so app readiness is deterministic (no koordinator-attach race).",
+  "description": "Verify /setup opens the guided provider wizard, advances a step, and cancels cleanly. Launches with an isolated HOME and the hub disabled so app readiness is deterministic (no koordinator-attach race). The seeded config marks setup done, so the first-run wizard does not open ahead of the typed /setup.",
   "config": {
-    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
+    "command": "bash -lc 'H=$(mktemp -d); mkdir -p \"$H/.kollab\"; printf \"%s\" \"{\\\"plugins\\\":{\\\"hub\\\":{\\\"enabled\\\":false}},\\\"application\\\":{\\\"setup_completed\\\":true}}\" > \"$H/.kollab/config.json\"; source .venv/bin/activate 2>/dev/null; HOME=\"$H\" python main.py'",
     "app_init_sleep": 11,
     "show_captures": false,
     "term_width": 120,
