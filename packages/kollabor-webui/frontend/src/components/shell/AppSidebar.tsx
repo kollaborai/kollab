@@ -4,7 +4,7 @@ import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, Offline
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
-import { groupRemoteByDevice } from "@/components/shell/agent-network";
+import { groupNetworkTree } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
@@ -53,6 +53,9 @@ import {
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
@@ -170,7 +173,13 @@ export function AppSidebar({
     [agents],
   );
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
-  const remoteGroups = useMemo(() => groupRemoteByDevice(network.remote), [network.remote]);
+  // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
+  // this device belongs to; an engine without the aggregate synthesizes one
+  // group from the flat rows, so the sidebar never regresses.
+  const networkTree = useMemo(
+    () => groupNetworkTree(network.networks, network.device, network.remote),
+    [network.networks, network.device, network.remote],
+  );
   // An agent opened on another computer is a session too; it stays in its computer's group.
   const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
   const pickedGem = poolByName.get(selectedIdentity);
@@ -513,70 +522,132 @@ export function AppSidebar({
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        {remoteGroups.map((group) => (
-          <SidebarGroup key={group.device}>
+        {networkTree.map((net) => (
+          <SidebarGroup key={net.id}>
             <SidebarGroupLabel>
-              {group.device}
-              <span className="ml-auto tabular-nums">{group.agents.length}</span>
+              {net.name || "Network"}
+              <span className="text-muted-foreground ml-1 truncate text-[10px]">
+                {net.name && net.trust ? ` ${net.trust}` : ""}
+              </span>
             </SidebarGroupLabel>
             <SidebarGroupContent>
-              <SidebarMenu>
-                {group.agents.map((agent) => {
-                  // Opens through the network once that computer allows this one.
-                  const id = agent.handle || "";
-                  const note = id && opening?.id === id ? opening : null;
-                  // Not up, or unknown: no agent here is on the network to say (a click starts one).
-                  const up = network.live !== false && agent.state !== "offline";
-                  const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
-                  return (
-                  <SidebarMenuItem key={id || `${agent.name}@${agent.device}`}>
-                    <SidebarMenuButton
-                      disabled={!id}
-                      isActive={Boolean(id) && id === activeId}
-                      onClick={async () => {
-                        // Closes the phone menu only once it opened: a refusal shows here.
-                        if (await onSelectRemote(id)) setOpenMobile(false);
-                      }}
-                      title={`Open ${titleCase(agent.name)} on ${agent.device}`}
-                      className="h-auto gap-3 overflow-visible py-2 pl-2.5"
-                    >
-                      <GemAvatar
-                        gem={agent.name}
-                        where={agent.device}
-                        caste={poolByName.get(agent.name)?.caste}
-                        color={poolByName.get(agent.name)?.color}
-                        state={up ? "idle" : "offline"}
-                        live={up}
-                        activity={id && id === activeId ? activeActivity : null}
-                        season="auto"
-                        follow
-                        size={56}
-                      />
-                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="truncate text-[13px] leading-tight font-medium">
-                          {titleCase(agent.name)}
+              <SidebarMenuSub>
+              {net.devices.map((dev) => (
+                <SidebarMenuSubItem key={dev.device} className="list-none">
+                  <SidebarMenuSub>
+                    <SidebarMenuSubItem>
+                      <SidebarMenuSubButton className="text-muted-foreground pointer-events-none h-6 cursor-default justify-between font-medium">
+                        {dev.device}
+                        <span className="text-[10px] tabular-nums">
+                          {dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
                         </span>
-                        <span className="text-muted-foreground truncate text-[11px] leading-tight">
-                          {note && !note.error
-                            ? "Opening…"
-                            : agent.state === "offline"
-                              ? ["Offline", seen].filter(Boolean).join(" · ")
-                              : network.live === false
-                                ? seen || "Not Connected"
-                                : agent.state
-                                  ? titleCase(agent.state)
-                                  : "Online"}
-                        </span>
-                        {note?.error ? <OpenError text={note.error} /> : null}
-                      </div>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                  );
-                })}
-              </SidebarMenu>
+                      </SidebarMenuSubButton>
+                    </SidebarMenuSubItem>
+                    {dev.workspaces.map((ws) => (
+                      <SidebarMenuSubItem key={ws.label || "-"}>
+                        {ws.label ? (
+                          <SidebarMenuSubButton className="text-muted-foreground pointer-events-none h-5 cursor-default text-[11px]">
+                            {ws.label}
+                          </SidebarMenuSubButton>
+                        ) : null}
+                        {ws.agents.map((agent) => {
+                          // Opens through the network once that computer allows this one.
+                          const id = agent.handle || "";
+                          const note = id && opening?.id === id ? opening : null;
+                          // Not up, or unknown: no agent here is on the network to say (a click starts one).
+                          const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
+                          const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
+                          return (
+                          <SidebarMenuItem key={id || `${agent.name}@${agent.device}`}>
+                            <SidebarMenuButton
+                              disabled={!id}
+                              isActive={Boolean(id) && id === activeId}
+                              onClick={async () => {
+                                // Closes the phone menu only once it opened: a refusal shows here.
+                                if (await onSelectRemote(id)) setOpenMobile(false);
+                              }}
+                              title={`Open ${titleCase(agent.name)} on ${agent.device}`}
+                              className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                            >
+                              <GemAvatar
+                                gem={agent.name}
+                                where={agent.device}
+                                caste={poolByName.get(agent.name)?.caste}
+                                color={poolByName.get(agent.name)?.color}
+                                state={up ? "idle" : "offline"}
+                                live={up}
+                                activity={id && id === activeId ? activeActivity : null}
+                                season="auto"
+                                follow
+                                size={56}
+                              />
+                              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                <span className="truncate text-[13px] leading-tight font-medium">
+                                  {titleCase(agent.name)}
+                                </span>
+                                <span className="text-muted-foreground truncate text-[11px] leading-tight">
+                                  {note && !note.error
+                                    ? "Opening…"
+                                    : agent.state === "offline"
+                                      ? ["Offline", seen].filter(Boolean).join(" · ")
+                                      : net.live === false || network.live === false
+                                        ? seen || "Not Connected"
+                                        : agent.state
+                                          ? titleCase(agent.state)
+                                          : "Online"}
+                                </span>
+                                {note?.error ? <OpenError text={note.error} /> : null}
+                              </div>
+                            </SidebarMenuButton>
+                          </SidebarMenuItem>
+                          );
+                        })}
+                      </SidebarMenuSubItem>
+                    ))}
+                  </SidebarMenuSub>
+                </SidebarMenuSubItem>
+              ))}
+              </SidebarMenuSub>
             </SidebarGroupContent>
           </SidebarGroup>
         ))}
+        {(network.contacts?.length ?? 0) > 0 ? (
+          <SidebarGroup>
+            <SidebarGroupLabel>Contacts</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {network.contacts?.map((contact) => (
+                  <SidebarMenuItem key={contact.key}>
+                    <SidebarMenuButton
+                      disabled
+                      className="text-muted-foreground h-auto cursor-default gap-3 py-2 pl-2.5"
+                      title={`Accepted contact (${contact.trust || "no trust"}): nothing is permitted until /connect allow`}
+                    >
+                      <GemAvatar
+                        gem={contact.key}
+                        where={contact.device || ""}
+                        state="offline"
+                        live={false}
+                        season="auto"
+                        follow
+                        size={40}
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="truncate text-[13px] leading-tight font-medium">
+                          {contact.label}
+                        </span>
+                        <span className="truncate text-[11px] leading-tight">
+                          {contact.trust ? `${titleCase(contact.trust)} trust · ` : ""}
+                          {"Ask /connect allow to work together"}
+                        </span>
+                      </div>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ) : null}
       </SidebarContent>
 
       <SidebarFooter className="border-t p-2">

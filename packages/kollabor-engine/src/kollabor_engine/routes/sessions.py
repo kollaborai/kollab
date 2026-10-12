@@ -20,6 +20,7 @@ from kollabor_ai.session_naming import generate_session_name
 
 from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge, network_daemons
+from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
 from .workspaces import remember_workspace
@@ -489,7 +490,9 @@ async def list_sessions():
         "discovered": discovered,
         "active_count": len(sessions) + len(discovered),
         "offline": _offline_agents(found, registry),
-        "network": _network_view(await _network_snapshot(registry)),
+        "network": merge_view_and_memberships(
+            _network_view(await _network_snapshot(registry))
+        ),
     }
 
 

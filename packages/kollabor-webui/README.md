@@ -49,6 +49,13 @@ if Node/npm is unavailable.
   computer's trust allows: under `open` (the default) every computer of your
   network, under `agents` only the agents it lets this one message, under
   `manual` none.
+- **Multi-network (#158)**: when this device belongs to more than one network,
+  the sidebar nests them — NETWORKS > DEVICES > WORKSPACES > AGENTS — with
+  the devices and workspaces of every membership (`network.networks` on
+  `GET /sessions`). A CONTACTS section lists peers this device accepted from
+  another network's rooms (a knock); it is display-only: nothing is permitted
+  with a contact until `/connect allow` says so. Engines without the
+  aggregate render the flat single-network view exactly as before.
 - **Chat**: pill composer with attachments, a `/voicemode` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →

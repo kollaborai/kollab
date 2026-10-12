@@ -83,7 +83,10 @@ async def test_solo_daemon_has_no_relay_so_it_is_not_asked(registry, monkeypatch
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"] == {"device": "devbox", "remote": [], "live": False}
+    assert result["network"]["device"] == "devbox" and result["network"]["remote"] == []
+    assert result["network"]["live"] is False
+    # The v2 aggregate (#158) adds networks/contacts; empty on this machine.
+    assert result["network"]["networks"] == [] and result["network"]["contacts"] == []
 
 
 @pytest.mark.asyncio
@@ -93,4 +96,7 @@ async def test_no_answer_means_no_remote_rows(registry, monkeypatch):
 
     result = await sessions_route.list_sessions()
 
-    assert result["network"] == {"device": "devbox", "remote": [], "live": False}
+    assert result["network"]["device"] == "devbox" and result["network"]["remote"] == []
+    assert result["network"]["live"] is False
+    # The v2 aggregate (#158) adds networks/contacts; empty on this machine.
+    assert result["network"]["networks"] == [] and result["network"]["contacts"] == []
