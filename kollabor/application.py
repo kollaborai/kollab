@@ -1426,14 +1426,38 @@ class TerminalLLMChat:
             self.running = True
             logger.info("Pipe mode initialized with plugins")
 
+            # A slash command in pipe mode runs through the command registry
+            # and prints its result, like `kollab --command`; it must not open
+            # fullscreen views or reach the model as chat text.
+            if piped_input.strip().startswith("/"):
+                command = self.input_handler.slash_parser.parse_command(
+                    piped_input.strip()
+                )
+                if command is None:
+                    logger.warning("Pipe command failed to parse: %s", piped_input)
+                    print(f"Unknown command: {piped_input.strip()}")
+                    await self.cleanup()
+                    sys.exit(2)
+                result = await self.input_handler.command_executor.execute_command(
+                    command, self.event_bus
+                )
+                # Same display rule as --command: skip when a modal is the display.
+                if (
+                    result
+                    and result.message
+                    and not (result.ui_config and result.ui_config.type == "modal")
+                ):
+                    self._print_command_result(result)
+                exit_code = 0 if result and result.success else 1
+                await self.cleanup()
+                sys.exit(exit_code)
+
             # Send input to LLM and wait for response
             # The LLM service will handle the response display
             submission = await self.llm_service.submit_human_input(
                 piped_input, source=UserInputSource.PIPE
             )
             if submission.get("status") in {"cancelled", "rejected"}:
-                import sys
-
                 logger.warning(
                     "Pipe input was not submitted (%s)", submission["status"]
                 )
@@ -1472,8 +1496,6 @@ class TerminalLLMChat:
 
             if timed_out:
                 # Timeout expired before processing completed
-                import sys
-
                 logger.warning(
                     f"Pipe mode timeout reached after {timeout}s - processing incomplete"
                 )
