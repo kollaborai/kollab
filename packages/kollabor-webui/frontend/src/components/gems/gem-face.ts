@@ -215,6 +215,14 @@ export type FaceFrame = {
   /** Stable per-gem value in [0, 2π), for variety across a roster. */
   seed: number;
   still: boolean;
+  /** The pill eyes' shape mix (see eyeShape), sprung by the engine so it morphs. */
+  eyeShape?: readonly number[];
+  /** 0..1: how far angry lids cut across the pill eyes. */
+  lid?: number;
+  /** The shared mouth's shape mix (see mouthShape), sprung by the engine. */
+  mouthShape?: readonly number[];
+  /** 0..1: how open the shared mouth is. */
+  mouthOpen?: number;
 };
 
 /** Where activity escalation stands while thinking or working at length. */
@@ -275,7 +283,7 @@ type FaceMood = {
 };
 
 /** Where the eyes look for each activity; otherwise they follow the pointer. */
-function gazeFor(f: FaceFrame): { x: number; y: number } {
+export function gazeFor(f: Pick<FaceFrame, "activity" | "look" | "t" | "desk">): { x: number; y: number } {
   const { activity, look, t } = f;
   if (f.desk > 0.5) {
     // Side-on at the laptop: on the screen, scanning down lines while reading.
@@ -392,6 +400,10 @@ export function drawFace(f: FaceFrame) {
 function drawEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: number, m: FaceMood) {
   const { ctx, box, style } = f;
   const s = box.s;
+  if (style === "pill") {
+    morphEye(f, ex, ey, side, k, m);
+    return;
+  }
   if (m.closed && style !== "buttons") {
     ctx.strokeStyle = m.ink;
     ctx.lineWidth = Math.max(1, s * 0.022 * Math.max(0.7, k));
@@ -413,23 +425,6 @@ function drawEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: numb
   }
   const { gaze, squint, wide, ink } = m;
   switch (style) {
-    case "pill": {
-      const w = s * 0.07 * wide;
-      const h = Math.max(s * 0.014, s * 0.125 * wide * f.blink * squint);
-      const x = ex + gaze.x * s * 0.025 - w / 2;
-      const y = ey + gaze.y * s * 0.02 - h / 2;
-      ctx.fillStyle = ink;
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, w / 2);
-      ctx.fill();
-      if (s >= 90 && f.blink > 0.6) {
-        ctx.fillStyle = f.dark ? "rgba(20,24,40,0.7)" : "rgba(255,255,255,0.85)";
-        ctx.beginPath();
-        ctx.arc(x + w * 0.66, y + h * 0.26, w * 0.18, 0, TAU);
-        ctx.fill();
-      }
-      return;
-    }
     case "dot": {
       const r = s * 0.033 * wide;
       const x = ex + gaze.x * s * 0.02;
@@ -730,7 +725,7 @@ function drawBrows(f: FaceFrame, ax: number, ay: number, gap: number, m: FaceMoo
               : 0.085);
   const browGap = banded ? s * 0.22 * f.anchor.gap : gap;
   const color = big ? "rgba(8,10,18,0.95)" : m.ink;
-  if (m.angry) {
+  if (m.angry && style !== "pill") {
     // Brows slanting down toward the middle.
     ctx.strokeStyle = color;
     ctx.lineWidth = Math.max(1.4, s * 0.03);
@@ -1072,98 +1067,333 @@ function drawMouth(f: FaceFrame, mx: number, my: number, ink: string) {
   }
   if (style === "pixel" && pixelMouth(f, mx, my, stroke)) return;
   if (style === "coal" && coalMouth(f, mx, my)) return;
+  const talking = activity === "speaking" || activity === "messaging";
+  if (visor && talking) {
+    // An equalizer reading the speech.
+    for (let i = -2; i <= 2; i += 1) {
+      const level = 0.25 + 0.75 * Math.abs(Math.sin(t * (9 + i * 1.7) + i));
+      const bh = s * 0.06 * level * (0.4 + f.talk);
+      ctx.fillRect(mx + i * s * 0.026 - s * 0.008, my - bh / 2, s * 0.016, bh);
+    }
+    return;
+  }
+  if (activity === "error" && BIG_EYES.has(style)) {
+    teeth(ctx, mx, my, s);
+    return;
+  }
+  const cheerful = talking || activity === "dance" || activity === "idle" || activity === "tasking";
+  if (style === "kawaii" && (activity === "idle" || activity === "tasking")) {
+    // A cat mouth.
+    ctx.beginPath();
+    ctx.arc(mx - s * 0.013, my - s * 0.004, s * 0.013, 0.1 * Math.PI, 0.9 * Math.PI);
+    ctx.arc(mx + s * 0.013, my - s * 0.004, s * 0.013, 0.1 * Math.PI, 0.9 * Math.PI);
+    ctx.stroke();
+    if (vampire) fangs(ctx, mx, my + s * 0.006, s);
+    return;
+  }
+  const top = morphMouth(f, mx + (activity === "thinking" ? s * 0.02 : 0), my, stroke);
+  if (vampire && cheerful) fangs(ctx, mx, top, s);
+}
 
-  switch (activity) {
-    case "speaking":
-    case "messaging": {
-      if (visor) {
-        // An equalizer reading the speech.
-        for (let i = -2; i <= 2; i += 1) {
-          const level = 0.25 + 0.75 * Math.abs(Math.sin(t * (9 + i * 1.7) + i));
-          const bh = s * 0.06 * level * (0.4 + f.talk);
-          ctx.fillRect(mx + i * s * 0.026 - s * 0.008, my - bh / 2, s * 0.016, bh);
-        }
-        return;
-      }
-      const ry = s * (0.006 + 0.032 * f.talk);
-      const rx = s * (0.042 - 0.01 * f.talk);
-      ctx.fillStyle = "#3a0d16";
-      ctx.beginPath();
-      ctx.ellipse(mx, my, rx, ry, 0, 0, TAU);
-      ctx.fill();
-      if (ry > s * 0.02) {
-        ctx.fillStyle = "#ff7a93";
-        ctx.beginPath();
-        ctx.ellipse(mx, my + ry * 0.5, rx * 0.55, ry * 0.4, 0, 0, TAU);
-        ctx.fill();
-      }
-      if (vampire && ry > s * 0.015) fangs(ctx, mx, my - ry * 0.85, s);
-      return;
+/* Morphing outlines. Every eye and mouth shape is a closed path resampled to
+   the same points (over the top left to right, then back underneath), so two
+   shapes blend point by point and an eye can melt from a pill into a smile. */
+
+const RES = 24;
+type Outline = Float32Array;
+
+/** Resamples a closed path ([x, y, ...]) into an Outline, split at its leftmost and rightmost points. */
+function outline(path: number[]): Outline {
+  const n = path.length / 2;
+  let area = 0;
+  for (let i = 0; i < n; i += 1) {
+    const j = (i + 1) % n;
+    area += path[2 * i] * path[2 * j + 1] - path[2 * j] * path[2 * i + 1];
+  }
+  const pt = (i: number) => {
+    const k = ((area >= 0 ? i : n - 1 - i) % n + n) % n;
+    return [path[2 * k], path[2 * k + 1]] as const;
+  };
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    lo = Math.min(lo, pt(i)[1]);
+    hi = Math.max(hi, pt(i)[1]);
+  }
+  const mid = (lo + hi) / 2;
+  let left = 0;
+  let right = 0;
+  for (let i = 0; i < n; i += 1) {
+    const [x, y] = pt(i);
+    if (x + 1e-3 * Math.abs(y - mid) < pt(left)[0] + 1e-3 * Math.abs(pt(left)[1] - mid)) left = i;
+    if (x - 1e-3 * Math.abs(y - mid) > pt(right)[0] - 1e-3 * Math.abs(pt(right)[1] - mid)) right = i;
+  }
+  const out = new Float32Array(RES * 4);
+  const half = (from: number, to: number, at: number) => {
+    const pts: (readonly [number, number])[] = [];
+    for (let i = from; ; i += 1) {
+      pts.push(pt(i));
+      if ((i - to) % n === 0) break;
     }
-    case "dance": {
-      ctx.fillStyle = "#3a0d16";
-      ctx.beginPath();
-      ctx.arc(mx, my - s * 0.01, s * 0.045, 0, Math.PI);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = "#ff7a93";
-      ctx.beginPath();
-      ctx.ellipse(mx, my + s * 0.018, s * 0.022, s * 0.012, 0, 0, TAU);
-      ctx.fill();
-      if (vampire) fangs(ctx, mx, my - s * 0.01, s);
-      return;
+    const lengths = [0];
+    for (let i = 1; i < pts.length; i += 1) {
+      lengths.push(lengths[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
     }
-    case "error": {
-      if (BIG_EYES.has(style)) teeth(ctx, mx, my, s);
-      else {
-        ctx.beginPath();
-        ctx.arc(mx, my + s * 0.04, s * 0.04, 1.2 * Math.PI, 1.8 * Math.PI);
-        ctx.stroke();
-      }
-      return;
+    const total = lengths[lengths.length - 1] || 1;
+    let seg = 1;
+    for (let k = 0; k < RES; k += 1) {
+      const want = (total * k) / (RES - 1);
+      while (seg < pts.length - 1 && lengths[seg] < want) seg += 1;
+      const u = (want - lengths[seg - 1]) / (lengths[seg] - lengths[seg - 1] || 1);
+      out[at + 2 * k] = pts[seg - 1][0] + (pts[seg][0] - pts[seg - 1][0]) * u;
+      out[at + 2 * k + 1] = pts[seg - 1][1] + (pts[seg][1] - pts[seg - 1][1]) * u;
     }
-    case "thinking": {
-      // "Hmm": a small wavy line pushed to one side.
-      ctx.beginPath();
-      ctx.moveTo(mx - s * 0.015, my);
-      ctx.quadraticCurveTo(mx + s * 0.005, my - s * 0.012, mx + s * 0.025, my);
-      ctx.quadraticCurveTo(mx + s * 0.04, my + s * 0.01, mx + s * 0.05, my - s * 0.004);
-      ctx.stroke();
-      return;
-    }
-    case "searching": {
-      ctx.beginPath();
-      ctx.ellipse(mx, my, s * 0.014, s * 0.018, 0, 0, TAU);
-      ctx.stroke();
-      return;
-    }
-    case "waiting":
-    case "dreaming":
-    case "booting": {
-      ctx.beginPath();
-      ctx.arc(mx, my, s * (activity === "waiting" ? 0.013 : 0.009), 0, TAU);
-      ctx.stroke();
-      return;
-    }
-    case "offline": {
-      line(ctx, mx - s * 0.02, my, mx + s * 0.02, my);
-      return;
-    }
-    default: {
-      if (style === "kawaii") {
-        // A cat mouth.
-        ctx.beginPath();
-        ctx.arc(mx - s * 0.013, my - s * 0.004, s * 0.013, 0.1 * Math.PI, 0.9 * Math.PI);
-        ctx.arc(mx + s * 0.013, my - s * 0.004, s * 0.013, 0.1 * Math.PI, 0.9 * Math.PI);
-        ctx.stroke();
-      } else {
-        ctx.beginPath();
-        ctx.arc(mx, my - s * 0.03, s * 0.042, 0.22 * Math.PI, 0.78 * Math.PI);
-        ctx.stroke();
-      }
-      if (vampire) fangs(ctx, mx, my + s * 0.006, s);
+  };
+  half(left, right < left ? right + n : right, 0);
+  half(right, left < right ? left + n : left, RES * 2);
+  return out;
+}
+
+function oval(cx: number, cy: number, rx: number, ry: number): Outline {
+  const path: number[] = [];
+  for (let i = 0; i < 64; i += 1) path.push(cx + rx * Math.cos((i / 64) * TAU), cy + ry * Math.sin((i / 64) * TAU));
+  return outline(path);
+}
+
+/** A rounded box with half-sizes (hw, hh) and the roundest corners that fit. */
+function stadium(hw: number, hh: number): Outline {
+  const r = Math.min(hw, hh);
+  const path: number[] = [];
+  for (const [cx, cy, a] of [
+    [hw - r, hh - r, 0],
+    [r - hw, hh - r, 0.25],
+    [r - hw, r - hh, 0.5],
+    [hw - r, r - hh, 0.75],
+  ]) {
+    for (let i = 0; i <= 12; i += 1) {
+      const t = (a + i / 48) * TAU;
+      path.push(cx + r * Math.cos(t), cy + r * Math.sin(t));
     }
   }
+  return outline(path);
+}
+
+/** A curved stroke: the arc of radius `rad` around (cx, cy) from angle a0 to a1, half-thickness `th`, round ends. */
+function band(cx: number, cy: number, rad: number, a0: number, a1: number, th: number): Outline {
+  const path: number[] = [];
+  const dir = Math.sign(a1 - a0);
+  const at = (r: number, a: number) => path.push(cx + r * Math.cos(a), cy + r * Math.sin(a));
+  for (let i = 0; i <= 24; i += 1) at(rad + th, a0 + ((a1 - a0) * i) / 24);
+  for (let i = 1; i < 12; i += 1) {
+    // The end cap, from the outer edge round the tip to the inner edge.
+    const p = (i / 12) * Math.PI;
+    const ex = cx + rad * Math.cos(a1);
+    const ey = cy + rad * Math.sin(a1);
+    path.push(
+      ex + th * (Math.cos(a1) * Math.cos(p) - dir * Math.sin(a1) * Math.sin(p)),
+      ey + th * (Math.sin(a1) * Math.cos(p) + dir * Math.cos(a1) * Math.sin(p)),
+    );
+  }
+  for (let i = 0; i <= 24; i += 1) at(rad - th, a1 + ((a0 - a1) * i) / 24);
+  for (let i = 1; i < 12; i += 1) {
+    const p = (i / 12) * Math.PI;
+    const ex = cx + rad * Math.cos(a0);
+    const ey = cy + rad * Math.sin(a0);
+    path.push(
+      ex - th * (Math.cos(a0) * Math.cos(p) - dir * Math.sin(a0) * Math.sin(p)),
+      ey - th * (Math.sin(a0) * Math.cos(p) + dir * Math.cos(a0) * Math.sin(p)),
+    );
+  }
+  return outline(path);
+}
+
+/** An open mouth: a flat top over a half-ellipse. */
+function dee(rx: number, top: number, depth: number): Outline {
+  const path: number[] = [-rx, top, rx, top];
+  for (let i = 1; i < 32; i += 1) path.push(rx * Math.cos((i / 32) * Math.PI), top + depth * Math.sin((i / 32) * Math.PI));
+  return outline(path);
+}
+
+function blend(shapes: Outline[], mix: readonly number[], out: Float32Array): Float32Array {
+  let total = 0;
+  for (let i = 0; i < shapes.length; i += 1) total += Math.max(0, mix[i] ?? 0);
+  out.fill(0);
+  shapes.forEach((shape, i) => {
+    const k = Math.max(0, mix[i] ?? 0) / (total || 1);
+    if (k) for (let j = 0; j < out.length; j += 1) out[j] += shape[j] * k;
+  });
+  if (!total) out.set(shapes[0]);
+  return out;
+}
+
+/** Traces an Outline as a smooth closed curve: each point is a control point between midpoints. */
+function trace(ctx: CanvasRenderingContext2D, o: Outline) {
+  const n = o.length / 2;
+  const mx = (i: number) => (o[(2 * i) % o.length] + o[(2 * i + 2) % o.length]) / 2;
+  const my = (i: number) => (o[(2 * i + 1) % o.length] + o[(2 * i + 3) % o.length]) / 2;
+  ctx.beginPath();
+  ctx.moveTo(mx(n - 1), my(n - 1));
+  for (let i = 0; i < n; i += 1) ctx.quadraticCurveTo(o[2 * i], o[2 * i + 1], mx(i), my(i));
+  ctx.closePath();
+}
+
+const PILL = [1, 0, 0, 0];
+const HAPPY = [0.1, 0, 0.9, 0];
+const SHUT = [0, 0, 0, 1];
+
+/** The pill eye's shape mix for an activity: pill, round, happy arc, shut line. `cheer` is a passing idle smile. */
+export function eyeShape(activity: Activity, t: number, cheer: boolean): readonly number[] {
+  switch (activity) {
+    case "offline":
+    case "dreaming":
+    case "booting":
+      return SHUT;
+    case "thinking":
+      return [0.35, 0.65, 0, 0];
+    case "waiting":
+      return [0.5, 0.5, 0, 0];
+    case "dance":
+      return HAPPY;
+    case "speaking":
+    case "messaging":
+      return t % 1.7 < 0.4 ? HAPPY : PILL;
+    default:
+      return cheer ? HAPPY : PILL;
+  }
+}
+
+/** The shared mouth's shape mix (smile, grin, round "o", flat line, frown) and how open it is. */
+export function mouthShape(activity: Activity, t: number, talk: number, cheer: boolean): { mix: readonly number[]; open: number } {
+  switch (activity) {
+    case "speaking":
+    case "messaging":
+      // Vowels: mostly an open "ah", every third beat an "o".
+      return { mix: Math.floor(t * 4) % 3 === 0 ? [0, 0.2, 0.8, 0, 0] : [0, 0.8, 0.2, 0, 0], open: talk };
+    case "dance":
+      return { mix: [0, 1, 0, 0, 0], open: 0.5 };
+    case "error":
+      return { mix: [0, 0, 0, 0.4, 0.6], open: 0 };
+    case "thinking":
+      return { mix: [0, 0, 0.6, 0.4, 0], open: 0.05 };
+    case "searching":
+    case "waiting":
+      return { mix: [0, 0, 1, 0, 0], open: 0 };
+    case "dreaming":
+    case "booting":
+      return { mix: [0, 0, 1, 0, 0], open: 0.1 + 0.06 * Math.sin(t * 1.1) };
+    case "offline":
+      return { mix: [0, 0, 0, 1, 0], open: 0 };
+    default:
+      return { mix: cheer ? [0, 1, 0, 0, 0] : [1, 0, 0, 0, 0], open: cheer ? 0.25 : 0 };
+  }
+}
+
+let eyeOutlines: Outline[] | null = null;
+let mouthOutlines: Outline[] | null = null;
+const shapeBuffer = new Float32Array(RES * 4);
+
+/** The pill eye, in units of a tenth of the box: a dark pill with an iris, pupil and catchlights that morphs between moods. */
+function morphEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: number, m: FaceMood) {
+  const { ctx, box } = f;
+  const s = box.s;
+  eyeOutlines ??= [
+    stadium(0.36, 0.62),
+    oval(0, 0, 0.56, 0.56),
+    band(0, 0.3, 0.52, 1.5 * Math.PI - 1.05, 1.5 * Math.PI + 1.05, 0.12),
+    stadium(0.48, 0.1),
+  ];
+  const weights = f.eyeShape ?? eyeShape(f.activity, f.t, false);
+  const shape = blend(eyeOutlines, weights, shapeBuffer);
+  // Blinks squash the eye; a fast dart is handled by the face's stretch.
+  const shut = 1 - f.blink;
+  const unit = s * 0.1 * k;
+  const sx = unit * m.wide * (1 + shut * 0.2);
+  const sy = unit * m.wide * (1 - shut * 0.9) * (m.angry ? 1 : m.squint);
+  const lid = f.lid ?? (m.angry ? 0.5 : 0);
+  ctx.save();
+  ctx.translate(ex + m.gaze.x * s * 0.015, ey + m.gaze.y * s * 0.012);
+  ctx.scale(sx, sy);
+  if (lid > 0.01 && side) {
+    // Angry lids: keep what lies below a line slanting down toward the nose.
+    const a = side * -0.55;
+    const c = 1.2 - 1.6 * lid;
+    const nx = Math.sin(a);
+    const ny = -Math.cos(a);
+    const px = c * nx;
+    const py = c * ny;
+    ctx.beginPath();
+    ctx.moveTo(px + 3 * ny, py - 3 * nx);
+    ctx.lineTo(px - 3 * ny, py + 3 * nx);
+    ctx.lineTo(px - 3 * ny - 3 * nx, py + 3 * nx - 3 * ny);
+    ctx.lineTo(px + 3 * ny - 3 * nx, py - 3 * nx - 3 * ny);
+    ctx.closePath();
+    ctx.clip();
+  }
+  trace(ctx, shape);
+  ctx.fillStyle = m.ink;
+  ctx.fill();
+  let total = 0;
+  for (const w of weights) total += Math.max(0, w);
+  const open = (Math.max(0, weights[0]) + Math.max(0, weights[1])) / (total || 1);
+  if (open > 0.05 && s >= 40 && f.activity !== "offline") {
+    // An iris in the gem's own color; the pupil travels further than the
+    // iris, which reads as depth.
+    ctx.clip();
+    ctx.globalAlpha *= open;
+    const gx = m.gaze.x * 0.17;
+    const gy = m.gaze.y * 0.26;
+    const dot = (x: number, y: number, r: number, color: string) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, TAU);
+      ctx.fill();
+    };
+    dot(gx, gy, 0.3, rgba(mix(f.rgb, BLACK, 0.45)));
+    dot(gx * 1.2, gy * 1.2, 0.14, "rgba(4,5,9,0.95)");
+    dot(gx * 0.5 - 0.14, gy * 0.5 - 0.26, 0.11, "rgba(255,255,255,0.95)");
+    dot(gx * 0.5 + 0.12, gy * 0.5 + 0.06, 0.05, "rgba(255,255,255,0.8)");
+  }
+  ctx.restore();
+}
+
+/** The shared mouth, morphing between shapes; returns the y of its top edge at the middle, for fangs. */
+function morphMouth(f: FaceFrame, mx: number, my: number, color: string): number {
+  const { ctx, box } = f;
+  const s = box.s;
+  const target = f.mouthShape ? { mix: f.mouthShape, open: f.mouthOpen ?? 0 } : mouthShape(f.activity, f.t, f.talk, false);
+  const open = Math.max(0, Math.min(1, target.open));
+  mouthOutlines ??= [
+    band(0, -0.03, 0.042, 0.78 * Math.PI, 0.22 * Math.PI, 0.0085),
+    dee(0.045, -0.008, 0.022),
+    oval(0, 0.004, 0.019, 0.019),
+    stadium(0.03, 0.0075),
+    band(0, 0.045, 0.04, 1.2 * Math.PI, 1.8 * Math.PI, 0.0085),
+  ];
+  const shapes = [...mouthOutlines];
+  if (open > 0) {
+    shapes[1] = dee(0.045 - 0.008 * open, -0.008, 0.022 + 0.035 * open);
+    shapes[2] = oval(0, 0.004, 0.019 + 0.006 * open, 0.019 + 0.028 * open);
+  }
+  const shape = blend(shapes, target.mix, shapeBuffer);
+  ctx.save();
+  ctx.translate(mx, my);
+  ctx.scale(s, s);
+  trace(ctx, shape);
+  ctx.fillStyle = color;
+  ctx.fill();
+  let total = 0;
+  for (const w of target.mix) total += Math.max(0, w);
+  const gape = ((Math.max(0, target.mix[1] ?? 0) + Math.max(0, target.mix[2] ?? 0)) / (total || 1)) * open;
+  if (gape > 0.04) {
+    ctx.clip();
+    ctx.globalAlpha *= Math.min(1, gape * 4);
+    ctx.fillStyle = "#ff7a93";
+    ctx.beginPath();
+    ctx.arc(0, 0.011 + 0.045 * open, 0.0128 + 0.017 * open, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+  return my + shape[RES + 1] * s;
 }
 
 /** The pixel style's mouths; false hands the activity to the shared mouths. */
