@@ -63,12 +63,12 @@ function SpanRow() {
           </SpanPrimitive.CollapseToggle>
         </span>
         <SpanPrimitive.StatusIndicator className="size-1.5 shrink-0 rounded-full bg-emerald-500/80 data-[span-status=failed]:bg-destructive data-[span-status=running]:animate-pulse data-[span-status=running]:bg-amber-400" />
-        <SpanPrimitive.TypeBadge className="text-muted-foreground hidden shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-[10px] sm:inline">
+        <SpanPrimitive.TypeBadge className="text-muted-foreground hidden shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem] sm:inline">
           {type === "turn" ? "Turn" : formatKind(type)}
         </SpanPrimitive.TypeBadge>
         <SpanPrimitive.Name className="min-w-0 truncate group-data-[span-status=failed]:text-destructive" />
       </SpanPrimitive.Indent>
-      <span className="text-muted-foreground text-right font-mono text-[10px] tabular-nums">
+      <span className="text-muted-foreground text-right font-mono text-[0.625rem] tabular-nums">
         {formatDuration(latencyMs === null ? null : latencyMs / 1000)}
       </span>
       <div className="relative h-5">
@@ -130,7 +130,7 @@ export function TrajectoryWaterfall({
         <LoadEarlierBanner loading={loadingEarlier} onLoad={onLoadEarlier} />
       )}
       <div
-        className={`${GRID} bg-muted/55 text-muted-foreground shrink-0 border-b py-2.5 pr-3 pl-3 text-[10px] font-semibold tracking-[0.1em] uppercase sm:tracking-[0.14em] backdrop-blur`}
+        className={`${GRID} bg-muted/55 text-muted-foreground shrink-0 border-b py-2.5 pr-3 pl-3 text-[0.625rem] font-semibold tracking-[0.1em] uppercase sm:tracking-[0.14em] backdrop-blur`}
       >
         <span>Span</span>
         <span className="text-right">Duration</span>

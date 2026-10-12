@@ -86,10 +86,10 @@ export function WorkspacePicker({
           {entry.name}
           {label ? <span className="text-muted-foreground font-normal"> · {label}</span> : null}
         </span>
-        <Tail className="text-[11px]" text={entry.path} />
+        <Tail className="text-[0.6875rem]" text={entry.path} />
       </span>
       {entry.live ? (
-        <span className="text-muted-foreground shrink-0 text-[11px] tabular-nums">{entry.live} Live</span>
+        <span className="text-muted-foreground shrink-0 text-[0.6875rem] tabular-nums">{entry.live} Live</span>
       ) : null}
       {entry.path === chosen ? <Check className="size-3.5 shrink-0" /> : null}
     </button>
@@ -135,21 +135,21 @@ export function WorkspacePicker({
             aria-label="Folder path"
           />
         </form>
-        {error ? <p className="text-destructive px-1 text-[11px]">{error}</p> : null}
+        {error ? <p className="text-destructive px-1 text-[0.6875rem]">{error}</p> : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {home ? (
             <>
-              <p className="text-muted-foreground px-2 pt-1 pb-0.5 text-[11px] font-medium">Default</p>
+              <p className="text-muted-foreground px-2 pt-1 pb-0.5 text-[0.6875rem] font-medium">Default</p>
               {row(home, "Engine Folder")}
             </>
           ) : null}
           {recent.length ? (
             <>
-              <p className="text-muted-foreground px-2 pt-2 pb-0.5 text-[11px] font-medium">Recent</p>
+              <p className="text-muted-foreground px-2 pt-2 pb-0.5 text-[0.6875rem] font-medium">Recent</p>
               {recent.map((entry) => row(entry))}
             </>
           ) : null}
-          <p className="text-muted-foreground flex items-center gap-1 px-2 pt-2 pb-0.5 text-[11px] font-medium">
+          <p className="text-muted-foreground flex items-center gap-1 px-2 pt-2 pb-0.5 text-[0.6875rem] font-medium">
             Browse
             {loading ? <Loader2 className="size-3 animate-spin" /> : null}
           </p>
@@ -167,7 +167,7 @@ export function WorkspacePicker({
                 >
                   <CornerLeftUp className="size-3.5" />
                 </Button>
-                <Tail className="min-w-0 flex-1 text-[11px]" text={listing.path} />
+                <Tail className="min-w-0 flex-1 text-[0.6875rem]" text={listing.path} />
               </div>
               {listing.dirs.map((dir) => (
                 <button
@@ -182,7 +182,7 @@ export function WorkspacePicker({
                 </button>
               ))}
               {!listing.dirs.length ? (
-                <p className="text-muted-foreground px-2 py-1 text-[11px]">No folders inside.</p>
+                <p className="text-muted-foreground px-2 py-1 text-[0.6875rem]">No folders inside.</p>
               ) : null}
             </>
           ) : null}

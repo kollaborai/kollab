@@ -143,7 +143,7 @@ export function TrajectoryTable({
       {canLoadEarlier && (
         <LoadEarlierBanner loading={loadingEarlier} onLoad={onLoadEarlier} />
       )}
-      <div className="bg-muted/55 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] border-b px-3 py-2.5 text-[10px] font-semibold tracking-[0.14em] uppercase backdrop-blur md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
+      <div className="bg-muted/55 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] border-b px-3 py-2.5 text-[0.625rem] font-semibold tracking-[0.14em] uppercase backdrop-blur md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
         <span>#</span>
         <span>Event</span>
         <span>Content</span>
@@ -186,14 +186,14 @@ export function TrajectoryTable({
                   )}
                   onClick={() => onSelect(record.id)}
                 >
-                  <span className="text-muted-foreground tabular-nums font-mono text-[11px]">
+                  <span className="text-muted-foreground tabular-nums font-mono text-[0.6875rem]">
                     {record.index}
                   </span>
                   <span className="flex min-w-0 flex-wrap items-center gap-1 pr-2">
                     <Badge
                       variant="outline"
                       className={cn(
-                        "max-w-full gap-1 rounded-full px-2 text-[10px] shadow-none",
+                        "max-w-full gap-1 rounded-full px-2 text-[0.625rem] shadow-none",
                         kindClass(record.kind),
                       )}
                     >
@@ -203,12 +203,12 @@ export function TrajectoryTable({
                       </span>
                     </Badge>
                     {record.turn > 0 && (
-                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[10px]">
+                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem]">
                         T{record.turn}
                       </span>
                     )}
                     {record.request !== null && (
-                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[10px]">
+                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem]">
                         R{record.request}
                       </span>
                     )}
@@ -234,11 +234,11 @@ export function TrajectoryTable({
                     </span>
                     {(record.inputTokens !== undefined ||
                       record.outputTokens !== undefined) && (
-                      <span className="text-muted-foreground hidden shrink-0 rounded bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] xl:inline">
+                      <span className="text-muted-foreground hidden shrink-0 rounded bg-muted/50 px-1.5 py-0.5 font-mono text-[0.625rem] xl:inline">
                         in {formatTokens(record.inputTokens)} · out {formatTokens(record.outputTokens)}
                       </span>
                     )}
-                    <span className="text-muted-foreground shrink-0 tabular-nums font-mono text-[10px]">
+                    <span className="text-muted-foreground shrink-0 tabular-nums font-mono text-[0.625rem]">
                       {formatDuration(record.durationSeconds)}
                     </span>
                   </span>
