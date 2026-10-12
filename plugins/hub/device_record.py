@@ -171,6 +171,27 @@ class DeviceRecord:
         _write_private(self.device_json_path, blob)
 
     def _validate(self, payload: dict) -> None:
+        # device_primary (PR #164) may write/read the flat spelling
+        # ``primary_network`` (the network's name) alongside the slug
+        # spelling ``primary``; it pops the flat field on every write of
+        # its own, but a record carrying it must load, not raise. Accept
+        # and normalize: tolerate the field, and when ``primary`` is unset
+        # resolve the flat name against the networks map so both spellings
+        # mean the same choice.
+        if "primary_network" in payload:
+            flat = payload.pop("primary_network")
+            if "primary" not in payload:
+                payload["primary"] = ""  # unknown/damaged name: no choice
+            if not payload["primary"] and isinstance(flat, str) and flat:
+                networks = payload.get("networks")
+                if isinstance(networks, dict):
+                    for slug, entry in networks.items():
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("network_name") == flat
+                        ):
+                            payload["primary"] = slug
+                            break
         if set(payload) - {"device_id", "device_name", "networks", "primary"}:
             raise DeviceRecordError("unsupported device record fields")
         device_id = payload.get("device_id")
