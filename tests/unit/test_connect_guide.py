@@ -481,7 +481,8 @@ async def test_daemon_hub_connect_carries_reason(monkeypatch):
 
     state_handlers.register_state_handlers(_RpcServer(), _FailingStateService())
     result = await captured["state.hub_connect"]({"command": "start"})
-    assert result["error"] == "beacon command failed: discovery: address_denied"
+    # The daemon names the exception: f"{type(exc).__name__}: {exc}".
+    assert result["error"] == "RuntimeError: discovery: address_denied"
 
 
 @pytest.mark.asyncio
@@ -507,7 +508,7 @@ async def test_remote_hub_connect_generic_when_daemon_says_nothing():
             return {"error": "beacon command failed"}
 
     service = RemoteStateService(_Rpc())
-    with pytest.raises(ValueError, match="daemon beacon command failed"):
+    with pytest.raises(ValueError, match="beacon command failed"):
         await service.hub_connect("start")
 
 
