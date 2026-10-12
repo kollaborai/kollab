@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 import secrets
 import time
@@ -276,6 +277,7 @@ class RelayCommands:
         from .relay_client import RelayClient
 
         self.client = RelayClient(workspace=workspace, state_dir=state_dir)
+        self.workspace = Path(workspace)
         self.config = config
         self.agent_bridge = agent_bridge
         self._lock = asyncio.Lock()
@@ -571,11 +573,151 @@ class RelayCommands:
             raise ValueError("Unsupported advertised relay control URL")
         return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
 
+
+    def _membership_rows(self):
+        """On-disk memberships this workspace holds, or None when the
+        registry (issue #162 slice 3) is unavailable: callers then keep the
+        single-network behavior unchanged."""
+        try:
+            from .membership_runtime import Memberships
+        except Exception:
+            return None
+        try:
+            registry = Memberships(self.workspace)
+        except Exception:
+            return None
+        if not callable(getattr(registry, "list", None)):
+            return None
+        try:
+            rows = registry.list()
+        except Exception:
+            return None
+        return rows if isinstance(rows, list) else None
+
+    def _membership_primary_slug(self, rows) -> str:
+        """The registry's primary slug; the first membership as fallback."""
+        try:
+            from .membership_runtime import Memberships
+
+            return Memberships(self.workspace).primary().slug
+        except Exception:
+            return rows[0].slug if rows else ""
+
+    @staticmethod
+    def _membership_state(row) -> dict:
+        """One membership's on-disk state payload; {} when unreadable."""
+        try:
+            payload = json.loads(
+                (Path(row.state_dir) / "state.json").read_text()
+            )
+        except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _membership_line(self, row) -> str:
+        """Compact view of a membership this window is not running."""
+        payload = self._membership_state(row)
+        origin = payload.get("origin") or ""
+        domain = ""
+        if isinstance(origin, str) and origin:
+            domain = origin.removeprefix("https://").rstrip("/")
+        if domain:
+            name = payload.get("network_name") or ""
+            label = network_label(name, domain)
+        else:
+            label = "(state unreadable)" if not payload else "(no origin recorded)"
+        line = f"  {row.slug}  {label}"
+        trust = payload.get("trust") or ""
+        if isinstance(trust, str) and trust:
+            line += f"  trust: {trust}"
+        if payload.get("enabled") is False:
+            line += "  reconnect disabled"
+        elif domain:
+            line += "  not connected in this window"
+        return line
+
+    def _named_membership(self, token: str, rows):
+        """The membership a /connect argument names: slug, origin or domain."""
+        wanted = directory_origin(token)
+        domain = token.lower().removeprefix("https://").rstrip("/")
+        for row in rows:
+            if row.slug == token:
+                return row
+            origin = self._membership_state(row).get("origin") or ""
+            if not isinstance(origin, str):
+                continue
+            if wanted is not None and origin == wanted:
+                return row
+            if origin.removeprefix("https://").rstrip("/") == domain:
+                return row
+        return None
+
+    def _set_primary_network(self, rest: str) -> str:
+        """`/connect primary <network>`: move the device's primary choice."""
+        if not rest:
+            return "usage: /connect primary <network>"
+        try:
+            from .device_primary import set_primary_network
+        except ImportError:
+            return (
+                "connect: choosing this device's primary network needs the "
+                "device-record slice (issue #164), which is not in this build"
+            )
+        net = rest.strip()
+        connected = directory_origin(net)
+        primary_key = (
+            self.client.state.inviter
+            if connected is not None and connected == self.client.state.origin
+            else ""
+        )
+        try:
+            try:
+                applied = set_primary_network(
+                    primary_key, net, state_dir=self.client.state_dir
+                )
+            except TypeError:
+                # A device_primary without the state_dir keyword.
+                applied = set_primary_network(primary_key, net)
+        except (OSError, ValueError, RelayError) as exc:
+            return f"connect: {exc}"
+        if applied:
+            return f"primary network set: {net}"
+        return (
+            f"connect: {net} is not a network this device's record knows; "
+            "join it first, then choose it as primary"
+        )
+
     async def format_status(self) -> str:
         """`/connect status`, redesigned per the constitution (sections 5-6).
 
-        Names, not keys, appear here.
+        Names, not keys, appear here. With several memberships on disk
+        (issue #158) a device header marks the primary, the connected
+        network keeps its full block, and every other membership gets one
+        compact line.
         """
+        rows = self._membership_rows()
+        if rows is None or len(rows) <= 1:
+            return await self._status_block()
+        primary = self._membership_primary_slug(rows)
+        listed = ", ".join(
+            f"{row.slug} (primary)" if row.slug == primary else row.slug
+            for row in rows
+        )
+        device_name = self._device_name()
+        header = (
+            f"device {device_name} — networks: {listed}"
+            if device_name
+            else f"device — networks: {listed}"
+        )
+        parts = [header, await self._status_block()]
+        bound = Path(self.client.state_dir)
+        parts.extend(
+            self._membership_line(row) for row in rows if Path(row.state_dir) != bound
+        )
+        return "\n".join(parts)
+
+    async def _status_block(self) -> str:
+        """The connected network's status block (the v1 status body)."""
         state = self.client.status()
         origin = state["origin"] or ""
         domain = origin[len("https://") :] if origin.startswith("https://") else origin
@@ -880,13 +1022,31 @@ class RelayCommands:
                 "Its grants are gone and it gets no more of your sealed config. "
                 "Provider credentials it copied are not revoked at the provider."
             )
+        if head == "primary":
+            return self._set_primary_network(rest)
         if head == "leave":
             origin = self.client.state.origin
             if not origin:
                 return "connect: this device is not on a network"
+            rows = self._membership_rows() or []
+            if len(rows) > 1 and not rest:
+                names = ", ".join(row.slug for row in rows)
+                return (
+                    "connect: this device holds "
+                    f"{len(rows)} network memberships ({names}); "
+                    "name the one to leave: /connect leave <network>"
+                )
             if rest and rest.lower().removeprefix("https://").rstrip("/") != (
                 origin.removeprefix("https://")
             ):
+                if self._named_membership(rest, rows) is not None:
+                    return (
+                        f"connect: {rest} is joined on disk but is not the "
+                        "network this window is connected to; leaving a "
+                        "membership that is not connected needs the runtime "
+                        "from issue #162. To switch: /connect leave, then "
+                        "/connect <network>."
+                    )
                 return f"connect: this device is not on {rest}"
             sync_links = getattr(self.agent_bridge, "sync_links", None)
             if callable(sync_links):
@@ -918,5 +1078,25 @@ class RelayCommands:
                 "\nAgent Card: verified (JWS EdDSA, pinned locator key); no task submitted"
                 if card
                 else "\nAgent Card: not advertised by this publisher"
+            )
+        current = self.client.state.origin
+        if current and result.origin != current:
+            # Joining a second network must never implicitly leave the first
+            # (issue #158): a bridge that can hold memberships takes over here.
+            joiner = getattr(self.agent_bridge, "join_membership", None)
+            if callable(joiner):
+                try:
+                    outcome = await joiner(result.origin)
+                except TypeError:
+                    outcome = None  # signature drift: fall through to guidance
+                if isinstance(outcome, str) and outcome:
+                    return outcome
+            here = current.removeprefix("https://")
+            there = result.origin.removeprefix("https://")
+            return (
+                f"connect: already on {here}; joining {there} would add a "
+                "second membership and this build's runtime holds one "
+                "(issue #162). To switch networks: /connect leave, then "
+                "/connect <network>."
             )
         return await self._attach(result, ca, cidrs)
