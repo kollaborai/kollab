@@ -118,9 +118,14 @@ function RuntimeShell({
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   // An agent on another computer reads @names in that computer's mesh.
+  // The #158 signature also narrows by network/workspace once rows carry them;
+  // rows without those fields (pre-aggregate engines) ignore the filters.
   const targets = useMemo(
-    () => (session.device ? targetsOn(session.device, remoteAgents) : { agents, remote: remoteAgents }),
-    [session.device, agents, remoteAgents],
+    () =>
+      session.device
+        ? targetsOn(session.device, remoteAgents, session.network, session.workspace ?? undefined)
+        : { agents, remote: remoteAgents },
+    [session.device, agents, remoteAgents, session.network, session.workspace],
   );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
