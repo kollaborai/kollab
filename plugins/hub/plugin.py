@@ -9776,7 +9776,7 @@ class HubPlugin(BasePlugin):
         # A device alone on a network keeps it: connecting again re-attaches the same
         # room (naming it if it has no name), so there is no second network.
         domain = self._relay_network_domain() or DEFAULT_DOMAIN
-        if not await self._start_connect_network(domain):
+        if (await self._start_connect_network(domain)) is not True:
             # A half-set-up network of one (a 0.10.7 room with no domain and
             # networking off) cannot be re-attached: leave it, as Join does, and
             # start fresh. Never a network that has another device on it.
@@ -9790,27 +9790,37 @@ class HubPlugin(BasePlugin):
             except Exception:
                 logger.debug("guided setup: leaving a lone network failed")
             domain = DEFAULT_DOMAIN
-            if not await self._start_connect_network(domain):
+            if (await self._start_connect_network(domain)) is not True:
                 return f"connect: could not start a network on {domain}; try /connect"
         return await self._open_connect_screen(
             self._relay_network_domain() or domain, guide=True
         )
 
-    async def _start_connect_network(self, domain: str) -> bool:
-        """Start a network on `domain` (the first device); True once one exists."""
+    async def _start_connect_network(self, domain: str) -> bool | str:
+        """Start a network on `domain` (the first device).
+
+        True once a network exists; otherwise a short human-readable reason
+        (for the Connect screens and pipe output) why it could not be started.
+        """
         from .relay_commands import NO_NETWORK
 
         if not _looks_like_connect_target(domain):
-            return False
+            return f"'{domain}' is not a domain, URL or known network"
         try:
             if self._attached():
                 text = await self._attached_connect(domain)
             else:
                 text = await self._run_connect_command(domain)
-        except Exception:
-            return False
+        except Exception as exc:
+            logger.warning("start network %s failed: %s", domain, exc)
+            logger.debug("start network %s failed", domain, exc_info=True)
+            return f"could not start a network: {type(exc).__name__}: {exc}"
         first = str(text).splitlines()[:1]
-        return bool(first) and first[0].startswith("network ") and first[0] != NO_NETWORK
+        if first and first[0].startswith("network ") and first[0] != NO_NETWORK:
+            return True
+        reason = first[0] if first else "no reply from the relay owner"
+        logger.warning("start network %s failed: %s", domain, reason)
+        return reason
 
     def _altview_stack(self):
         """The AltView stack manager, created on first use."""
@@ -9974,8 +9984,11 @@ class HubPlugin(BasePlugin):
                     result = await self._connect_enrollment_status(receipt_id)
                 return outcome_of(result, target_domain)
 
-            async def attach(domain: str) -> bool:
-                """No code: this is the first device, so start a network."""
+            async def attach(domain: str) -> bool | str:
+                """No code: this is the first device, so start a network.
+
+                True once one exists, else a short reason for the Connect view.
+                """
                 return await self._start_connect_network(domain)
 
             stack_mgr = self._altview_stack()

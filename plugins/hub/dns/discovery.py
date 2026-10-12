@@ -293,7 +293,13 @@ class _PublicResolver(aiohttp.abc.AbstractResolver):
                     forbidden = forbidden or bool(ip.ipv4_mapped or ip.sixtofour or ip.teredo)
                 allowed = ip.is_global or any(ip in net for net in self.networks)
                 if forbidden or not allowed:
-                    raise DiscoveryError("address_denied", "discovery resolves outside the permitted address scope")
+                    hint_network = ipaddress.ip_network(f"{ip}/{ip.max_prefixlen}", strict=False)
+                    raise DiscoveryError(
+                        "address_denied",
+                        f"{host} resolves to {ip}, outside the permitted address scope. "
+                        "If this host uses a DNS or egress proxy, allow it with "
+                        f'plugins.hub.discovery_private_origins = {{"https://{host}": ["{hint_network}"]}}',
+                    )
                 addresses.append(
                     {
                         "hostname": host,

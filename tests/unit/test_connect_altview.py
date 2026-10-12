@@ -504,3 +504,72 @@ async def test_the_form_hints_wrap_instead_of_being_cut_off_on_a_narrow_terminal
     flat = " ".join(" ".join(rows).split())
     assert "an empty code plus enter starts a network on kollabor.ai" in flat
     assert "run /connect code on a device already on the network" in flat
+
+
+# --------------------------------------------- start-network failure reasons (#155)
+
+
+def test_error_outcome_accepts_a_single_line_detail():
+    """ERROR outcomes may carry the start-network failure reason (#155)."""
+    outcome = ConnectOutcome.error("could not start a network: RuntimeError: no dns")
+    assert outcome.detail == "could not start a network: RuntimeError: no dns"
+    assert ConnectOutcome.error().detail == ""
+    # The old contract still works: submit-path failures keep a note.
+    assert ConnectOutcome.error(note="stale offer").note == "stale offer"
+
+
+@pytest.mark.parametrize("detail", ["two\nlines", "x" * 201, "bad \x00 control"])
+def test_error_outcome_detail_is_still_one_printable_line(detail):
+    with pytest.raises(ValueError):
+        ConnectOutcome.error(detail)
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_shows_the_start_network_reason():
+    """The empty-code path renders 'could not start the network' plus why."""
+
+    async def on_attach(domain: str) -> str:
+        return "connect: relay discovery is unavailable"
+
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error(), on_attach=on_attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    text = renderer.text()
+    assert "could not start the network" in text
+    assert "connect: relay discovery is unavailable" in text
+    assert "could not submit the join request" not in text
+
+
+@pytest.mark.asyncio
+async def test_attach_exception_becomes_a_printable_reason(caplog):
+    def on_attach(domain: str) -> bool:
+        raise RuntimeError("boom")
+
+    view = ConnectAltView(on_submit=lambda _s: ConnectOutcome.error(), on_attach=on_attach)
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    text = renderer.text()
+    assert "could not start the network" in text
+    assert "RuntimeError: boom" in text
+    assert any("start network failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_attach_without_reason_keeps_the_generic_submit_error():
+    """A callback that only says False (legacy) still gets the old copy."""
+    view = ConnectAltView(
+        on_submit=lambda _s: ConnectOutcome.error(), on_attach=lambda _d: False
+    )
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    await view.handle_input(_named("Enter"))
+    await view.render_frame(0.0)
+
+    assert "could not submit the join request" in renderer.text()
+    assert "could not start the network" not in renderer.text()

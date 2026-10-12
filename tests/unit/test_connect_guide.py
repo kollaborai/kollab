@@ -314,13 +314,18 @@ def test_new_network_creates_then_opens_the_screen_with_the_steps():
 
 @pytest.mark.parametrize(
     "reply,started",
-    [("network mac-net via kollabor.ai", True), (NO_NETWORK, False), ("", False)],
+    [
+        ("network mac-net via kollabor.ai", True),
+        (NO_NETWORK, NO_NETWORK),
+        ("", "no reply from the relay owner"),
+    ],
 )
 def test_start_network_reads_the_first_line_of_the_reply(reply, started):
+    """True only once a network exists; else the reason says why it does not."""
     plugin = _plugin()
     plugin._attached = lambda: False
     plugin._run_connect_command = AsyncMock(return_value=reply)
-    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) is started
+    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) == started
 
 
 # ---------------------------------------------------------------- the texts
@@ -410,3 +415,45 @@ async def test_join_line_says_the_stand_in_once_when_no_name_comes():
     line = JoinLine(lambda: "", patience=30.0, clock=lambda: now[0])
     await line.say(said.append, poll=1.0, sleep=sleep)
     assert said == [post_join_line("")] and now[0] == 30.0
+
+
+# ------------------------------------------------- start-network reasons (#155)
+
+
+def test_start_network_failure_reasons_are_returned_not_swallowed():
+    """Every failure path returns a short human-readable reason (issue #155)."""
+    plugin = _plugin()
+    plugin._attached = lambda: False
+
+    # Not a target: say what was wrong with the input.
+    plugin._run_connect_command = AsyncMock()
+    reason = asyncio.run(plugin._start_connect_network("not a domain"))
+    assert reason == "'not a domain' is not a domain, URL or known network"
+    plugin._run_connect_command.assert_not_awaited()
+
+    # The relay call raised: name the exception and its message.
+    plugin._run_connect_command = AsyncMock(
+        side_effect=RuntimeError("relay discovery is unavailable")
+    )
+    reason = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert (
+        reason
+        == "could not start a network: RuntimeError: relay discovery is unavailable"
+    )
+
+
+def test_guided_new_network_falls_back_on_a_reason_string():
+    """A reason (not False) also counts as not-started for the guided setup."""
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: ""
+    plugin._start_connect_network = AsyncMock(
+        side_effect=["bad dns", "still bad dns"]
+    )
+    plugin._connect_has_network = AsyncMock(return_value=False)
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(return_value="")
+    plugin._open_connect_screen = AsyncMock()
+    assert "could not start a network" in asyncio.run(plugin._guided_new_network())
+    plugin._open_connect_screen.assert_not_awaited()
+    # Both attempts got a real reason back, not a bare False.
+    assert plugin._start_connect_network.await_count == 2

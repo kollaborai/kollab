@@ -238,3 +238,92 @@ def test_hub_plugin_still_discoverable():
     classes = dict(inspect.getmembers(plugins.hub, inspect.isclass))
     assert "HubPlugin" in classes
     assert callable(classes["HubPlugin"].get_default_config)
+
+
+@pytest.mark.asyncio
+async def test_address_denied_message_names_host_ip_and_config_hint():
+    """The denial says what resolved where and the exact config change (#155)."""
+    resolver = _PublicResolver(FakeDNS(["10.0.0.5"]), ())
+    with pytest.raises(DiscoveryError) as denied:
+        await resolver.resolve("example.com", 443)
+    text = str(denied.value)
+    assert "example.com resolves to 10.0.0.5" in text
+    assert "discovery_private_origins" in text
+    assert '"https://example.com": ["10.0.0.5/32"]' in text
+
+
+@pytest.mark.asyncio
+async def test_address_denied_message_is_actionable_for_ipv6_too():
+    resolver = _PublicResolver(FakeDNS(["2001:db8::5"]), ())
+    with pytest.raises(DiscoveryError) as denied:
+        await resolver.resolve("example.com", 443)
+    assert '"https://example.com": ["2001:db8::5/128"]' in str(denied.value)
+
+
+# ------------------------------------------- wildcard discovery scope (#155)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scopes, expected",
+    [
+        ({"https://example.com": ["10.0.0.0/8"]}, ("10.0.0.0/8",)),
+        ({"*": ["198.18.0.0/15"]}, ("198.18.0.0/15",)),
+        ({}, ()),
+    ],
+)
+async def test_private_discovery_scope_explicit_then_wildcard(
+    scopes, expected, monkeypatch
+):
+    """An explicit origin entry wins; '*' covers any origin; default is deny."""
+    import kollabor_config.provisioned_state as provisioned_state
+    from unittest.mock import AsyncMock
+
+    import plugins.hub.relay_commands as relay_commands
+    from plugins.hub.relay_commands import RelayCommands
+
+    class _NoNetworkPrefs:
+        def get_network_preferences(self):
+            return {}
+
+    monkeypatch.setattr(
+        provisioned_state, "ProvisionedStateFile", _NoNetworkPrefs, raising=False
+    )
+    monkeypatch.setattr(
+        relay_commands, "discover", AsyncMock(return_value=object()), raising=False
+    )
+
+    commands = RelayCommands.__new__(RelayCommands)
+    commands.config = {
+        "plugins.hub.discovery_private_origins": scopes,
+        "plugins.hub.endpoint_tls_ca": "",
+    }
+    commands._cache = SimpleNamespace(accept=lambda result: result)
+
+    _result, _ca, cidrs, _is_card = await commands._discover("https://example.com")
+    assert cidrs == expected
+
+
+@pytest.mark.asyncio
+async def test_private_discovery_scope_rejects_bad_wildcard_values(monkeypatch):
+    """A non-list '*' value gets the same validation as a named origin."""
+    import kollabor_config.provisioned_state as provisioned_state
+    from plugins.hub.relay_commands import RelayCommands
+
+    class _NoNetworkPrefs:
+        def get_network_preferences(self):
+            return {}
+
+    monkeypatch.setattr(
+        provisioned_state, "ProvisionedStateFile", _NoNetworkPrefs, raising=False
+    )
+
+    commands = RelayCommands.__new__(RelayCommands)
+    commands.config = {
+        "plugins.hub.discovery_private_origins": {"*": "198.18.0.0/15"},
+        "plugins.hub.endpoint_tls_ca": "",
+    }
+    commands._cache = SimpleNamespace(accept=lambda result: result)
+
+    with pytest.raises(ValueError, match="list of CIDRs"):
+        await commands._discover("https://example.com")

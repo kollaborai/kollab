@@ -296,3 +296,66 @@ async def test_join_finish_reads_the_wizard_action_body():
     with pytest.raises(PanelError) as err:
         await JOIN.act(Hub(), "finish", {"values": {"domain": "kollabor.ai", "code": ""}, "step": "code"})
     assert "code" in err.value.errors
+
+
+# ------------------------------------------------ beacon failure reasons (#155)
+
+
+class _FailingHub:
+    """A state service whose hub_connect always raises."""
+
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    async def hub_connect(self, command: str) -> str:
+        raise self.exc
+
+
+@pytest.mark.asyncio
+async def test_daemon_hub_connect_reports_the_reason_not_bare_failure():
+    """The daemon returns the exception text so callers can show why (#155)."""
+    from types import SimpleNamespace
+
+    from kollabor.state.handlers import register_state_handlers
+
+    handlers = {}
+    register_state_handlers(
+        SimpleNamespace(
+            register=lambda *a, **k: handlers.__setitem__(a[0], a[1])
+        ),
+        _FailingHub(ValueError("address_denied: host is blocked")),
+    )
+    result = await handlers["state.hub_connect"]({"command": "leave"})
+    assert result["error"] == "ValueError: address_denied: host is blocked"
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_surfaces_the_daemon_reason(caplog):
+    """RemoteStateService raises the daemon's reason, not a generic string."""
+    from types import SimpleNamespace
+
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "ValueError: address_denied: host is blocked"}
+
+    remote = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="address_denied: host is blocked"):
+        await remote.hub_connect("leave")
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_keeps_generic_reason_for_non_dict():
+    """A malformed daemon reply still raises the old generic message."""
+    from types import SimpleNamespace
+
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return "not a dict"
+
+    with pytest.raises(ValueError, match="daemon beacon command failed"):
+        await RemoteStateService(_Rpc()).hub_connect("leave")
+

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import re
 import textwrap
 import time
@@ -54,6 +55,8 @@ _LABEL_WIDTH = 13
 _POLL_SECONDS = 2.0
 _SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
 _OFFER_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectStatus(Enum):
@@ -162,7 +165,8 @@ class ConnectOutcome:
         elif self.receipt_id is not None:
             raise ValueError("only pending outcomes may include a receipt ID")
         if self.detail and (
-            self.status not in (ConnectStatus.APPROVED, ConnectStatus.CONNECTED)
+            self.status
+            not in (ConnectStatus.APPROVED, ConnectStatus.CONNECTED, ConnectStatus.ERROR)
             or not isinstance(self.detail, str)
             or len(self.detail) > 200
             or ConnectAltView._filter_text(self.detail, 200) != self.detail
@@ -193,16 +197,17 @@ class ConnectOutcome:
         return cls(ConnectStatus.REJECTED)
 
     @classmethod
-    def error(cls, note: str = "") -> ConnectOutcome:
-        return cls(ConnectStatus.ERROR, note=note)
+    def error(cls, detail: str = "", note: str = "") -> ConnectOutcome:
+        return cls(ConnectStatus.ERROR, detail=detail, note=note)
 
 
 ConnectSubmitCallback = Callable[
     [ConnectSubmission], ConnectOutcome | Awaitable[ConnectOutcome]
 ]
 EnrollmentOfferCallback = Callable[[str], dict[str, str] | Awaitable[dict[str, str]]]
-# Starts a network on a directory when the code is left empty; true on success.
-ConnectAttachCallback = Callable[[str], bool | Awaitable[bool]]
+# Starts a network on a directory when the code is left empty; true on success,
+# else a short human-readable reason the view shows under its error line.
+ConnectAttachCallback = Callable[[str], "bool | str | Awaitable[bool | str]"]
 # Where a submitted request stands: (receipt id, domain) -> pending, approved,
 # rejected or error. It raises when it cannot tell (the form keeps waiting).
 ConnectWaitCallback = Callable[[str, str], ConnectOutcome | Awaitable[ConnectOutcome]]
@@ -413,11 +418,18 @@ class ConnectAltView(AltView):
         elif self._sent:
             # It was submitted, so this is the wait that failed, not the send.
             message = "the join request did not complete; get a new code and try again"
+        elif outcome.detail:
+            # The first-device network start failed; say so and why.
+            message = "could not start the network"
         else:
             message = "could not submit the join request"
 
         self._write_line(2, y, message, width, lambda text: paint_status(text, kind))
         row = y + 1
+        if outcome is not None and outcome.detail and outcome.status is ConnectStatus.ERROR:
+            for line in textwrap.wrap(outcome.detail, max(10, width - 3)):
+                self._write_line(2, row, line, width, _dim)
+                row += 1
         if outcome is not None and outcome.note:
             for line in textwrap.wrap(outcome.note, max(10, width - 3)):
                 self._write_line(2, row, line, width, _dim)
@@ -509,15 +521,24 @@ class ConnectAltView(AltView):
             result = self._on_attach(self.domain) if self._on_attach else False
             if inspect.isawaitable(result):
                 result = await result
-            self._outcome = (
-                ConnectOutcome.connected() if result is True else ConnectOutcome.error()
-            )
+            if result is True:
+                self._outcome = ConnectOutcome.connected()
+            else:
+                detail = result if isinstance(result, str) and result else ""
+                self._outcome = ConnectOutcome.error(detail)
         except asyncio.CancelledError:
             self._outcome = ConnectOutcome.error()
             self._stage = "outcome"
             raise
-        except Exception:
-            self._outcome = ConnectOutcome.error()
+        except Exception as exc:
+            logger.warning(
+                "connect view: start network failed: %s",
+                type(exc).__name__,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
+            self._outcome = ConnectOutcome.error(
+                ConnectAltView._filter_text(f"{type(exc).__name__}: {exc}", 200)
+            )
         self._stage = "outcome"
         self.request_render()
 
