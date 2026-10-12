@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web: the gems are soft now. Each is a smooth, breathing blob in its own color that changes shape, with pill eyes and a mouth that morph too, and its face turns with the body toward your cursor. Every agent is born with one of three motions that sticks: Mood Morph (its shape shows what it is doing), Jelly (it wobbles as it moves) or Shape Cycle (it cycles through shapes while idle).
 
+## [0.15.5] - 2026-10-12
+
+### Fixed
+- The update check no longer treats a version cache holding the version you are already running as fresh for a full day: a cache that shows the current or an older version is refetched within the hour, so a release you just installed is announced instead of staying hidden until the next day. (#169, #170)
+- `kollab --update` now shows download progress (bytes and percent) on stderr, fails loudly after 30 seconds of no data and retries once — resuming from where the server allows, and restarting cleanly when it does not — sweeps stale `.kollab-upgrade-*` temp files older than an hour at startup, and unlinks its in-flight temp file on Ctrl-C or SIGTERM instead of leaving it behind. (#171, #172)
+
+
 ## [0.15.4] - 2026-10-12
 
 ### Added
