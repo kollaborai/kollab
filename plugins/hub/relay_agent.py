@@ -50,6 +50,7 @@ from .relay_conversations import (
     RelayAddress,
     validate_message,
 )
+from .membership_runtime import Memberships
 from .relay_owner import WorkspaceRelayOwner, local_relay_rpc
 from .relay_state import (
     ID,
@@ -164,6 +165,7 @@ class RelayAgentBridge:
         self.plugin = plugin
         self.workspace = Path(workspace).resolve()
         self.owner = WorkspaceRelayOwner(self.workspace, state_dir)
+        self.memberships = Memberships(self.workspace)
         self.directory = directory or LocalAgentDirectory()
         self.commands: RelayCommands | None = None
         self.store: ConversationStore | None = None
@@ -690,10 +692,18 @@ class RelayAgentBridge:
         if self.commands is not None:
             return
         if self.owner.acquire(self.identity.socket_path, self.identity.agent_id):
+            # Slice 3: with several memberships the commands instance binds to
+            # the PRIMARY membership's state dir (the registry resolves it;
+            # N=1 keeps today's behavior because the primary is the only one).
+            try:
+                membership = self.memberships.resolve(None)
+                membership_dir = membership.state_dir
+            except RelayError:
+                membership_dir = self.owner.state_dir
             self.commands = RelayCommands(
                 self.workspace,
                 config=self.plugin.config,
-                state_dir=self.owner.state_dir,
+                state_dir=membership_dir,
                 agent_bridge=self,
             )
             self.plugin._relay_commands = self.commands
