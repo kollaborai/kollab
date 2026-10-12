@@ -1,6 +1,7 @@
 """Security and input behavior for the private connect AltView."""
 
 import re
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -504,3 +505,52 @@ async def test_the_form_hints_wrap_instead_of_being_cut_off_on_a_narrow_terminal
     flat = " ".join(" ".join(rows).split())
     assert "an empty code plus enter starts a network on kollabor.ai" in flat
     assert "run /connect code on a device already on the network" in flat
+
+
+# --------------------------------------------------------------------- #
+# attach failure reasons surface on the Connect screen (issue #155)
+# --------------------------------------------------------------------- #
+
+
+async def _run_attach(outcome_of_attach):
+    """Drive the Connect form through the empty-code attach path."""
+    view = ConnectAltView()
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    view._on_attach = AsyncMock(return_value=outcome_of_attach)
+    await view._attach()
+    await view.render_frame(0.0)
+    return view, renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_attach_reason_string_shown_after_generic_start_message():
+    view, text = await _run_attach("198.18.0.7 is outside the permitted scope")
+    assert view._outcome.status is ConnectStatus.ERROR
+    assert "could not start the network" in text
+    assert "198.18.0.7 is outside the permitted scope" in text
+
+
+@pytest.mark.asyncio
+async def test_attach_false_keeps_generic_message_without_detail():
+    view, text = await _run_attach(False)
+    assert view._outcome.status is ConnectStatus.ERROR
+    assert "could not start the network" in text
+
+
+@pytest.mark.asyncio
+async def test_attach_exception_text_is_surfaced_and_logged():
+    view = ConnectAltView()
+    renderer = _FakeRenderer()
+    await view.on_enter(renderer)
+    view._on_attach = AsyncMock(side_effect=RuntimeError("dns resolver died"))
+    await view._attach()
+    await view.render_frame(0.0)
+    assert view._outcome.status is ConnectStatus.ERROR
+    assert "dns resolver died" in renderer.text()
+
+
+@pytest.mark.asyncio
+async def test_attach_success_still_connects():
+    view, text = await _run_attach(True)
+    assert view._outcome.status is ConnectStatus.CONNECTED

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import re
 import textwrap
 import time
@@ -197,15 +198,23 @@ class ConnectOutcome:
         return cls(ConnectStatus.ERROR, note=note)
 
 
+logger = logging.getLogger(__name__)
+
 ConnectSubmitCallback = Callable[
     [ConnectSubmission], ConnectOutcome | Awaitable[ConnectOutcome]
 ]
 EnrollmentOfferCallback = Callable[[str], dict[str, str] | Awaitable[dict[str, str]]]
-# Starts a network on a directory when the code is left empty; true on success.
-ConnectAttachCallback = Callable[[str], bool | Awaitable[bool]]
+# Starts a network on a directory when the code is left empty; true on success,
+# or a short failure reason string.
+ConnectAttachCallback = Callable[[str], bool | str | Awaitable[bool | str]]
 # Where a submitted request stands: (receipt id, domain) -> pending, approved,
 # rejected or error. It raises when it cannot tell (the form keeps waiting).
 ConnectWaitCallback = Callable[[str, str], ConnectOutcome | Awaitable[ConnectOutcome]]
+
+
+def _failure_note(exc: Exception) -> str:
+    """One printable line from an exception; empty when nothing safe to show."""
+    return ConnectAltView._filter_text(str(exc).strip(), 200)
 
 
 class ConnectAltView(AltView):
@@ -246,6 +255,7 @@ class ConnectAltView(AltView):
         self._on_attach = on_attach
         self._on_wait = on_wait
         self._sent = False  # the relay holds a request from this form
+        self._attach_failed = False  # the empty-code first-device path failed
         self._wait_note = ""
         self._renderer: Any = None
         self._code_chars: list[str] = []
@@ -283,6 +293,7 @@ class ConnectAltView(AltView):
         self._focus = "code" if self.domain else "domain"
         self._stage = "entry"
         self._sent = False
+        self._attach_failed = False
         self._wait_note = ""
         self._paste_active = False
 
@@ -413,6 +424,9 @@ class ConnectAltView(AltView):
         elif self._sent:
             # It was submitted, so this is the wait that failed, not the send.
             message = "the join request did not complete; get a new code and try again"
+        elif self._attach_failed:
+            # Empty-code first-device path: nothing was submitted anywhere.
+            message = "could not start the network"
         else:
             message = "could not submit the join request"
 
@@ -509,15 +523,23 @@ class ConnectAltView(AltView):
             result = self._on_attach(self.domain) if self._on_attach else False
             if inspect.isawaitable(result):
                 result = await result
-            self._outcome = (
-                ConnectOutcome.connected() if result is True else ConnectOutcome.error()
-            )
+            if result is True:
+                self._outcome = ConnectOutcome.connected()
+            else:
+                # A string return is the human-readable failure reason; False
+                # carries none and keeps the generic message.
+                self._attach_failed = True
+                reason = result if isinstance(result, str) else ""
+                reason = ConnectAltView._filter_text(reason.strip(), 200)
+                self._outcome = ConnectOutcome.error(note=reason)
         except asyncio.CancelledError:
             self._outcome = ConnectOutcome.error()
             self._stage = "outcome"
             raise
-        except Exception:
-            self._outcome = ConnectOutcome.error()
+        except Exception as exc:
+            logger.warning("connect attach failed: %s", exc, exc_info=True)
+            self._attach_failed = True
+            self._outcome = ConnectOutcome.error(note=_failure_note(exc))
         self._stage = "outcome"
         self.request_render()
 

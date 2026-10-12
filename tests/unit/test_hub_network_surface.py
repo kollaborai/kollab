@@ -17,8 +17,10 @@ import pytest
 
 from kollabor_events.data_models import ConversationMessage
 from plugins.hub.device_names import contact_route_hex, key_label, short_fingerprint
+from plugins.hub.dns.discovery import DiscoveryError
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.plugin import HubPlugin
+from plugins.hub import relay_commands
 from plugins.hub.relay_commands import RelayCommands
 
 REMOTE_ROWS = [
@@ -713,3 +715,86 @@ def test_an_outgoing_box_never_draws_a_relay_address():
     )
     assert _outgoing_box(address, []).startswith("sapphire -> a remote agent\n")
     assert _outgoing_box("lapis", [row]).startswith("sapphire -> lapis\n")
+
+
+# --------------------------------------------------------------------- #
+# discovery_private_origins "*" host-wide proxy ranges (issue #155)
+# --------------------------------------------------------------------- #
+
+
+class _StarConfig:
+    def __init__(self, scopes):
+        self._scopes = scopes
+
+    def get(self, name, default=None):
+        if name == "plugins.hub.discovery_private_origins":
+            return self._scopes
+        return default
+
+
+def _capture_discovery(seen):
+    """Stub plugins.hub.relay_commands.discover and the cache accept, so the
+    test exercises only the scope routing in RelayCommands._discover."""
+
+    async def _fake_discover(origin, ca="", private_cidrs=()):
+        seen["origin"] = origin
+        seen["cidrs"] = private_cidrs
+        return SimpleNamespace(
+            origin=origin,
+            discovery_url=origin + "/.well-known/agent-keys.json",
+            manifest={},
+        )
+
+    return _fake_discover
+
+
+@pytest.mark.asyncio
+async def test_star_scope_allows_proxy_range_for_any_origin(tmp_path, monkeypatch):
+    """{"*": [...]} applies the ranges to every origin."""
+    commands = _relay_commands(tmp_path, agent_bridge=SimpleNamespace())
+    commands.config = _StarConfig({"*": ["198.18.0.0/15"]})
+    seen = {}
+    monkeypatch.setattr(relay_commands, "discover", _capture_discovery(seen))
+    monkeypatch.setattr(
+        commands._cache, "accept", lambda result: result, raising=False
+    )
+    _, _ca, cidrs, _is_card = await commands._discover("example.com")
+    assert cidrs == ("198.18.0.0/15",)
+
+
+@pytest.mark.asyncio
+async def test_star_scope_still_denies_outside_ranges(tmp_path, monkeypatch):
+    """The wildcard widens nothing outside its listed ranges."""
+    commands = _relay_commands(tmp_path, agent_bridge=SimpleNamespace())
+    commands.config = _StarConfig({"*": ["198.18.0.0/15"]})
+    monkeypatch.setattr(
+        relay_commands,
+        "discover",
+        lambda *a, **k: pytest.fail("discovery must not run for a denied address"),
+    )
+
+    def _deny(_origin, ca="", private_cidrs=()):
+        raise DiscoveryError("address_denied", "198.18.x outside scope")
+
+    monkeypatch.setattr(relay_commands, "discover", _deny)
+    with pytest.raises(DiscoveryError, match="address_denied"):
+        await commands._discover("example.com")
+
+
+@pytest.mark.asyncio
+async def test_specific_origin_scope_wins_over_star(tmp_path, monkeypatch):
+    """An explicit origin entry still beats the host-wide ranges."""
+    commands = _relay_commands(tmp_path, agent_bridge=SimpleNamespace())
+    commands.config = _StarConfig(
+        {
+            "https://example.com": ["10.0.0.0/8"],
+            "*": ["198.18.0.0/15"],
+        }
+    )
+    seen = {}
+    monkeypatch.setattr(relay_commands, "discover", _capture_discovery(seen))
+    monkeypatch.setattr(
+        commands._cache, "accept", lambda result: result, raising=False
+    )
+    await commands._discover("example.com")
+    assert seen["cidrs"] == ("10.0.0.0/8",)

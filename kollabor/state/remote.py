@@ -953,7 +953,14 @@ class RemoteStateService(StateService):
             "state.hub_connect", {"command": command}, timeout=max(self._timeout, 50.0)
         )
         if not isinstance(result, dict) or result.get("error"):
-            raise ValueError("daemon beacon command failed")
+            reason = str(result.get("error", "")) if isinstance(result, dict) else ""
+            logger.warning("daemon beacon command failed: %s", reason or "no reply")
+            raise ValueError(
+                reason.removeprefix("beacon command failed: ").removeprefix(
+                    "beacon command failed"
+                ).strip()
+                or "daemon beacon command failed"
+            )
         return str(result.get("text", ""))
 
     async def hub_send_msg(self, target: str, content: str) -> str:

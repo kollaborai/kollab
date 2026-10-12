@@ -320,7 +320,8 @@ def test_start_network_reads_the_first_line_of_the_reply(reply, started):
     plugin = _plugin()
     plugin._attached = lambda: False
     plugin._run_connect_command = AsyncMock(return_value=reply)
-    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) is started
+    result = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert (result is True) is started
 
 
 # ---------------------------------------------------------------- the texts
@@ -410,3 +411,127 @@ async def test_join_line_says_the_stand_in_once_when_no_name_comes():
     line = JoinLine(lambda: "", patience=30.0, clock=lambda: now[0])
     await line.say(said.append, poll=1.0, sleep=sleep)
     assert said == [post_join_line("")] and now[0] == 30.0
+
+
+# --------------------------------------------------------------------- #
+# start-network failure reasons (issue #155)
+# --------------------------------------------------------------------- #
+
+
+def test_start_network_failure_returns_a_reason_string():
+    plugin = _plugin()
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(return_value="connect: beacon down")
+    result = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert result == "connect: beacon down"
+
+
+def test_start_network_no_network_reply_gets_generic_reason():
+    from plugins.hub.relay_commands import NO_NETWORK
+
+    plugin = _plugin()
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(return_value=NO_NETWORK)
+    result = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert result is not True
+    assert isinstance(result, str) and result
+
+
+def test_start_network_exception_becomes_reason_string():
+    plugin = _plugin()
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(side_effect=RuntimeError("dns dead"))
+    result = asyncio.run(plugin._start_connect_network("kollabor.ai"))
+    assert result is not True
+    assert "dns dead" in result
+
+
+def test_start_network_invalid_target_returns_reason():
+    plugin = _plugin()
+    result = asyncio.run(plugin._start_connect_network("not a domain"))
+    assert result is not True
+    assert isinstance(result, str) and result
+
+
+def test_start_network_success_still_true():
+    plugin = _plugin()
+    plugin._attached = lambda: False
+    plugin._run_connect_command = AsyncMock(
+        return_value="network mac-net via kollabor.ai"
+    )
+    assert asyncio.run(plugin._start_connect_network("kollabor.ai")) is True
+
+
+def test_guided_new_network_uses_is_true_and_reports_reason():
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: "kollabor.ai"
+    plugin._start_connect_network = AsyncMock(
+        side_effect=["the beacon did not come up"]
+    )
+    text = asyncio.run(plugin._guided_new_network())
+    # A reason string must be treated as failure, never as success.
+    assert "could not start a network" in text
+    plugin._open_connect_screen = AsyncMock()
+    plugin._open_connect_screen.assert_not_awaited()
+
+
+def test_guided_new_network_reason_string_is_not_success():
+    """A truthy reason must not pass the old truthiness check."""
+    plugin = _plugin()
+    plugin._relay_network_domain = lambda: "kollabor.ai"
+    plugin._start_connect_network = AsyncMock(side_effect=["beacon timed out"])
+    plugin._open_connect_screen = AsyncMock()
+    asyncio.run(plugin._guided_new_network())
+    plugin._open_connect_screen.assert_not_awaited()
+
+
+# --------------------------------------------------------------------- #
+# beacon reason propagation (issue #155)
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_daemon_hub_connect_carries_reason(monkeypatch):
+    """The daemon passes the underlying failure through to the caller."""
+    from kollabor.state import handlers as state_handlers
+
+    class _FailingStateService:
+        async def hub_connect(self, command):
+            raise RuntimeError("discovery: address_denied")
+
+    captured = {}
+
+    class _RpcServer:
+        def register(self, name, handler):
+            captured[name] = handler
+
+    state_handlers.register_state_handlers(_RpcServer(), _FailingStateService())
+    result = await captured["state.hub_connect"]({"command": "start"})
+    assert result["error"] == "beacon command failed: discovery: address_denied"
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_raises_underlying_reason():
+    """The attach client raises the daemon's reason, not a generic string."""
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed: discovery: address_denied"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="discovery: address_denied"):
+        await service.hub_connect("start")
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_connect_generic_when_daemon_says_nothing():
+    from kollabor.state.remote import RemoteStateService
+
+    class _Rpc:
+        async def call(self, method, params, timeout=None):
+            return {"error": "beacon command failed"}
+
+    service = RemoteStateService(_Rpc())
+    with pytest.raises(ValueError, match="daemon beacon command failed"):
+        await service.hub_connect("start")

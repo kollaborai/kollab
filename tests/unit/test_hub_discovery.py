@@ -238,3 +238,21 @@ def test_hub_plugin_still_discoverable():
     classes = dict(inspect.getmembers(plugins.hub, inspect.isclass))
     assert "HubPlugin" in classes
     assert callable(classes["HubPlugin"].get_default_config)
+
+
+# --------------------------------------------------------------------- #
+# actionable address_denied reasons (issue #155)
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_address_denied_names_host_ip_and_config_hint():
+    """A denied lookup says which host resolved where and how to allow it."""
+    resolver = _PublicResolver(FakeDNS(["198.18.0.7"]), ())
+    with pytest.raises(DiscoveryError) as err:
+        await resolver.resolve("example.com", 443)
+    assert err.value.code == "address_denied"
+    message = str(err.value)
+    assert "example.com resolves to 198.18.0.7" in message
+    assert "plugins.hub.discovery_private_origins" in message
+    assert "'https://example.com': ['198.18.0.7/32']" in message

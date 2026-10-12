@@ -1426,6 +1426,24 @@ class TerminalLLMChat:
             self.running = True
             logger.info("Pipe mode initialized with plugins")
 
+            # Slash commands run directly through the command executor and
+            # print their result to stdout, so pipe callers see the outcome
+            # (e.g. `kollab -p "/connect join.example.net"` shows why a join
+            # failed). Anything else goes to the LLM.
+            slash_parser = getattr(self, "event_bus", None) and self.event_bus.get_service(
+                "slash_parser"
+            )
+            if slash_parser is not None and slash_parser.is_slash_command(
+                piped_input
+            ):
+                logger.info("Pipe mode: executing command %r", piped_input)
+                exit_code = await self._execute_cli_command(
+                    {"raw": piped_input.strip()}
+                )
+                if exit_code:
+                    sys.exit(exit_code)
+                return
+
             # Send input to LLM and wait for response
             # The LLM service will handle the response display
             submission = await self.llm_service.submit_human_input(

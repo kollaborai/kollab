@@ -455,8 +455,11 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             return {"error": "invalid beacon command"}
         try:
             return {"text": await state_service.hub_connect(command)}
-        except Exception:
-            return {"error": "beacon command failed"}
+        except Exception as exc:
+            # Carry the real reason so attached windows see why it failed.
+            reason = str(exc).strip() or exc.__class__.__name__
+            logger.warning("beacon connect failed: %s", reason)
+            return {"error": f"beacon command failed: {reason}"}
 
     async def _hub_enroll(params: dict[str, Any]) -> dict[str, Any]:
         domain = params.get("domain")
