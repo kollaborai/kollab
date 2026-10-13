@@ -414,9 +414,21 @@ class EngineSession:
             self.history = web_history(self._raw_history)
             return self.history
 
-    async def send_message(self, content: Any) -> Dict[str, Any]:
+    async def send_message(
+        self,
+        content: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        origin_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        return await self.state.send_message(content)
+        return await self.state.send_message(
+            content,
+            request_id=request_id,
+            thread_id=thread_id,
+            origin_context=origin_context,
+        )
 
     def cancel_turn(self) -> None:
         """Ask the daemon to cancel the in-flight turn (fire and forget)."""

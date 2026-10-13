@@ -2593,7 +2593,11 @@ class LocalStateService(StateService):
             "queued",
             "submitted",
         }:
-            return {"accepted": True, "reason": ""}
+            accepted = {"accepted": True, "reason": ""}
+            for key in ("request_id", "turn_id"):
+                if submission.get(key) is not None:
+                    accepted[key] = submission[key]
+            return accepted
 
         reason = submission.get("reason") if isinstance(submission, dict) else None
         if not isinstance(reason, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", reason):

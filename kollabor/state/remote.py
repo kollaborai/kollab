@@ -1030,7 +1030,14 @@ class RemoteStateService(StateService):
 
     # === Resume (phase 4.5 step 7) ===
 
-    async def send_message(self, message: Any) -> dict[str, Any]:
+    async def send_message(
+        self,
+        message: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        origin_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Submit a user turn to the daemon. Returns once accepted, not done."""
         logger.debug(
             "state rpc: send_message len=%d",
@@ -1038,7 +1045,12 @@ class RemoteStateService(StateService):
         )
         result = await self._rpc.call(
             "state.send_message",
-            {"message": message},
+            {
+                "message": message,
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "origin_context": origin_context,
+            },
             timeout=self._timeout,
         )
         if not isinstance(result, dict):
