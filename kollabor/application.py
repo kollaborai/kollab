@@ -1238,7 +1238,13 @@ class TerminalLLMChat:
         scope = metadata.get("acp_grant_scope")
         choice = metadata.get("acp_choice")
         grant_acp = getattr(manager, "grant_acp", None)
-        if allowed and callable(grant_acp) and scope in ("session", "project"):
+        if (
+            allowed
+            and valid_operation
+            and len(allow_once) == 1
+            and callable(grant_acp)
+            and scope in ("session", "project")
+        ):
             grant_acp(request.operation, request.workspace, request.profile, scope=scope)
         if allowed and choice in ("approve_session", "approve_project"):
             wanted = "allow_once"
