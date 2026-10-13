@@ -2514,9 +2514,6 @@ class LocalStateService(StateService):
         if goal_handled is not None:
             return goal_handled
 
-        if getattr(llm, "is_processing", False):
-            return {"accepted": False, "reason": "turn already in flight"}
-
         if contains_image_content(message):
             supports_images = getattr(llm, "supports_image_input", None)
             if not callable(supports_images) or not supports_images():
