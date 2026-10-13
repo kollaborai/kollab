@@ -124,6 +124,7 @@ class LLMProfile:
     cwd: str = ""
     workspace: str = ""
     pass_env: tuple[str, ...] = ()
+    install_guidance: str = ""
     model: str = ""
     temperature: float = 0.7
     max_tokens: Optional[int] = None
@@ -512,6 +513,8 @@ class LLMProfile:
                 result["workspace"] = self.workspace
             if self.pass_env:
                 result["pass_env"] = list(self.pass_env)
+            if self.install_guidance:
+                result["install_guidance"] = self.install_guidance
 
         # Include api_key (resolved from env var if set)
         api_key = self.get_api_key()
@@ -610,6 +613,7 @@ class LLMProfile:
             cwd=data.get("cwd", "") if provider == "acp" else "",
             workspace=data.get("workspace", "") if provider == "acp" else "",
             pass_env=tuple(pass_env),
+            install_guidance=data.get("install_guidance", "") if provider == "acp" else "",
             api_key=data.get("api_key", ""),
             model=data.get("model", ""),
             temperature=data.get("temperature", 0.7),
@@ -736,6 +740,24 @@ class ProfileManager:
             "model": "",
             "temperature": 0.7,
             "description": "Auto-detect from env vars, fallback to local LLM",
+        },
+        "claude-code": {
+            "provider": "acp",
+            "command": ["claude-agent-acp"],
+            "description": "Claude Code over ACP",
+            "install_guidance": "Install with: npm install -g @agentclientprotocol/claude-agent-acp@0.89.0",
+        },
+        "codex-cli": {
+            "provider": "acp",
+            "command": ["codex-acp"],
+            "description": "Codex over ACP",
+            "install_guidance": "Install with: npm install -g @agentclientprotocol/codex-acp@2.1.1",
+        },
+        "gemini-cli": {
+            "provider": "acp",
+            "command": ["gemini", "--acp"],
+            "description": "Gemini CLI over ACP",
+            "install_guidance": "Install with: npm install -g @google/gemini-cli@0.63.0",
         },
     }
 
