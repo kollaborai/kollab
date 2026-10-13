@@ -492,3 +492,29 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     bus.register_service("acp_orchestrator", ACP())
     result = await service._handle_user_input({"message": "hello"}, SimpleNamespace(source="state_rpc"))
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_input_is_nonhuman_and_permission_pending_rejected():
+    bus = EventBus()
+    seen = []
+
+    async def reject_agent(data, event):
+        seen.append(event.source)
+        if event.source == "agent":
+            event.cancelled = True
+        return data
+
+    await bus.register_hook(Hook(
+        name="reject_agent_pending_permission", plugin_name="test",
+        event_type=EventType.USER_INPUT_PRE, priority=HookPriority.SECURITY.value,
+        callback=reject_agent,
+    ))
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    result = await service.submit_human_input(
+        "agent command", source="agent",
+        origin_context={"authenticated": True, "sender": "agent-a"},
+    )
+    assert result == {"status": "cancelled", "phase": "pre_user_input"}
+    assert seen == ["agent"]

@@ -1733,8 +1733,10 @@ class LLMService:
         same pre/main/post phases exactly once. Internal/model-origin callers
         cannot select an arbitrary source string here.
         """
-        if not isinstance(source, UserInputSource):
+        is_agent = source == "agent" and bool((origin_context or {}).get("authenticated"))
+        if not isinstance(source, UserInputSource) and not is_agent:
             return {"status": "rejected", "reason": "invalid_input_source"}
+        source_value = "agent" if is_agent else source.value
 
         acp = self.event_bus.get_service("acp_orchestrator")
         acp_dispatch = acp is not None and getattr(acp, "active", False) is True
@@ -1766,7 +1768,7 @@ class LLMService:
                     "thread_id": thread_id,
                     "origin_context": dict(origin_context or {}),
                 },
-                source.value,
+                source_value,
             )
         except Exception as exc:
             # Do not include user content or exception text in logs/results.

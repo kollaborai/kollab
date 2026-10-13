@@ -338,3 +338,37 @@ async def test_attached_daemon_submission_preserves_mixed_content(
     broadcast = hub._deliver_to_agent.await_args.args[1]
     assert broadcast.content == "Please inspect this\n[image1]"
     assert PNG_DATA_URL not in broadcast.content
+
+
+@pytest.mark.asyncio
+async def test_attach_legacy_text_callback_receives_no_context_kwargs():
+    received = asyncio.Event()
+    values = []
+
+    async def legacy_callback(text):
+        values.append(text)
+        received.set()
+
+    server = AgentSocketServer(
+        "legacy-callback",
+        on_message=lambda *_args: None,
+        on_input_inject=legacy_callback,
+        socket_name=f"legacy-{uuid.uuid4().hex}",
+    )
+    server._display_tap = DisplayTap(history_size=1)
+    socket_path = await server.start()
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        writer.write((json.dumps({
+            "action": "attach", "mode": "interactive", "client_id": "legacy",
+        }) + "\n").encode())
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), 2)
+        writer.write((json.dumps({"type": "input", "text": "hello"}) + "\n").encode())
+        await writer.drain()
+        await asyncio.wait_for(received.wait(), 2)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+    assert values == ["hello"]
