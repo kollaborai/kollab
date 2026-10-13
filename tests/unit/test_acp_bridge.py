@@ -433,6 +433,21 @@ async def test_permission_bridge_honors_explicit_reject_always_option():
     assert await bridge.request(request) == "reject"
 
 
+@pytest.mark.asyncio
+async def test_permission_bridge_does_not_auto_select_always_kind():
+    async def decide(request):
+        return "allow"
+
+    bridge = ACPPermissionBridge(decide)
+    bridge.bind("s1", 1)
+    request = type("Request", (), {
+        "session_id": "s1", "generation": 1,
+        "options": ({"optionId": "once", "kind": "allow_once"},),
+    })()
+    assert await bridge.request(request) is None
+
+
+
 def test_missing_adapter_is_a_hard_gate(tmp_path):
     profile = ACPProfile("missing", ("definitely-not-an-acp-adapter",), cwd=str(tmp_path))
     with pytest.raises(ACPError):
