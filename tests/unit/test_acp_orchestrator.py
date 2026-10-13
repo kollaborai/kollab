@@ -41,7 +41,7 @@ class Bus:
 
 
 class FakeRunner:
-    def __init__(self, profile, update_callback=None):
+    def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None):
         self.profile = profile
         self.update_callback = update_callback
         self.started = False
@@ -162,7 +162,7 @@ async def test_restart_start_failure_closes_replacement_and_clears_state(monkeyp
     created = []
 
     class RestartRunner(FakeRunner):
-        def __init__(self, profile, update_callback=None):
+        def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None):
             super().__init__(profile, update_callback)
             self.start_count = 0
             created.append(self)

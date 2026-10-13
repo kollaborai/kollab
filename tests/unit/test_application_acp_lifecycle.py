@@ -8,7 +8,7 @@ from kollabor.application import TerminalLLMChat
 class FakeRunner:
     instances = []
 
-    def __init__(self, event_bus, *, identity, hub_plugin):
+    def __init__(self, event_bus, *, identity, hub_plugin, permission_decider=None):
         self.event_bus = event_bus
         self.identity = identity
         self.hub_plugin = hub_plugin
