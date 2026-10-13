@@ -2386,6 +2386,63 @@ class AgentMessenger:
                     pass
 
     @staticmethod
+    async def send_turn_end(
+        target_socket: str,
+        *,
+        thread_id: str,
+        reply_to: str,
+        replies: int,
+        failed: bool,
+        outcome: str,
+        timeout: float = 5.0,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> bool:
+        """Send a correlated terminal frame on a fresh authenticated connection."""
+        if (
+            not isinstance(thread_id, str)
+            or not isinstance(reply_to, str)
+            or not isinstance(replies, int)
+            or isinstance(replies, bool)
+            or replies < 0
+            or not isinstance(failed, bool)
+            or outcome not in {
+                "end_turn", "cancelled", "refusal", "max_tokens",
+                "max_turn_requests", "busy", "skipped", "timeout", "error",
+            }
+        ):
+            return False
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                target_socket, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            payload = {
+                "action": "turn_end",
+                "thread_id": thread_id,
+                "reply_to": reply_to,
+                "turn_end": {
+                    "replies": replies,
+                    "failed": failed,
+                    "outcome": outcome,
+                },
+            }
+            writer.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            response = json.loads(line.decode().strip()) if line else {}
+            return isinstance(response, dict) and response.get("type") == "ack"
+        except Exception:
+            return False
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
     async def ping_agent(
         socket_path: str,
         timeout: float = 3.0,
