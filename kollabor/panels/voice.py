@@ -6,6 +6,7 @@ from typing import Any
 
 from kollabor_voice.classifiers import CLASSIFIERS, MAX_CONTEXT_LINES, load_preferences
 from kollabor_voice.control import service_root
+from kollabor_voice.speech_settings import KOKORO_VOICES, speech_errors
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 from .config import validate_config_changes
@@ -23,10 +24,13 @@ def voice_plugin(ctx):
     return plugin
 
 
-def voice_sections(plugin) -> list[dict]:
-    """One field definition for both interfaces; fixed engines are read-only."""
+def voice_sections(plugin, live=None) -> list[dict]:
+    """One field definition for both interfaces and both speech engines."""
     preferences = load_preferences()
-    state = plugin.status()
+    state = {**plugin.status(), **(live or {})}
+    from kollabor_voice.control import manifest
+
+    speech = state.get("speech", {})
     return [
         {
             "id": "preferences",
@@ -68,13 +72,87 @@ def voice_sections(plugin) -> list[dict]:
                 ),
                 make_field(
                     "tts_engine",
-                    "label",
+                    "dropdown",
                     "Speech Engine",
-                    value="Kokoro",
-                    help="Local speech synthesis; currently fixed.",
+                    value=preferences["tts_engine"],
+                    options=["kokoro", "vibevoice"],
+                    help=("Local synthesis. Selecting VibeVoice prepares its isolated runtime "
+                          "and warms the model in the background."),
                 ),
-                make_field("tts_voice", "label", "Speech Voice", value="af_heart"),
-                make_field("tts_speed", "label", "Speech Speed", value="1.0"),
+                make_field(
+                    "kokoro_voice",
+                    "dropdown",
+                    "Kokoro Voice",
+                    value=preferences["kokoro_voice"],
+                    options=list(KOKORO_VOICES),
+                ),
+                make_field(
+                    "kokoro_speed",
+                    "spinbox",
+                    "Kokoro Speed",
+                    value=preferences["kokoro_speed"],
+                    min_value=0.5,
+                    max_value=2.0,
+                    step=0.1,
+                ),
+                make_field(
+                    "vibevoice_voice",
+                    "dropdown",
+                    "VibeVoice Voice",
+                    value=preferences["vibevoice_voice"],
+                    options=list(manifest()["tts"]["vibevoice"]["voices"]),
+                ),
+                make_field(
+                    "vibevoice_prompt",
+                    "text_input",
+                    "Custom VibeVoice Prompt",
+                    value=preferences["vibevoice_prompt"],
+                    help=("Optional absolute path to your trusted cached .pt voice prompt. "
+                          "Leave blank to use the selected preset."),
+                ),
+                make_field(
+                    "vibevoice_model",
+                    "text_input",
+                    "VibeVoice Model",
+                    value=preferences["vibevoice_model"],
+                    help=("Microsoft VibeVoice-Realtime-0.5B or an existing absolute model directory. "
+                          "The default model download is pinned."),
+                ),
+                make_field(
+                    "vibevoice_device",
+                    "dropdown",
+                    "VibeVoice Device",
+                    value=preferences["vibevoice_device"],
+                    options=["auto", "mps", "cuda", "cpu"],
+                    help="Auto uses Apple MPS or CUDA when available, otherwise CPU.",
+                ),
+                make_field(
+                    "vibevoice_steps",
+                    "spinbox",
+                    "VibeVoice Diffusion Steps",
+                    value=preferences["vibevoice_steps"],
+                    min_value=1,
+                    max_value=20,
+                    step=1,
+                ),
+                make_field(
+                    "vibevoice_cfg",
+                    "spinbox",
+                    "VibeVoice Guidance",
+                    value=preferences["vibevoice_cfg"],
+                    min_value=1.0,
+                    max_value=3.0,
+                    step=0.1,
+                ),
+                make_field(
+                    "speech_status",
+                    "label",
+                    "Speech Readiness",
+                    value=(
+                        f"{speech.get('engine') or 'not loaded'} · {speech.get('state', 'off')}"
+                    ),
+                    help=speech.get("detail", ""),
+                ),
                 make_field(
                     "microphone",
                     "label",
@@ -109,12 +187,19 @@ class VoicePanel:
     kind = "form"
 
     async def describe(self, ctx: Any, params: dict[str, Any]) -> dict:
+        from kollabor_voice.client import VoiceClient
+
+        live = None
+        try:
+            live = await VoiceClient().call("status")
+        except (OSError, TimeoutError, ValueError, RuntimeError):
+            pass
         return {
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
             "scope_note": "Saved for every chat on the device running Kollab. Saving does not enable the microphone.",
-            "sections": voice_sections(voice_plugin(ctx)),
+            "sections": voice_sections(voice_plugin(ctx), live),
             "actions": [
                 {"id": "save", "label": "Save for This Device", "targets": ["device"]}
             ],
@@ -134,11 +219,17 @@ class VoicePanel:
         current = await self.describe(ctx, {})
         fields = {f["path"]: f for s in current["sections"] for f in s["fields"]}
         errors = validate_config_changes(fields, changes)
+        if not errors:
+            errors.update(
+                speech_errors({**load_preferences(), **changes}, check_files=True)
+            )
         if errors:
             return error_result("Some voice settings were not saved", errors)
         # JSON numeric controls may send 20.0. The persisted contract uses integers.
-        if "context_lines" in changes:
-            changes = {**changes, "context_lines": int(changes["context_lines"])}
+        changes = dict(changes)
+        for key in ("context_lines", "vibevoice_steps"):
+            if key in changes:
+                changes[key] = int(changes[key])
         try:
             await voice_plugin(ctx).configure_voice(changes)
         except (OSError, ValueError) as exc:

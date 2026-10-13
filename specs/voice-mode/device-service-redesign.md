@@ -648,3 +648,32 @@ voice toggles remain chat commands; TUI Ctrl+S and web Save for This Device use
 the same action; values survive a fresh plugin and are read by other active chats;
 invalid, fractional, unknown and read-only changes do not alter disk or runtime.
 Check the web panel at 390px and 820px and the TUI at narrow and wide sizes.
+
+
+## Selectable local speech engines (October 12, 2026)
+
+This extends the configuration contract above: Speech Engine is now editable
+(`kokoro` or `vibevoice`). All engine preferences share the existing device
+preference transaction. Kokoro Voice/Speed and VibeVoice Voice/Custom Prompt/Model/
+Device/Diffusion Steps/Guidance are validated before publication. Only the
+selected engine is prepared; changing inactive options does not reload it.
+
+VibeVoice runs as one service-owned persistent child in a separately pinned
+runtime, using the pinned official Microsoft source archive. Preset prompts are
+hash-verified; default model downloads use a pinned Hugging Face revision. Local
+model and custom prompt paths are explicit user-owned overrides. Model/prompt
+files and another application's VibeVoice worker are never changed.
+
+The worker returns float32 waveform samples and sample rate over a bounded pipe
+protocol. Each response carries the request identity; timeout/identity failure
+ends that worker and cannot be mistaken for a later sentence. Logs use stderr.
+The worker performs silent warmup, never microphone capture or device playback.
+Kollab's existing SpeechQueue retains FIFO, cancellation fences and actual
+playback receipts. The service watches preference revisions and loads a changed
+backend without starting capture when no conversation owns the microphone.
+Readiness reports actual backend state/PID/voice/device, including setup errors.
+
+Acceptance: valid presets/configuration persist from either editor; invalid
+paths/numbers/options leave preferences unchanged; selecting VibeVoice yields
+real waveform audio; cancellation fences late generation; switching back to
+Kokoro closes only the owned inference worker; busy coding agents remain running.

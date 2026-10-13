@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from kollabor_voice.classifiers import load_preferences, save_preferences
+from kollabor_voice.speech_settings import speech_defaults
 
 from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
 from kollabor.panels import PanelError, get_panel
@@ -73,6 +74,7 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
     assert {p for p, f in fields.items() if f["editable"]} == {
         "classifier",
         "context_lines",
+        *speech_defaults(),
     }
     other = VoicePlugin(event_bus=state._event_bus)
     plugin._pending = [{"event_id": "keep"}]
@@ -86,7 +88,8 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
         },
     )
     assert result["ok"]
-    assert load_preferences() == {"classifier": "provider", "context_lines": 20}
+    saved = load_preferences()
+    assert (saved["classifier"], saved["context_lines"]) == ("provider", 20)
     assert json.loads((root / "preferences.json").read_text())["context_lines"] == 20
     assert other.status()["context_lines"] == 20
     assert other.classifier_name == "provider"
@@ -102,8 +105,10 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
         widgets["context_lines"].handle_input(
             KeyPress(name="ArrowRight", code="\x1b[C")
         )
+    widgets["kokoro_speed"].handle_input(KeyPress(name="ArrowRight", code="\x1b[C"))
     await view.handle_input(KeyPress(name="Ctrl+S", code=19))
     assert load_preferences()["context_lines"] == 25
+    assert load_preferences()["kokoro_speed"] == pytest.approx(1.1)
     fresh = await remote.get_panel("voice")
     assert fresh["sections"][0]["fields"][1]["value"] == 25
     assert VoicePlugin(event_bus=state._event_bus).context_lines == 25

@@ -13,9 +13,18 @@ class VoiceConfigAltView(ConfigAltView):
         self.plugin = plugin
         self.metadata.plugin_type = "voice-config"
         self.metadata.description = "Configure device voice preferences"
+        self._panel = None
+
+    async def on_enter(self, renderer):
+        self._panel = await VoicePanel().describe(
+            SimpleNamespace(_event_bus=self.plugin._event_bus), {}
+        )
+        await super().on_enter(renderer)
 
     def _build_sections(self):
-        sections = voice_sections(self.plugin)
+        sections = (
+            self._panel["sections"] if self._panel else voice_sections(self.plugin)
+        )
         values = {f["path"]: f["value"] for s in sections for f in s["fields"]}
         self.config_service = SimpleNamespace(get=values.get)
         return [
@@ -26,6 +35,9 @@ class VoiceConfigAltView(ConfigAltView):
                         **field,
                         "config_path": field["path"],
                         "current_value": field["value"],
+                        "decimal_places": (
+                            1 if isinstance(field.get("step"), float) else 0
+                        ),
                     }
                     for field in section["fields"]
                 ],
@@ -52,6 +64,7 @@ class VoiceConfigAltView(ConfigAltView):
             if result["errors"]:
                 self.status_message += ": " + "; ".join(result["errors"].values())
             if result["ok"]:
+                self._panel = result["panel"]
                 self._load_widgets()
             return False
         self.status_message = ""

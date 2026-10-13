@@ -1,8 +1,8 @@
 # Voice mode
 
 Run `/voice on` in the chat that should respond to you. Kollab prepares local
-voice support in the background, downloads Whisper base, the default Kokoro
-voice and the default Laya classifier, warms them, then starts the microphone. Engine setup is automatic. The input box stays usable during setup.
+voice support in the background, downloads Whisper base and the default Laya classifier, and prepares the selected
+speech engine (Kokoro by default), warms them, then starts the microphone. Engine setup is automatic. The input box stays usable during setup.
 
 Use `/voice status` to inspect setup/download progress, microphone activity,
 model warmup, transcription, speech playback and errors. The transcript file uses
@@ -27,8 +27,8 @@ input-level meter.
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
 - `/voice config` opens Voice Configuration in the TUI or Settings → Voice in the web UI.
   Change the classifier and transcript context there, then save for this device.
-  The panel also shows the fixed transcription engine, speech engine, voice, speed,
-  microphone and current state. Saving does not enable the microphone.
+  Select Kokoro or VibeVoice and configure their voices there. The panel also shows
+  microphone, transcription engine, operating state and speech readiness. Saving does not enable the microphone.
   Preferences are shared across chats on the device running Kollab; an attached
   remote host's web settings apply to that host.
   `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` are no longer registered.
@@ -269,3 +269,30 @@ is recorded as cancelled and is never automatically replayed.
 
 Implementation and measured platform/acceptance coverage are recorded in
 [`implementation-status.md`](../../specs/voice-mode/implementation-status.md).
+
+
+## Select a speech engine
+
+Open `/voice config` (terminal) or Settings → Voice (web). Choose `vibevoice`
+under Speech Engine and save for this device. This prepares an isolated runtime
+from a pinned Microsoft VibeVoice source archive, verifies the selected voice
+preset by hash, and warms the model without opening the microphone. Read Speech
+Readiness or `/voice status`; use `/voice retry` after a setup error.
+
+VibeVoice uses Microsoft VibeVoice-Realtime-0.5B. Presets are Carter, Davis, Emma,
+Frank, Grace, Mike and Samuel. A trusted cached `.pt` file in Custom VibeVoice
+Prompt overrides the preset. Model accepts the default Microsoft model name or
+an existing absolute model directory; an installed model in the usual local
+VibeVoice directory is detected. Auto device chooses MPS, then CUDA, then CPU.
+Diffusion Steps (1–20) and Guidance (1.0–3.0) control generation.
+
+Kokoro remains selectable with its English voice presets and Speed (0.5–2.0).
+Inactive engine settings are retained. A change applies at the next sentence;
+failed VibeVoice inference is shown as an error and never silently becomes
+Kokoro. Both engines return waveform samples to the same serialized speaker
+queue. Cancellation and ownership changes still suppress late synthesis. The
+VibeVoice worker never plays audio itself or changes the Codex speech hook.
+
+Dependencies, voice presets and default weights download on first use and are
+cached. Heavy libraries stay out of the main Kollab process. Custom model
+directories and custom voice prompts are user-owned files and are preserved.

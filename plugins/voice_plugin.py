@@ -57,6 +57,7 @@ class VoicePlugin(BasePlugin):
 
         self._preferences_revision = self._preference_revision()
         preferences = load_preferences()
+        self._voice_preferences = preferences
         self.classifier_name = preferences["classifier"]
         self.context_lines = preferences["context_lines"]
         self._needs_classifier_prepare = False
@@ -155,10 +156,8 @@ class VoicePlugin(BasePlugin):
         from kollabor_voice.classifiers import load_preferences
 
         preferences = load_preferences()
-        changed = preferences != {
-            "classifier": self.classifier_name,
-            "context_lines": self.context_lines,
-        }
+        changed = preferences != self._voice_preferences
+        self._voice_preferences = preferences
         if self.classifier_name != preferences["classifier"]:
             self._needs_classifier_prepare = preferences["classifier"] == "laya"
         self.classifier_name = preferences["classifier"]
@@ -352,6 +351,11 @@ class VoicePlugin(BasePlugin):
                         )
                 else:
                     update(initial)
+                speech = initial.get("speech", {})
+                if speech.get("state") == "error":
+                    raise RuntimeError(
+                        speech.get("detail", "Speech engine setup failed; /voice retry")
+                    )
                 if initial.get("state") == "error":
                     raise RuntimeError(
                         initial.get("error")

@@ -62,7 +62,14 @@ def load_preferences(root=None):
     if not isinstance(value, dict):
         value = {}
     name, lines = value.get("classifier"), value.get("context_lines")
+    from .speech_settings import speech_defaults, speech_errors
+
+    defaults = speech_defaults()
+    speech = {**defaults, **{k: v for k, v in value.items() if k in defaults}}
+    for key in speech_errors(speech):
+        speech[key] = defaults[key]
     return {
+        **speech,
         "classifier": (
             name
             if isinstance(name, str) and name in CLASSIFIERS
@@ -82,7 +89,13 @@ def save_preferences(changes, root=None):
     # reading preferences must still work on other platforms.
     import fcntl
 
-    if not isinstance(changes, dict) or set(changes) - {"classifier", "context_lines"}:
+    from .speech_settings import speech_defaults, speech_errors
+
+    if not isinstance(changes, dict) or set(changes) - {
+        "classifier",
+        "context_lines",
+        *speech_defaults(),
+    }:
         raise ValueError("Unknown voice preference")
     if "classifier" in changes and (
         not isinstance(changes["classifier"], str)
@@ -108,6 +121,13 @@ def save_preferences(changes, root=None):
             ) from exc
         if not isinstance(preferences, dict):
             raise ValueError("Voice preferences must be an object")
+        errors = speech_errors(
+            {**speech_defaults(), **preferences, **changes}, check_files=True
+        )
+        if errors:
+            raise ValueError(
+                "; ".join(f"{key}: {error}" for key, error in errors.items())
+            )
         atomic_json(path, {**preferences, **changes})
     return load_preferences(root)
 

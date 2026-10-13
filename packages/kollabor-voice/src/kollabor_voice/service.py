@@ -52,6 +52,9 @@ class VoiceService:
         self.audio_warmup_seconds = None
         self.transcript = None
         self.output = None
+        self.speech = None
+        self.speech_prepare_task = None
+        self._speech_preferences_revision = None
         self.owner = None
         self.delegates = {}
         self.withdrawn_claims = {}
@@ -107,6 +110,7 @@ class VoiceService:
             from .assets import ensure_models
             from .audio import LocalModels, play_audio
             from .output import SpeechQueue
+            from .speech import SpeechEngine
 
             loop = asyncio.get_running_loop()
 
@@ -126,6 +130,11 @@ class VoiceService:
                 await asyncio.to_thread(models.warmup)
                 self.audio_warmup_seconds = time.monotonic() - started
                 self.models = models
+            if self.speech is None:
+                self.speech = SpeechEngine(self.root, self.models.synthesize)
+            await asyncio.to_thread(
+                self.speech.configure, self.speech.status()["state"] == "error"
+            )
             if self.transcript is None:
                 self.transcript = TranscriptLog(self.root, self.instance_id)
             for task in list(self.tasks):
@@ -147,7 +156,7 @@ class VoiceService:
             self.worker_failures.clear()
             if self.output is None:
                 self.output = SpeechQueue(
-                    self.root, self.models.synthesize, self.player or play_audio
+                    self.root, self.speech.synthesize, self.player or play_audio
                 )
                 self.tasks.append(
                     asyncio.create_task(self.output.run(), name="voice-output")
@@ -216,8 +225,14 @@ class VoiceService:
             "error": self.error,
             "cursor": self.transcript.seq if self.transcript else 0,
             "stream_id": self.instance_id,
-            "ready": self.setup.get("state") == "ready",
+            "ready": self.setup.get("state") == "ready"
+            and (self.speech is None or self.speech.status()["state"] == "ready"),
             "classifier": self.classifier.status(),
+            "speech": (
+                self.speech.status()
+                if self.speech
+                else {"state": "off", "engine": None}
+            ),
             "audio_warmup_seconds": self.audio_warmup_seconds,
         }
 
@@ -477,6 +492,8 @@ class VoiceService:
     async def start_capture(self):
         if self.recorder or not self.owner or self.setup["state"] != "ready":
             return
+        if self.speech and self.speech.status()["state"] != "ready":
+            return
         try:
             from .audio import SpeechSegmenter
             from .recorder import Recorder, RecorderConfig
@@ -571,6 +588,26 @@ class VoiceService:
     async def watch(self):
         while True:
             try:
+                if self.speech and (
+                    self.speech_prepare_task is None or self.speech_prepare_task.done()
+                ):
+                    from .classifiers import load_preferences
+                    from .speech_settings import speech_key
+
+                    try:
+                        st = (self.root / "preferences.json").stat()
+                        revision = st.st_mtime_ns, st.st_ino
+                    except OSError:
+                        revision = None
+                    changed = revision != self._speech_preferences_revision
+                    self._speech_preferences_revision = revision
+                    if (
+                        changed
+                        and speech_key(load_preferences(self.root)) != self.speech.key
+                    ):
+                        self.speech_prepare_task = asyncio.create_task(
+                            self.prepare_speech(), name="speech-prepare"
+                        )
                 async with self.lifecycle:
                     for task in self.tasks:
                         if (
@@ -614,6 +651,18 @@ class VoiceService:
                 with contextlib.suppress(Exception):
                     await self.stop_capture()
             await asyncio.sleep(0.02)
+
+    async def prepare_speech(self):
+        try:
+            await asyncio.to_thread(self.speech.configure)
+            async with self.lifecycle:
+                if (
+                    self.owner
+                    and time.monotonic() - self.owner["heartbeat"] < LEASE_SECONDS
+                ):
+                    await self.start_capture()
+        except Exception:
+            log.exception("Speech engine preparation failed")
 
     async def transcribe(self):
         while True:
@@ -667,12 +716,15 @@ class VoiceService:
         # Persist admitted trailing speech before ending workers.
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.segments.join(), 15)
-        for task in [self.setup_task, *self.tasks]:
+        for task in [self.setup_task, self.speech_prepare_task, *self.tasks]:
             if task:
                 task.cancel()
         await asyncio.gather(
-            *(t for t in [self.setup_task, *self.tasks] if t), return_exceptions=True
+            *(t for t in [self.setup_task, self.speech_prepare_task, *self.tasks] if t),
+            return_exceptions=True,
         )
+        if self.speech:
+            await asyncio.to_thread(self.speech.close)
         await self.classifier.close()
         path = socket_path(self.root)
         if path.exists():

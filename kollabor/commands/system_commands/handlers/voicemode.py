@@ -168,7 +168,10 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         lines = [
             f"Voice {state.get('state', 'off').replace('_', ' ').title()}",
             f"Service: {state.get('pid') or 'not running'} · owner: {state.get('owner') or 'none'}",
-            "Models: Whisper base · Kokoro af_heart",
+            "Transcription: Whisper base",
+            f"Speech: {state.get('speech', {}).get('engine') or 'not loaded'} · "
+            f"{state.get('speech', {}).get('voice') or 'no voice'} · "
+            f"{state.get('speech', {}).get('state', 'off')}",
             f"Context: previous {state.get('context_lines', 10)} transcript lines",
             f"Classifier: {CLASSIFIERS.get(name, name)}"
             + (
@@ -200,6 +203,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             state.get("error"),
             state.get("observer_error"),
             output.get("error"),
+            state.get("speech", {}).get("detail"),
             classifier.get("detail") if name == "laya" else None,
         ):
             if value:
