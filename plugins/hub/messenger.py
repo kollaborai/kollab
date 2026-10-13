@@ -1510,6 +1510,8 @@ class AgentSocketServer:
                             client_id,
                             mode,
                             sub_queue=sub_queue,
+                            sender=(authenticated_as if require_auth else self._local_designation) or None,
+                            operator=not require_auth,
                         )
                         return  # Connection ends when attacher detaches
 
@@ -1760,6 +1762,8 @@ class AgentSocketServer:
         client_id: str,
         mode: str,
         sub_queue: Any | None = None,
+        sender: str | None = None,
+        operator: bool = False,
     ) -> None:
         """Persistent streaming loop for an attached client.
 
@@ -1878,7 +1882,23 @@ class AgentSocketServer:
                         text = msg.get("text", "")
                         if text and self._on_input_inject:
                             try:
-                                result = self._on_input_inject(text)
+                                callback = self._on_input_inject
+                                context = {
+                                    "request_id": msg.get("request_id"),
+                                    "thread_id": msg.get("thread_id"),
+                                    "sender": sender,
+                                    "operator": operator,
+                                }
+                                try:
+                                    signature = inspect.signature(callback)
+                                    accepts_context = any(
+                                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                                        or name in signature.parameters
+                                        for name, parameter in signature.parameters.items()
+                                    )
+                                except (TypeError, ValueError):
+                                    accepts_context = False
+                                result = callback(text, **context) if accepts_context else callback(text)
                                 if asyncio.iscoroutine(result):
                                     await result
                             except Exception as e:

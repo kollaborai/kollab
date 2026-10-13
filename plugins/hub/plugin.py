@@ -13239,7 +13239,15 @@ class HubPlugin(BasePlugin):
             "next_cursor": next_cursor,
         }
 
-    async def _inject_attacher_input(self, text: Any) -> None:
+    async def _inject_attacher_input(
+        self,
+        text: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        sender: str | None = None,
+        operator: bool = False,
+    ) -> None:
         """Inject input from a remote attacher as if the user typed it.
 
         Routes through the canonical human-input entry point so all hooks
@@ -13256,9 +13264,16 @@ class HubPlugin(BasePlugin):
                 logger.debug("Attached input rejected: LLM input pipeline unavailable")
                 return
             submit_kwargs = {"source": UserInputSource.HUB_ATTACHMENT}
-            thread_id = getattr(self, "_active_thread_id", None) or None
+            thread_id = thread_id or getattr(self, "_active_thread_id", None) or None
+            if request_id is not None:
+                submit_kwargs["request_id"] = request_id
             if thread_id is not None:
                 submit_kwargs["thread_id"] = thread_id
+            submit_kwargs["origin_context"] = {
+                "sender": sender,
+                "operator": bool(operator),
+                "authenticated": bool(sender),
+            }
             result = await submit(text, **submit_kwargs)
             if isinstance(result, dict) and result.get("status") in {
                 "cancelled",

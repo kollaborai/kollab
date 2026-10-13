@@ -1725,6 +1725,7 @@ class LLMService:
         pre_displayed: bool = False,
         request_id: str | None = None,
         thread_id: str | None = None,
+        origin_context: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -1763,6 +1764,7 @@ class LLMService:
                     "message_pre_displayed": pre_displayed,
                     "request_id": request_id,
                     "thread_id": thread_id,
+                    "origin_context": dict(origin_context or {}),
                 },
                 source.value,
             )
