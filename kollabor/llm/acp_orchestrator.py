@@ -234,13 +234,23 @@ class ACPOrchestrator:
         if self._closed:
             return
         self._closed = True
-        if self._runner is not None:
-            self._terminal_session_id = getattr(self._runner, "session_id", None)
-            await self._runner.close()
-            self._runner = None
+        close_error: BaseException | None = None
+        runner = self._runner
+        if runner is not None:
+            self._terminal_session_id = getattr(runner, "session_id", None)
+            try:
+                await runner.close()
+            except BaseException as exc:
+                # Cancellation must not skip process/binding cleanup.  Keep the
+                # original error for the caller after all owned resources settle.
+                close_error = exc
+            finally:
+                self._runner = None
         if self._completion_tasks:
             await asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
         self._terminal_session_id = None
         if self.hub_plugin is not None and self._binding is not None:
             self.hub_plugin.rotate_acp_hub_binding()
             self._binding = None
+        if close_error is not None:
+            raise close_error

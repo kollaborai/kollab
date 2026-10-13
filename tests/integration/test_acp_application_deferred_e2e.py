@@ -78,6 +78,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
         requester_server = None
         requester_presence = None
         sdk_process = None
+        hub_socket_path = None
         with (
             contextlib.chdir(project),
             patch.object(config_utils, "get_config_directory", return_value=global_root),
@@ -120,6 +121,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                 owner = app.acp_orchestrator
                 sdk_process = owner.runner._process
                 hub = instances["hub"]
+                hub_socket_path = Path(hub._socket_server.socket_path)
                 row = {
                     "startup_complete": app._startup_complete,
                     "hub_socket_bound": hub._socket_server is not None and hub._socket_server._server is not None,
@@ -178,8 +180,23 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                     and result["outcome"] == "end_turn"
                 ), result
             finally:
+                cleanup_error = None
                 if app is not None:
-                    await asyncio.wait_for(app.cleanup(), timeout=10)
+                    owner = getattr(app, "acp_orchestrator", None)
+                    if owner is not None and owner.runner is not None:
+                        original_close = owner.runner.close
+
+                        async def close_then_cancel():
+                            await original_close()
+                            raise asyncio.CancelledError()
+
+                        owner.runner.close = close_then_cancel
+                    try:
+                        await asyncio.wait_for(app.cleanup(), timeout=10)
+                    except BaseException as exc:
+                        cleanup_error = exc
+                    assert cleanup_error is None, cleanup_error
+                    assert hub_socket_path is None or not hub_socket_path.exists()
                 if sdk_process is not None:
                     await asyncio.wait_for(sdk_process.wait(), timeout=5)
                     assert sdk_process.returncode is not None
