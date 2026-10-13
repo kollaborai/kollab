@@ -66,7 +66,7 @@ class AttachPermissionBridge:
                 if not self._is_native_response_name(response_name):
                     return {"ok": False, "error": f"unoffered option for {tool_id}"}
                 response = self._parse_response(response_name)
-                if not self._native_response_allowed(details, response):
+                if not self._native_response_allowed(details, response, response_name):
                     return {"ok": False, "error": f"unoffered option for {tool_id}"}
             else:
                 response = self._parse_response(response_name)
@@ -236,18 +236,42 @@ class AttachPermissionBridge:
         return value.strip().upper() in ConfirmationResponse.__members__
 
     @staticmethod
-    def _native_response_allowed(details: dict[str, Any], response: ConfirmationResponse) -> bool:
-        """Allow only native controls actually eligible for this prompt."""
+    def _native_response_allowed(
+        details: dict[str, Any],
+        response: ConfirmationResponse,
+        response_name: str,
+    ) -> bool:
+        """Allow only explicitly eligible native controls for this prompt."""
+        if str(details.get("source") or "").lower() == "acp":
+            if response is ConfirmationResponse.CANCEL:
+                return True
+            options = details.get("acp_options") or []
+            once = [
+                item for item in options
+                if isinstance(item, dict) and item.get("kind") == "allow_once"
+            ]
+            operation = details.get("operation")
+            if response is ConfirmationResponse.APPROVE_ONCE:
+                return len(once) == 1
+            if response in (
+                ConfirmationResponse.APPROVE_SESSION,
+                ConfirmationResponse.APPROVE_PROJECT,
+            ):
+                return len(once) == 1 and bool(operation)
+            if response is ConfirmationResponse.APPROVE_ALWAYS:
+                return (
+                    len(once) == 1
+                    and bool(operation)
+                    and str(operation).split(":", 1)[0] == "edit"
+                )
+            return response is ConfirmationResponse.DENY
         if not details.get("acp_options"):
             return True
-        tool_type = details.get("tool_type", "unknown")
-        eligible = {
+        return response in {
             ConfirmationResponse.APPROVE_ONCE,
             ConfirmationResponse.DENY,
+            ConfirmationResponse.CANCEL,
         }
-        if tool_type == "terminal":
-            eligible.add(ConfirmationResponse.CANCEL)
-        return response in eligible
 
 
     def _parse_response(self, response_name: str) -> ConfirmationResponse:
