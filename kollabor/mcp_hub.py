@@ -1,4 +1,4 @@
-"""Minimal authenticated stdio MCP-style hub_status server for ACP adapters."""
+"""Authenticated stdio MCP server exposing only the ``hub_status`` tool."""
 from __future__ import annotations
 
 import asyncio
@@ -7,9 +7,25 @@ import os
 import sys
 from typing import Any, Callable
 
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
 
 def _status() -> dict[str, Any]:
     return {"status": "ok", "generation": os.environ.get("KOLLAB_ACP_GENERATION", "0")}
+
+
+def _auth_valid(request: dict[str, Any], token: str) -> bool:
+    params = request.get("params") or {}
+    metadata = params.get("_meta") or request.get("_meta") or {}
+    expected_generation = os.environ.get("KOLLAB_ACP_GENERATION")
+    expected_socket = os.environ.get("KOLLAB_ACP_HUB_SOCKET")
+    if metadata.get("token") != token:
+        return False
+    if expected_generation is not None and str(metadata.get("generation")) != expected_generation:
+        return False
+    if expected_socket is not None and metadata.get("socket") != expected_socket:
+        return False
+    return True
 
 
 async def serve_hub_status(
@@ -19,36 +35,45 @@ async def serve_hub_status(
     token: str,
     status: Callable[[], dict[str, Any]] = _status,
 ) -> None:
-    """Serve protocol-only stdout and diagnostics on stderr."""
+    """Serve MCP protocol on stdout; diagnostics never share the stream."""
     try:
         while line := await reader.readline():
             request: dict[str, Any] = {}
             try:
                 request = json.loads(line)
-                auth = request.get("auth")
-                expected_generation = os.environ.get("KOLLAB_ACP_GENERATION")
-                expected_socket = os.environ.get("KOLLAB_ACP_HUB_SOCKET")
-                if isinstance(auth, dict):
-                    valid = auth.get("token") == token
-                    if expected_generation is not None:
-                        valid = valid and str(auth.get("generation")) == expected_generation
-                    if expected_socket is not None:
-                        valid = valid and auth.get("socket") == expected_socket
-                else:
-                    valid = auth == token and expected_generation is None and expected_socket is None
-                if not valid:
-                    raise PermissionError("invalid ACP hub token or binding")
                 method = request.get("method")
-                if method != "hub_status":
-                    raise ValueError("unsupported method")
-                result = status()
+                if method == "notifications/initialized":
+                    continue
+                if not _auth_valid(request, token):
+                    raise PermissionError("invalid ACP hub token or binding")
+                if method == "initialize":
+                    result: dict[str, Any] = {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "kollab-hub", "version": "1"},
+                    }
+                elif method == "tools/list":
+                    result = {
+                        "tools": [{
+                            "name": "hub_status",
+                            "description": "Return the current Kollab hub status.",
+                            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                        }],
+                    }
+                elif method == "tools/call":
+                    if (request.get("params") or {}).get("name") != "hub_status":
+                        raise ValueError("unknown tool")
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps(status(), separators=(",", ":"))}],
+                        "isError": False,
+                    }
+                else:
+                    raise ValueError("unsupported MCP method")
                 response = {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
+            except PermissionError as exc:
+                response = {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32001, "message": str(exc)}}
             except Exception as exc:
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": request.get("id") if isinstance(locals().get("request"), dict) else None,
-                    "error": {"code": -32001, "message": str(exc)},
-                }
+                response = {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32601, "message": str(exc)}}
             writer.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
             await writer.drain()
     finally:
@@ -68,6 +93,13 @@ async def _main_async(token: str) -> None:
     await serve_hub_status(reader, writer, token=token)
 
 
+def kollab_hub_argv() -> list[str]:
+    """Return a source/wheel/binary-safe argv for launching this server."""
+    from .binary import kollab_argv
+
+    return [*kollab_argv(), "--mcp-hub"]
+
+
 def main() -> None:
     token = os.environ.get("KOLLAB_ACP_HUB_TOKEN")
     if not token:
@@ -78,10 +110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def kollab_hub_argv() -> list[str]:
-    """Return a source/wheel/binary-safe argv for launching this server."""
-    from .binary import kollab_argv
-
-    return [*kollab_argv(), "--mcp-hub"]
