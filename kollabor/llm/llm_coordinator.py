@@ -8,6 +8,7 @@ kollabor-tui (display, status), and kollabor-events (hooks).
 import asyncio
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Optional, cast
 
 from kollabor.user_input_source import UserInputSource
@@ -1732,18 +1733,10 @@ class LLMService:
         if not isinstance(source, UserInputSource):
             return {"status": "rejected", "reason": "invalid_input_source"}
 
-        # ACP profiles own the transport loop; keep this public entrypoint
-        # canonical while bypassing the native provider/tool loop.
         acp = self.event_bus.get_service("acp_orchestrator")
-        if acp is not None and getattr(acp, "active", False):
-            if not isinstance(message, str):
-                return {"status": "rejected", "reason": "acp_text_only"}
-            try:
-                result = await acp.submit(message, source=source.value)
-            except Exception as exc:
-                logger.error("ACP input dispatch failed (%s)", type(exc).__name__)
-                return {"status": "rejected", "reason": "acp_dispatch_failed"}
-            return {"status": "completed", **result}
+        acp_dispatch = acp is not None and getattr(acp, "active", False)
+        if acp_dispatch and not isinstance(message, str):
+            return {"status": "rejected", "reason": "acp_text_only"}
 
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
@@ -1755,6 +1748,10 @@ class LLMService:
                 {
                     "message": message,
                     "message_pre_displayed": pre_displayed,
+                    **({
+                        "_acp_dispatch": True,
+                        "_acp_request_id": uuid.uuid4().hex,
+                    } if acp_dispatch else {}),
                 },
                 source.value,
             )
@@ -1801,7 +1798,20 @@ class LLMService:
         )
 
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
-        """Handle user input hook callback (delegated)."""
+        """Handle user input, dispatching ACP after admission when selected."""
+        if data.get("_acp_dispatch"):
+            acp = self.event_bus.get_service("acp_orchestrator")
+            request_id = str(data.get("_acp_request_id", uuid.uuid4().hex))
+            source = getattr(event, "source", UserInputSource.STATE_RPC.value)
+
+            async def run_acp() -> None:
+                try:
+                    await acp.submit(str(data["message"]), source=source)
+                except Exception as exc:
+                    logger.error("ACP input dispatch failed (%s)", type(exc).__name__)
+
+            self.create_background_task(run_acp(), name=f"acp-turn-{request_id}")
+            return {"status": "queued", "request_id": request_id, "turn_id": request_id}
         return cast(
             Dict[str, Any], await self._message_handler.handle_user_input(data, event)
         )
