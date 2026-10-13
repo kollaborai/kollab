@@ -406,3 +406,32 @@ def test_tool_progress_does_not_create_new_message_boundary():
         {"kind": "tool_call_update", "payload": {"toolCallId": "t1"}},
     ]
     assert ACPRunner._select_answer(updates) == "Final answer. "
+
+
+@pytest.mark.asyncio
+async def test_profile_resolution_uses_cache_and_strips_provider_keys(tmp_path, monkeypatch):
+    adapter = tmp_path / "adapter"
+    adapter.write_text("#!/bin/sh\n")
+    adapter.chmod(0o755)
+    config = tmp_path / "config"
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(config))
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-pass")
+    monkeypatch.setenv("CUSTOM_ENV", "kept")
+    profile = ACPProfile("custom", (str(adapter),), cwd=str(tmp_path), pass_env=("OPENAI_API_KEY",))
+    command, env, _ = profile.resolve()
+    assert command[0] == str(adapter)
+    assert env["OPENAI_API_KEY"] == "must-not-pass"
+    assert env["CUSTOM_ENV"] == "kept"
+    assert (config / "acp" / "resolved.json").exists()
+    adapter.unlink()
+    with pytest.raises(ACPError, match="adapter executable not found"):
+        profile.resolve()
+
+
+def test_builtin_profile_and_missing_adapter_guidance(tmp_path, monkeypatch):
+    profile = ACPProfile.builtin("claude-code", cwd=str(tmp_path))
+    assert profile.command == ("claude-agent-acp",)
+    assert "claude-agent-acp@0.89.0" in profile.install_guidance
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    with pytest.raises(ACPError, match="Install the adapter"):
+        profile.resolve()

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
 import shutil
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, ClassVar
 
 import acp
 from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, McpServerStdio, TextContentBlock
@@ -28,9 +31,30 @@ class ACPProfile:
     workspace: str | None = None
     mcp_servers: tuple[dict[str, Any], ...] = ()
 
+    BUILTIN_PROFILES: ClassVar[dict[str, dict[str, Any]]] = {
+        "claude-code": {
+            "command": ["claude-agent-acp"],
+            "install": "npm install -g @agentclientprotocol/claude-agent-acp@0.89.0",
+        },
+        "codex-cli": {
+            "command": ["codex-acp"],
+            "install": "npm install -g @agentclientprotocol/codex-acp@2.1.1",
+        },
+        "gemini-cli": {
+            "command": ["gemini", "--acp"],
+            "install": "npm install -g @google/gemini-cli@0.63.0",
+        },
+    }
+    _PROVIDER_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY",
+        "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    })
+
     @classmethod
     def from_dict(cls, name: str, value: dict[str, Any]) -> "ACPProfile":
         command = value.get("command")
+        if command is None and name in cls.BUILTIN_PROFILES:
+            command = cls.BUILTIN_PROFILES[name]["command"]
         if isinstance(command, str):
             command = (command,)
         if not isinstance(command, (list, tuple)) or not command or not all(
@@ -47,17 +71,94 @@ class ACPProfile:
             mcp_servers=tuple(value.get("mcp_servers") or ()),
         )
 
+    @classmethod
+    def builtin(cls, name: str, **overrides: Any) -> "ACPProfile":
+        try:
+            data = dict(cls.BUILTIN_PROFILES[name])
+        except KeyError as exc:
+            raise ValueError(f"unknown ACP profile: {name}") from exc
+        data.pop("install", None)
+        data.update(overrides)
+        return cls.from_dict(name, data)
+
+    @property
+    def install_guidance(self) -> str:
+        install = self.BUILTIN_PROFILES.get(self.name, {}).get("install")
+        return f"Install the adapter with: {install}" if install else (
+            f"Install the ACP adapter for profile '{self.name}' and retry."
+        )
+
+    def _cache_path(self) -> Path:
+        root = Path(os.environ.get("KOLLAB_CONFIG_DIR", "~/.kollab")).expanduser()
+        path = root / "acp" / "resolved.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _login_shell_path(self) -> str:
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        try:
+            result = subprocess.run(
+                [shell, "-lc", f"command -v {shlex.quote(self.command[0])}"],
+                check=False, capture_output=True, text=True, timeout=3,
+            )
+            return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
     def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
-        executable = shutil.which(self.command[0])
+        cache_path = self._cache_path()
+        cache: dict[str, Any] = {}
+        try:
+            cache = json.loads(cache_path.read_text())
+        except (OSError, ValueError):
+            pass
+        cached = cache.get(self.name) if isinstance(cache, dict) else None
+        executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
+        if not executable or not Path(executable).exists():
+            executable = self._login_shell_path() or shutil.which(self.command[0]) or ""
         if not executable:
-            raise ACPError(f"ACP adapter executable not found: {self.command[0]}")
+            raise ACPError(f"ACP adapter executable not found: {self.command[0]}. {self.install_guidance}")
+        executable = os.path.abspath(executable)
         cwd = str(Path(self.cwd or self.workspace or os.getcwd()).expanduser().resolve())
         if not Path(cwd).is_dir():
             raise ACPError(f"ACP working directory does not exist: {cwd}")
-        safe_env = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "TERM", "SHELL"}
-        env = {key: value for key, value in os.environ.items() if key in safe_env or key in self.pass_env}
-        env.update(self.env)
-        return (executable, *self.command[1:]), env, cwd
+        resolved_dir = os.path.dirname(executable)
+        node_path = ""
+        try:
+            first_line = Path(executable).read_text(errors="ignore").splitlines()[0]
+            if first_line.startswith("#!") and "env node" in first_line:
+                node_path = self._login_shell_node()
+        except (OSError, IndexError):
+            pass
+        cache[self.name] = {"path": executable, "directory": resolved_dir, "node": node_path}
+        try:
+            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\\n")
+        except OSError:
+            pass
+        path_prefix = [resolved_dir]
+        if node_path:
+            path_prefix.append(os.path.dirname(node_path))
+        original_path = os.environ.get("PATH", "")
+        safe_env = {
+            key: value for key, value in os.environ.items()
+            if key not in self._PROVIDER_KEYS or key in self.pass_env
+        }
+        safe_env["PATH"] = os.pathsep.join(path_prefix + ([original_path] if original_path else []))
+        safe_env.update({k: v for k, v in self.env.items() if k not in self._PROVIDER_KEYS or k in self.pass_env})
+        if node_path:
+            safe_env.setdefault("ACP_NODE", node_path)
+        return (executable, *self.command[1:]), safe_env, cwd
+
+    def _login_shell_node(self) -> str:
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        try:
+            result = subprocess.run(
+                [shell, "-lc", "command -v node"],
+                check=False, capture_output=True, text=True, timeout=3,
+            )
+            return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
 
     def sdk_mcp_servers(self) -> list[Any]:
         servers = []
