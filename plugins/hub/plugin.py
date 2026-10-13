@@ -2785,6 +2785,10 @@ class HubPlugin(BasePlugin):
             deferred=mode == "buffer",
             skipped=mode not in ("wake", "buffer"),
         )
+        turns = getattr(self, "_acp_network_turns", None)
+        if turns is None:
+            turns = self._acp_network_turns = {}
+        turns[message.id] = self._net_turn
 
     def _network_answering(self, handle: str) -> Optional["_NetworkTurn"]:
         """The open request from ``handle`` this turn is handling, if any."""
@@ -2915,7 +2919,7 @@ class HubPlugin(BasePlugin):
             logger.debug("network %s for %s refused: %s", what, turn.handle, rejections)
         return not rejections
 
-    def on_acp_completion(
+    async def on_acp_completion(
         self,
         *,
         request_id: str,
@@ -2927,7 +2931,9 @@ class HubPlugin(BasePlugin):
         failed: bool = False,
     ) -> None:
         """Forward a correlated ACP result to the authenticated Hub requester."""
-        turn = getattr(self, "_net_turn", None)
+        turn = getattr(self, "_acp_network_turns", {}).get(request_id)
+        if turn is None:
+            turn = getattr(self, "_net_turn", None)
         if turn is None or turn.message_id != request_id:
             return
         if thread_id and turn.thread_id != thread_id:
@@ -2937,14 +2943,8 @@ class HubPlugin(BasePlugin):
         turn.answer = text
         turn.failed = failed
         turn.ended = True
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                self._end_network_turn(turn, failed=failed),
-                name=f"hub-acp-end-{request_id}",
-            )
-        except RuntimeError:
-            logger.debug("no running loop for ACP Hub completion %s", request_id)
+        getattr(self, "_acp_network_turns", {}).pop(request_id, None)
+        await self._end_network_turn(turn, failed=failed)
 
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
         """The far agent's turn on our request ended: settle whoever waits on it.

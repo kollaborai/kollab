@@ -31,6 +31,7 @@ class ACPOrchestrator:
         self._profile_name: str | None = None
         self._closed = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
+        self._delivery_tasks: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
 
     @property
@@ -104,7 +105,7 @@ class ACPOrchestrator:
         task.add_done_callback(self._completion_tasks.discard)
         return admission
 
-    def _notify_hub_completion(
+    async def _notify_hub_completion(
         self, *, request_id: str, turn_id: int, thread_id: str | None,
         source: str, text: str, end_frame: dict[str, Any], failed: bool = False,
     ) -> None:
@@ -117,7 +118,7 @@ class ACPOrchestrator:
                 source=source, text=text, end_frame=dict(end_frame), failed=failed,
             )
             if inspect.isawaitable(result):
-                asyncio.create_task(result, name=f"acp-hub-end-{request_id}")
+                await asyncio.wait_for(result, timeout=10.0)
         except Exception:
             logger.exception("ACP Hub completion callback failed")
 
@@ -154,7 +155,7 @@ class ACPOrchestrator:
                 request_id=admission.request_id, input_source=admission.source,
                 thread_id=admission.thread_id,
             )
-            self._notify_hub_completion(
+            await self._notify_hub_completion(
                 request_id=admission.request_id, turn_id=admission.turn_id,
                 thread_id=admission.thread_id, source=admission.source,
                 text="", end_frame=end_frame, failed=True,
@@ -174,11 +175,11 @@ class ACPOrchestrator:
             request_id=result.request_id, input_source=result.source,
             thread_id=result.thread_id,
         )
-        self._notify_hub_completion(
+        await self._notify_hub_completion(
             request_id=result.request_id, turn_id=result.turn_id,
             thread_id=result.thread_id, source=result.source, text=result.text,
             end_frame=result.end_frame,
-            failed=result.stop_reason not in {"end_turn", "cancelled"},
+            failed=result.stop_reason != "end_turn",
         )
         return {"text": result.text, "session_id": result.session_id,
                 "generation": result.generation, "turn_id": result.turn_id,
