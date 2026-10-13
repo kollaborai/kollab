@@ -64,7 +64,8 @@ async def handle_confirmation_response(
         )
 
     if response == ConfirmationResponse.APPROVE_SESSION:
-        permission_manager._record_approval(tool_type, tool_name, tool_data, "session")
+        if tool_data.get("source") != "acp":
+            permission_manager._record_approval(tool_type, tool_name, tool_data, "session")
         return PermissionDecision(
             allowed=True,
             reason="User approved (session)",
@@ -72,7 +73,8 @@ async def handle_confirmation_response(
         )
 
     if response == ConfirmationResponse.APPROVE_PROJECT:
-        permission_manager._record_project_approval(tool_type, tool_name, tool_data)
+        if tool_data.get("source") != "acp":
+            permission_manager._record_project_approval(tool_type, tool_name, tool_data)
         return PermissionDecision(
             allowed=True,
             reason="User approved (project)",
@@ -91,7 +93,8 @@ async def handle_confirmation_response(
 
     if response == ConfirmationResponse.APPROVE_TOOL_ALWAYS:
         # For MCP: whitelist this specific tool
-        permission_manager._record_approval(tool_type, tool_name, tool_data, "session")
+        if tool_data.get("source") != "acp":
+            permission_manager._record_approval(tool_type, tool_name, tool_data, "session")
         return PermissionDecision(
             allowed=True,
             reason=f"User approved tool '{tool_name}' always",
