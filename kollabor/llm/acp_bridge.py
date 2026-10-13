@@ -483,21 +483,23 @@ class ACPRunner:
                 _, _, _, queued = item
                 if not queued.done():
                     queued.set_exception(ACPError("ACP runner closed"))
-        # Wake an idle consumer without relying on task cancellation of a
-        # Queue.get waiter, which can remain pending under SDK callbacks.
+        # Wake an idle consumer without relying on cancellation of a Queue.get
+        # waiter, which can remain pending under SDK callbacks.
         self._queue.put_nowait(None)
         if self._active_future is not None and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP runner closed"))
-        await self._terminate_process()
         worker = self._worker
-        if worker is not None:
-            worker.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=2)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                worker.cancel()
+        try:
+            if worker is not None:
                 try:
-                    await asyncio.wait_for(asyncio.shield(worker), timeout=1)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
+                    await asyncio.wait_for(asyncio.shield(worker), timeout=2)
+                except asyncio.TimeoutError:
+                    await self._terminate_process()
+                    worker.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker), timeout=1)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+        finally:
+            await self._terminate_process()
             self._worker = None
