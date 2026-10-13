@@ -35,7 +35,11 @@ class ACPOrchestrator:
     @property
     def is_processing(self) -> bool:
         """Whether an admitted ACP turn is active or waiting in FIFO."""
-        return bool(self._completion_tasks)
+        runner = self._runner
+        return bool(
+            self._completion_tasks
+            or (runner is not None and getattr(runner, "is_processing", False) is True)
+        )
 
     @property
     def active(self) -> bool:
@@ -113,7 +117,7 @@ class ACPOrchestrator:
             stop_reason = (
                 "cancelled"
                 if isinstance(exc, asyncio.CancelledError)
-                or (isinstance(exc, ACPError) and "cancel" in str(exc).lower())
+                or (isinstance(exc, ACPError) and str(exc) == "ACP turn cancelled")
                 else "error"
             )
             end_frame = {
