@@ -2915,6 +2915,37 @@ class HubPlugin(BasePlugin):
             logger.debug("network %s for %s refused: %s", what, turn.handle, rejections)
         return not rejections
 
+    def on_acp_completion(
+        self,
+        *,
+        request_id: str,
+        turn_id: int,
+        thread_id: str | None,
+        source: str,
+        text: str,
+        end_frame: dict[str, Any],
+        failed: bool = False,
+    ) -> None:
+        """Forward a correlated ACP result to the authenticated Hub requester."""
+        turn = getattr(self, "_net_turn", None)
+        if turn is None or turn.message_id != request_id:
+            return
+        if thread_id and turn.thread_id != thread_id:
+            return
+        if getattr(turn, "ended", False):
+            return
+        turn.answer = text
+        turn.failed = failed
+        turn.ended = True
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self._end_network_turn(turn, failed=failed),
+                name=f"hub-acp-end-{request_id}",
+            )
+        except RuntimeError:
+            logger.debug("no running loop for ACP Hub completion %s", request_id)
+
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
         """The far agent's turn on our request ended: settle whoever waits on it.
 

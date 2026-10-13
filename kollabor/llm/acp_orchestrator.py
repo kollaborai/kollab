@@ -6,6 +6,7 @@ ACP transport and permission protocol details remain in ``acp_bridge``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from typing import Any
@@ -103,6 +104,23 @@ class ACPOrchestrator:
         task.add_done_callback(self._completion_tasks.discard)
         return admission
 
+    def _notify_hub_completion(
+        self, *, request_id: str, turn_id: int, thread_id: str | None,
+        source: str, text: str, end_frame: dict[str, Any], failed: bool = False,
+    ) -> None:
+        callback = getattr(self.hub_plugin, "on_acp_completion", None)
+        if callback is None:
+            return
+        try:
+            result = callback(
+                request_id=request_id, turn_id=turn_id, thread_id=thread_id,
+                source=source, text=text, end_frame=dict(end_frame), failed=failed,
+            )
+            if inspect.isawaitable(result):
+                asyncio.create_task(result, name=f"acp-hub-end-{request_id}")
+        except Exception:
+            logger.exception("ACP Hub completion callback failed")
+
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         try:
             result: ACPResult = await admission.future
@@ -136,6 +154,11 @@ class ACPOrchestrator:
                 request_id=admission.request_id, input_source=admission.source,
                 thread_id=admission.thread_id,
             )
+            self._notify_hub_completion(
+                request_id=admission.request_id, turn_id=admission.turn_id,
+                thread_id=admission.thread_id, source=admission.source,
+                text="", end_frame=end_frame, failed=True,
+            )
             return {"text": "", "session_id": session_id,
                     "generation": generation, "turn_id": admission.turn_id,
                     "request_id": admission.request_id,
@@ -150,6 +173,12 @@ class ACPOrchestrator:
             self.event_bus, "turn_end", **result.end_frame, hidden=True,
             request_id=result.request_id, input_source=result.source,
             thread_id=result.thread_id,
+        )
+        self._notify_hub_completion(
+            request_id=result.request_id, turn_id=result.turn_id,
+            thread_id=result.thread_id, source=result.source, text=result.text,
+            end_frame=result.end_frame,
+            failed=result.stop_reason not in {"end_turn", "cancelled"},
         )
         return {"text": result.text, "session_id": result.session_id,
                 "generation": result.generation, "turn_id": result.turn_id,

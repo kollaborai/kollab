@@ -9,7 +9,9 @@ real tool handler and the real router against a fake relay bridge.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -439,3 +441,30 @@ def test_authenticated_agent_dispatch_is_tri_state_and_fail_closed_for_acp():
         get_provider=lambda: "native"
     )
     assert plugin._agent_dispatch_mode(llm) == "native"
+
+
+@pytest.mark.asyncio
+async def test_acp_completion_forwards_one_reply_and_hidden_end_on_original_thread():
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._net_turn = _NetworkTurn(
+        handle=PEER, thread_id="thread-a", message_id="req-a",
+        opened_at=time.monotonic(), started=True,
+    )
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn.thread_id, turn.message_id, content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    plugin.on_acp_completion(
+        request_id="req-a", turn_id=7, thread_id="thread-a", source="agent",
+        text="final answer", end_frame={"turnId": 7},
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert [item[2] for item in sent] == ["final answer", "The receiving agent finished this request."]
+    assert all(item[0:2] == ("thread-a", "req-a") for item in sent)
+    assert plugin._net_turn is None
