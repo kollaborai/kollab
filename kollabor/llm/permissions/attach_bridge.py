@@ -39,6 +39,7 @@ class AttachPermissionBridge:
     def __init__(self) -> None:
         self._pending: Dict[str, asyncio.Future[ConfirmationResponse | str]] = {}
         self._pending_option_ids: Dict[str, set[str]] = {}
+        self._pending_details: Dict[str, dict[str, Any]] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
         # (shown or queued) that another window answered first.
@@ -58,10 +59,15 @@ class AttachPermissionBridge:
             response_name = str(params.get("response") or "")
             future = self._pending.get(tool_id)
             offered_ids = self._pending_option_ids.get(tool_id, set())
-            if offered_ids:
-                if response_name not in offered_ids:
-                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
+            details = self._pending_details.get(tool_id, {})
+            if offered_ids and response_name in offered_ids:
                 response: ConfirmationResponse | str = response_name
+            elif offered_ids:
+                if not self._is_native_response_name(response_name):
+                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
+                response = self._parse_response(response_name)
+                if not self._native_response_allowed(details, response):
+                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
             else:
                 response = self._parse_response(response_name)
             if future is None or future.done():
@@ -92,6 +98,7 @@ class AttachPermissionBridge:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ConfirmationResponse] = loop.create_future()
         self._pending[tool_id] = future
+        self._pending_details[tool_id] = details
         self._pending_option_ids[tool_id] = {
             str(option.get("optionId"))
             for option in details.get("acp_options", ())
@@ -108,6 +115,7 @@ class AttachPermissionBridge:
         finally:
             self._pending.pop(tool_id, None)
             self._pending_option_ids.pop(tool_id, None)
+            self._pending_details.pop(tool_id, None)
             # Every attached window shows this prompt (a terminal and the web UI
             # can watch one daemon): tell them all it is closed, so the ones that
             # did not answer stop showing it.
@@ -222,6 +230,25 @@ class AttachPermissionBridge:
                 return True
 
         return self.has_visible_attach_client(display_tap)
+
+    @staticmethod
+    def _is_native_response_name(value: str) -> bool:
+        return value.strip().upper() in ConfirmationResponse.__members__
+
+    @staticmethod
+    def _native_response_allowed(details: dict[str, Any], response: ConfirmationResponse) -> bool:
+        """Allow only native controls actually eligible for this prompt."""
+        if not details.get("acp_options"):
+            return True
+        tool_type = details.get("tool_type", "unknown")
+        eligible = {
+            ConfirmationResponse.APPROVE_ONCE,
+            ConfirmationResponse.DENY,
+        }
+        if tool_type == "terminal":
+            eligible.add(ConfirmationResponse.CANCEL)
+        return response in eligible
+
 
     def _parse_response(self, response_name: str) -> ConfirmationResponse:
         """Parse wire response names from the attach client."""
