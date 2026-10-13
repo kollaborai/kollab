@@ -268,11 +268,12 @@ async def test_attached_daemon_submission_preserves_mixed_content(
             event_type == EventType.USER_INPUT
             and source == UserInputSource.HUB_ATTACHMENT.value
         ):
-            received.append((data["message"], result))
+            received.append((data["message"], data.get("thread_id"), result))
             delivered.set()
         return result
 
     event_bus.emit_with_hooks = capture_attached_submission
+    hub._active_thread_id = "thread-attach"
 
     server = AgentSocketServer(
         agent_id=f"t{uuid.uuid4().hex[:6]}",
@@ -314,8 +315,9 @@ async def test_attached_daemon_submission_preserves_mixed_content(
         await server.stop()
 
     assert len(received) == 1
-    received_content, result = received[0]
+    received_content, received_thread_id, result = received[0]
     assert received_content == content
+    assert received_thread_id == "thread-attach"
     assert result["post"]["final_data"]["message"] == content
     assert not result["cancelled"]
     _assert_hook_results_succeeded(result)

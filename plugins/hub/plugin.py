@@ -13255,10 +13255,11 @@ class HubPlugin(BasePlugin):
             if not callable(submit):
                 logger.debug("Attached input rejected: LLM input pipeline unavailable")
                 return
-            result = await submit(
-                text,
-                source=UserInputSource.HUB_ATTACHMENT,
-            )
+            submit_kwargs = {"source": UserInputSource.HUB_ATTACHMENT}
+            thread_id = getattr(self, "_active_thread_id", None) or None
+            if thread_id is not None:
+                submit_kwargs["thread_id"] = thread_id
+            result = await submit(text, **submit_kwargs)
             if isinstance(result, dict) and result.get("status") in {
                 "cancelled",
                 "rejected",

@@ -1723,6 +1723,8 @@ class LLMService:
         *,
         source: UserInputSource,
         pre_displayed: bool = False,
+        request_id: str | None = None,
+        thread_id: str | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -1759,6 +1761,8 @@ class LLMService:
                 {
                     "message": message,
                     "message_pre_displayed": pre_displayed,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
                 },
                 source.value,
             )
@@ -1819,7 +1823,7 @@ class LLMService:
         if selected_acp and not (acp is not None and getattr(acp, "active", False)):
             return {"status": "rejected", "reason": "acp_unavailable"}
         if acp is not None and getattr(acp, "active", False):
-            request_id = uuid.uuid4().hex
+            request_id = data.get("request_id") or uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
             try:
                 admission = acp.admit(
