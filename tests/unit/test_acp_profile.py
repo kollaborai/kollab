@@ -34,3 +34,19 @@ def test_native_profile_drops_acp_fields():
     )
     assert profile.command == ()
     assert "command" not in profile.to_dict()
+
+
+
+def test_default_acp_profiles_are_selectable_without_native_fallback():
+    from kollabor_ai.profile_manager import ProfileManager
+
+    for name, command, package in (
+        ("claude-code", "claude-agent-acp", "claude-agent-acp@0.89.0"),
+        ("codex-cli", "codex-acp", "codex-acp@2.1.1"),
+        ("gemini-cli", "gemini", "@google/gemini-cli@0.63.0"),
+    ):
+        data = ProfileManager.DEFAULT_PROFILES[name]
+        profile = LLMProfile.from_dict(name, data)
+        assert profile.get_provider() == "acp"
+        assert profile.command[0] == command
+        assert package in profile.install_guidance
