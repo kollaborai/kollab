@@ -1207,18 +1207,10 @@ class TerminalLLMChat:
             logger.exception("ACP permission confirmation failed")
             return None
         allowed = bool(getattr(decision, "allowed", False))
-        requested_scope = str(
-            getattr(decision, "scope", None)
-            or getattr(decision, "approval_scope", None)
-            or details.get("approval_scope")
-            or "once"
-        ).lower()
-        wanted = (
-            "allow_always" if allowed and requested_scope in {"always", "project", "session"}
-            else "allow_once" if allowed
-            else "reject_always" if requested_scope in {"always", "project", "session"}
-            else "reject_once"
-        )
+        # Native confirmation handling has already persisted session/project
+        # grants (when selected). ACP must receive a one-shot opaque outcome;
+        # never widen an ACP adapter request into a reusable ACP grant.
+        wanted = "allow_once" if allowed else "reject_once"
         for option in options:
             if str(option.get("kind")) == wanted:
                 return str(option.get("optionId"))

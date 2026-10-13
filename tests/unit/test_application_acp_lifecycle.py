@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor.application import TerminalLLMChat
+from kollabor_events.permissions_models import PermissionDecision, ToolRiskLevel
 
 
 class FakeRunner:
@@ -128,3 +129,39 @@ async def test_application_cancelled_start_closes_partial_runner(monkeypatch):
         await app._initialize_acp_orchestrator()
     assert app.acp_orchestrator is None
     assert CancelledRunner.instances[-1].closed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["session", "project"])
+async def test_acp_decider_maps_native_reusable_approval_to_once(scope):
+    seen = []
+
+    async def callback(details):
+        seen.append(details)
+        return PermissionDecision(
+            allowed=True,
+            reason=f"User approved ({scope})",
+            risk_level=ToolRiskLevel.MEDIUM,
+            confirmation_details={"approval_scope": scope},
+        )
+
+    app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.permission_manager = SimpleNamespace(_confirmation_callback=callback)
+    request = SimpleNamespace(
+        request_id="perm-1",
+        kind="file_edit",
+        operation={"kind": "edit", "path": "/tmp/work/a.txt"},
+        workspace="/tmp/work",
+        profile="claude-code",
+        options=(
+            {"optionId": "opaque-once", "kind": "allow_once"},
+            {"optionId": "opaque-always", "kind": "allow_always"},
+        ),
+    )
+
+    result = await app._acp_permission_decider(request)
+
+    assert result == "opaque-once"
+    assert seen[0]["source"] == "acp"
+    assert seen[0]["approval_scope"] == "once"
+    assert seen[0]["operation"]["kind"] == "edit"
