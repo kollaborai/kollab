@@ -7413,13 +7413,17 @@ class HubPlugin(BasePlugin):
             return
         # Dedup check
         msg_id = getattr(message, "id", "") or ""
-        if msg_id and msg_id in self._seen_messages:
-            logger.debug(f"Dedup: skipping already-seen message {msg_id}")
+        if message.action != "turn_end":
+            if msg_id and msg_id in self._seen_messages:
+                logger.debug(f"Dedup: skipping already-seen message {msg_id}")
+                return
+            if msg_id:
+                self._seen_messages[msg_id] = None
+                while len(self._seen_messages) > 1000:
+                    self._seen_messages.popitem(last=False)
+        elif msg_id and msg_id in self._seen_messages:
+            logger.debug(f"Dedup: skipping already-seen turn_end {msg_id}")
             return
-        if msg_id:
-            self._seen_messages[msg_id] = None
-            while len(self._seen_messages) > 1000:
-                self._seen_messages.popitem(last=False)
 
         # A correlated ACP completion arrives as a standalone turn_end message
         # (the sender ACKs the admission connection, then opens a new message
@@ -7457,6 +7461,10 @@ class HubPlugin(BasePlugin):
                 and message.reply_to == expected_ids.get(message.thread_id)
                 and sender_ok
             ):
+                if msg_id:
+                    self._seen_messages[msg_id] = None
+                    while len(self._seen_messages) > 1000:
+                        self._seen_messages.popitem(last=False)
                 self.on_network_turn_end(message.thread_id, frame, message.content)
                 return
 
