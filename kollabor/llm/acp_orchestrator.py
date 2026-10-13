@@ -18,9 +18,11 @@ logger = logging.getLogger(__name__)
 class ACPOrchestrator:
     """Own one ACP runner for one daemon identity/profile."""
 
-    def __init__(self, event_bus: Any, *, identity: str = "default") -> None:
+    def __init__(self, event_bus: Any, *, identity: str = "default", hub_plugin: Any = None) -> None:
         self.event_bus = event_bus
         self.identity = identity
+        self.hub_plugin = hub_plugin
+        self._binding: tuple[str, int] | None = None
         self._runner: ACPRunner | None = None
         self._profile_name: str | None = None
         self._closed = False
@@ -42,12 +44,29 @@ class ACPOrchestrator:
             raise RuntimeError("ACP runner already started for this identity")
 
         command = tuple(profile.command)
+        mcp_servers = []
+        if self.hub_plugin is not None:
+            token, generation = self.hub_plugin.rotate_acp_hub_binding()
+            self._binding = (token, generation)
+            socket_path = getattr(getattr(self.hub_plugin, "_socket_server", None), "socket_path", "")
+            from kollabor.mcp_hub import kollab_hub_argv
+            mcp_servers.append({
+                "name": "kollab-hub",
+                "command": kollab_hub_argv()[0],
+                "args": kollab_hub_argv()[1:],
+                "env": {
+                    "KOLLAB_ACP_HUB_TOKEN": token,
+                    "KOLLAB_ACP_HUB_GENERATION": str(generation),
+                    "KOLLAB_ACP_HUB_SOCKET": str(socket_path),
+                },
+            })
         acp_profile = ACPProfile(
             name=profile.name,
             command=command,
             cwd=profile.cwd or profile.workspace or None,
             workspace=profile.workspace or None,
             pass_env=profile.pass_env,
+            mcp_servers=tuple(mcp_servers),
         )
         self._runner = ACPRunner(acp_profile)
         self._profile_name = profile.name
@@ -93,3 +112,6 @@ class ACPOrchestrator:
         if self._runner is not None:
             await self._runner.close()
             self._runner = None
+        if self.hub_plugin is not None and self._binding is not None:
+            self.hub_plugin.rotate_acp_hub_binding()
+            self._binding = None

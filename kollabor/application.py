@@ -1156,7 +1156,10 @@ class TerminalLLMChat:
         identity = getattr(self.args, "as_identity", None) or os.environ.get(
             "KOLLAB_IDENTITY", "default"
         )
-        orchestrator = ACPOrchestrator(self.event_bus, identity=identity)
+        hub_plugin = self.event_bus.get_service("hub_plugin")
+        orchestrator = ACPOrchestrator(
+            self.event_bus, identity=identity, hub_plugin=hub_plugin
+        )
         await orchestrator.start(profile)
         self.acp_orchestrator = orchestrator
         logger.info("ACP runner started for identity=%s profile=%s", identity, profile.name)

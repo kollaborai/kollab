@@ -15,6 +15,16 @@ class Tap:
         self.events.append(event)
 
 
+class Hub:
+    def __init__(self):
+        self.rotations = 0
+        self._socket_server = None
+
+    def rotate_acp_hub_binding(self):
+        self.rotations += 1
+        return (f"token-{self.rotations}", self.rotations)
+
+
 class Bus:
     def __init__(self):
         self.services = {"display_tap": Tap()}
@@ -49,7 +59,8 @@ class FakeRunner:
 async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
     bus = Bus()
-    orchestrator = mod.ACPOrchestrator(bus, identity="lapis")
+    hub = Hub()
+    orchestrator = mod.ACPOrchestrator(bus, identity="lapis", hub_plugin=hub)
     profile = LLMProfile(name="fake", provider="acp", command=("fake",))
     await orchestrator.start(profile)
     result = await orchestrator.submit("hello", source="rpc")
@@ -58,3 +69,4 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     assert any(event.get("type") == "turn_complete" for event in bus.services["display_tap"].events)
     await orchestrator.close()
     assert not orchestrator.active
+    assert hub.rotations == 2
