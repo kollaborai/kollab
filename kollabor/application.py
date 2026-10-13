@@ -1240,7 +1240,12 @@ class TerminalLLMChat:
         grant_acp = getattr(manager, "grant_acp", None)
         if allowed and callable(grant_acp) and scope in ("session", "project"):
             grant_acp(request.operation, request.workspace, request.profile, scope=scope)
-        wanted = choice if allowed and choice else ("allow_once" if allowed else "reject_once")
+        if allowed and choice in ("approve_session", "approve_project"):
+            wanted = "allow_once"
+        elif allowed and choice in ("approve_always", "approve_tool_always"):
+            wanted = "allow_always" if choice == "approve_always" else "allow_tool_always"
+        else:
+            wanted = "allow_once" if allowed else "reject_once"
         for option in options:
             if str(option.get("kind")) == wanted:
                 return str(option.get("optionId"))
