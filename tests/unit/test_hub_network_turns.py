@@ -1228,7 +1228,8 @@ def test_a_driver_that_only_lowers_is_processing_still_ends_the_chain(completed,
     hub.network_chain_ended.assert_called_once_with(failed=failed)
 
 @pytest.mark.asyncio
-async def test_correlated_turn_end_settles_waiter_without_model_wake():
+async def test_incoming_acp_origin_cannot_be_settled_by_turn_end():
+    """Only outbound waiters may consume correlated terminal frames."""
     sent: list = []
     plugin, llm = _responder(sent)
     waiter = asyncio.Queue()
@@ -1241,16 +1242,14 @@ async def test_correlated_turn_end_settles_waiter_without_model_wake():
         from_agent="relay:peer",
         from_identity=ASKER,
         to="infra",
-        content="",
+        content="finished",
         thread_id=T1,
         reply_to=W1,
         metadata={"turn_end": {"replies": 1, "failed": False, "outcome": "end_turn"}},
     )
     await plugin._on_message_received(message)
-    assert await asyncio.wait_for(waiter.get(), timeout=0.2) == (
-        "end", 1, False, ""
-    )
-    assert plugin._acp_network_turns == {}
+    assert waiter.empty()
+    assert plugin._acp_network_turns == {W1: turn}
     assert llm.conversation_history == []
     assert sent == []
 
@@ -1404,3 +1403,37 @@ async def test_turn_end_rejects_foreign_authenticated_sender_even_with_matching_
     await plugin._on_message_received(message)
     assert "request-id" in plugin._acp_network_turns
     assert llm.conversation_history == []
+
+
+@pytest.mark.asyncio
+async def test_correlated_turn_end_rejects_same_name_foreign_device():
+    """A requester waiter is bound to the full authenticated designation."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    thread_id = "sender-thread"
+    request_id = "sender-request"
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {thread_id: waiter}
+    plugin._cli_waiter_request_ids = {thread_id: request_id}
+    plugin._cli_waiter_senders = {thread_id: "receiver@device"}
+    message = HubMessage(
+        id="end-id",
+        action="turn_end",
+        from_agent="receiver",
+        from_identity="receiver@other-device",
+        to="infra",
+        content="stopped",
+        thread_id=thread_id,
+        reply_to=request_id,
+        metadata={
+            "turn_end": {
+                "replies": 0,
+                "failed": True,
+                "outcome": "cancelled",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert waiter.empty()
+    assert llm.conversation_history == []
+    assert sent == []

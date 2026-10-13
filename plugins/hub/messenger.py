@@ -1378,13 +1378,19 @@ class AgentSocketServer:
                     if (
                         set(msg_data) != required
                         or not isinstance(frame, dict)
-                        or set(frame) != {"replies", "failed", "outcome"}
+                        or set(frame)
+                        not in (
+                            {"replies", "failed", "outcome"},
+                            {"replies", "failed", "outcome", "text"},
+                        )
                     ):
                         writer.write(b'{"type":"error","msg":"invalid turn_end"}\n')
                         await writer.drain()
                         return
                     end_message = HubMessage(
-                        id=str(msg_data["reply_to"]), action="turn_end", content="",
+                        id=str(msg_data["reply_to"]),
+                        action="turn_end",
+                        content=str(frame.get("text", "")),
                         from_identity=authenticated_as or "local",
                         from_agent=authenticated_as or "local",
                         thread_id=str(msg_data["thread_id"]),
@@ -2398,6 +2404,7 @@ class AgentMessenger:
         replies: int,
         failed: bool,
         outcome: str,
+        text: str,
         timeout: float = 5.0,
         auth: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
@@ -2410,6 +2417,8 @@ class AgentMessenger:
             or isinstance(replies, bool)
             or replies < 0
             or not isinstance(failed, bool)
+            or not isinstance(text, str)
+            or not text.strip()
             or outcome not in {
                 "end_turn", "cancelled", "refusal", "max_tokens",
                 "max_turn_requests", "busy", "skipped", "timeout", "error",
@@ -2429,6 +2438,7 @@ class AgentMessenger:
                     "replies": replies,
                     "failed": failed,
                     "outcome": outcome,
+                    "text": text,
                 },
             }
             writer.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())

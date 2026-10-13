@@ -7398,7 +7398,11 @@ class HubPlugin(BasePlugin):
             frame = (message.metadata or {}).get("turn_end")
             if (
                 not isinstance(frame, dict)
-                or set(frame) != {"replies", "failed", "outcome"}
+                or set(frame)
+                not in (
+                    {"replies", "failed", "outcome"},
+                    {"replies", "failed", "outcome", "text"},
+                )
                 or not isinstance(frame.get("replies"), int)
                 or not isinstance(frame.get("failed"), bool)
                 or not isinstance(frame.get("outcome"), str)
@@ -7417,8 +7421,6 @@ class HubPlugin(BasePlugin):
             expected_sender = expected_senders.get(message.thread_id, "")
             sender_values = {message.from_identity or "", message.from_agent or ""}
             sender_ok = not expected_sender or expected_sender in sender_values
-            if "@" in expected_sender:
-                sender_ok = sender_ok or expected_sender.split("@", 1)[0] in sender_values
             if (
                 waiter is not None
                 and message.reply_to == expected_ids.get(message.thread_id)
@@ -7427,27 +7429,11 @@ class HubPlugin(BasePlugin):
                 self.on_network_turn_end(message.thread_id, frame, message.content)
                 return
 
-            turns = getattr(self, "_acp_network_turns", None) or {}
-            matched = None
-            sender_values = {message.from_identity or "", message.from_agent or ""}
-            for key, candidate in list(turns.items()):
-                expected_sender = getattr(candidate, "handle", "") or ""
-                sender_ok = not expected_sender or expected_sender in sender_values
-                if "@" in expected_sender:
-                    sender_ok = sender_ok or expected_sender.split("@", 1)[0] in sender_values
-                if (
-                    key == message.reply_to
-                    and candidate.message_id == message.reply_to
-                    and candidate.thread_id == message.thread_id
-                    and sender_ok
-                ):
-                    matched = candidate
-                    turns.pop(key, None)
-                    break
-            if matched is None:
-                logger.debug("ignoring unmatched correlated turn_end %s", message.reply_to)
-                return
-            self.on_network_turn_end(message.thread_id, frame, message.content)
+            # Incoming ACP origins are owned by this agent's runner and are
+            # settled only by its local completion callback. They must not be
+            # completed by a remote turn_end frame. Only outbound waiters
+            # registered by this agent can be settled here.
+            logger.debug("ignoring unmatched correlated turn_end %s", message.reply_to)
             return
 
         # A request from a remote agent@device (not a reply to ours) is handled
@@ -9392,6 +9378,10 @@ class HubPlugin(BasePlugin):
                     replies=int(turn_end.get("replies", 0)),
                     failed=bool(turn_end.get("failed", False)),
                     outcome=str(turn_end.get("outcome", "error")),
+                    text=(message.content or self._acp_outcome_text(
+                        str(turn_end.get("outcome", "error")),
+                        bool(turn_end.get("failed", False)),
+                    )),
                     auth=dial_auth,
                 )
                 self._trace_delivery(
