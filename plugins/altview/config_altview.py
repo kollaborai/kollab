@@ -65,6 +65,8 @@ class ConfigAltView(AltView):
         # App / config references (injected via set_app)
         self.app: Any = None
         self.config_service: Any = None
+        self.title = "System Configuration"
+        self.status_message = ""
 
         # Data model  --  real widget instances grouped by section
         self._sections: List[str] = []
@@ -165,10 +167,7 @@ class ConfigAltView(AltView):
 
     def _load_widgets(self) -> None:
         """Load config definition and create real widget instances."""
-        self._managed, self._global_settings = read_managed_state()
-        sections = build_config_sections(
-            self.config_service, self._managed, self._global_settings
-        )
+        sections = self._build_sections()
 
         self._sections = []
         self._section_widgets = []
@@ -188,10 +187,16 @@ class ConfigAltView(AltView):
             self._sections.append(title)
             self._section_widgets.append(widgets)
 
-        # Set initial focus
         vis = self._visible_widgets()
         if vis:
             vis[0].set_focus(True)
+
+    def _build_sections(self) -> list[dict]:
+        """Shared widget editor; subclasses provide a focused settings panel."""
+        self._managed, self._global_settings = read_managed_state()
+        return build_config_sections(
+            self.config_service, self._managed, self._global_settings
+        )
 
     # -- settings the network's primary manages ------------------------------
 
@@ -369,7 +374,7 @@ class ConfigAltView(AltView):
     def _render_header(self, width: int, theme: Any) -> None:
         """Render the title bar."""
         assert self._renderer is not None  # guarded by render_frame
-        title = " System Configuration"
+        title = f" {self.title}"
         dirty = self._dirty_count()
         if dirty:
             title += f"  ({dirty} unsaved)"
@@ -542,10 +547,7 @@ class ConfigAltView(AltView):
                 solid_fg(str(C["half_bottom"]) * width, warn),
                 "",
             )
-            prompt_text = (
-                " Save to: (L)ocal → .kollab/config.json here  "
-                "(G)lobal → ~/.kollab/config.json  (Esc) cancel"
-            )
+            prompt_text = " Save to: (L)ocal → .kollab/config.json here  (G)lobal → ~/.kollab/config.json  (Esc) cancel"
             self._renderer.write_at(
                 0,
                 footer_y + 1,
@@ -568,15 +570,10 @@ class ConfigAltView(AltView):
             if self._search_active:
                 hint = " Type to filter | Esc exit search | Enter select"
             else:
-                keys = (
-                    "Up/Dn navigate  "
-                    "Tab section  "
-                    "Enter/Space toggle  "
-                    "/ search  "
-                    "Ctrl+S save  "
-                    "Esc exit"
-                )
+                keys = "Up/Dn navigate  Tab section  Enter/Space toggle  / search  Ctrl+S save  Esc exit"
                 hint = f" {keys}"
+            if self.status_message:
+                hint = f" {self.status_message}"[:width]
 
             # Activity badge: show buffered message count from agent
             badge = self._get_activity_badge()

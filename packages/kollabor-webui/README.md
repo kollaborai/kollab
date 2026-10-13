@@ -57,7 +57,7 @@ if Node/npm is unavailable.
   another network's rooms (a knock); it is display-only: nothing is permitted
   with a contact until `/connect allow` says so. Engines without the
   aggregate render the flat single-network view exactly as before.
-- **Chat**: pill composer with attachments, a `/voicemode` mic, and a
+- **Chat**: pill composer with attachments, a `/voice` mic, and a
   send/stop button; tool calls show while they run and keep their duration.
   Messages from other agents show as messages from their gems ("Aquamarine →
   Lapis"), the way the terminal draws its hub boxes; one the agent only

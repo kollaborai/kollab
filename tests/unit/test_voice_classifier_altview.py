@@ -1,4 +1,4 @@
-"""`/voicemode classifier`: each decision on the left, what it saw and said on the right."""
+"""`/voice classifier`: each decision on the left, what it saw and said on the right."""
 
 from types import SimpleNamespace
 
@@ -115,13 +115,13 @@ def test_without_a_trace_the_request_and_errors_still_show():
         "records": [{"event_id": "e1", "text": "hi", "playback_overlap": [{"text": "Yes, I can hear you."}]}],
         "transcript_context": [{"event_id": "e0", "text": "before"}],
         "context": "user: earlier",
-        "error": "Voice observer timed out; /voicemode retry",
+        "error": "Voice observer timed out; /voice retry",
     }
     rows = [text for _, text in detail_lines(entry)]
     assert '  while the agent said: "Yes, I can hear you."' in rows
     assert "  previous transcript lines (1)" in rows
     assert "    user: earlier" in rows
-    assert "  Voice observer timed out; /voicemode retry" in rows
+    assert "  Voice observer timed out; /voice retry" in rows
     assert "  nothing" in rows
 
 

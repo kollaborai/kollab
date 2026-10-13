@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-from kollabor_tui.terminal_state import get_terminal_size
+from kollabor_tui.terminal_state import get_global_terminal_state, get_terminal_size
 from kollabor_tui.visual_effects import ColorPalette
 
 # Platform-specific imports for terminal control
@@ -354,7 +354,14 @@ class FullScreenRenderer:
         Returns:
             Tuple of (width, height).
         """
-        return (self.terminal_width, self.terminal_height)
+        # The normal render loop is paused while fullscreen views are open.
+        # Refresh the shared terminal state here so they also see resizes.
+        get_global_terminal_state().update_size()
+        size = get_terminal_size()
+        if size != (self.terminal_width, self.terminal_height):
+            self.terminal_width, self.terminal_height = size
+            self.invalidate_render_cache()
+        return size
 
     def is_active(self) -> bool:
         """Check if renderer is currently active.

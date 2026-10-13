@@ -40,7 +40,7 @@ from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 logger = logging.getLogger(__name__)
 
 # Modules that may export PANELS, in the order list_panels() loads them.
-PANEL_MODULES: tuple[str, ...] = ("config", "llm", "model", "setup", "connect", "apps")
+PANEL_MODULES: tuple[str, ...] = ("config", "llm", "model", "setup", "connect", "apps", "voice")
 
 # Slash command (canonical name, no "/") -> the panel it opens in the web UI.
 COMMAND_PANELS: dict[str, str] = {
@@ -50,6 +50,7 @@ COMMAND_PANELS: dict[str, str] = {
     "setup": "setup",
     "connect": "connect",
     "apps": "apps",
+    "voice": "voice",
 }
 
 # Where the web UI shows each panel. Used in the reply a command gives when it
@@ -61,6 +62,7 @@ PANEL_LOCATIONS: dict[str, str] = {
     "setup": "Settings → Setup",
     "connect": "Settings → Network",
     "apps": "Apps (sidebar)",
+    "voice": "Settings → Voice",
 }
 
 FIELD_TYPES: tuple[str, ...] = (

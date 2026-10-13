@@ -452,7 +452,7 @@ export type PanelForm = PanelBase & {
   kind: "form";
   sections: PanelSection[];
   actions?: PanelAction[];
-  save_targets?: { local?: string | null; global?: string | null } | null;
+  save_targets?: Record<string, string | null> | null;
 };
 
 export type PanelPicker = PanelBase & {

@@ -423,7 +423,7 @@ async def test_context_command_defaults_validation_persistence_and_no_activation
 
 
 def test_decision_traces_what_laya_read_and_each_pass():
-    """`/voicemode classifier` shows this: the state read and both passes' answers."""
+    """`/voice classifier` shows this: the state read and both passes' answers."""
     from kollabor_voice.classifiers import VoiceDecision
     from kollabor_voice.laya_worker import predict
 

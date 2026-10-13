@@ -6,7 +6,8 @@ export type SettingsTab =
   | "loadouts"
   | "model"
   | "setup"
-  | "network";
+  | "network"
+  | "voice";
 export type PanelTab = Exclude<SettingsTab, "session">;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
@@ -42,6 +43,7 @@ export const SETTINGS_TABS: readonly {
     scope: "Adds a provider profile and makes it the active one",
   },
   { id: "network", label: "Network", scope: "This device's agent network" },
+  { id: "voice", label: "Voice", scope: "Saved for every chat on the device running Kollab" },
 ];
 
 /** The daemon panel behind each non-session tab (key == slash command). */
@@ -51,6 +53,7 @@ export const PANEL_NAME: Record<PanelTab, string> = {
   model: "model",
   setup: "setup",
   network: "connect",
+  voice: "voice",
 };
 
 const TAB_FOR_PANEL: Record<string, PanelTab> = {
@@ -59,6 +62,7 @@ const TAB_FOR_PANEL: Record<string, PanelTab> = {
   model: "model",
   setup: "setup",
   connect: "network",
+  voice: "voice",
 };
 
 const BARE_COMMAND = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)(?:[ \t]+([A-Za-z]+))?$/;
@@ -84,6 +88,8 @@ export function panelCommandRequest(
   const panel = known?.panel || known?.name.toLowerCase() || word;
   const tab = TAB_FOR_PANEL[panel];
   if (!tab) return null;
+  // /voice alone toggles listening; only /voice config opens the settings.
+  if (tab === "voice") return arg === "config" ? { tab } : null;
   if (!arg) return { tab };
   if (tab === "network" && arg === "code") return { tab, intent: "new_code" };
   if (tab === "network" && arg === "knocks") return { tab, intent: "knocks" };

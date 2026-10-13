@@ -96,6 +96,8 @@ def _needs_terminal_reply(command_name: str) -> str:
     panel = COMMAND_PANELS.get(command_name)
     if panel is None:
         return f"/{command_name} needs the terminal UI"
+    if command_name == "voice":
+        return "/voice config opens in Settings → Voice in the web UI"
     return f"/{command_name} opens in {PANEL_LOCATIONS[panel]} in the web UI"
 
 

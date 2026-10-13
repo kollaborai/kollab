@@ -1,6 +1,6 @@
 # Web Settings Panels
 
-The web UI (`kollab --web-ui`) has a **Settings** dialog with six tabs. They do what the terminal's fullscreen screens do (`/config`, `/llm`, `/model`, `/setup`, `/connect`), through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. On a phone the dialog is a full-screen sheet.
+The web UI (`kollab --web-ui`) has a **Settings** dialog with seven tabs. They do what the terminal's fullscreen screens do (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`), through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. On a phone the dialog is a full-screen sheet.
 
 Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-unified-config.md).
 
@@ -13,6 +13,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Loadouts | The same list as terminal `/llm`: use one, create, edit, delete (delete asks twice). | The profile manager the terminal `/llm` uses. |
 | Model | Reasoning effort and the model picker for the active provider (terminal `/model`). | The profile manager the terminal `/model` uses. |
 | Setup | The first-run wizard as steps: provider, API key, endpoint, model, optional connection test, Save and Activate. A bad key shows a redacted error; a missing key jumps back to the key step. | A new profile, activated, through the same code as terminal `/setup`. |
+| Voice | Classifier and transcript context, plus the fixed transcription and speech engines, voice, speed, microphone and current state (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
 | Network | Your agent network: status, this device, join requests with accept and reject, trust level, rename, and New Join Code. Knocks opens the knock screen: ringing knocks (accept, reject, block), the knocks this device placed (stop), missed knocks, blocked routes, contacts, and who may knock. | The network state the terminal `/connect` and `/connect knocks` use. |
 
 A change that is not saved yet is marked "changed" on its field; closing the dialog with unsaved changes asks first.
@@ -28,6 +29,9 @@ Typing a panel command in the web chat opens its tab instead of sending a messag
 | `/model` (also `/mod`, `/m`) | Settings, Model |
 | `/setup` (also `/onboard`, `/wizard`) | Settings, Setup |
 | `/connect`, `/connect code`, `/connect knocks` | Settings, Network |
+| `/voice config` | Settings, Voice |
+
+`/voice`, `/voice on` and `/voice off` control listening through normal chat commands. `/voice status` reports runtime diagnostics.
 
 `/model effort high` and `/llm <name>` with an argument run as typed and answer in the chat. Picking a command from the slash menu opens its tab too. A command that only works in a terminal (`/matrix`, for one) answers "needs the terminal UI" and the turn ends; it never hangs.
 

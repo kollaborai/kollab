@@ -26,3 +26,7 @@ provider-only choice in the original audit.
 The [spoken response contract](spoken-response-review.md) separates screen text
 from narration, adds outgoing style review and permits one bounded correction.
 It supersedes any earlier policy that reads all visible assistant prose aloud.
+
+Voice now uses `/voice` and `/voice config`. The current configuration contract is
+in the final section of the device-service spec; it includes the shared TUI/web
+panel and device preference persistence.

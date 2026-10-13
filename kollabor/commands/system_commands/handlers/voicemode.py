@@ -23,13 +23,12 @@ class VoiceModeCommandHandler(BaseCommandHandler):
     def register_commands(self):
         self.command_registry.register_command(
             CommandDefinition(
-                name="voicemode",
+                name="voice",
                 description="Turn device voice on or off; automatic setup",
                 handler=self.handle_voicemode,
                 plugin_name="system",
                 category=CommandCategory.SYSTEM,
                 mode=CommandMode.INSTANT,
-                aliases=["vm", "voice"],
                 subcommands=[
                     SubcommandInfo(action, "", description)
                     for action, description in [
@@ -37,6 +36,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("off", "Stop voice in this chat"),
                         ("status", "Show service, microphone and transcript status"),
                         ("retry", "Retry setup or pending speech"),
+                        ("config", "Configure voice in the terminal or web UI"),
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
                             "classifier",
@@ -44,17 +44,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ),
                     ]
                 ],
-            )
-        )
-        self.command_registry.register_command(
-            CommandDefinition(
-                name="voicemodels",
-                description="Show automatic voice setup status",
-                handler=self.handle_voicemodels,
-                plugin_name="system",
-                category=CommandCategory.SYSTEM,
-                mode=CommandMode.INSTANT,
-                aliases=["vmodels"],
             )
         )
 
@@ -68,19 +57,23 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 message="Voice plugin is unavailable; restart Kollab after updating",
                 display_type="error",
             )
+        if action == "config":
+            return await self._open_config(plugin)
         if action == "status":
             return await self._status(plugin)
         if action == "context":
             return CommandResult(
                 success=True,
-                message=f"Voice context: previous {plugin.context_lines} transcript lines. /voicemode context 1–50",
+                message=f"Voice context: previous {plugin.context_lines} transcript lines. /voice context 1–50",
             )
         if action.startswith("context "):
             try:
                 message = plugin.set_context_lines(int(action.removeprefix("context ")))
                 return CommandResult(success=True, message=message)
             except (ValueError, OSError) as exc:
-                return CommandResult(success=False, message=str(exc), display_type="error")
+                return CommandResult(
+                    success=False, message=str(exc), display_type="error"
+                )
         if action == "classifier":
             return await self._open_classifier_log(plugin)
         if action.startswith("classifier "):
@@ -95,7 +88,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         if action not in {"", "on", "off", "retry"}:
             return CommandResult(
                 success=False,
-                message="Usage: /voicemode [on|off|status|retry|classifier [laya|provider]|context [1–50]]",
+                message="Usage: /voice [on|off|status|retry|config|classifier [laya|provider]|context [1–50]]",
                 display_type="error",
             )
         if action == "retry":
@@ -105,6 +98,19 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         else:
             message = await plugin.start_voice()
         return CommandResult(success=True, message=message)
+
+    async def _open_config(self, plugin):
+        from kollabor_tui.altview.stack_manager import AltViewStackManager
+        from plugins.altview.voice_config_altview import VoiceConfigAltView
+
+        stack = self.event_bus.get_service("altview_stack_manager")
+        if stack is None:
+            stack = AltViewStackManager(
+                self.event_bus, self.event_bus.get_service("renderer")
+            )
+            self.event_bus.register_service("altview_stack_manager", stack)
+        await stack.push(VoiceConfigAltView(plugin), "voice-config", reuse=False)
+        return CommandResult(success=True, message="")
 
     async def _open_classifier_log(self, plugin):
         """Fullscreen: each classifier decision, what it saw and what it said."""
@@ -132,8 +138,8 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 success=True,
                 message=(
                     f"Voice classifier: {CLASSIFIERS[plugin.classifier_name]}\n"
-                    "/voicemode classifier laya — local, shared persistent worker (default)\n"
-                    "/voicemode classifier provider — active AI provider"
+                    "/voice classifier laya — local, shared persistent worker (default)\n"
+                    "/voice classifier provider — active AI provider"
                 ),
             )
         return CommandResult(success=True, message="")
@@ -199,7 +205,3 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             if value:
                 lines.append(str(value))
         return CommandResult(success=True, message="\n".join(lines))
-
-    async def handle_voicemodels(self, command):
-        command.args = ["status"]
-        return await self.handle_voicemode(command)

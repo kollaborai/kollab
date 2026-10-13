@@ -13,6 +13,8 @@ import asyncio
 import contextlib
 import io
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from kollabor_tui.fullscreen.renderer import FullScreenRenderer
 
@@ -45,6 +47,50 @@ def _frame(r, cells):
 
 
 class FullscreenRendererSkipTest(unittest.TestCase):
+    def test_altview_detects_resize_without_a_signal(self):
+        from kollabor_tui.altview.session import AltViewSession
+
+        session = SimpleNamespace(
+            renderer=MagicMock(terminal_width=80, terminal_height=24),
+            pending_input=asyncio.Queue(),
+        )
+        with (
+            patch("kollabor_tui.altview.session.get_global_terminal_state") as state,
+            patch("sys.stdin") as stdin,
+        ):
+            state.return_value.check_and_clear_resize_flag.return_value = False
+            state.return_value.get_size.return_value = (120, 36)
+            stdin.isatty.return_value = False
+            self.assertEqual(
+                asyncio.run(AltViewSession._input_callback(session)), (True, False)
+            )
+        session.renderer.invalidate_render_cache.assert_called_once()
+
+    def test_altview_resize_requests_a_frame_without_keyboard_input(self):
+        from kollabor_tui.altview.session import AltViewSession
+
+        session = SimpleNamespace(renderer=MagicMock(), pending_input=asyncio.Queue())
+        with (
+            patch("kollabor_tui.altview.session.get_global_terminal_state") as state,
+            patch("sys.stdin") as stdin,
+        ):
+            state.return_value.check_and_clear_resize_flag.return_value = True
+            stdin.isatty.return_value = False
+            self.assertEqual(
+                asyncio.run(AltViewSession._input_callback(session)), (True, False)
+            )
+        session.renderer.invalidate_render_cache.assert_called_once()
+
+    def test_resize_updates_bounds_and_repaints_an_identical_frame(self):
+        r = _renderer()
+        _frame(r, [(2, 0, "hello")])
+        with patch(
+            "kollabor_tui.fullscreen.renderer.get_terminal_size", return_value=(120, 36)
+        ):
+            self.assertEqual(r.get_terminal_size(), (120, 36))
+        self.assertEqual((r.terminal_width, r.terminal_height), (120, 36))
+        self.assertIn("hello", _frame(r, [(2, 0, "hello")]))
+
     def test_first_frame_paints_in_full(self):
         r = _renderer()
         out = _frame(r, [(2, 0, "hello"), (2, 1, "world")])

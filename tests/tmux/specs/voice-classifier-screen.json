@@ -1,6 +1,6 @@
 {
   "name": "voice classifier screen",
-  "description": "/voicemode classifier opens the two-pane decision screen; Esc returns to the prompt",
+  "description": "/voice classifier opens the two-pane decision screen; Esc returns to the prompt",
   "config": {
     "command": "sh -c 'cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec kollab --no-daemon'",
     "app_init_sleep": 5,
@@ -16,7 +16,7 @@
     },
     {
       "action": "slash_command",
-      "command": "voicemode",
+      "command": "voice",
       "subcommand": "classifier"
     },
     {
@@ -33,7 +33,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Voice is off. /voicemode on, then speak."
+      "pattern": "Voice is off. /voice on, then speak."
     },
     {
       "action": "assert_contains",

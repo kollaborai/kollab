@@ -69,6 +69,7 @@ const freshTabs = (): TabMap => ({
   model: IDLE,
   setup: IDLE,
   network: IDLE,
+  voice: IDLE,
 });
 const newView = (panel: PanelDescription): View => ({
   panel,

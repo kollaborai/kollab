@@ -164,7 +164,7 @@ class VoiceService:
         except Exception as exc:
             log.exception("Voice setup failed")
             self.error = str(exc)
-            self.progress(state="error", detail=f"{exc}. Run /voicemode retry")
+            self.progress(state="error", detail=f"{exc}. Run /voice retry")
 
     def authorize(self, token, epoch):
         if (
@@ -172,12 +172,12 @@ class VoiceService:
             or time.monotonic() - self.owner["heartbeat"] >= LEASE_SECONDS
         ):
             raise VoiceError(
-                "lease_expired", "Voice connection expired; run /voicemode retry"
+                "lease_expired", "Voice connection expired; run /voice retry"
             )
         if token != self.owner["token"] or epoch != self.owner["epoch"]:
             raise VoiceError(
                 "not_owner",
-                "Voice is active in another chat; run /voicemode on",
+                "Voice is active in another chat; run /voice on",
             )
 
     def status(self):
@@ -581,7 +581,7 @@ class VoiceService:
                         ):
                             self.worker_failures.add(task.get_name())
                             raise RuntimeError(
-                                f"{task.get_name()} stopped: {task.exception()}. Run /voicemode retry"
+                                f"{task.get_name()} stopped: {task.exception()}. Run /voice retry"
                             )
                     if (
                         self.owner

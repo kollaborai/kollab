@@ -35,7 +35,7 @@ DEAD_STREAM_TIMEOUT_S = 1.5
 PERMISSION_HELP = (
     "Microphone unavailable or permission denied. Grant access to your "
     "terminal app in System Settings > Privacy & Security > Microphone, "
-    "then run /voicemode again."
+    "then run /voice again."
 )
 
 

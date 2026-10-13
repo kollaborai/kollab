@@ -309,9 +309,9 @@ const Composer: FC<{
   // sent to the chat being left.
   const lock = useContext(ComposerLockContext);
   const { workspace, remote: remoteAgents } = useContext(ComposerHubContext);
-  // The mic only exists where the session's live command list has /voicemode.
+  // The mic only exists where the session's live command list has /voice.
   const voiceAvailable = commands.some(
-    (command) => command.name === "voicemode" && command.enabled !== false,
+    (command) => command.name === "voice" && command.enabled !== false,
   );
   const slotMode = useAuiState((s) =>
     composerSlotMode(s, voiceAvailable ? voice : null),
@@ -648,13 +648,13 @@ function prettyCommandName(name: string): string {
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
 // One trailing button slot that morphs: stop while a run is going, send once
-// there is something to send, otherwise the /voicemode toggle (a mic, or the
+// there is something to send, otherwise the /voice toggle (a mic, or the
 // pulsing listening button while voice is on) where the session offers it.
 const composerSlotMode = (
   s: AssistantState,
   voice: VoiceMode | null,
 ): ComposerSlotMode => {
-  // A /voicemode command is itself a chat run; hold the mic still through it
+  // A /voice command is itself a chat run; hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
   if (s.thread.isRunning) return "stop";

@@ -73,7 +73,7 @@ class SpinBoxWidget(BaseWidget):
         """
         return self.render_modern()
 
-    def render_modern(self, width: int = 50) -> List[str]:  # type: ignore[override]
+    def render_modern(self, width: int = 50, position: str = "only") -> List[str]:  # type: ignore[override]
         """Render spin box with modern design system styling.
 
         Uses TagBox for label and increment/decrement buttons.
@@ -117,6 +117,7 @@ class SpinBoxWidget(BaseWidget):
                 content_width=content_width,
                 tag_chars=[icon],
                 use_gradient=use_gradient,
+                position=position,
             )
             lines.append(label_line)
 
@@ -139,6 +140,7 @@ class SpinBoxWidget(BaseWidget):
                 content_width=content_width,
                 tag_chars=[icon],
                 use_gradient=self.focused,
+                position=position,
             )
             lines.append(value_line)
         else:
@@ -156,6 +158,7 @@ class SpinBoxWidget(BaseWidget):
                 content_width=content_width,
                 tag_chars=[icon],
                 use_gradient=self.focused,
+                position=position,
             )
             lines.append(value_line)
 
@@ -180,6 +183,7 @@ class SpinBoxWidget(BaseWidget):
                 content_width=content_width,
                 tag_chars=["   "],
                 use_gradient=False,
+                position=position,
             )
             lines.append(range_line)
 
@@ -245,6 +249,7 @@ class SpinBoxWidget(BaseWidget):
         if key_press.key == "r" and key_press.ctrl:
             default = (self.min_value + self.max_value) / 2
             self.current_value = default
+            self.set_value(self.current_value)
             return True
 
         return False
@@ -285,6 +290,7 @@ class SpinBoxWidget(BaseWidget):
                 new_value = self.max_value
 
         self.current_value = self._round_to_decimals(new_value)
+        self.set_value(self.current_value)
 
     def _decrement(self, step=None):
         """Decrement value by step.
@@ -305,6 +311,7 @@ class SpinBoxWidget(BaseWidget):
                 new_value = self.min_value
 
         self.current_value = self._round_to_decimals(new_value)
+        self.set_value(self.current_value)
 
     def _handle_digit_input(self, digit: str):
         """Handle direct digit input for entering numbers.
@@ -322,6 +329,7 @@ class SpinBoxWidget(BaseWidget):
         # Simplified: toggle to next decimal precision
         if self.decimal_places > 0:
             self.current_value = round(self.current_value, self.decimal_places)
+            self.set_value(self.current_value)
 
     def _handle_minus_input(self):
         """Handle minus sign for negative values."""
@@ -330,6 +338,7 @@ class SpinBoxWidget(BaseWidget):
             self.current_value = max(self.min_value, -self.current_value)
         else:
             self.current_value = abs(self.current_value)
+        self.set_value(self.current_value)
 
     def _format_value(self, value: float) -> str:
         """Format value for display.

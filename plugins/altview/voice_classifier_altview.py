@@ -1,6 +1,6 @@
 """Voice classifier log: each decision on the left, what it saw and said on the right.
 
-Opened by ``/voicemode classifier``. Reads ``voice_plugin.classifier_log()``,
+Opened by ``/voice classifier``. Reads ``voice_plugin.classifier_log()``,
 the plugin's record of every classifier call (oldest first), and refreshes
 while open so a new decision shows up as you speak.
 """
@@ -229,7 +229,7 @@ class VoiceClassifierAltView(AltView):
     def _detail_rows(self, width: int, selected: int) -> List[Tuple[str, str]]:
         if not self.entries:
             if self.plugin is None or not getattr(self.plugin, "requested", False):
-                return [("dim", "Voice is off. /voicemode on, then speak.")]
+                return [("dim", "Voice is off. /voice on, then speak.")]
             return [("dim", "Speak; each classifier decision shows here.")]
         rows: List[Tuple[str, str]] = []
         for style, text in detail_lines(self.entries[selected]):
@@ -261,7 +261,7 @@ class VoiceClassifierAltView(AltView):
         assert self.renderer is not None
         name = getattr(self.plugin, "classifier_name", "") or "none"
         hints = (
-            f" Classifier: {name} (/voicemode classifier laya|provider)"
+            f" Classifier: {name} (/voice classifier laya|provider)"
             " · Tab: switch · Up/Down: move · q/Esc: close"
         )
         self.renderer.write_at(0, height - 2, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), "")

@@ -218,7 +218,7 @@ def parse_decision(raw: str, records: list[dict]) -> list[dict]:
     except (ValueError, TypeError, KeyError) as exc:
         raise VoiceError(
             "invalid_decision",
-            "Voice observer returned an invalid decision; speech remains pending. Run /voicemode retry",
+            "Voice observer returned an invalid decision; speech remains pending. Run /voice retry",
         ) from exc
 
 

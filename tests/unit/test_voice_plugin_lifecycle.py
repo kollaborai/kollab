@@ -618,7 +618,7 @@ async def test_waking_the_observer_uses_the_state_it_prepared_not_the_stale_erro
     plugin.classifier_name = "laya"
     plugin.requested = True
     plugin._lease = {"epoch": "e", "token": "t"}
-    stopped = "Laya request stopped; /voicemode retry"
+    stopped = "Laya request stopped; /voice retry"
     # The last heartbeat saw the stopped worker. The service answers the retry
     # with the state it just entered, before the next heartbeat refreshes it.
     plugin._state = {"classifier": {"state": "error", "detail": stopped}}
