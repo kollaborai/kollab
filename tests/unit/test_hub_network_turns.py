@@ -628,6 +628,8 @@ def _validate(payload: dict) -> dict:
 
 def test_a_well_formed_turn_end_is_accepted_and_a_plain_message_needs_none():
     assert _validate(_wire_payload())["turn_end"] == {"replies": 2, "failed": False}
+    acp = _wire_payload(turn_end={"replies": 2, "failed": True, "outcome": "cancelled"})
+    assert _validate(acp)["turn_end"]["outcome"] == "cancelled"
     plain = _wire_payload()
     del plain["turn_end"]
     assert "turn_end" not in _validate(plain)
