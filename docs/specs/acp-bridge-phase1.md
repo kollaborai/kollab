@@ -4,7 +4,7 @@ This document records the current implementation checkpoint; the canonical
 phase contract remains in `docs/specs/acp-bridge.md`.
 
 implemented in commits 22da746d, 854d3dbb, 557fdebe, fca1178f,
-30ddd1b0, 02a7b848, 0f112962, a51d658d, and ebbf1e2f:
+30ddd1b0, 02a7b848, 0f112962, a51d658d, ebbf1e2f, and e6951da0:
 
 - portable `ACPProfile` command/cwd/workspace/env/pass_env resolution with
   provider-key stripping and device-local executable lookup
@@ -36,6 +36,8 @@ validation checkpoint:
 - `ruff`, `py_compile`, and `git diff --check` pass on changed files
 - `kollab --version`, `kollab --hub status`, and live MCP ClientSession
   initialize/list/call plus parent roster-revocation smoke pass
+- instrumented startup proof confirms ACP profiles skip native API/provider init
+  (0/0 calls), while a native profile retains both calls (1/1)
 
 remaining phase-1 gates (not complete):
 
