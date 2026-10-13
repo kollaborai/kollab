@@ -452,3 +452,24 @@ def test_profile_cache_re_resolves_when_command_changes(tmp_path, monkeypatch):
     ACPProfile("same", (str(first),), cwd=str(tmp_path)).resolve()
     command, _, _ = ACPProfile("same", (str(second),), cwd=str(tmp_path)).resolve()
     assert command[0] == str(second)
+
+
+
+def test_profile_cache_invalid_or_non_executable_and_profile_keys_stay_stripped(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(config))
+    monkeypatch.setenv("OPENAI_API_KEY", "exported")
+    adapter = tmp_path / "adapter"
+    adapter.write_text("#!/bin/sh\n")
+    adapter.chmod(0o755)
+    profile = ACPProfile(
+        "edge", (str(adapter),), cwd=str(tmp_path),
+        env={"OPENAI_API_KEY": "stored"}, pass_env=("OPENAI_API_KEY",),
+    )
+    _, env, _ = profile.resolve()
+    assert env["OPENAI_API_KEY"] == "exported"
+    (config / "acp" / "resolved.json").write_text("[]")
+    _, _, _ = profile.resolve()
+    adapter.chmod(0o644)
+    with pytest.raises(ACPError, match="adapter executable not found"):
+        profile.resolve()
