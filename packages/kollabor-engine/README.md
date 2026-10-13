@@ -110,7 +110,7 @@ Permissions:
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/sessions/{session_id}/permissions` | current approval mode and pending tools |
+| `GET` | `/sessions/{session_id}/permissions` | current approval mode and pending prompts, from the engine (never waits on the agent) |
 | `POST` | `/sessions/{session_id}/permission` | approve or deny a pending tool |
 | `POST` | `/sessions/{session_id}/permissions/mode` | set approval mode |
 

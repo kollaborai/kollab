@@ -188,12 +188,15 @@ export type NetworkWorkspaceGroup = { label: string; agents: NetworkAgent[] };
 /** One device's workspaces on one network (#158). */
 export type NetworkDeviceGroup = { device: string; workspaces: NetworkWorkspaceGroup[] };
 
-/** One network this device belongs to (#158): its devices grouped by workspace. */
+/** One network this device belongs to (#158): its devices grouped by workspace.
+ * `live: false`: no agent here carries it now, so its rows are the last roster
+ * seen and opening one first starts an agent in `folder`. */
 export type NetworkGroup = {
   id: string;
   name: string;
   trust?: string;
   live?: boolean;
+  folder?: string;
   devices: NetworkDeviceGroup[];
 };
 

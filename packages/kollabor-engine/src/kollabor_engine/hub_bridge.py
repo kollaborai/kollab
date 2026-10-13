@@ -408,11 +408,12 @@ class HubBridge:
 async def network_daemons(skip: Collection[Any] = ()) -> AsyncIterator[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """Local daemons on a network, each with its ``network_status`` answer.
 
-    The engine's own chats are asked through their state service; ``skip``
-    holds their session ids and pids. Every other live agent on this computer
-    is asked over its hub socket, read-only (``kollab --hub status`` asks the
-    same), this engine's folder first and one at a time, so a caller that stops
-    at the first answer pokes no other daemon. A daemon on no network is passed.
+    Every live agent on this computer but the ones ``skip`` names (session ids
+    and pids) is asked over its hub socket, read-only (``kollab --hub status``
+    asks the same). All are asked at once, so a busy agent costs its timeout
+    once rather than once per agent after it, and the answers come in order,
+    this engine's folder first; a caller that stops early cancels the asks
+    still out. A daemon on no network is passed.
     """
     from plugins.hub.messenger import AgentMessenger
 
@@ -423,8 +424,15 @@ async def network_daemons(skip: Collection[Any] = ()) -> AsyncIterator[Tuple[Dic
         if row.get("session_id") not in skip and row.get("daemon_pid") not in skip
     ]
     rows.sort(key=lambda row: not row.get("workspace") or os.path.realpath(row["workspace"]) != home)
-    for row in rows:
-        status = await AgentMessenger.request_network_status(row["socket_path"], timeout=3)
-        # An older agent sends no network name; its rows still say it is on one.
-        if status and (status.get("network") or status.get("agents")):
-            yield row, status
+    asks = [
+        asyncio.ensure_future(AgentMessenger.request_network_status(row["socket_path"], timeout=3)) for row in rows
+    ]
+    try:
+        for row, ask in zip(rows, asks):
+            status = await ask
+            # An older agent sends no network name; its rows still say it is on one.
+            if status and (status.get("network") or status.get("agents")):
+                yield row, status
+    finally:
+        for ask in asks:
+            ask.cancel()

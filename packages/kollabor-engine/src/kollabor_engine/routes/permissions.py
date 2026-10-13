@@ -47,23 +47,27 @@ async def respond_to_permission(session_id: str, body: PermissionResponseRequest
 
 @router.get("/{session_id}/permissions")
 async def get_permissions(session_id: str):
+    """What the engine holds for this chat, without asking its agent.
+
+    Opening a chat reads this, and a busy agent, or one on another computer
+    whose replies queue behind its live events in the network tunnel, cannot
+    answer in time. Prompts come from the events the agent pushed
+    (``EngineSession._pending_permissions``), the mode is the one the engine
+    last set or read.
+    """
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    snapshot = await session.state.get_permission_state()
     return {
         "session_id": session_id,
-        "approval_mode": snapshot.approval_mode,
+        "approval_mode": session.approval_mode,
         "pending": list(session._pending_permissions.keys()),
         # Full prompt payloads so a client that reloaded mid-prompt can
         # re-render it. The daemon is still blocked waiting for an answer and
         # will not re-send the request.
         "pending_prompts": list(session._pending_permissions.values()),
-        "stats": snapshot.stats,
-        "session_approvals": snapshot.session_approvals_count,
-        "project_approvals": snapshot.project_approvals_count,
     }
 
 

@@ -11,7 +11,7 @@ import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
-import { targetsOn } from "@/components/shell/agent-network";
+import { networkOf, targetsOn } from "@/components/shell/agent-network";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
   PanelIntent,
@@ -378,7 +378,8 @@ export default function App() {
     async (sessionId: string, nextSessions: Session[]) => {
       const [history, permissions] = await Promise.all([
         api.getHistory(sessionId),
-        api.getPermissions(sessionId),
+        // A prompt that arrives later comes as an event anyway: this read never stops a chat opening.
+        api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);
       return buildInitialState(
         sessionId,
@@ -584,16 +585,17 @@ export default function App() {
     });
   };
 
-  /** Open an agent on another computer. With no agent here on the network, start this
-   * folder's koordinator to carry it first (GET /sessions `network.live`). */
+  /** Open an agent on another computer. With no agent here on its network, start the
+   * koordinator of that network's folder to carry it first (GET /sessions `network`). */
   const selectRemote = async (handle: string): Promise<boolean> => {
-    if (network.live !== false) return selectSession(handle);
+    const on = networkOf(network, handle);
+    if (on.live) return selectSession(handle);
     setOpening({ id: handle });
     try {
       const carrier = {
         profile: selectedProfile || "default",
         approval_mode: "trust_all",
-        workspace: network.folder || undefined,
+        workspace: on.folder || undefined,
       };
       await api
         .createSession({ ...carrier, identity: "koordinator", agent: "koordinator" })
@@ -602,7 +604,8 @@ export default function App() {
       let liveSince = 0;
       while (Date.now() < deadline) {
         const result = await api.listSessions();
-        const remote = result.network?.live ? result.network.remote : [];
+        const now = networkOf(result.network ?? { device: "", remote: [] }, handle);
+        const remote = now.live ? now.agents : [];
         if (remote.some((agent) => agent.handle === handle && agent.state !== "offline")) {
           await loadSessions();
           return selectSession(handle);
@@ -611,7 +614,7 @@ export default function App() {
         // 15 s, plugins/hub/relay_agent.py:remote_agents), and until then every saved agent
         // reads offline: only give up once it has had time to list (seen live: ~18 s).
         // ponytail: fixed grace; a "directory read" flag in network_status could end it early.
-        if (result.network?.live && !liveSince) liveSince = Date.now();
+        if (now.live && !liveSince) liveSince = Date.now();
         if (liveSince && Date.now() - liveSince > 25_000 && remote.some((agent) => agent.handle === handle)) break;
         await new Promise((resolve) => setTimeout(resolve, 1500));
       }

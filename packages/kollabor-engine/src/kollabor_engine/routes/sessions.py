@@ -333,42 +333,57 @@ async def _reap_dead_sessions() -> None:
 
 
 async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any]:
-    """This computer's name and the agents on other computers, asked of a daemon.
+    """Every network this computer is on, asked of the agents running here.
 
-    This engine's chats are asked first, then every other live agent on this
-    computer over its hub socket (hub_bridge.network_daemons): after a restart
-    no chat runs here yet, and the network must still show and open. The first
-    one on a network answers; a solo daemon has none. An agent opened on another
-    computer answers for that computer, so it is never asked. No answer means
-    no network to show: no remote rows. ``folder`` is where the answering
-    daemon runs, the folder whose network it is.
+    Folders can be on different networks, so every live agent on this computer
+    is asked over its hub socket, this engine's chats too (hub_bridge.network_daemons,
+    this engine's folder first): after a restart no chat runs here yet, and the
+    networks must still show and open. The first agent to answer for a network
+    speaks for it. A solo chat is off the mesh, and an agent opened on another
+    computer answers for that computer, so neither is asked.
+
+    ``networks`` holds one answer per network: ``network`` (its name), ``device``
+    (this computer's name on it), ``trust``, ``remote`` and ``folder`` (where the
+    answering agent runs, the folder whose network it is). The flat ``device``
+    and ``folder`` are the first answer's, ``remote`` every answer's rows. No
+    answer means no network to show: no remote rows.
     """
     fallback = socket.gethostname().split(".")[0]
     here = os.path.realpath(os.getcwd())
-    asked: set = set()
-    for session in registry.values():
-        asked.update({session.session_id, getattr(getattr(session, "daemon", None), "pid", 0)})
-        if not session.alive or getattr(session, "solo", False) or getattr(session, "device", ""):
-            continue
-        try:
-            snapshot = await asyncio.wait_for(session.state.get_hub_state(), timeout=3)
-        except Exception as exc:
-            logger.debug("Session %s network read failed: %s", session.session_id, exc)
-            continue
-        if snapshot.device:
-            folder = getattr(session, "workspace", None) or here
-            return {"device": snapshot.device, "remote": snapshot.remote, "folder": folder}
+    skip = {
+        key
+        for session in registry.values()
+        if getattr(session, "solo", False) or getattr(session, "device", "")
+        for key in (session.session_id, getattr(getattr(session, "daemon", None), "pid", 0))
+        if key
+    }
+    answers: List[Dict[str, Any]] = []
     try:
-        async with aclosing(network_daemons(asked - {0, None})) as found:
+        async with aclosing(network_daemons(skip)) as found:
             async for row, status in found:
-                return {
-                    "device": status.get("device") or fallback,
+                # Named for people (relay_commands.network_label: "home-net  via
+                # kollabor.ai"); the memberships on disk know it as "home-net".
+                name = str(status.get("network") or "").split("  via ", 1)[0]
+                device = status.get("device") or fallback
+                if any((answer["network"] or answer["device"]) == (name or device) for answer in answers):
+                    continue  # another agent here answered for this network
+                answers.append({
+                    "network": name,
+                    "device": device,
+                    "trust": status.get("trust") or "",
                     "remote": status.get("agents") or [],
                     "folder": row.get("workspace") or here,
-                }
+                })
     except Exception as exc:
         logger.debug("Local daemon network read failed: %s", exc)
-    return {"device": fallback, "remote": []}
+    if not answers:
+        return {"device": fallback, "remote": []}
+    return {
+        "device": answers[0]["device"],
+        "remote": [row for answer in answers for row in answer["remote"]],
+        "folder": answers[0]["folder"],
+        "networks": answers,
+    }
 
 
 # Every agent the network has shown, so the sidebar keeps them while they are
@@ -384,54 +399,94 @@ def _network_cache_path() -> Path:
 
 
 def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
-    """The live network plus every agent seen on it lately.
+    """The live networks plus every agent seen on them lately.
 
-    ``live`` is ``_network_snapshot``'s answer. With a daemon here on the
-    network, its agents show as they are and the ones it no longer lists show
-    with ``state: "offline"``. With none, the last network seen shows with
-    ``live: False``: nothing here can tell who is up, and opening one first
-    starts an agent in ``folder`` to carry the network. Each row keeps
-    ``last_seen`` (epoch seconds).
+    ``live`` is ``_network_snapshot``'s answer. On a network an agent here
+    answered for, its agents show as they are and the ones it no longer lists
+    show with ``state: "offline"``. A network seen within NETWORK_CACHE_DAYS
+    that no agent here answers for now shows its last roster with ``live:
+    False``: nothing here can tell who is up, and opening one first starts an
+    agent in that network's ``folder`` to carry it. Each row keeps
+    ``last_seen`` (epoch seconds). ``networks`` lists them, live ones first;
+    the flat ``remote`` holds every row once, ``live`` is whether any network
+    is live and, with none, ``folder`` is the folder of the one seen last.
     """
     now = time.time() if now is None else now
+    month = NETWORK_CACHE_DAYS * 86400
     path = _network_cache_path()
     try:
         cache = json.loads(path.read_text())
     except (OSError, ValueError):
         cache = {}
-    if not isinstance(cache, dict):
-        cache = {}
-    seen = cache.get("agents") if isinstance(cache.get("agents"), dict) else {}
+    saved = cache.get("networks") if isinstance(cache, dict) and isinstance(cache.get("networks"), dict) else {}
 
-    if live.get("folder"):
-        if cache.get("device") != live["device"]:
-            seen = {}  # another network: what this one saw no longer applies
+    def last_seen(row: Dict[str, Any]) -> float:
+        return float(row.get("last_seen") or 0)
+
+    def by_last_seen(rows: Any) -> List[Dict[str, Any]]:
+        return sorted(rows, key=lambda row: -last_seen(row))
+
+    networks: Dict[str, Dict[str, Any]] = {}
+    for answer in live.get("networks") or []:
+        key = answer["network"] or answer["device"]
+        before = saved.get(key) if isinstance(saved.get(key), dict) else {}
+        # This computer under another name there: what the old name saw no longer applies.
+        same = before.get("device") == answer["device"] and isinstance(before.get("agents"), dict)
+        seen = before["agents"] if same else {}
         current = {}
-        for row in live.get("remote") or []:
+        for row in answer["remote"]:
             handle = row.get("handle") or f"{row.get('name', '')}@{row.get('device', '')}"
-            last_seen = float((seen.get(handle) or {}).get("last_seen") or 0)
+            was = last_seen(seen.get(handle) or {})
             # A minute's precision: the roster is written only when it changes.
-            current[handle] = {**row, "handle": handle, "last_seen": last_seen if now - last_seen < 60 else now}
+            current[handle] = {**row, "handle": handle, "last_seen": was if now - was < 60 else now}
         kept = {
             handle: {**row, "state": "offline"}
             for handle, row in seen.items()
-            if handle not in current and now - float(row.get("last_seen") or 0) < NETWORK_CACHE_DAYS * 86400
+            if handle not in current and now - last_seen(row) < month
         }
-        stored = {"device": live["device"], "folder": live["folder"], "agents": {**kept, **current}}
-        try:
-            if stored != cache:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(stored))
-        except OSError as exc:
-            logger.debug("Could not save the network roster: %s", exc)
-        remote = list(current.values()) + sorted(kept.values(), key=lambda r: -float(r.get("last_seen") or 0))
-        return {"device": live["device"], "remote": remote, "live": True}
+        networks[key] = {
+            **{field: answer[field] for field in ("network", "device", "trust", "folder")},
+            "agents": {**kept, **current},
+            "remote": list(current.values()) + by_last_seen(kept.values()),
+            "live": True,
+        }
+    for key, entry in saved.items():
+        if key in networks or not isinstance(entry, dict) or not isinstance(entry.get("agents"), dict):
+            continue
+        agents = {handle: row for handle, row in entry["agents"].items() if now - last_seen(row) < month}
+        if agents and entry.get("folder"):
+            networks[key] = {**entry, "agents": agents, "remote": by_last_seen(agents.values()), "live": False}
 
-    if not seen or not cache.get("folder"):
+    stored = {
+        "networks": {
+            key: {field: value for field, value in entry.items() if field not in ("remote", "live")}
+            for key, entry in networks.items()
+        }
+    }
+    try:
+        if stored != cache:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(stored))
+    except OSError as exc:
+        logger.debug("Could not save the network roster: %s", exc)
+
+    blocks = [{field: value for field, value in entry.items() if field != "agents"} for entry in networks.values()]
+    if not blocks:
         return {"device": live.get("device", ""), "remote": [], "live": False}
-    remote = sorted(seen.values(), key=lambda r: -float(r.get("last_seen") or 0))
-    return {"device": cache.get("device") or live.get("device", ""), "remote": remote,
-            "live": False, "folder": cache["folder"]}
+    remote: Dict[str, Dict[str, Any]] = {}
+    for block in blocks:
+        for row in block["remote"]:
+            remote.setdefault(row["handle"], row)
+    view = {
+        "device": live.get("device") or blocks[0]["device"],
+        "remote": list(remote.values()),
+        "live": any(block["live"] for block in blocks),
+        "networks": blocks,
+    }
+    if not view["live"]:
+        last = max(blocks, key=lambda block: max((last_seen(row) for row in block["remote"]), default=0))
+        view["device"], view["folder"] = last["device"], last["folder"]
+    return view
 
 
 def _offline_agents(found: List[Dict[str, Any]], registry: Dict[str, EngineSession]) -> List[Dict[str, Any]]:

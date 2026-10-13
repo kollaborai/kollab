@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Web: agents on your other computers fill the sidebar's width again. The network section nested its rows two levels deep, which left each name a few letters wide and clipped the device name and its count. (#173)
+- Web: the sidebar shows every network this computer is on. With folders on different networks it asked only the first agent that answered, so the other networks' agents were missing, and the ones it did show could sit under another network's name. Every agent here is asked now, all at once, and each network lists its own computers and keeps its own offline roster; opening an agent on a network no agent here carries starts one in that network's folder first.
+- Web: opening a busy agent, or one on another computer, no longer fails with "rpc call 'state.get_permission_state' timed out". Its replies queue behind its live events, so the engine stops asking it on the way in: pending approvals come from the prompts the agent already pushed, and its profile and approval mode are read in the background.
 
 ### Changed
 - Web: on a mouse-and-keyboard screen the UI is a step denser (90%), the chat text one size smaller, and tool calls start collapsed ("2 tool calls"; click to open). Touch screens keep their size. (#173)

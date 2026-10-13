@@ -1,7 +1,7 @@
 // Run: node --test tests/agent-network.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupNetworkTree, groupRemoteByDevice, targetsOn } from "../src/components/shell/agent-network.ts";
+import { groupNetworkTree, groupRemoteByDevice, networkOf, targetsOn } from "../src/components/shell/agent-network.ts";
 
 test("remote agents group under the computer they run on, both sorted by name", () => {
   const groups = groupRemoteByDevice([
@@ -136,4 +136,35 @@ test("targetsOn filters are ignored by rows without the fields (old engines)", (
   const targets = targetsOn("gpu-rig", rows, "lab", "train");
   assert.deepEqual(targets.agents.map((agent) => agent.name), ["agate"]);
   assert.deepEqual(targets.remote.map((agent) => agent.handle), ["lapis@server-box"]);
+});
+
+test("an agent's own network says whether one here carries it and where to start one", () => {
+  const opal = { name: "opal", device: "lab-box", handle: "opal@lab-box", state: "idle" };
+  const lapis = { name: "lapis", device: "prod-box", handle: "lapis@prod-box", state: "idle" };
+  const network = {
+    device: "mac-box",
+    remote: [lapis, opal],
+    live: true,
+    networks: [
+      { id: "h", name: "home-net", live: true, devices: [{ device: "prod-box", workspaces: [{ label: "", agents: [lapis] }] }] },
+      {
+        id: "l",
+        name: "lab-net",
+        live: false,
+        folder: "/w/lab",
+        devices: [{ device: "lab-box", workspaces: [{ label: "", agents: [opal] }] }],
+      },
+    ],
+  };
+
+  // home-net is live although lab-net went quiet: opening lapis goes straight through.
+  assert.deepEqual(networkOf(network, "lapis@prod-box"), { live: true, folder: undefined, agents: [lapis] });
+  // Opening opal first starts an agent in lab-net's own folder.
+  assert.deepEqual(networkOf(network, "opal@lab-box"), { live: false, folder: "/w/lab", agents: [opal] });
+  // Without per-network blocks the flat fields answer.
+  assert.deepEqual(networkOf({ device: "mac-box", remote: [opal], live: false, folder: "/w" }, "opal@lab-box"), {
+    live: false,
+    folder: "/w",
+    agents: [opal],
+  });
 });
