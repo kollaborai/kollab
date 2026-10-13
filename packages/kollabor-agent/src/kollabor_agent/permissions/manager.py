@@ -627,8 +627,9 @@ class PermissionManager:
         logger.info(f"Recorded project approval: {key}")
 
     def clear_project_approvals(self) -> None:
-        """Clear all project approvals."""
+        """Clear all project approvals, including ACP grants."""
         self._project_approvals.clear()
+        self._acp_project_grants.clear()
         self._save_project_approvals()
         logger.info("Cleared all project approvals")
 
@@ -733,8 +734,9 @@ class PermissionManager:
         return self._stats.copy()
 
     def clear_session_approvals(self) -> None:
-        """Clear all session-scoped approvals."""
+        """Clear all session-scoped approvals, including ACP grants."""
         self._session_approvals.clear()
+        self._acp_session_grants.clear()
         logger.info("Session approvals cleared")
 
     async def _emit_permission_granted(
