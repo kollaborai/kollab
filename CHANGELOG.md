@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-10-13
+
 ### Added
 - Web: fold a sidebar group away by clicking its name (This Computer, each network, Contacts). A folded group keeps its count, and the browser remembers what you folded. (#173)
 
