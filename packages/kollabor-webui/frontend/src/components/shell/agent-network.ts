@@ -1,4 +1,4 @@
-import type { AgentPoolEntry, NetworkAgent, NetworkGroup } from "@/api";
+import type { AgentNetwork, AgentPoolEntry, NetworkAgent, NetworkGroup } from "@/api";
 
 /** Remote agents grouped by the computer they run on, computers and agents sorted by name. */
 export function groupRemoteByDevice(
@@ -49,6 +49,25 @@ export function targetsOn(
       .map((agent) => ({ name: agent.name, active: true, state: agent.state })),
     remote: candidates.filter((agent) => agent.device !== device),
   };
+}
+
+/**
+ * The network an agent on another computer is on: whether an agent here carries
+ * it (`live`), the folder to start one in when none does, and that network's
+ * rows. Folders here can be on different networks, so one going quiet leaves the
+ * others live. A snapshot without per-network blocks answers with its flat fields.
+ */
+export function networkOf(
+  network: AgentNetwork,
+  handle: string,
+): { live: boolean; folder?: string; agents: NetworkAgent[] } {
+  for (const net of network.networks ?? []) {
+    const agents = net.devices.flatMap((device) => device.workspaces.flatMap((ws) => ws.agents));
+    if (agents.some((agent) => agent.handle === handle)) {
+      return { live: net.live !== false, folder: net.folder, agents };
+    }
+  }
+  return { live: network.live !== false, folder: network.folder, agents: network.remote };
 }
 
 /**

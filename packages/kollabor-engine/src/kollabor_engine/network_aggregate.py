@@ -15,9 +15,10 @@ off disk in whatever shape slice 1 (PR #162) left it:
 - legacy single-network state: ``~/.kollab/network/<digest>/state.json``.
 
 A missing or empty index means one legacy block, so a machine with no v2
-runtime yet still renders. Live rows a daemon just answered (the flat
-``remote`` list) are matched into their network's block by device name when
-the on-disk state cannot say.
+runtime yet still renders. Each network an agent here answered for (the
+view's ``networks``) folds into the block that names it, and one the disk
+does not know, such as a folder that has not moved to the device record yet,
+gets a block of its own.
 """
 
 from __future__ import annotations
@@ -173,6 +174,8 @@ def _ingest_remote_rows(
             "handle": str(row.get("handle") or ""),
             "state": row.get("state") or "",
         }
+        if row.get("last_seen"):
+            agent["last_seen"] = row["last_seen"]  # "Seen 2h ago" on a row that is not up
         if agent not in workspace_row["agents"]:
             workspace_row["agents"].append(agent)
 
@@ -350,71 +353,66 @@ def aggregate_network_snapshot(
 ) -> Dict[str, Any]:
     """The sidebar's aggregated network answer: blocks + contacts.
 
-    ``live`` is the flat ``_network_snapshot`` answer (``device``, ``remote``,
-    ``folder``). Its rows are folded into the block the answering daemon is a
-    member of — the network named by the live ``network`` field when slice 2
-    adds it, else the primary block — so live presence renders even where
-    disk state cannot say. The flat fields pass through untouched.
+    ``live`` is the ``_network_view`` answer. Each of its ``networks`` (one per
+    network an agent here answered for, or seen on lately; a view without the
+    list is one answer unless it says it is not live) folds into the block of
+    the network it names. Matching goes narrowest first (#163 fix-up): id or
+    exact name for every answer, then a name that contains it, so a live
+    "acme" never lands in an "acme-lab-net" that merely contains the name. An
+    answer from an older agent names no network and folds into the primary
+    block; a network no membership on disk names gets a block of its own, so
+    every network renders where disk state cannot say. A block keeps its
+    answer's ``live`` and ``folder``. The flat fields pass through untouched.
     """
     root = _root(home)
     blocks = _membership_blocks(home=root, workspace=workspace)
-    live_network = (live or {}).get("network")
-    live_network = live_network if isinstance(live_network, str) else ""
-    live_device = (live or {}).get("device")
-    live_device = live_device if isinstance(live_device, str) else ""
-    # A not-live view carries the roster cache, not a daemon's answer: its
-    # rows stay flat (the sidebar falls back to flat grouping), and no
-    # block is synthesized for a network nothing here belongs to.
-    is_live = bool(live) and (live or {}).get("live", True) is not False
+    live = live or {}
+    answers = live.get("networks")
+    if not isinstance(answers, list):
+        answers = [live] if live and live.get("live", True) is not False else []
+    answers = [answer for answer in answers if isinstance(answer, dict)]
 
-    if not blocks and is_live:
-        # No disk membership at all (a machine where the v2 runtime has not
-        # landed): one block from the live answer alone, so the sidebar tree
-        # still shows the network a daemon answered for.
-        if live_network or live_device:
-            slug = _slug(live_network or live_device)
-            block = _network_block(slug, live_network or live_device, live_network)
-            block["live"] = True
-            blocks.append(block)
-    if blocks and is_live:
-        target = None
-        if live_network:
-            # Match passes, narrowest first (#163 fix-up): exact id, exact
-            # name, then substring. A substring pass alone mis-folds a live
-            # answer for "acme" into a primary "acme-lab-net" that merely
-            # contains the name, because blocks run primary-first.
-            target = next((item for item in blocks if item["id"] == live_network), None)
-            if target is None:
-                target = next(
-                    (
-                        item
-                        for item in blocks
-                        if live_network == str(item.get("name") or "")
-                    ),
-                    None,
-                )
-            if target is None:
-                target = next(
-                    (
-                        item
-                        for item in blocks
-                        if live_network in str(item.get("name") or "")
-                    ),
-                    None,
-                )
-        if target is None and live_device:
-            # Fall back to the primary block: on a live answer the daemon is
-            # almost always on its primary network.
-            target = blocks[0]
-        if target is not None:
-            target["live"] = True
-            _ingest_remote_rows(
-                blocks,
-                (live or {}).get("remote") or [],
-                network_id=target["id"],
-                network_name=live_network or "",
-                device=live_device,
-            )
+    def text(answer: Dict[str, Any], key: str) -> str:
+        value = answer.get(key)
+        return value if isinstance(value, str) else ""
+
+    claimed: set = set()
+    targets: List[Optional[Dict[str, Any]]] = [None] * len(answers)
+    for exact in (True, False):
+        for index, answer in enumerate(answers):
+            name = text(answer, "network")
+            if targets[index] is not None or not name:
+                continue
+            for block in blocks:
+                label = str(block.get("name") or "")
+                if block["id"] not in claimed and (
+                    block["id"] == name or label == name or (not exact and name in label)
+                ):
+                    targets[index] = block
+                    claimed.add(block["id"])
+                    break
+    for answer, target in zip(answers, targets):
+        name, device = text(answer, "network"), text(answer, "device")
+        if target is None and not name and blocks and blocks[0]["id"] not in claimed:
+            target = blocks[0]  # an older agent: on its primary network, almost always
+        if target is None:
+            if not (name or device):
+                continue
+            target = _network_block(_slug(name or device), name or device, name)
+            blocks.append(target)
+        claimed.add(target["id"])
+        target["live"] = answer.get("live", True) is not False
+        if text(answer, "folder"):
+            target["folder"] = answer["folder"]
+        if text(answer, "trust") and not target.get("trust"):
+            target["trust"] = answer["trust"]
+        _ingest_remote_rows(
+            blocks,
+            answer.get("remote") or [],
+            network_id=target["id"],
+            network_name=name,
+            device=device,
+        )
     contacts = _merge_contacts(blocks)
     return {"networks": blocks, "contacts": contacts}
 

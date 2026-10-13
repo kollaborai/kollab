@@ -12,7 +12,6 @@ from fastapi import HTTPException
 from kollabor_engine import daemon_pool, server
 from kollabor_engine.hub_bridge import HubBridge
 from kollabor_engine.routes import panels as panels_route
-from kollabor_engine.routes import sessions as sessions_route
 from kollabor_engine.session import EngineSession
 
 HANDLE = "koordinator@server-box"
@@ -273,7 +272,7 @@ async def test_an_agent_on_another_computer_never_answers_for_this_one(registry)
     registry["koordinator@server-box"] = _answering("server-box", device="server-box")
     registry["viewer"] = viewer = _answering("mac-box", read_only=True)
 
-    assert (await sessions_route._network_snapshot(registry))["device"] == "mac-box"
+    # (GET /sessions never asks it either: test_network_snapshot.py.)
     # A chat here with a read-only Network panel keeps it rather than show the server's.
     assert await panels_route._network_owner(viewer) is None
 
@@ -315,6 +314,7 @@ async def test_an_agent_on_another_computer_reports_its_own_folder(monkeypatch):
         {"session_id": "a1b2c3", "identity": "lapis", "name": "lapis", "workspace": "/w/here", "daemon_pid": 4242}
     )
     try:
+        await asyncio.gather(remote._facts_task, local._facts_task)  # read in the background
         assert (remote.to_dict()["device"], remote.workspace) == ("server-box", "/home/someone/project")
         assert (local.to_dict()["device"], local.workspace) == ("", "/w/here")
         assert asked == ["system"]

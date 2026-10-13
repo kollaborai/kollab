@@ -178,6 +178,7 @@ class EngineSession:
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
         self._event_task: Optional[asyncio.Task] = None
+        self._facts_task: Optional[asyncio.Task] = None
 
     @staticmethod
     def _resolve_workspace(workspace: Optional[str]) -> Optional[str]:
@@ -263,26 +264,37 @@ class EngineSession:
             started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
             session.created_at = started.replace(tzinfo=None)
         session.daemon = await get_daemon_pool().adopt(session_id, found)
-        try:
-            session.profile = await session.state.get_active_profile()
-            mode = (await session.state.get_permission_state()).approval_mode
-            session.approval_mode = str(mode or "").lower()
-            if session.device:
-                # Its folder is on that computer: what its own daemon reports.
-                session.workspace = (await session.state.get_system_info()).cwd or None
-        except Exception as e:
-            logger.debug("session %s: could not read its profile: %s", session_id, e)
+        # Read in the background: a busy agent, or one on another computer whose
+        # replies queue behind its live events, answers late, and opening it must
+        # not wait on that. Its row fills in once it does.
+        session._facts_task = asyncio.create_task(
+            session._read_agent_facts(), name=f"session-facts-{session_id}"
+        )
         session._event_task = asyncio.create_task(
             session._track_events(), name=f"session-track-{session_id}"
         )
         await session.refresh_history()
         return session
 
+    async def _read_agent_facts(self) -> None:
+        """An adopted agent's profile, approval mode and, on another computer, folder."""
+        try:
+            self.profile = await self.state.get_active_profile()
+            mode = (await self.state.get_permission_state()).approval_mode
+            self.approval_mode = str(mode or "").lower()
+            if self.device:
+                # Its folder is on that computer: what its own daemon reports.
+                self.workspace = (await self.state.get_system_info()).cwd or None
+        except Exception as e:
+            logger.debug("session %s: could not read its profile: %s", self.session_id, e)
+
     async def shutdown(self) -> None:
-        if self._event_task is not None:
-            self._event_task.cancel()
+        for task in (self._facts_task, self._event_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._event_task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
         await get_daemon_pool().stop(self.session_id)

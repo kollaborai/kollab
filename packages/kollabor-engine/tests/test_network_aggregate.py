@@ -19,7 +19,9 @@ from kollabor_engine.network_aggregate import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "network"
-WORKSPACE = "/home/box/proj"
+# Resolves to itself on Linux and macOS (where /home is /System/Volumes/Data/home),
+# so the digests the fixture folders are named by match what the code computes.
+WORKSPACE = "/Users/box/proj"
 DIGEST = hashlib.sha256(WORKSPACE.encode()).hexdigest()
 
 
@@ -326,3 +328,52 @@ def test_live_answer_for_exact_name_beats_prefix_overlap_primary(tmp_path):
     assert by_name["acme"]["devices"], "the live row folded into the exact-name network"
     assert by_name["acme-lab-net"].get("live") is None
     assert by_name["acme-lab-net"]["devices"] == []
+
+
+def test_each_network_answer_folds_into_its_own_block(tmp_path):
+    # This computer's folders are on two networks and the disk knows only
+    # home-net (a folder not moved to the device record yet): each roster
+    # still lands under its own network, never the primary's.
+    _memberships(tmp_path, links=[])
+    opal = {"name": "opal", "device": "lab-box", "handle": "opal@lab-box", "state": "idle"}
+    lapis = {"name": "lapis", "device": "server-box", "handle": "lapis@server-box", "state": "idle"}
+    view = {
+        "device": "mac-lab",
+        "remote": [opal, lapis],
+        "live": True,
+        "networks": [
+            {"network": "lab-net", "device": "mac-lab", "trust": "open", "folder": "/w/lab", "live": True,
+             "remote": [opal]},
+            {"network": "home-net", "device": "mac-box", "trust": "open", "folder": WORKSPACE, "live": True,
+             "remote": [lapis]},
+        ],
+    }
+
+    merged = merge_view_and_memberships(view, home=tmp_path, workspace=WORKSPACE)
+
+    by_name = {block["name"]: block for block in merged["networks"]}
+    assert set(by_name) == {"home-net", "lab-net"}
+    assert [row["device"] for row in by_name["home-net"]["devices"]] == ["server-box"]
+    assert [row["device"] for row in by_name["lab-net"]["devices"]] == ["lab-box"]
+    assert by_name["lab-net"]["folder"] == "/w/lab" and by_name["lab-net"]["trust"] == "open"
+    assert by_name["home-net"]["live"] is True and by_name["lab-net"]["live"] is True
+
+
+def test_a_network_no_agent_here_carries_shows_its_last_roster(tmp_path):
+    opal = {"name": "opal", "device": "lab-box", "handle": "opal@lab-box", "state": "offline", "last_seen": 900.0}
+    view = {
+        "device": "mac-lab",
+        "remote": [opal],
+        "live": False,
+        "folder": "/w/lab",
+        "networks": [
+            {"network": "lab-net", "device": "mac-lab", "trust": "open", "folder": "/w/lab", "live": False,
+             "remote": [opal]},
+        ],
+    }
+
+    [block] = merge_view_and_memberships(view, home=tmp_path, workspace=WORKSPACE)["networks"]
+
+    assert block["live"] is False and block["folder"] == "/w/lab"
+    [agent] = block["devices"][0]["workspaces"][0]["agents"]
+    assert agent["state"] == "offline" and agent["last_seen"] == 900.0

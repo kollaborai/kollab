@@ -40,12 +40,13 @@ if Node/npm is unavailable.
   terminal or as a daemon, each one click from a full chat (the web UI only
   attaches to an agent it did not start, so it offers no Delete). Agents that
   ran in this folder and are not running follow as offline; a click starts one
-  as itself, and its vault brings back what it knew. Then each of your other
-  computers. The engine keeps every agent the network has listed for a month
+  as itself, and its vault brings back what it knew. Then each network this
+  computer is on (folders here can be on different ones), with its other
+  computers. The engine keeps every agent each network has listed for a month
   (`~/.kollab/engine-network.json`): one that left shows offline with when it
-  was last seen, and with no agent here on the network the last roster shows.
-  Opening one then first starts this folder's koordinator to carry the
-  network. One click opens one as a full chat, through the network, as that
+  was last seen, and a network no agent here carries now shows its last
+  roster. Opening one of its agents then first starts the koordinator of that
+  network's folder to carry it. One click opens one as a full chat, through the network, as that
   computer's trust allows: under `open` (the default) every computer of your
   network, under `agents` only the agents it lets this one message, under
   `manual` none.
