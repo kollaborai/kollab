@@ -398,3 +398,19 @@ async def test_authenticated_agent_message_uses_nonhuman_acp_envelope():
         thread_id="thread-agent",
         origin_context={"sender": PEER, "authenticated": True, "operator": False},
     )
+
+
+def test_authenticated_agent_route_requires_selected_active_acp():
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin.event_bus.get_service.return_value = SimpleNamespace(active=True)
+    llm = SimpleNamespace(
+        profile_manager=SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "native")
+        )
+    )
+    assert plugin._acp_agent_admission_enabled(llm) is False
+    plugin.event_bus.get_service.return_value = SimpleNamespace(active=False)
+    llm.profile_manager.get_active_profile = lambda: SimpleNamespace(
+        get_provider=lambda: "acp"
+    )
+    assert plugin._acp_agent_admission_enabled(llm) is False
