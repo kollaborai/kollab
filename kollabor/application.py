@@ -1267,12 +1267,19 @@ class TerminalLLMChat:
             logger.exception("ACP permission confirmation failed")
             return None
         decision_details = getattr(decision, "confirmation_details", None) or {}
-        if decision_details.get("acp_choice") == "cancel":
+
+        def schedule_cancel() -> None:
             orchestrator = getattr(self, "acp_orchestrator", None)
             cancel = getattr(orchestrator, "cancel", None)
             if callable(cancel):
+                # The ACP request callback runs inside the active prompt RPC;
+                # awaiting cancellation here deadlocks that RPC. Schedule the
+                # owner and return immediately so the runner can emit the
+                # protocol-cancelled response and drain its queue boundary.
                 asyncio.create_task(cancel())
-                await asyncio.sleep(0.01)
+
+        if decision_details.get("acp_choice") == "cancel":
+            schedule_cancel()
             return None
         allowed = bool(getattr(decision, "allowed", False))
         selected_id = (getattr(decision, "confirmation_details", None) or {}).get(
@@ -1285,6 +1292,15 @@ class TerminalLLMChat:
             if str(selected_id) not in offered_ids:
                 return None
             return str(selected_id)
+        # An ACP denial with no offered reject_once option cannot be
+        # represented as a valid permission outcome; cancel the active ACP
+        # turn instead of allowing the runner to synthesize a generic deny.
+        if not allowed and not any(
+            str(option.get("kind")) == "reject_once" for option in options
+        ):
+            schedule_cancel()
+            return None
+
         # Native confirmation handling persists its own approvals. Mirror
         # session/project choices into the ACP namespace while returning only
         # the one-shot opaque outcome to the adapter.
