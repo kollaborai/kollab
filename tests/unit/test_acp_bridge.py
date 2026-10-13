@@ -48,6 +48,11 @@ async def test_profile_resolution_strips_environment_by_default(tmp_path, monkey
     assert command[0] == sys.executable
     assert "OPENAI_API_KEY" not in env
     assert cwd == str(tmp_path)
+    profile = ACPProfile.from_dict("mcp", {
+        "command": [sys.executable],
+        "mcp_servers": [{"name": "hub", "command": "kollab", "args": ["--mcp-hub"]}],
+    })
+    assert profile.sdk_mcp_servers()[0].name == "hub"
 
 
 @pytest.mark.asyncio

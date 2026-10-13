@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import acp
-from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, TextContentBlock
+from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, McpServerStdio, TextContentBlock
 
 
 class ACPError(RuntimeError):
@@ -65,7 +65,7 @@ class ACPProfile:
             if server.get("type", "stdio") != "stdio":
                 raise ACPError("phase-1 supports only stdio MCP servers")
             env = [EnvVariable(name=str(k), value=str(v)) for k, v in (server.get("env") or {}).items()]
-            servers.append(acp.McpServerStdio(
+            servers.append(McpServerStdio(
                 name=str(server["name"]),
                 command=str(server["command"]),
                 args=[str(arg) for arg in server.get("args", [])],

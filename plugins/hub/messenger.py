@@ -365,6 +365,7 @@ class AgentSocketServer:
         on_network_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
+        on_acp_hub_status: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -380,6 +381,7 @@ class AgentSocketServer:
         self._on_network_status = on_network_status
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
+        self._on_acp_hub_status = on_acp_hub_status
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1350,6 +1352,20 @@ class AgentSocketServer:
                         await writer.drain()
                         return
                     writer.write(response_line)
+                    await writer.drain()
+
+                elif action == "acp_hub_status":
+                    result = None
+                    if self._on_acp_hub_status:
+                        result = self._on_acp_hub_status(
+                            token=msg_data.get("token"),
+                            generation=msg_data.get("generation"),
+                        )
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                    if not isinstance(result, dict):
+                        result = {"error": "stale or unavailable ACP hub binding"}
+                    writer.write((json.dumps({"type": "acp_hub_status", **result}) + "\n").encode())
                     await writer.drain()
 
                 elif action == "ping":

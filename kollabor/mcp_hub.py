@@ -1,6 +1,8 @@
 """Authenticated stdio MCP server exposing only the ``hub_status`` tool."""
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 from typing import Any, Callable
@@ -17,8 +19,11 @@ def _status() -> dict[str, Any]:
     return {"status": "ok", "generation": os.environ.get("KOLLAB_ACP_GENERATION", "0")}
 
 
-def _require_binding(binding: Callable[[], bool]) -> None:
-    if not binding():
+async def _require_binding(binding: Callable[[], bool | Any]) -> None:
+    result = binding()
+    if hasattr(result, "__await__"):
+        result = await result
+    if not result:
         raise PermissionError("stale or unavailable ACP hub binding")
 
 
@@ -28,10 +33,29 @@ def _binding_from_environment() -> bool:
     return bool(os.environ.get("KOLLAB_ACP_HUB_TOKEN"))
 
 
+async def _binding_from_socket() -> bool:
+    socket_path = os.environ.get("KOLLAB_ACP_HUB_SOCKET")
+    token = os.environ.get("KOLLAB_ACP_HUB_TOKEN")
+    generation = os.environ.get("KOLLAB_ACP_GENERATION")
+    if not socket_path or not token or generation is None:
+        return _binding_from_environment()
+    try:
+        reader, writer = await asyncio.open_unix_connection(socket_path)
+        request = {"action": "acp_hub_status", "token": token, "generation": generation}
+        writer.write((json.dumps(request) + "\n").encode())
+        await writer.drain()
+        response = json.loads((await asyncio.wait_for(reader.readline(), 2)).decode())
+        writer.close()
+        await writer.wait_closed()
+        return response.get("type") == "acp_hub_status" and "error" not in response
+    except (OSError, asyncio.TimeoutError, ValueError):
+        return False
+
+
 def build_hub_server(
     *,
     status: Callable[[], dict[str, Any]] = _status,
-    binding: Callable[[], bool] = _binding_from_environment,
+    binding: Callable[[], bool | Any] = _binding_from_environment,
 ) -> Server:
     server = Server("kollab-hub", version="1")
 
@@ -45,7 +69,7 @@ def build_hub_server(
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        _require_binding(binding)
+        await _require_binding(binding)
         if name != "hub_status":
             raise ValueError(f"unknown tool: {name}")
         import json
@@ -58,7 +82,7 @@ def build_hub_server(
 async def serve_hub_status(
     *,
     status: Callable[[], dict[str, Any]] = _status,
-    binding: Callable[[], bool] = _binding_from_environment,
+    binding: Callable[[], bool | Any] = _binding_from_environment,
 ) -> None:
     """Run the standard MCP stdio transport; stdout is protocol-only."""
     server = build_hub_server(status=status, binding=binding)
@@ -80,7 +104,7 @@ def main() -> None:
     if not os.environ.get("KOLLAB_ACP_HUB_TOKEN"):
         print("KOLLAB_ACP_HUB_TOKEN is required", file=sys.stderr)
         raise SystemExit(2)
-    anyio.run(serve_hub_status)
+    anyio.run(lambda: serve_hub_status(binding=_binding_from_socket))
 
 
 if __name__ == "__main__":
