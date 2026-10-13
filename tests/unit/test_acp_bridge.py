@@ -304,9 +304,56 @@ async def test_permission_response_is_nested_and_option_bound(tmp_path):
     )
     assert response.outcome.outcome == "selected"
     assert response.outcome.optionId == "allow"
-    assert seen[0].operation == "read"
+    # Titles are display-only; operations come only from structured fields.
+    assert seen[0].operation is None
     assert seen[0].workspace == str(tmp_path.resolve())
     assert seen[0].profile == "fake"
+
+
+
+@pytest.mark.asyncio
+async def test_permission_operation_uses_structured_command_paths_and_id_merge(tmp_path):
+    seen = []
+
+    async def decide(request):
+        seen.append(request)
+        return "allow"
+
+    runner = ACPRunner(
+        ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)),
+        ACPPermissionBridge(decide),
+    )
+    runner.session_id = "s1"
+    runner._active_generation = 1
+    runner.permission_bridge.bind("s1", 1)
+    option = PermissionOption(optionId="allow", name="Allow once", kind="allow_once")
+
+    def tool(payload):
+        return type("Tool", (), {"model_dump": lambda self: payload})()
+
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "exec", "kind": "execute", "rawInput": {"command": ["echo", "a b"]}}), [option]
+    )
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "chain", "kind": "execute", "rawInput": {"command": "echo a && echo b"}}), [option]
+    )
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "edit", "kind": "edit", "locations": [{"path": str(tmp_path / "x.py")}]}), [option]
+    )
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "outside", "kind": "edit", "locations": [{"path": "/outside"}]}), [option]
+    )
+    runner._updates.append({
+        "kind": "tool_call",
+        "payload": {"toolCallId": "merged", "kind": "execute", "rawInput": {"command": ["git", "status"]}},
+    })
+    await runner._request_permission("s1", tool({"toolCallId": "merged"}), [option])
+
+    assert seen[0].operation == ["echo", "a b"]
+    assert seen[1].operation is None
+    assert seen[2].operation == [str((tmp_path / "x.py").resolve())]
+    assert seen[3].operation is None
+    assert seen[4].operation == ["git", "status"]
 
 
 @pytest.mark.asyncio
