@@ -202,6 +202,17 @@ class ACPRunner:
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
 
+    @property
+    def is_processing(self) -> bool:
+        """True while active RPC, queued work, or cancellation drain is held."""
+        return bool(
+            self._active_rpc_task is not None
+            or self._active_future is not None
+            or not self._queue.empty()
+            or self._cancel_hold
+            or not self._active_done.is_set()
+        )
+
     async def _start_process(self) -> str:
         command, env, cwd = self.profile.resolve()
         self._process = await asyncio.create_subprocess_exec(
