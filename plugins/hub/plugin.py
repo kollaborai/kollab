@@ -2785,11 +2785,6 @@ class HubPlugin(BasePlugin):
             deferred=mode == "buffer",
             skipped=mode not in ("wake", "buffer"),
         )
-        turns = getattr(self, "_acp_network_turns", None)
-        if turns is None:
-            turns = self._acp_network_turns = {}
-        turns[message.id] = self._net_turn
-
     def _network_answering(self, handle: str) -> Optional["_NetworkTurn"]:
         """The open request from ``handle`` this turn is handling, if any."""
         # getattr: some tests build HubPlugin via __new__ without __init__.
@@ -2877,20 +2872,26 @@ class HubPlugin(BasePlugin):
             return
         await self._end_network_turn(turn, failed=turn.failed)
 
-    async def _end_network_turn(self, turn: "_NetworkTurn", *, failed: bool) -> None:
+    async def _end_network_turn(
+        self, turn: "_NetworkTurn", *, failed: bool, acp: bool = False
+    ) -> None:
         """Close ``turn`` and tell its requester, on the request's thread."""
         from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
 
-        self._net_turn = None
-        # The model answered in plain text and sent nothing on the thread: that
-        # text is the reply, or a shell or cron job would get nothing back.
+        if self._net_turn is turn:
+            self._net_turn = None
+        # ACP always emits an outcome/final message before its hidden end frame.
         answer = _network_answer_text(turn.answer, MAX_CONTENT)
-        if answer and not turn.replies and not failed:
+        if acp:
+            content = answer if answer and not failed else _NET_TURN_FAILED
+            if await self._send_on_thread(turn, content, "reply"):
+                turn.replies += 1
+        elif answer and not turn.replies and not failed:
             if await self._send_on_thread(turn, answer, "reply"):
                 turn.replies += 1
         await self._send_on_thread(
             turn,
-            _NET_TURN_FAILED if failed else _NET_TURN_DONE,
+            _NET_TURN_DONE,
             "turn end",
             turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed},
         )
@@ -2944,7 +2945,7 @@ class HubPlugin(BasePlugin):
         turn.failed = failed
         turn.ended = True
         getattr(self, "_acp_network_turns", {}).pop(request_id, None)
-        await self._end_network_turn(turn, failed=failed)
+        await self._end_network_turn(turn, failed=failed, acp=True)
 
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
         """The far agent's turn on our request ended: settle whoever waits on it.
@@ -7295,6 +7296,11 @@ class HubPlugin(BasePlugin):
         self, message: HubMessage, llm_service: Any
     ) -> dict[str, Any]:
         """Admit a verified peer message without coercing it to human input."""
+        turns = getattr(self, "_acp_network_turns", None)
+        if turns is None:
+            turns = self._acp_network_turns = {}
+        if getattr(self, "_net_turn", None) is not None:
+            turns[message.id] = self._net_turn
         return await llm_service.submit_human_input(
             message.content,
             source="agent",
