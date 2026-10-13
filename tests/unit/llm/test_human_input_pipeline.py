@@ -437,3 +437,23 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
     assert result == {"status": "queued", "request_id": "r2"}
     await asyncio.gather(*tasks)
     assert calls == [("hello", "state_rpc")]
+
+@pytest.mark.asyncio
+async def test_acp_admission_rejects_full_queue_before_hooks():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+
+    class FullQueue:
+        def qsize(self):
+            return 10
+
+    class ACP:
+        active = True
+        runner = SimpleNamespace(_queue=FullQueue(), _active_rpc_task=None)
+
+    bus.register_service("acp_orchestrator", ACP())
+    bus.emit_with_hooks = AsyncMock()
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}
+    bus.emit_with_hooks.assert_not_awaited()
