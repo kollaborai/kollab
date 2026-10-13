@@ -200,7 +200,7 @@ class ACPPermissionRequest:
     request_id: str
     session_id: str
     generation: int
-    operation: str
+    operation: Any
     workspace: str
     profile: str
     options: tuple[dict[str, Any], ...]
@@ -591,6 +591,55 @@ class ACPRunner:
         if self.update_callback is not None:
             self.update_callback(dict(update_data))
 
+    def _merged_tool_payload(self, raw_tool: dict[str, Any], request_id: str) -> dict[str, Any]:
+        """Merge id-only permission cards with a prior structured tool call."""
+        merged = {}
+        for update in self._updates:
+            payload = update.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            tool_id = payload.get("toolCallId", payload.get("tool_call_id", payload.get("id")))
+            if tool_id is not None and str(tool_id) == request_id:
+                merged.update(payload)
+        merged.update({key: value for key, value in raw_tool.items() if value is not None})
+        return merged
+
+    @staticmethod
+    def _permission_operation(raw_tool: dict[str, Any], workspace: str) -> Any:
+        """Derive a grant key from structured ACP tool-call fields only."""
+        kind = str(raw_tool.get("kind") or "").lower()
+        raw_input = raw_tool.get("rawInput", raw_tool.get("raw_input"))
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+        if kind == "execute":
+            command = raw_input.get("command")
+            if isinstance(command, str):
+                if any(operator in command for operator in ("&&", "||", ";", "|")):
+                    return None
+                return command
+            if isinstance(command, (list, tuple)) and all(isinstance(item, str) for item in command):
+                return list(command)
+            return None
+        if kind not in {"edit", "delete", "move"}:
+            return None
+        locations = raw_tool.get("locations", raw_input.get("locations"))
+        if not isinstance(locations, (list, tuple)) or not locations:
+            return None
+        workspace_root = os.path.realpath(workspace)
+        canonical = []
+        for location in locations:
+            path = location.get("path") if isinstance(location, dict) else getattr(location, "path", None)
+            if not isinstance(path, str) or not path:
+                return None
+            resolved = os.path.realpath(os.path.expanduser(path))
+            try:
+                if os.path.commonpath((workspace_root, resolved)) != workspace_root:
+                    return None
+            except ValueError:
+                return None
+            canonical.append(resolved)
+        return canonical
+
     async def _request_permission(self, session_id: str, tool_call: Any, options: list[Any]) -> Any:
         if session_id != self.session_id or not self._active_generation:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
@@ -602,23 +651,19 @@ class ACPRunner:
                 "optionId": raw.get("optionId", raw.get("option_id")),
                 "kind": raw.get("kind"),
             })
-        raw_tool = tool_call.model_dump() if hasattr(tool_call, "model_dump") else {}
-        tool_name = (
-            raw_tool.get("name")
-            or raw_tool.get("toolName")
-            or raw_tool.get("title")
-            or getattr(tool_call, "name", None)
-            or getattr(tool_call, "title", None)
-        )
-        argv = raw_tool.get("arguments") or raw_tool.get("argv") or raw_tool.get("input")
-        if isinstance(argv, dict):
-            argv = json.dumps(argv, sort_keys=True, separators=(",", ":"))
-        if isinstance(argv, (list, tuple)):
-            operation = " ".join(str(item) for item in (argv or []))
+        if hasattr(tool_call, "model_dump"):
+            try:
+                raw_tool = tool_call.model_dump(by_alias=True)
+            except TypeError:
+                raw_tool = tool_call.model_dump()
         else:
-            operation = str(argv or tool_name or "unknown")
+            raw_tool = {}
+        request_id = str(getattr(tool_call, "toolCallId", raw_tool.get("toolCallId", "permission")))
+        raw_tool = self._merged_tool_payload(raw_tool, request_id)
+        workspace = os.path.realpath(self.profile.workspace or self.profile.cwd or os.getcwd())
+        operation = self._permission_operation(raw_tool, workspace)
         request = ACPPermissionRequest(
-            request_id=str(getattr(tool_call, "toolCallId", raw_tool.get("toolCallId", "permission"))),
+            request_id=request_id,
             session_id=session_id,
             generation=self._active_generation,
             operation=operation,
