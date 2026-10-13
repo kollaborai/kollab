@@ -114,7 +114,8 @@ class ACPProfile:
             pass
         cached = cache.get(self.name) if isinstance(cache, dict) else None
         executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
-        if not executable or not Path(executable).exists():
+        cached_command = cached.get("command") if isinstance(cached, dict) else None
+        if cached_command != self.command[0] or not executable or not Path(executable).exists():
             executable = self._login_shell_path() or shutil.which(self.command[0]) or ""
         if not executable:
             raise ACPError(f"ACP adapter executable not found: {self.command[0]}. {self.install_guidance}")
@@ -130,7 +131,12 @@ class ACPProfile:
                 node_path = self._login_shell_node()
         except (OSError, IndexError):
             pass
-        cache[self.name] = {"path": executable, "directory": resolved_dir, "node": node_path}
+        cache[self.name] = {
+            "command": self.command[0],
+            "path": executable,
+            "directory": resolved_dir,
+            "node": node_path,
+        }
         try:
             cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
         except OSError:
