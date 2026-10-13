@@ -70,6 +70,26 @@ async def test_queued_turn_keeps_first_generation_updates(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_permission_cancel_while_decider_never_returns():
+    started = asyncio.Event()
+
+    async def decide(request):
+        started.set()
+        await asyncio.Future()
+
+    bridge = ACPPermissionBridge(decide)
+    bridge.bind("s1", 1)
+    request = type("Request", (), {
+        "session_id": "s1", "generation": 1,
+        "options": ({"optionId": "allow", "kind": "allow_once"},),
+    })()
+    pending = asyncio.create_task(bridge.request(request))
+    await started.wait()
+    bridge.cancel()
+    assert await asyncio.wait_for(pending, 1) is None
+
+
+@pytest.mark.asyncio
 async def test_permission_cancel_after_decider_await_fails_closed():
     started = asyncio.Event()
     release = asyncio.Event()

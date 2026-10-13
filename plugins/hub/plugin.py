@@ -588,6 +588,8 @@ class HubPlugin(BasePlugin):
 
         # State
         self._roster: List[Dict] = []
+        self._acp_hub_token = secrets.token_urlsafe(32)
+        self._acp_hub_generation = 1
         self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
@@ -4761,6 +4763,7 @@ class HubPlugin(BasePlugin):
                 on_network_status=self._handle_network_status_request,
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
+                on_acp_hub_status=self._handle_acp_hub_status,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -13266,6 +13269,14 @@ class HubPlugin(BasePlugin):
                 )
         except Exception as e:
             logger.debug("Attacher input inject error (%s)", type(e).__name__)
+
+    async def _handle_acp_hub_status(self, *, token: str | None, generation: str | None) -> Dict[str, Any]:
+        if token != self._acp_hub_token or str(generation) != str(self._acp_hub_generation):
+            return {"error": "stale or invalid ACP hub binding"}
+        roster = list(self._roster)
+        if self._identity:
+            roster = [{"identity": self._identity.identity, "state": "online"}, *roster]
+        return {"generation": self._acp_hub_generation, "roster": roster}
 
     async def _handle_network_status_request(self) -> Dict[str, Any]:
         """Answer the CLI's `network_status` socket request.

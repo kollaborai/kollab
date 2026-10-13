@@ -93,6 +93,7 @@ class ACPPermissionBridge:
         self._generation = 0
         self._session_id: str | None = None
         self._cancelled = False
+        self._pending: set[asyncio.Task[str | None]] = set()
 
     def bind(self, session_id: str, generation: int) -> None:
         self._session_id = session_id
@@ -101,6 +102,8 @@ class ACPPermissionBridge:
 
     def cancel(self) -> None:
         self._cancelled = True
+        for pending in tuple(self._pending):
+            pending.cancel()
 
     async def request(self, request: ACPPermissionRequest) -> str | None:
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
@@ -108,7 +111,15 @@ class ACPPermissionBridge:
         offered = {str(option.get("optionId")): option for option in request.options}
         if self._decide is None:
             return None
-        selected = await self._decide(request)
+        pending = asyncio.create_task(self._decide(request))
+        self._pending.add(pending)
+        try:
+            selected = await asyncio.wait_for(asyncio.shield(pending), timeout=300)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pending.cancel()
+            return None
+        finally:
+            self._pending.discard(pending)
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
         if selected is None or selected not in offered:
