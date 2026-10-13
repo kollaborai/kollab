@@ -1432,8 +1432,12 @@ class ProfileManager:
         Returns:
             True if successful, False if profile not found and can't be created
         """
-        # Always try to create/update from env vars first (env vars take priority)
-        if self._try_create_profile_from_env(name):
+        # Portable ACP profiles own their command and must not be replaced by
+        # native model env synthesis (for example KOLLAB_CLAUDE_CODE_MODEL).
+        existing = self._profiles.get(name)
+        if existing is not None and existing.provider == "acp":
+            logger.debug("Preserving ACP profile '%s' over model env overrides", name)
+        elif self._try_create_profile_from_env(name):
             logger.info(f"Profile '{name}' loaded from environment variables")
         elif name not in self._profiles:
             logger.error(f"Profile not found: {name}")
