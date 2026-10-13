@@ -76,3 +76,55 @@ async def test_application_does_not_publish_runner_after_start_failure(monkeypat
     with pytest.raises(RuntimeError, match="adapter unavailable"):
         await app._initialize_acp_orchestrator()
     assert app.acp_orchestrator is None
+
+
+@pytest.mark.asyncio
+async def test_application_start_failure_closes_partial_runner(monkeypatch):
+    import kollabor.llm.acp_orchestrator as module
+
+    class FailingRunner(FakeRunner):
+        async def start(self, profile):
+            self.profile = profile
+            raise RuntimeError("child failed")
+
+    monkeypatch.setattr(module, "ACPOrchestrator", FailingRunner)
+    app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app._attach_to = None
+    app.acp_orchestrator = None
+    app.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(name="claude-code", provider="acp")
+    )
+    app.event_bus = SimpleNamespace(get_service=lambda _name: None)
+    app.args = SimpleNamespace(as_identity="daemon-proof")
+
+    with pytest.raises(RuntimeError, match="child failed"):
+        await app._initialize_acp_orchestrator()
+    assert app.acp_orchestrator is None
+    assert FailingRunner.instances[-1].closed == 1
+
+
+@pytest.mark.asyncio
+async def test_application_cancelled_start_closes_partial_runner(monkeypatch):
+    import kollabor.llm.acp_orchestrator as module
+
+    class CancelledRunner(FakeRunner):
+        async def start(self, profile):
+            self.profile = profile
+            raise asyncio.CancelledError
+
+    import asyncio
+
+    monkeypatch.setattr(module, "ACPOrchestrator", CancelledRunner)
+    app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app._attach_to = None
+    app.acp_orchestrator = None
+    app.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(name="claude-code", provider="acp")
+    )
+    app.event_bus = SimpleNamespace(get_service=lambda _name: None)
+    app.args = SimpleNamespace(as_identity="daemon-proof")
+
+    with pytest.raises(asyncio.CancelledError):
+        await app._initialize_acp_orchestrator()
+    assert app.acp_orchestrator is None
+    assert CancelledRunner.instances[-1].closed == 1
