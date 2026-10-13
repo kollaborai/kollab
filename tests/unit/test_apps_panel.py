@@ -17,7 +17,7 @@ from kollabor.panels.base import PanelError, get_panel
 from kollabor_agent import MCPManager
 
 PY = sys.executable  # absolute path: the MCP validator checks the command exists
-SECRET = "fixture-secret-7f3a"
+FIXTURE_VALUE = "fixture-value"
 
 
 def _catalog():
@@ -104,7 +104,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _install(ctx, value=SECRET):
+def _install(ctx, value=FIXTURE_VALUE):
     return _run(
         get_panel("apps-install").act(ctx, "install", {"changes": {"KEY": value}, "context": {"id": "mcp:search"}})
     )
@@ -148,10 +148,10 @@ def test_install_writes_the_server_reloads_and_never_echoes_the_secret(ctx):
     assert out["ok"] is True
     assert out["panel"]["panel"] == "apps"
     server = ctx.service.mcp_manager.load_config()["servers"]["search"]
-    assert server["enabled"] is True and server["env"] == {"KEY": SECRET}
+    assert server["enabled"] is True and server["env"] == {"KEY": FIXTURE_VALUE}
     assert ctx.reloads == 1
-    assert SECRET not in json.dumps(out)
-    assert SECRET not in json.dumps(_run(get_panel("apps").describe(ctx, {})))
+    assert FIXTURE_VALUE not in json.dumps(out)
+    assert FIXTURE_VALUE not in json.dumps(_run(get_panel("apps").describe(ctx, {})))
 
 
 def test_install_without_the_required_secret_returns_field_errors(ctx):

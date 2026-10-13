@@ -1,4 +1,7 @@
 [allowlist]
-description = "Historical test fixture was intentionally non-secret"
-regexTarget = "match"
-regexes = ['''sk-test-SECRET-7f3a''']
+description = "Historical test-only placeholder values"
+commits = [
+  "2e7339f1be9ba300a844df6afc473292bae72900",
+  "16278577c44c7e578309ca99053e80769fcddd91",
+  "6f50d457e1108b46a1cacd4d483b28acfa464c24",
+]
