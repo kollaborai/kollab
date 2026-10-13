@@ -4,10 +4,16 @@ This document records the current implementation checkpoint; the canonical
 phase contract remains in `docs/specs/acp-bridge.md`.
 
 implemented in commits 22da746d, 854d3dbb, 557fdebe, fca1178f,
-30ddd1b0, and 02a7b848:
+30ddd1b0, 02a7b848, 0f112962, a51d658d, and ebbf1e2f:
 
 - portable `ACPProfile` command/cwd/workspace/env/pass_env resolution with
-  provider-key stripping and local executable lookup
+  provider-key stripping and device-local executable lookup
+- built-in portable `claude-code`, `codex-cli`, and `gemini-cli` profiles with
+  pinned install guidance for missing adapters
+- device-local `~/.kollab/acp/resolved.json` cache recording command identity,
+  symlink-preserving executable directory, and optional Node resolution;
+  vanished or changed command paths are re-resolved, and adapter/Node
+  directories prefix the child PATH
 - pinned `agent-client-protocol==0.12.1` dependency and typed SDK connection
   for initialize, session/new, prompt, session updates, permission callback,
   cancel, process-group cleanup, and stderr draining
@@ -26,8 +32,7 @@ implemented in commits 22da746d, 854d3dbb, 557fdebe, fca1178f,
 
 validation checkpoint:
 
-- focused ACP/MCP/CLI/input tests pass; latest ACP/MCP correction suite: 12
-  tests before the queued-after-cancel addition and 9 ACP tests after it
+- 24 ACP bridge/profile tests pass, with focused ACP/MCP/CLI/input suites green
 - `ruff`, `py_compile`, and `git diff --check` pass on changed files
 - `kollab --version`, `kollab --hub status`, and live MCP ClientSession
   initialize/list/call plus parent roster-revocation smoke pass
