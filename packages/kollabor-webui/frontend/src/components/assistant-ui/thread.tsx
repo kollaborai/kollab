@@ -68,6 +68,7 @@ import {
   createContext,
   useContext,
   useMemo,
+  useRef,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -316,6 +317,10 @@ const Composer: FC<{
   const slotMode = useAuiState((s) =>
     composerSlotMode(s, voiceAvailable ? voice : null),
   );
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
+    null,
+  );
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
@@ -333,6 +338,51 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
+  const sendBusyMessage = (event: {
+    preventDefault: () => void;
+    defaultPrevented?: boolean;
+  }) => {
+    if (!isRunning || event.defaultPrevented) return;
+    const state = aui.composer.getState();
+    if (!state.text.trim() && state.attachments.length === 0) return;
+
+    const fingerprint = `${state.text}\u0000${state.attachments
+      .map((attachment) => attachment.id)
+      .join(",")}`;
+    const now = Date.now();
+    const previous = lastBusySubmit.current;
+    if (
+      previous &&
+      previous.fingerprint === fingerprint &&
+      now - previous.at < 450
+    ) {
+      event.preventDefault();
+      return;
+    }
+    lastBusySubmit.current = { fingerprint, at: now };
+    event.preventDefault();
+    aui.composer.send({ steer: true });
+  };
+
+  const submitBusyMessage = (event: {
+    preventDefault: () => void;
+    defaultPrevented?: boolean;
+  }) => {
+    openPanelFromComposer(event);
+    sendBusyMessage(event);
+  };
+
+  const handleComposerSubmit = (event: {
+    preventDefault: () => void;
+    defaultPrevented?: boolean;
+  }) => {
+    // Keep panel commands on their existing path, then bypass assistant-ui's
+    // disabled-send predicate while a turn is running. The transport already
+    // queues this append message behind the active run.
+    openPanelFromComposer(event);
+    sendBusyMessage(event);
+  };
+
   const openPanelForItem = (item: {
     id: string;
     metadata?: Record<string, unknown> | undefined;
@@ -577,7 +627,7 @@ const Composer: FC<{
       <ComposerPrimitive.Root
         className="aui-composer-root group/composer relative flex w-full flex-col"
         data-mode={slotMode}
-        onSubmit={openPanelFromComposer}
+        onSubmit={handleComposerSubmit}
       >
         <ComposerPalette
           char="/"
@@ -618,7 +668,9 @@ const Composer: FC<{
               />
               <ComposerSlot
                 voice={voiceAvailable ? voice : null}
+                running={isRunning}
                 onBeforeSend={openPanelFromComposer}
+                onSteer={submitBusyMessage}
               />
             </div>
           </div>
@@ -657,8 +709,8 @@ const composerSlotMode = (
   // A /voice command is itself a chat run; hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
-  if (s.thread.isRunning) return "stop";
   if (!s.composer.isEmpty || !voice) return "send";
+  if (s.thread.isRunning) return "stop";
   return voice.on ? "listening" : "mic";
 };
 
@@ -673,13 +725,13 @@ const SLOT_SHOWS_SEND =
   "group-data-[mode=send]/composer:scale-100 group-data-[mode=send]/composer:opacity-100 group-data-[mode=send]/composer:visible";
 const SLOT_SHOWS_LISTENING =
   "group-data-[mode=listening]/composer:scale-100 group-data-[mode=listening]/composer:opacity-100 group-data-[mode=listening]/composer:visible";
-const SLOT_SHOWS_STOP =
-  "group-data-[mode=stop]/composer:scale-100 group-data-[mode=stop]/composer:opacity-100 group-data-[mode=stop]/composer:visible";
 
 const ComposerSlot: FC<{
   voice: VoiceMode | null;
+  running: boolean;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
-}> = ({ voice, onBeforeSend }) => {
+  onSteer: (event: { preventDefault: () => void }) => void;
+}> = ({ voice, running, onBeforeSend, onSteer }) => {
   return (
     <div className="aui-composer-slot relative size-9 shrink-0">
       {voice && (
@@ -710,30 +762,49 @@ const ComposerSlot: FC<{
           </TooltipIconButton>
         </>
       )}
-      <ComposerPrimitive.Send asChild onClick={onBeforeSend}>
+      {running ? (
         <TooltipIconButton
-          tooltip="Send Message"
+          tooltip="Send while generating"
           side="top"
           type="button"
           variant="default"
-          className={cn(SLOT_BUTTON, SLOT_SHOWS_SEND)}
-          aria-label="Send message"
+          className={cn(SLOT_BUTTON, SLOT_SHOWS_SEND, "pointer-events-auto")}
+          aria-label="Send message while generating"
+          onClick={onSteer}
         >
           <ArrowUpIcon className="size-5" />
         </TooltipIconButton>
-      </ComposerPrimitive.Send>
-      <ComposerPrimitive.Cancel asChild>
-        <TooltipIconButton
-          tooltip="Stop Generating"
-          side="top"
-          type="button"
-          variant="default"
-          className={cn(SLOT_BUTTON, SLOT_SHOWS_STOP)}
-          aria-label="Stop generating"
-        >
-          <SquareIcon className="size-3.5 fill-current" />
-        </TooltipIconButton>
-      </ComposerPrimitive.Cancel>
+      ) : (
+        <ComposerPrimitive.Send asChild onClick={onBeforeSend}>
+          <TooltipIconButton
+            tooltip="Send Message"
+            side="top"
+            type="button"
+            variant="default"
+            className={cn(SLOT_BUTTON, SLOT_SHOWS_SEND)}
+            aria-label="Send message"
+          >
+            <ArrowUpIcon className="size-5" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Send>
+      )}
+      {running ? (
+        <ComposerPrimitive.Cancel asChild>
+          <TooltipIconButton
+            tooltip="Stop Generating"
+            side="top"
+            type="button"
+            variant="default"
+            className={cn(
+              SLOT_BUTTON,
+              "!left-auto !right-10 scale-100 opacity-100 visible",
+            )}
+            aria-label="Stop generating"
+          >
+            <SquareIcon className="size-3.5 fill-current" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Cancel>
+      ) : null}
     </div>
   );
 };
