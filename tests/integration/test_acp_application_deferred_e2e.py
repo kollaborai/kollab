@@ -72,11 +72,6 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
             process = await original_spawn(*args, **kwargs)
             children.append(process)
             child_names[process.pid] = Path(args[0]).name
-            Path("/tmp/kollab-acp-full-deferred-child-log.json").write_text(
-                json.dumps(
-                    [{"pid": p.pid, "executable": child_names[p.pid], "returncode": p.returncode} for p in children]
-                )
-            )
             return process
 
         app = None
