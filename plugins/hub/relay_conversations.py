@@ -140,13 +140,26 @@ def validate_message(
         raise RelayError("invalid sender device")
     if "turn_end" in payload:
         end = payload["turn_end"]
+        if payload.get("kind") != "message" or not isinstance(end, dict):
+            raise RelayError("invalid turn end")
+        # Native relay frames historically carried replies/failed only. ACP
+        # frames additionally carry the canonical stop outcome; accept both
+        # envelopes so older peers remain wire-compatible while validating the
+        # richer terminal result strictly.
+        if set(end) not in ({"replies", "failed"}, {"replies", "failed", "outcome"}):
+            raise RelayError("invalid turn end")
         if (
-            payload.get("kind") != "message"
-            or not isinstance(end, dict)
-            or set(end) != {"replies", "failed"}
-            or type(end["replies"]) is not int
+            type(end["replies"]) is not int
             or not 0 <= end["replies"] <= MAX_TURN_REPLIES
             or type(end["failed"]) is not bool
+        ):
+            raise RelayError("invalid turn end")
+        if "outcome" in end and (
+            not isinstance(end["outcome"], str)
+            or end["outcome"] not in {
+                "end_turn", "cancelled", "refusal", "max_tokens",
+                "max_turn_requests", "busy", "skipped", "timeout", "error",
+            }
         ):
             raise RelayError("invalid turn end")
     if "task" in payload and (
