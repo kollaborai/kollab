@@ -14,6 +14,7 @@ import pytest
 
 import kollabor.application as application_module
 from kollabor_config import config_utils
+from plugins.hub import presence
 from plugins.hub.plugin import HubPlugin
 
 
@@ -27,7 +28,9 @@ async def test_hub_plugin_real_init_and_cleanup_in_temp_scope(tmp_path, monkeypa
     global_config.mkdir()
     monkeypatch.chdir(project)
     monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
-    monkeypatch.setenv("KOLLAB_HUB_SOCKET_DIR", str(tmp_path / "sockets"))
+    socket_root = Path("/tmp") / f"acp-test-{tmp_path.name[-6:]}"
+    socket_root.mkdir()
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
     (global_config / "config.json").write_text(
         json.dumps({"plugins": {"hub": {"enabled": True, "project_scoped": True}}})
     )
@@ -59,9 +62,13 @@ async def test_hub_plugin_real_init_and_cleanup_in_temp_scope(tmp_path, monkeypa
         assert plugin._presence is not None
         await plugin._start_hub()
         assert plugin._socket_server is not None
+        socket_path = Path(plugin._socket_server.socket_path)
+        assert socket_path.exists()
+        assert socket_path.is_relative_to(socket_root)
         await plugin.shutdown(exit_process=False)
+        assert not socket_path.exists()
 
-    assert not list((tmp_path / "sockets").glob("*.sock"))
+    assert not list(socket_root.glob("*.sock"))
 
 
 def test_terminal_constructor_uses_isolated_profile_fixture(tmp_path, monkeypatch):
@@ -99,5 +106,25 @@ async def test_hub_readiness_barrier_waits_for_delayed_socket():
         plugin._socket_server = object()
 
     plugin._startup_task = asyncio.create_task(delayed_start())
+    await plugin.wait_until_ready(timeout=1.0)
+    assert plugin._socket_server is not None
+
+
+@pytest.mark.asyncio
+async def test_register_hooks_waits_for_actual_delayed_hub_start(monkeypatch):
+    class EventBus:
+        async def register_hook(self, hook):
+            return None
+
+    plugin = HubPlugin(event_bus=EventBus())
+    plugin._identity = SimpleNamespace(solo=True)
+    plugin._cli_args = SimpleNamespace(attach=None)
+
+    async def delayed_start():
+        await asyncio.sleep(0.01)
+        plugin._socket_server = object()
+
+    monkeypatch.setattr(plugin, "_start_hub", delayed_start)
+    await plugin.register_hooks()
     await plugin.wait_until_ready(timeout=1.0)
     assert plugin._socket_server is not None

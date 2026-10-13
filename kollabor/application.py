@@ -1266,8 +1266,12 @@ class TerminalLLMChat:
 
             await self._initialize_plugins()
             await asyncio.sleep(0)  # Yield after plugin init
-            hub_plugin = self.event_bus.get_service("hub_plugin")
-            if hub_plugin is not None and hasattr(hub_plugin, "wait_until_ready"):
+            hub_plugins = [
+                plugin
+                for plugin in self.plugin_instances.values()
+                if hasattr(plugin, "wait_until_ready")
+            ]
+            for hub_plugin in {id(plugin): plugin for plugin in hub_plugins}.values():
                 await hub_plugin.wait_until_ready(timeout=30.0)
             await self._initialize_acp_orchestrator()
 
