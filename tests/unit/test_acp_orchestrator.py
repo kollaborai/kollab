@@ -67,6 +67,7 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     assert result["text"] == "hello"
     assert bus.services["acp_orchestrator"] is orchestrator
     assert any(event.get("type") == "turn_complete" for event in bus.services["display_tap"].events)
+    assert any(event.get("type") == "turn_end" and event.get("hidden") for event in bus.services["display_tap"].events)
     await orchestrator.close()
     assert not orchestrator.active
     assert hub.rotations == 2

@@ -92,6 +92,13 @@ class ACPOrchestrator:
                     "source": source,
                 }
             )
+            tap.publish_semantic(
+                {
+                    **result.end_frame,
+                    "hidden": True,
+                    "source": source,
+                }
+            )
         return {
             "text": result.text,
             "session_id": result.session_id,
