@@ -15,10 +15,13 @@ from acp.schema import (
 )
 
 class FakeAgent:
+    def __init__(self):
+        self._sessions = 0
     async def initialize(self, protocol_version, **kwargs):
         return InitializeResponse(protocolVersion=1)
     async def new_session(self, cwd, mcp_servers=None, **kwargs):
-        return NewSessionResponse(sessionId='s1')
+        self._sessions += 1
+        return NewSessionResponse(sessionId=f's{self._sessions}')
     async def prompt(self, session_id, prompt, **kwargs):
         import asyncio
         await asyncio.sleep(0.05)
@@ -67,6 +70,7 @@ async def test_queued_turn_after_cancel_rebases_generation(tmp_path):
     with pytest.raises(ACPError):
         await first
     result2 = await second
+    assert result2.session_id == "s2"
     assert result2.text == "hello "
     await runner.close()
 

@@ -161,6 +161,7 @@ class ACPRunner:
         self._next_turn_id = 0
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
+        self._restart_before_next = False
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
@@ -234,6 +235,14 @@ class ACPRunner:
                     future.set_exception(exc)
             finally:
                 self._active_future = None
+            if self._restart_before_next and self._connection is not None:
+                self._restart_before_next = False
+                cwd = self.profile.cwd or self.profile.workspace or os.getcwd()
+                result = await self._connection.new_session(
+                    cwd=cwd,
+                    mcp_servers=self.profile.sdk_mcp_servers(),
+                )
+                self.session_id = str(result.sessionId)
 
     async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
         self._active_generation = generation
@@ -307,6 +316,7 @@ class ACPRunner:
 
     async def cancel(self) -> None:
         self.permission_bridge.cancel()
+        self._restart_before_next = True
         self.generation += 1
         if self._active_future and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP turn cancelled"))
