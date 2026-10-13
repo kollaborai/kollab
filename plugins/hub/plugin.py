@@ -2894,7 +2894,11 @@ class HubPlugin(BasePlugin):
             turn,
             _NET_TURN_DONE,
             "turn end",
-            turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed, "outcome": outcome or ("error" if failed else "end_turn")},
+            turn_end={
+                "replies": min(turn.replies, MAX_TURN_REPLIES),
+                "failed": failed,
+                "outcome": outcome or ("error" if failed else "end_turn"),
+            },
         )
 
     async def _send_on_thread(
@@ -7305,7 +7309,7 @@ class HubPlugin(BasePlugin):
             turns = self._acp_network_turns = {}
         if getattr(self, "_net_turn", None) is not None:
             turns[message.id] = self._net_turn
-        return await llm_service.submit_human_input(
+        result = await llm_service.submit_human_input(
             message.content,
             source="agent",
             request_id=message.id,
@@ -7316,6 +7320,9 @@ class HubPlugin(BasePlugin):
                 "operator": False,
             },
         )
+        if isinstance(result, dict) and result.get("status") == "rejected":
+            turns.pop(message.id, None)
+        return result
 
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
