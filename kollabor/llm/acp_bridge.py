@@ -204,6 +204,7 @@ class ACPPermissionRequest:
     workspace: str
     profile: str
     options: tuple[dict[str, Any], ...]
+    kind: str = ""
 
 
 class ACPPermissionBridge:
@@ -593,14 +594,16 @@ class ACPRunner:
 
     def _merged_tool_payload(self, raw_tool: dict[str, Any], request_id: str) -> dict[str, Any]:
         """Merge id-only permission cards with a prior structured tool call."""
-        merged = {}
+        merged: dict[str, Any] = {}
         for update in self._updates:
             payload = update.get("payload")
             if not isinstance(payload, dict):
                 continue
             tool_id = payload.get("toolCallId", payload.get("tool_call_id", payload.get("id")))
             if tool_id is not None and str(tool_id) == request_id:
-                merged.update(payload)
+                # Permission cards can be id-only or contain explicit nulls;
+                # never let a sparse update erase an earlier structured field.
+                merged.update({key: value for key, value in payload.items() if value is not None})
         merged.update({key: value for key, value in raw_tool.items() if value is not None})
         return merged
 
@@ -616,9 +619,9 @@ class ACPRunner:
             if isinstance(command, str):
                 if any(operator in command for operator in ("&&", "||", ";", "|")):
                     return None
-                return command
+                return {"kind": kind, "command": command}
             if isinstance(command, (list, tuple)) and all(isinstance(item, str) for item in command):
-                return list(command)
+                return {"kind": kind, "command": list(command)}
             return None
         if kind not in {"edit", "delete", "move"}:
             return None
@@ -638,7 +641,7 @@ class ACPRunner:
             except ValueError:
                 return None
             canonical.append(resolved)
-        return canonical
+        return {"kind": kind, "paths": canonical}
 
     async def _request_permission(self, session_id: str, tool_call: Any, options: list[Any]) -> Any:
         if session_id != self.session_id or not self._active_generation:
@@ -670,6 +673,7 @@ class ACPRunner:
             workspace=os.path.realpath(self.profile.workspace or self.profile.cwd or os.getcwd()),
             profile=self.profile.name,
             options=tuple(option_data),
+            kind=str(raw_tool.get("kind") or "").lower(),
         )
         if self.update_callback is not None:
             self.update_callback({
