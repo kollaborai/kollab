@@ -171,9 +171,14 @@ async def test_compliant_cancel_preserves_process_session_and_single_consumer(tm
     worker = runner._worker
     first = asyncio.create_task(runner.prompt("first"))
     await asyncio.sleep(0.01)
+    second = asyncio.create_task(runner.prompt("second"))
     await runner.cancel()
     with pytest.raises(ACPError):
         await first
+    result = await second
+    assert result.text == "drained "
+    assert result.session_id == "preserved"
+    assert result.generation == 2
     assert runner._process is process
     assert runner.session_id == "preserved"
     assert runner._worker is worker

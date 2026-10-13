@@ -262,6 +262,10 @@ class ACPRunner:
                 self._active_rpc_task = None
                 self._active_future = None
                 self._active_done.set()
+                # Advance the turn fence only after the RPC response and all
+                # reader-delivered updates have drained.
+                if self.generation == generation:
+                    self.generation += 1
             try:
                 if self._restart_before_next:
                     self._restart_before_next = False
@@ -389,8 +393,8 @@ class ACPRunner:
                 await asyncio.wait_for(asyncio.shield(active), timeout=self.cancel_timeout)
                 # The protocol response (including stopReason=cancelled) and
                 # all reader-delivered updates are now drained. Preserve the
-                # process/session and fence the next queued generation.
-                self.generation += 1
+                # process/session; the worker advances the turn fence after
+                # this RPC completes.
             except asyncio.TimeoutError:
                 self.generation += 1
                 self._restart_before_next = True
