@@ -143,6 +143,7 @@ class ACPOrchestrator:
                 "type": "turn_end", "generation": generation,
                 "turnId": admission.turn_id, "sessionId": session_id,
                 "stopReason": stop_reason, "error": type(exc).__name__,
+                "outcome": "failed",
             }
             publish_semantic(
                 self.event_bus, "turn_complete", request_id=admission.request_id,
@@ -170,8 +171,12 @@ class ACPOrchestrator:
             turn_id=result.turn_id, stop_reason=result.stop_reason,
             input_source=result.source, thread_id=result.thread_id,
         )
+        end_frame = dict(result.end_frame)
+        end_frame.setdefault(
+            "outcome", "success" if result.stop_reason == "end_turn" else "failed"
+        )
         publish_semantic(
-            self.event_bus, "turn_end", **result.end_frame, hidden=True,
+            self.event_bus, "turn_end", **end_frame, hidden=True,
             request_id=result.request_id, input_source=result.source,
             thread_id=result.thread_id,
         )
@@ -184,7 +189,7 @@ class ACPOrchestrator:
         return {"text": result.text, "session_id": result.session_id,
                 "generation": result.generation, "turn_id": result.turn_id,
                 "request_id": result.request_id, "stop_reason": result.stop_reason,
-                "end_frame": result.end_frame}
+                "end_frame": end_frame}
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"

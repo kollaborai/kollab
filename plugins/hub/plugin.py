@@ -2873,7 +2873,8 @@ class HubPlugin(BasePlugin):
         await self._end_network_turn(turn, failed=turn.failed)
 
     async def _end_network_turn(
-        self, turn: "_NetworkTurn", *, failed: bool, acp: bool = False
+        self, turn: "_NetworkTurn", *, failed: bool, acp: bool = False,
+        outcome: str | None = None,
     ) -> None:
         """Close ``turn`` and tell its requester, on the request's thread."""
         from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
@@ -2893,7 +2894,7 @@ class HubPlugin(BasePlugin):
             turn,
             _NET_TURN_DONE,
             "turn end",
-            turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed},
+            turn_end={"replies": min(turn.replies, MAX_TURN_REPLIES), "failed": failed, "outcome": outcome or ("error" if failed else "end_turn")},
         )
 
     async def _send_on_thread(
@@ -2945,7 +2946,10 @@ class HubPlugin(BasePlugin):
         turn.failed = failed
         turn.ended = True
         getattr(self, "_acp_network_turns", {}).pop(request_id, None)
-        await self._end_network_turn(turn, failed=failed, acp=True)
+        await self._end_network_turn(
+            turn, failed=failed, acp=True,
+            outcome=str(end_frame.get("stopReason") or ("error" if failed else "end_turn")),
+        )
 
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:
         """The far agent's turn on our request ended: settle whoever waits on it.
