@@ -222,6 +222,8 @@ class ACPRunner:
             generation, turn_id, text, future = await self._queue.get()
             if future.cancelled():
                 continue
+            if generation != self.generation:
+                generation = self.generation
             self._active_future = future
             try:
                 result = await self._run_prompt(generation, turn_id, text)

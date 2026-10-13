@@ -56,6 +56,22 @@ async def test_profile_resolution_strips_environment_by_default(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_queued_turn_after_cancel_rebases_generation(tmp_path):
+    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    runner = ACPRunner(profile)
+    await runner.start()
+    first = asyncio.create_task(runner.prompt("first"))
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(runner.prompt("second"))
+    await runner.cancel()
+    with pytest.raises(ACPError):
+        await first
+    result2 = await second
+    assert result2.text == "hello "
+    await runner.close()
+
+
+@pytest.mark.asyncio
 async def test_queued_turn_keeps_first_generation_updates(tmp_path):
     profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
     runner = ACPRunner(profile)
