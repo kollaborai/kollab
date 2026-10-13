@@ -1746,7 +1746,7 @@ class LLMService:
                 runner = getattr(acp, "runner", None)
                 queued = getattr(getattr(runner, "_queue", None), "qsize", lambda: 0)()
                 active = 1 if getattr(runner, "_active_rpc_task", None) is not None else 0
-                if queued + active + self._acp_pending >= 11:
+                if queued + active + self._acp_pending >= 10:
                     return {"status": "rejected", "reason": "acp_queue_full"}
                 self._acp_pending += 1
                 acp_reserved = True
