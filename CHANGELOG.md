@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-10-13
+
+### Added
+- Apps: /apps marketplace to browse and install apps; bundled skill seed copies are retired on startup (moved, never deleted).
+- ACP: phase-one outbound Agent Client Protocol bridge with orchestrator, cancellation lifecycle, and profile integration.
+- Voice: selectable VibeVoice speech backend; unified voice settings shared across the terminal and the web UI.
+
+### Changed
+- Web: composer input typed during an active turn is queued instead of dropped.
+- Hub: capture output is normalized and structured with bounded pagination.
+
+### Fixed
+- Opening a busy agent no longer times out: history refresh is bounded, session open has a 2-second timeout, and permission reads no longer wait on history. (#179, #180)
+
+
+
 ## [0.15.6] - 2026-10-13
 
 ### Added
