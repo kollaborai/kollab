@@ -24,8 +24,8 @@ import pytest
 from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events import EventType
 from plugins.hub.device_names import default_device_name, format_handle
-from plugins.hub.models import HubMessage
 from plugins.hub.messenger import AgentMessenger
+from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_conversations import (
     MAX_CONTENT,
