@@ -967,7 +967,12 @@ class LLMService:
 
     @property
     def is_processing(self) -> bool:
-        return cast(bool, self._queue_processor.is_processing)
+        native = cast(bool, self._queue_processor.is_processing)
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+            return native or getattr(acp, "is_processing", False) is True
+        except Exception:
+            return native
 
     @is_processing.setter
     def is_processing(self, value: bool):
