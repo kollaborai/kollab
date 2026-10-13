@@ -459,7 +459,7 @@ async def test_acp_completion_forwards_one_reply_and_hidden_end_on_original_thre
         return True
 
     plugin._send_on_thread = capture
-    plugin.on_acp_completion(
+    await plugin.on_acp_completion(
         request_id="req-a", turn_id=7, thread_id="thread-a", source="agent",
         text="final answer", end_frame={"turnId": 7},
     )
