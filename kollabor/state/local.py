@@ -1186,7 +1186,37 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.debug("OAuth profile reload before activation failed: %s", e)
 
-        ok = bool(self._profile_manager.set_active_profile(name))
+        target_profile = self._profile_manager.get_profile(name)
+        target_provider = (
+            target_profile.get_provider()
+            if hasattr(target_profile, "get_provider")
+            else getattr(target_profile, "provider", "")
+        )
+        current_profile = self._profile_manager.get_active_profile()
+        current_provider = (
+            current_profile.get_provider()
+            if hasattr(current_profile, "get_provider")
+            else getattr(current_profile, "provider", "")
+        ) if current_profile is not None else ""
+        event_bus = getattr(self, "_event_bus", None)
+        orchestrator = (
+            event_bus.get_service("acp_orchestrator")
+            if event_bus else None
+        )
+        if str(target_provider).lower() == "acp":
+            if orchestrator is None:
+                raise ValueError("ACP profile unavailable: orchestrator is not running")
+            try:
+                await orchestrator.close()
+                await orchestrator.start(target_profile)
+                ok = bool(self._profile_manager.set_active_profile(name))
+            except Exception as exc:
+                logger.exception("ACP profile activation failed for %r", name)
+                raise ValueError(f"ACP profile activation failed: {exc}") from exc
+        else:
+            if str(current_provider).lower() == "acp" and orchestrator is not None:
+                await orchestrator.close()
+            ok = bool(self._profile_manager.set_active_profile(name))
         if not ok and hasattr(self._profile_manager, "reload"):
             # OAuth login stores tokens before it asks the daemon to activate
             # ``openai-oauth``.  In attach mode the daemon's ProfileManager
@@ -1261,7 +1291,7 @@ class LocalStateService(StateService):
         # native tools in the background because that work is independent of
         # provider selection.
         llm = self._llm_service
-        if llm is not None and hasattr(llm, "api_service"):
+        if str(target_provider).lower() != "acp" and llm is not None and hasattr(llm, "api_service"):
             try:
                 reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
                 if callable(reinitialize):
