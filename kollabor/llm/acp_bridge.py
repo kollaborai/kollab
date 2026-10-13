@@ -381,6 +381,7 @@ class ACPRunner:
                     "turnId": turn_id,
                     "sessionId": self.session_id,
                     "stopReason": stop_reason,
+                    "outcome": "success" if stop_reason == "end_turn" else "failed",
                 },
                 turn_id=turn_id,
                 request_id=admission.request_id,
