@@ -165,3 +165,52 @@ async def test_acp_decider_maps_native_reusable_approval_to_once(scope):
     assert seen[0]["source"] == "acp"
     assert seen[0]["approval_scope"] == "once"
     assert seen[0]["operation"]["kind"] == "edit"
+
+
+@pytest.mark.asyncio
+async def test_acp_decider_does_not_store_grant_without_valid_operation_or_unique_once():
+    callbacks = []
+    grants = []
+
+    async def callback(details):
+        callbacks.append(details)
+        return PermissionDecision(
+            allowed=True,
+            reason="User approved (session)",
+            risk_level=ToolRiskLevel.MEDIUM,
+            confirmation_details={
+                "acp_grant_scope": "session",
+                "acp_choice": "approve_session",
+            },
+        )
+
+    app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.permission_manager = SimpleNamespace(
+        _confirmation_callback=callback,
+        grant_acp=lambda *args, **kwargs: grants.append((args, kwargs)),
+    )
+    base = dict(
+        request_id="perm-invalid",
+        kind="file_edit",
+        workspace="/tmp/work",
+        profile="claude-code",
+    )
+    for operation, options in (
+        (None, ({"optionId": "once", "kind": "allow_once"},)),
+        (
+            {"kind": "edit", "path": "/tmp/work/a.txt"},
+            (
+                {"optionId": "once-a", "kind": "allow_once"},
+                {"optionId": "once-b", "kind": "allow_once"},
+            ),
+        ),
+    ):
+        request = SimpleNamespace(operation=operation, options=options, **base)
+        result = await app._acp_permission_decider(request)
+        if operation is None:
+            assert result == "once"
+        else:
+            assert result is None
+
+    assert len(callbacks) == 2
+    assert grants == []

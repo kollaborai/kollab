@@ -1247,6 +1247,8 @@ class TerminalLLMChat:
         ):
             grant_acp(request.operation, request.workspace, request.profile, scope=scope)
         if allowed and choice in ("approve_session", "approve_project"):
+            if len(allow_once) != 1:
+                return None
             wanted = "allow_once"
         elif allowed and choice in ("approve_always", "approve_tool_always"):
             wanted = "allow_always" if choice == "approve_always" else "allow_tool_always"
