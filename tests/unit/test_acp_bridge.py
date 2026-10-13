@@ -643,3 +643,28 @@ def test_node_shebang_requires_existing_executable_node(tmp_path, monkeypatch):
     monkeypatch.setattr(ACPProfile, "_login_shell_node", lambda self: str(tmp_path / "missing-node"))
     with pytest.raises(ACPError, match="Node executable"):
         profile.resolve()
+
+
+@pytest.mark.asyncio
+async def test_prepare_cancel_holds_queue_for_delayed_owner(tmp_path):
+    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    runner = ACPRunner(profile)
+    await runner.start()
+    first = asyncio.create_task(runner.prompt("first"))
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(runner.prompt("second"))
+    session_id, generation = runner.session_id, runner.generation
+    assert runner.prepare_cancel(
+        expected_session_id=session_id,
+        expected_generation=generation,
+    )
+    await asyncio.sleep(0.02)
+    await runner.cancel(
+        expected_session_id=session_id,
+        expected_generation=generation,
+    )
+    with pytest.raises(ACPError):
+        await first
+    result = await second
+    assert result.text == "hello "
+    await runner.close()

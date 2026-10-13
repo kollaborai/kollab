@@ -1247,11 +1247,22 @@ class TerminalLLMChat:
             orchestrator = getattr(self, "acp_orchestrator", None)
             cancel = getattr(orchestrator, "cancel", None)
             if callable(cancel):
+                prepare = getattr(orchestrator, "prepare_cancel", None)
+                if callable(prepare):
+                    prepare(
+                        session_id=request.session_id,
+                        generation=request.generation,
+                    )
                 # The ACP request callback runs inside the active prompt RPC;
                 # awaiting cancellation here deadlocks that RPC. Schedule the
                 # owner and return immediately so the runner can emit the
                 # protocol-cancelled response and drain its queue boundary.
-                asyncio.create_task(cancel())
+                asyncio.create_task(
+                    cancel(
+                        session_id=request.session_id,
+                        generation=request.generation,
+                    )
+                )
 
         if not options:
             schedule_cancel()

@@ -246,9 +246,35 @@ class ACPOrchestrator:
             thread_id=update.get("thread_id"),
         )
 
-    async def cancel(self) -> None:
+
+    def prepare_cancel(
+        self,
+        *,
+        session_id: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        runner = self._runner
+        if runner is None or self._closed:
+            return False
+        prepare = getattr(runner, "prepare_cancel", None)
+        if not callable(prepare):
+            return False
+        return bool(prepare(
+            expected_session_id=session_id,
+            expected_generation=generation,
+        ))
+
+    async def cancel(
+        self,
+        *,
+        session_id: str | None = None,
+        generation: int | None = None,
+    ) -> None:
         if self._runner is not None and not self._closed:
-            await self._runner.cancel()
+            await self._runner.cancel(
+                expected_session_id=session_id,
+                expected_generation=generation,
+            )
 
     async def close(self) -> None:
         if self._closed:

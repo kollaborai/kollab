@@ -334,6 +334,7 @@ class ACPRunner:
         self._closing = False
         self._cancel_lock = asyncio.Lock()
         self._cancel_hold = False
+        self._cancel_target: tuple[str | None, int | None] | None = None
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -705,11 +706,44 @@ class ACPRunner:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
         return acp.RequestPermissionResponse(outcome=AllowedOutcome(optionId=selected, outcome="selected"))
 
-    async def cancel(self) -> None:
+
+    def prepare_cancel(
+        self,
+        *,
+        expected_session_id: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
+        """Reserve the active turn's queue boundary before async cancellation."""
+        if expected_session_id is not None and expected_session_id != self.session_id:
+            return False
+        if expected_generation is not None and expected_generation != self.generation:
+            return False
+        active = self._active_rpc_task
+        if active is None or active.done():
+            return False
+        self._cancel_target = (expected_session_id, expected_generation)
+        self._cancel_hold = True
+        self._queue_release.clear()
+        return True
+
+    async def cancel(
+        self,
+        *,
+        expected_session_id: str | None = None,
+        expected_generation: int | None = None,
+    ) -> None:
         async with self._cancel_lock:
+            target = self._cancel_target
+            if target is None:
+                if expected_session_id is not None and expected_session_id != self.session_id:
+                    return
+                if expected_generation is not None and expected_generation != self.generation:
+                    return
+            elif target != (expected_session_id, expected_generation):
+                return
             self.permission_bridge.cancel()
             active = self._active_rpc_task
-            if active is None or active.done():
+            if active is None and self._cancel_target is None:
                 return
             # Hold the worker at the queue boundary before sending cancel so a
             # completion cannot release B between our snapshot and the RPC.
@@ -725,7 +759,12 @@ class ACPRunner:
                     remaining = max(0.01, deadline - asyncio.get_running_loop().time())
                     await asyncio.wait_for(asyncio.shield(cancel_task), timeout=remaining)
                 remaining = max(0.01, deadline - asyncio.get_running_loop().time())
-                cancel_result = await asyncio.wait_for(asyncio.shield(active), timeout=remaining)
+                if active is None:
+                    cancel_result = None
+                elif active.done():
+                    cancel_result = active.result()
+                else:
+                    cancel_result = await asyncio.wait_for(asyncio.shield(active), timeout=remaining)
                 if getattr(cancel_result, "stop_reason", None) != "cancelled":
                     self._restart_before_next = True
                     self.generation += 1
@@ -751,6 +790,7 @@ class ACPRunner:
                     cancel_task.cancel()
                     await asyncio.gather(cancel_task, return_exceptions=True)
                 self._cancel_hold = False
+                self._cancel_target = None
                 self._queue_release.set()
 
     async def _terminate_process(self) -> None:
