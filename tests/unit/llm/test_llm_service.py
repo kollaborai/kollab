@@ -10,6 +10,7 @@ import os
 # Import the components we're testing
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -687,6 +688,23 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
 
         calls = self.event_bus.register_hook.call_args_list
         self.assertEqual(len(calls), 5)
+
+
+    def test_selected_acp_cancel_reaches_orchestrator(self):
+        async def scenario():
+            acp = SimpleNamespace(active=True, cancel=AsyncMock())
+            self.service.profile_manager = SimpleNamespace(
+                get_active_profile=lambda: SimpleNamespace(
+                get_provider=lambda: "acp"
+                )
+            )
+            self.service.event_bus.get_service.return_value = acp
+            generation = self.service.cancel_current_request()
+            await self.service.wait_for_tasks()
+            self.assertIsInstance(generation, int)
+            acp.cancel.assert_awaited_once()
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

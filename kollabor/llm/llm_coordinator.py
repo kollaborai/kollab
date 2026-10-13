@@ -1891,6 +1891,21 @@ class LLMService:
             await self.event_bus.register_hook(cancel_hook)
             logger.info("Registered cancel hook for attach-mode client")
 
+    def _selected_active_acp_orchestrator(self):
+        """Return the live ACP transport only for an explicitly selected ACP profile."""
+        try:
+            profile = (
+                self.profile_manager.get_active_profile()
+                if self.profile_manager is not None
+                else None
+            )
+            if profile is None or profile.get_provider() != "acp":
+                return None
+            acp = self.event_bus.get_service("acp_orchestrator")
+            return acp if getattr(acp, "active", False) is True else None
+        except Exception:
+            return None
+
     def cancel_current_request(
         self,
         *,
@@ -1907,6 +1922,21 @@ class LLMService:
             raise ValueError("invalid cancellation origin")
 
         queue_processor = self._queue_processor
+        acp = self._selected_active_acp_orchestrator()
+        if acp is not None:
+            if queue_processor.cancel_processing:
+                return queue_processor.cancel_generation
+            generation = queue_processor.request_cancellation(origin=origin)
+            async def cancel_acp() -> None:
+                try:
+                    await asyncio.wait_for(acp.cancel(), timeout=35.0)
+                except Exception:
+                    logger.exception("ACP cancellation failed")
+            task = self.create_background_task(
+                cancel_acp(), name=f"acp_cancel_{generation}"
+            )
+            self._cancellation_cleanup_tasks[generation] = task
+            return generation
         if not self.is_processing:
             # A human ESC can arrive after the provider stopped but while the
             # bridge is still holding its cancellation latch. Keep that pause
