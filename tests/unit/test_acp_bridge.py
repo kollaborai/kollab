@@ -6,6 +6,42 @@ from acp.schema import PermissionOption, ToolCallStart
 
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
 
+STUBBORN_ADAPTER = """
+import asyncio
+import os
+import acp
+from acp.schema import AgentMessageChunk, InitializeResponse, NewSessionResponse, PromptResponse, TextContentBlock
+
+class FakeAgent:
+    def __init__(self):
+        self._conn = None
+        self._run_file = os.environ["ACP_RUN_FILE"]
+        try:
+            self._run = int(open(self._run_file).read()) + 1
+        except (FileNotFoundError, ValueError):
+            self._run = 1
+        with open(self._run_file, "w") as f:
+            f.write(str(self._run))
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocolVersion=1)
+    async def new_session(self, cwd, mcp_servers=None, **kwargs):
+        return NewSessionResponse(sessionId=f"s{self._run}")
+    async def prompt(self, session_id, prompt, **kwargs):
+        if self._run == 1:
+            await asyncio.Future()
+        await self._conn.session_update(session_id, AgentMessageChunk(
+            sessionUpdate="agent_message_chunk",
+            content=TextContentBlock(type="text", text="recovered "),
+        ))
+        return PromptResponse(stopReason="end_turn")
+    async def cancel(self, session_id, **kwargs):
+        return None
+    def on_connect(self, conn):
+        self._conn = conn
+
+asyncio.run(acp.run_agent(FakeAgent()))
+"""
+
 FAKE_ADAPTER = """
 import asyncio
 import acp
@@ -88,6 +124,53 @@ async def test_queued_turn_keeps_first_generation_updates(tmp_path):
     assert result1.text == "hello "
     assert result2.text == "hello "
     await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_compliant_cancel_preserves_process_session_and_single_consumer(tmp_path):
+    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    runner = ACPRunner(profile)
+    await runner.start()
+    process = runner._process
+    worker = runner._worker
+    first = asyncio.create_task(runner.prompt("first"))
+    await asyncio.sleep(0.01)
+    await runner.cancel()
+    with pytest.raises(ACPError):
+        await first
+    assert runner._process is process
+    assert runner.session_id == "s1"
+    assert runner._worker is worker
+    assert not runner._worker.done()
+    await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_ignored_cancel_kills_old_process_and_restarts_before_queue(tmp_path):
+    run_file = tmp_path / "runs"
+    profile = ACPProfile(
+        "stubborn",
+        (sys.executable, "-c", STUBBORN_ADAPTER),
+        cwd=str(tmp_path),
+        env={"ACP_RUN_FILE": str(run_file)},
+    )
+    runner = ACPRunner(profile)
+    runner.cancel_timeout = 0.1
+    await runner.start()
+    old_process = runner._process
+    first = asyncio.create_task(runner.prompt("first"))
+    await asyncio.sleep(0.03)
+    second = asyncio.create_task(runner.prompt("second"))
+    await runner.cancel()
+    with pytest.raises(ACPError):
+        await first
+    result = await asyncio.wait_for(second, 2)
+    assert result.text == "recovered "
+    assert runner._process is not old_process
+    assert old_process.returncode is not None
+    assert runner._worker is not None and not runner._worker.done()
+    await runner.close()
+
 
 
 @pytest.mark.asyncio

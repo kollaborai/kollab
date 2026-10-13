@@ -162,10 +162,13 @@ class ACPRunner:
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
         self._restart_before_next = False
-        self._cancel_requested = False
-        self._cancel_update_cutoff = 0
         self._active_done = asyncio.Event()
         self._active_done.set()
+        self._queue_release = asyncio.Event()
+        self._queue_release.set()
+        self._active_rpc_task: asyncio.Task[ACPResult] | None = None
+        self._force_cancel = False
+        self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
@@ -176,7 +179,7 @@ class ACPRunner:
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
 
-    async def start(self) -> str:
+    async def _start_process(self) -> str:
         command, env, cwd = self.profile.resolve()
         self._process = await asyncio.create_subprocess_exec(
             *command,
@@ -196,8 +199,13 @@ class ACPRunner:
         )
         self.session_id = str(result.sessionId)
         self.generation = self.generation + 1 if self.generation else 1
-        self._worker = asyncio.create_task(self._drain_queue())
         return self.session_id
+
+    async def start(self) -> str:
+        session_id = await self._start_process()
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._drain_queue())
+        return session_id
 
     async def _drain_stderr(self) -> None:
         if self._process is None or self._process.stderr is None:
@@ -231,19 +239,30 @@ class ACPRunner:
                 generation = self.generation
             self._active_future = future
             self._active_done.clear()
+            self._queue_release.clear()
+            self._active_rpc_task = asyncio.create_task(
+                self._run_prompt(generation, turn_id, text)
+            )
             try:
-                result = await self._run_prompt(generation, turn_id, text)
+                result = await self._active_rpc_task
                 if not future.done():
                     future.set_result(result)
+            except asyncio.CancelledError:
+                if not self._force_cancel:
+                    raise
+                if not future.done():
+                    future.set_exception(ACPError("ACP turn cancelled"))
             except Exception as exc:
                 if not future.done():
                     future.set_exception(exc)
             finally:
+                self._active_rpc_task = None
                 self._active_future = None
                 self._active_done.set()
-            if self._restart_before_next and self._connection is not None:
+            if self._restart_before_next:
                 self._restart_before_next = False
                 await self._restart_process()
+            self._queue_release.set()
 
     async def _restart_process(self) -> None:
         old_process = self._process
@@ -266,7 +285,7 @@ class ACPRunner:
         self._connection = None
         self._process = None
         self._stderr_task = None
-        await self.start()
+        await self._start_process()
 
     async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
         self._active_generation = generation
@@ -340,24 +359,61 @@ class ACPRunner:
 
     async def cancel(self) -> None:
         self.permission_bridge.cancel()
-        had_active = not self._active_done.is_set()
-        self._cancel_requested = had_active
-        self._cancel_update_cutoff = len(self._updates)
+        if self._active_done.is_set():
+            return
         self.generation += 1
         if self._active_future and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP turn cancelled"))
         if self.session_id and self._connection:
             await self._connection.cancel(session_id=self.session_id)
-        if had_active:
+        active = self._active_rpc_task
+        if active is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(active), timeout=self.cancel_timeout)
+        except asyncio.TimeoutError:
+            self._restart_before_next = True
+            self._force_cancel = True
             try:
-                await asyncio.wait_for(self._active_done.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                self._restart_before_next = True
-            else:
-                self._restart_before_next = len(self._updates) > self._cancel_update_cutoff
-        else:
-            self._restart_before_next = False
-        self._cancel_requested = False
+                await self._terminate_process()
+                try:
+                    await asyncio.wait_for(asyncio.shield(active), timeout=2)
+                except asyncio.TimeoutError:
+                    active.cancel()
+                    await asyncio.gather(active, return_exceptions=True)
+                except Exception:
+                    # Closing the transport is the expected completion for a
+                    # stubborn adapter; the worker owns restart and cleanup.
+                    pass
+            finally:
+                self._force_cancel = False
+        finally:
+            await asyncio.wait_for(self._queue_release.wait(), timeout=self.cancel_timeout + 2)
+
+    async def _terminate_process(self) -> None:
+        connection, process, stderr_task = self._connection, self._process, self._stderr_task
+        self._connection = None
+        self._process = None
+        self._stderr_task = None
+        if connection is not None:
+            try:
+                await asyncio.wait_for(connection.close(), timeout=2)
+            except (Exception, asyncio.CancelledError):
+                pass
+        if process is not None and process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except (AttributeError, ProcessLookupError, asyncio.TimeoutError):
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (AttributeError, ProcessLookupError):
+                        pass
+                    await process.wait()
+        if stderr_task is not None:
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
 
     async def close(self) -> None:
         self.permission_bridge.cancel()
@@ -366,25 +422,4 @@ class ACPRunner:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
-        if self._connection is not None:
-            await self._connection.close()
-        if self._process is not None and self._process.returncode is None:
-            try:
-                os.killpg(self._process.pid, signal.SIGTERM)
-            except (AttributeError, ProcessLookupError):
-                pass
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            await asyncio.gather(self._stderr_task, return_exceptions=True)
-            self._stderr_task = None
-        if self._process is not None:
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(self._process.pid, signal.SIGKILL)
-                except (AttributeError, ProcessLookupError):
-                    pass
-                await self._process.wait()
-        self._connection = None
-        self._process = None
+        await self._terminate_process()
