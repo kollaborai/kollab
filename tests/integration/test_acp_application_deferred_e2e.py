@@ -82,6 +82,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
         app = None
         requester_server = None
         requester_presence = None
+        sdk_process = None
         with (
             contextlib.chdir(project),
             patch.object(config_utils, "get_config_directory", return_value=global_root),
@@ -122,6 +123,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                 await app.llm_service.register_hooks()
                 await asyncio.wait_for(app._deferred_startup(), timeout=12)
                 owner = app.acp_orchestrator
+                sdk_process = owner.runner._process
                 hub = instances["hub"]
                 row = {
                     "startup_complete": app._startup_complete,
@@ -166,6 +168,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                     "ordinary_socket_request_acked": accepted,
                     "reply_actions": [item.action for item in matching],
                     "same_thread": all(item.thread_id == message.thread_id for item in matching),
+                    "reply_to_request": all(item.reply_to == message.id for item in matching),
                     "visible_answer": matching[0].content,
                     "outcome": matching[-1].metadata.get("turn_end", {}).get("outcome"),
                     "sdk_child_count": int(owner.runner._process is not None),
@@ -175,12 +178,16 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                     accepted
                     and result["reply_actions"] == ["message", "turn_end"]
                     and result["same_thread"]
+                    and result["reply_to_request"]
                     and result["visible_answer"] == "OWNED SDK ANSWER"
                     and result["outcome"] == "end_turn"
                 ), result
             finally:
                 if app is not None:
                     await asyncio.wait_for(app.cleanup(), timeout=10)
+                if sdk_process is not None:
+                    await asyncio.wait_for(sdk_process.wait(), timeout=5)
+                    assert sdk_process.returncode is not None
                 if requester_server is not None:
                     await requester_server.stop()
                 if requester_presence is not None:
