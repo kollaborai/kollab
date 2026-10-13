@@ -558,6 +558,7 @@ class HubPlugin(BasePlugin):
         self._cli_waiters: Dict[str, "asyncio.Queue"] = {}
         # Expected outbound request IDs for correlated hidden turn_end frames.
         self._cli_waiter_request_ids: Dict[str, str] = {}
+        self._cli_waiter_senders: Dict[str, str] = {}
         # The inbound remote request whose turn this agent is running.
         self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
@@ -7391,7 +7392,17 @@ class HubPlugin(BasePlugin):
             cli_waiters = getattr(self, "_cli_waiters", None) or {}
             waiter = cli_waiters.get(message.thread_id)
             expected_ids = getattr(self, "_cli_waiter_request_ids", None) or {}
-            if waiter is not None and message.reply_to == expected_ids.get(message.thread_id):
+            expected_senders = getattr(self, "_cli_waiter_senders", None) or {}
+            expected_sender = expected_senders.get(message.thread_id, "")
+            sender_values = {message.from_identity or "", message.from_agent or ""}
+            sender_ok = not expected_sender or expected_sender in sender_values
+            if "@" in expected_sender:
+                sender_ok = sender_ok or expected_sender.split("@", 1)[0] in sender_values
+            if (
+                waiter is not None
+                and message.reply_to == expected_ids.get(message.thread_id)
+                and sender_ok
+            ):
                 self.on_network_turn_end(message.thread_id, frame, message.content)
                 return
 
@@ -13620,6 +13631,7 @@ class HubPlugin(BasePlugin):
         events: asyncio.Queue = asyncio.Queue()
         self._cli_waiters[msg.thread_id] = events
         self._cli_waiter_request_ids[msg.thread_id] = msg.id
+        self._cli_waiter_senders[msg.thread_id] = handle_str
         try:
             rejections = await self._route_message(msg)
             self._display_outgoing_message(handle_str, content)
@@ -13664,6 +13676,7 @@ class HubPlugin(BasePlugin):
         finally:
             self._cli_waiters.pop(msg.thread_id, None)
             self._cli_waiter_request_ids.pop(msg.thread_id, None)
+            self._cli_waiter_senders.pop(msg.thread_id, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
