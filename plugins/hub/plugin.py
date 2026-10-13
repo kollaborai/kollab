@@ -7239,6 +7239,22 @@ class HubPlugin(BasePlugin):
         )
         return True
 
+    async def _submit_authenticated_agent_message(
+        self, message: HubMessage, llm_service: Any
+    ) -> dict[str, Any]:
+        """Admit a verified peer message without coercing it to human input."""
+        return await llm_service.submit_human_input(
+            message.content,
+            source="agent",
+            request_id=message.id,
+            thread_id=getattr(message, "thread_id", "") or message.id,
+            origin_context={
+                "sender": message.from_agent,
+                "authenticated": True,
+                "operator": False,
+            },
+        )
+
     async def _on_message_received(self, message: HubMessage) -> None:
         """Handle an incoming message from another agent."""
         if self._solo:
@@ -7825,6 +7841,16 @@ class HubPlugin(BasePlugin):
                 # Skip human-elsewhere (human typing in another agent's window).
                 # Loop prevention system handles runaway triggers.
                 if should_trigger_llm:
+                    # Authenticated agent messages use the canonical ACP
+                    # admission path; retain sender/thread in a separate
+                    # envelope and never relabel the request as human input.
+                    authenticated_agent = bool(
+                        getattr(message, "from_agent", None)
+                        and message.from_agent != "human"
+                    )
+                    if authenticated_agent and hasattr(llm_service, "submit_human_input"):
+                        await self._submit_authenticated_agent_message(message, llm_service)
+                        return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
                         {

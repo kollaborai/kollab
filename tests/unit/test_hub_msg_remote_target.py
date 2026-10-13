@@ -376,3 +376,25 @@ async def test_no_key_receipt_or_relay_address_in_any_remote_hub_msg_result():
 
     assert len([text for text in seen if text]) >= 12  # the scan saw real text
     assert [text for text in seen if LEAK.search(text)] == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_message_uses_nonhuman_acp_envelope():
+    from plugins.hub.models import HubMessage
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    llm = SimpleNamespace(submit_human_input=AsyncMock(return_value={
+        "status": "queued", "request_id": "req-agent", "turn_id": "turn-agent",
+    }))
+    message = HubMessage(
+        id="req-agent", action="message", from_identity=PEER,
+        from_agent=PEER, to="koordinator", content="agent task",
+        thread_id="thread-agent",
+    )
+    result = await plugin._submit_authenticated_agent_message(message, llm)
+    assert result["turn_id"] == "turn-agent"
+    llm.submit_human_input.assert_awaited_once_with(
+        "agent task", source="agent", request_id="req-agent",
+        thread_id="thread-agent",
+        origin_context={"sender": PEER, "authenticated": True, "operator": False},
+    )
