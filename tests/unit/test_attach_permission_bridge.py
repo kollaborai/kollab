@@ -457,3 +457,32 @@ def test_attach_bridge_accepts_native_cancel_alongside_acp_options():
         assert await task is ConfirmationResponse.CANCEL
 
     asyncio.run(run_bridge())
+
+
+def test_attach_bridge_accepts_acp_cancel_for_nonterminal_kind():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-edit",
+                    "source": "acp",
+                    "tool_type": "file_edit",
+                    "operation": "edit:/tmp/work/file.py",
+                    "acp_options": [{"optionId": "owned", "kind": "allow_once"}],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-edit", "response": "CANCEL"}
+        )
+        assert result == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
