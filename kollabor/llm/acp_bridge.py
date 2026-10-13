@@ -162,6 +162,10 @@ class ACPRunner:
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
         self._restart_before_next = False
+        self._cancel_requested = False
+        self._cancel_update_cutoff = 0
+        self._active_done = asyncio.Event()
+        self._active_done.set()
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
@@ -226,6 +230,7 @@ class ACPRunner:
             if generation != self.generation:
                 generation = self.generation
             self._active_future = future
+            self._active_done.clear()
             try:
                 result = await self._run_prompt(generation, turn_id, text)
                 if not future.done():
@@ -235,6 +240,7 @@ class ACPRunner:
                     future.set_exception(exc)
             finally:
                 self._active_future = None
+                self._active_done.set()
             if self._restart_before_next and self._connection is not None:
                 self._restart_before_next = False
                 await self._restart_process()
@@ -334,12 +340,24 @@ class ACPRunner:
 
     async def cancel(self) -> None:
         self.permission_bridge.cancel()
-        self._restart_before_next = True
+        had_active = not self._active_done.is_set()
+        self._cancel_requested = had_active
+        self._cancel_update_cutoff = len(self._updates)
         self.generation += 1
         if self._active_future and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP turn cancelled"))
         if self.session_id and self._connection:
             await self._connection.cancel(session_id=self.session_id)
+        if had_active:
+            try:
+                await asyncio.wait_for(self._active_done.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                self._restart_before_next = True
+            else:
+                self._restart_before_next = len(self._updates) > self._cancel_update_cutoff
+        else:
+            self._restart_before_next = False
+        self._cancel_requested = False
 
     async def close(self) -> None:
         self.permission_bridge.cancel()

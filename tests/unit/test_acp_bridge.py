@@ -71,7 +71,7 @@ async def test_queued_turn_after_cancel_rebases_generation(tmp_path):
         await first
     result2 = await second
     assert result2.session_id == "s1"
-    assert result2.generation == 3
+    assert result2.generation == 2
     assert result2.text == "hello "
     await runner.close()
 
