@@ -37,7 +37,8 @@ class AttachPermissionBridge:
     """Routes daemon permission prompts to the visible attach client."""
 
     def __init__(self) -> None:
-        self._pending: Dict[str, asyncio.Future[ConfirmationResponse]] = {}
+        self._pending: Dict[str, asyncio.Future[ConfirmationResponse | str]] = {}
+        self._pending_option_ids: Dict[str, set[str]] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
         # (shown or queued) that another window answered first.
@@ -55,8 +56,11 @@ class AttachPermissionBridge:
         async def _respond(params: dict[str, Any]) -> dict[str, Any]:
             tool_id = str(params.get("tool_id") or "")
             response_name = str(params.get("response") or "")
-            response = self._parse_response(response_name)
             future = self._pending.get(tool_id)
+            if response_name in self._pending_option_ids.get(tool_id, set()):
+                response: ConfirmationResponse | str = response_name
+            else:
+                response = self._parse_response(response_name)
             if future is None or future.done():
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
             future.set_result(response)
@@ -75,7 +79,7 @@ class AttachPermissionBridge:
         rpc_server: Any,
         details: dict[str, Any],
         timeout: float,
-    ) -> ConfirmationResponse:
+    ) -> ConfirmationResponse | str:
         """Publish a prompt to attach clients and wait for a response."""
         self.register_response_handler(rpc_server)
 
@@ -85,6 +89,11 @@ class AttachPermissionBridge:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ConfirmationResponse] = loop.create_future()
         self._pending[tool_id] = future
+        self._pending_option_ids[tool_id] = {
+            str(option.get("optionId"))
+            for option in details.get("acp_options", ())
+            if isinstance(option, dict) and option.get("optionId")
+        }
 
         display_tap.publish({"type": "permission_request", "details": details})
 
@@ -95,6 +104,7 @@ class AttachPermissionBridge:
             logger.warning("attach permission prompt timed out for %s", tool_id)
         finally:
             self._pending.pop(tool_id, None)
+            self._pending_option_ids.pop(tool_id, None)
             # Every attached window shows this prompt (a terminal and the web UI
             # can watch one daemon): tell them all it is closed, so the ones that
             # did not answer stop showing it.

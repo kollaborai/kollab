@@ -369,3 +369,34 @@ def test_a_prompt_another_window_answered_closes_without_an_answer_from_here():
         assert bridge._answered_elsewhere == set()
 
     asyncio.run(run_bridge())
+
+
+def test_attach_bridge_accepts_offered_opaque_acp_option_id():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        details = {
+            "tool_id": "acp_0",
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "opaque-first", "kind": "allow_once", "name": "Allow"},
+                {"optionId": "opaque-second", "kind": "reject_always", "name": "Reject"},
+            ],
+        }
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details=details,
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        accepted = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp_0", "response": "opaque-second"}
+        )
+        assert accepted == {"ok": True}
+        assert await task == "opaque-second"
+
+    asyncio.run(run_bridge())
