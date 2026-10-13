@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 import uuid
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -40,6 +42,7 @@ from plugins.hub.messenger import (
     remote_message_proof_body,
 )
 from plugins.hub.models import HubMessage
+from plugins.hub.plugin import HubPlugin
 
 
 def _run(coro):
@@ -1094,6 +1097,10 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
 
         requester_server = None
         receiver_server = None
+        requester_plugin = HubPlugin(event_bus=MagicMock())
+        requester_plugin._identity = SimpleNamespace(solo=False)
+        requester_plugin._cli_waiters = {}
+        requester_plugin._cli_waiter_request_ids = {}
         socket_suffix = uuid.uuid4().hex
         requester_socket_name = f"ep-auth-requester-{socket_suffix}"
         receiver_socket_name = f"ep-auth-receiver-{socket_suffix}"
@@ -1114,6 +1121,7 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
             if message.action == "message":
                 model_wakes.append(message)
             elif message.action == "turn_end":
+                await requester_plugin._on_message_received(message)
                 requester_done.set()
 
         async def on_receiver_message(message):
@@ -1185,6 +1193,8 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
                 content="please answer",
             )
             request_id = request.id
+            requester_plugin._cli_waiters[request.thread_id] = asyncio.Queue()
+            requester_plugin._cli_waiter_request_ids[request.thread_id] = request.id
             assert await AgentMessenger.send_to_agent(
                 receiver_socket,
                 request,
@@ -1213,6 +1223,10 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
                 "failed": False,
                 "outcome": "end_turn",
             }
+            assert await asyncio.wait_for(
+                requester_plugin._cli_waiters[request.thread_id].get(),
+                timeout=0.2,
+            ) == ("end", 1, False, "")
         finally:
             await requester_server.stop()
             await receiver_server.stop()
