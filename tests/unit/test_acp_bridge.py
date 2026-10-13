@@ -437,3 +437,18 @@ def test_builtin_profile_and_missing_adapter_guidance(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
     with pytest.raises(ACPError, match="Install the adapter"):
         profile.resolve()
+
+
+
+def test_profile_cache_re_resolves_when_command_changes(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(config))
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.write_text("#!/bin/sh\n")
+    second.write_text("#!/bin/sh\n")
+    first.chmod(0o755)
+    second.chmod(0o755)
+    ACPProfile("same", (str(first),), cwd=str(tmp_path)).resolve()
+    command, _, _ = ACPProfile("same", (str(second),), cwd=str(tmp_path)).resolve()
+    assert command[0] == str(second)
