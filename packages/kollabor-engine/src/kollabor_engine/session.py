@@ -40,6 +40,10 @@ PERMISSION_RESPONSE_RPC_METHOD = "permission.respond"
 # profile has this name, so the daemon builds it from KOLLAB_APP_INLINE_* vars
 # (ProfileManager._try_create_profile_from_env).
 INLINE_PROFILE = "app-inline"
+# Opening a busy agent must return its local history mirror promptly. A daemon
+# RPC can be queued behind a long-running tool, so this is deliberately shorter
+# than the normal RPC timeout and falls back to the cached snapshot.
+HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
 
 
 def inline_profile_env(profile: Any) -> Dict[str, str]:
@@ -356,9 +360,18 @@ class EngineSession:
         async with self._history_lock:
             held = self._raw_history
             try:
-                snapshot = await self.state.get_conversation(
-                    since=len(held) or None, anchor=self._history_anchor or None
+                snapshot = await asyncio.wait_for(
+                    self.state.get_conversation(
+                        since=len(held) or None, anchor=self._history_anchor or None
+                    ),
+                    timeout=HISTORY_REFRESH_TIMEOUT_SECONDS,
                 )
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "session %s history refresh timed out; using cached history",
+                    self.session_id,
+                )
+                return self.history
             except Exception as e:
                 logger.debug("session %s history refresh failed: %s", self.session_id, e)
                 return self.history

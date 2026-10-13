@@ -49,6 +49,8 @@ import {
 } from "./runtime";
 import { sessionHeading } from "@/utils/session-display";
 
+const OPEN_SESSION_TIMEOUT_MS = 2_000;
+
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
     const finish = () => {
@@ -61,6 +63,16 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
     };
     timerRef.current = window.setTimeout(finish, delayMs);
     signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: number | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== null) window.clearTimeout(timer);
   });
 }
 
@@ -379,7 +391,11 @@ export default function App() {
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
       const [history, permissions] = await Promise.all([
-        api.getHistory(sessionId),
+        withTimeout(
+          api.getHistory(sessionId),
+          OPEN_SESSION_TIMEOUT_MS,
+          "Timed out opening conversation. Try again while the agent is available.",
+        ),
         // A prompt that arrives later comes as an event anyway: this read never stops a chat opening.
         api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);

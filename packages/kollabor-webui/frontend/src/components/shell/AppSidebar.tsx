@@ -493,7 +493,7 @@ export function AppSidebar({
                             ) : task ? (
                               task
                             ) : session.external ? (
-                              [titleCase(session.identity || ""), folder ? `In ${folder}` : "Running"]
+                              [titleCase(session.identity || session.agent || ""), folder ? `In ${folder}` : "Running"]
                                 .filter(Boolean)
                                 .join(" · ")
                             ) : (

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from kollabor_engine import session as session_module
 from kollabor_engine.routes import permissions as permissions_route
+from kollabor_engine.routes import sessions as sessions_route
 from kollabor_engine.server import get_session_registry
 from kollabor_engine.session import EngineSession
 
@@ -37,7 +38,7 @@ class BusyState:
         return self._late(SimpleNamespace(cwd="/home/far/proj"))
 
     async def get_conversation(self, since=None, anchor=None):
-        return SimpleNamespace(messages=[], anchor="")
+        return await self._late(SimpleNamespace(messages=[], anchor=""))
 
 
 def _daemon(state):
@@ -94,3 +95,20 @@ async def test_opening_an_agent_does_not_wait_for_what_it_runs_with(monkeypatch)
         assert session.workspace == "/home/far/proj"  # its folder on that computer
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_history_route_returns_cached_snapshot_while_agent_is_busy(registry):
+    """A blocked history RPC must not keep the Web UI in Opening forever."""
+    state = BusyState()
+    session = EngineSession(session_id="lapis@far-box", profile=None)
+    session.daemon = _daemon(state)
+    session.history = [{"role": "user", "content": "cached"}]
+    registry[session.session_id] = session
+
+    result = await asyncio.wait_for(
+        sessions_route.get_history(session.session_id), timeout=1
+    )
+
+    assert result["history"] == session.history
+    assert not state.answer.is_set()
