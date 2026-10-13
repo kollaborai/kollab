@@ -1737,6 +1737,19 @@ class LLMService:
         acp_dispatch = acp is not None and getattr(acp, "active", False)
         if acp_dispatch and not isinstance(message, str):
             return {"status": "rejected", "reason": "acp_text_only"}
+        acp_reserved = False
+        if acp_dispatch:
+            if not hasattr(self, "_acp_admission_lock"):
+                self._acp_admission_lock = asyncio.Lock()
+                self._acp_pending = 0
+            async with self._acp_admission_lock:
+                runner = getattr(acp, "runner", None)
+                queued = getattr(getattr(runner, "_queue", None), "qsize", lambda: 0)()
+                active = 1 if getattr(runner, "_active_rpc_task", None) is not None else 0
+                if queued + active + self._acp_pending >= 11:
+                    return {"status": "rejected", "reason": "acp_queue_full"}
+                self._acp_pending += 1
+                acp_reserved = True
 
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
@@ -1758,23 +1771,33 @@ class LLMService:
         except Exception as exc:
             # Do not include user content or exception text in logs/results.
             logger.error("Human input event dispatch failed (%s)", type(exc).__name__)
+            if acp_reserved:
+                await self._release_acp_slot()
             return {"status": "rejected", "reason": "input_dispatch_failed"}
 
         if not isinstance(outcome, dict):
+            if acp_reserved:
+                await self._release_acp_slot()
             return {"status": "rejected", "reason": "invalid_event_result"}
 
         pre_result = outcome.get("pre") or {}
         if pre_result.get("cancelled"):
+            if acp_reserved:
+                await self._release_acp_slot()
             return {"status": "cancelled", "phase": "pre_user_input"}
 
         main_result = outcome.get("main") or {}
         if main_result.get("cancelled"):
+            if acp_reserved:
+                await self._release_acp_slot()
             return {"status": "cancelled", "phase": "user_input"}
 
         for hook_result in main_result.get("hook_results", []):
             if hook_result.get("hook_key") != "llm_core.process_user_input":
                 continue
             if not hook_result.get("success"):
+                if acp_reserved:
+                    await self._release_acp_slot()
                 return {
                     "status": "rejected",
                     "reason": "input_processing_failed",
@@ -1782,8 +1805,12 @@ class LLMService:
             result = hook_result.get("result")
             if isinstance(result, dict):
                 return result
+            if acp_reserved:
+                await self._release_acp_slot()
             return {"status": "rejected", "reason": "invalid_input_result"}
 
+        if acp_reserved:
+            await self._release_acp_slot()
         return {"status": "rejected", "reason": "input_handler_unavailable"}
 
     # --- MessageHandler delegation methods ---
@@ -1797,6 +1824,13 @@ class LLMService:
             await self._message_handler.handle_context_injection(data, event),
         )
 
+    async def _release_acp_slot(self) -> None:
+        lock = getattr(self, "_acp_admission_lock", None)
+        if lock is None:
+            return
+        async with lock:
+            self._acp_pending = max(0, self._acp_pending - 1)
+
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
         """Handle user input, dispatching ACP after admission when selected."""
         if data.get("_acp_dispatch"):
@@ -1809,9 +1843,11 @@ class LLMService:
                     await acp.submit(str(data["message"]), source=source)
                 except Exception as exc:
                     logger.error("ACP input dispatch failed (%s)", type(exc).__name__)
+                finally:
+                    await self._release_acp_slot()
 
             self.create_background_task(run_acp(), name=f"acp-turn-{request_id}")
-            return {"status": "queued", "request_id": request_id, "turn_id": request_id}
+            return {"status": "queued", "request_id": request_id}
         return cast(
             Dict[str, Any], await self._message_handler.handle_user_input(data, event)
         )

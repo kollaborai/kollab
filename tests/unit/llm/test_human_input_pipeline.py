@@ -434,6 +434,6 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
         {"message": "hello", "_acp_dispatch": True, "_acp_request_id": "r2"},
         event,
     )
-    assert result == {"status": "queued", "request_id": "r2", "turn_id": "r2"}
+    assert result == {"status": "queued", "request_id": "r2"}
     await asyncio.gather(*tasks)
     assert calls == [("hello", "state_rpc")]
