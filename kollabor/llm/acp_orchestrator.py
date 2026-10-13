@@ -30,6 +30,7 @@ class ACPOrchestrator:
         self._profile_name: str | None = None
         self._closed = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
+        self._terminal_session_id: str | None = None
 
     @property
     def active(self) -> bool:
@@ -96,14 +97,15 @@ class ACPOrchestrator:
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         try:
             result: ACPResult = await admission.future
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
+        except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
-            session_id = self._runner.session_id if self._runner is not None else ""
+            session_id = self._terminal_session_id
+            if session_id is None and self._runner is not None:
+                session_id = self._runner.session_id
+            session_id = session_id or ""
             generation = admission.generation
-            stop_reason = "error"
+            stop_reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             end_frame = {
                 "type": "turn_end", "generation": generation,
                 "turnId": admission.turn_id, "sessionId": session_id,
@@ -170,10 +172,12 @@ class ACPOrchestrator:
             return
         self._closed = True
         if self._runner is not None:
+            self._terminal_session_id = getattr(self._runner, "session_id", None)
             await self._runner.close()
             self._runner = None
         if self._completion_tasks:
             await asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
+        self._terminal_session_id = None
         if self.hub_plugin is not None and self._binding is not None:
             self.hub_plugin.rotate_acp_hub_binding()
             self._binding = None
