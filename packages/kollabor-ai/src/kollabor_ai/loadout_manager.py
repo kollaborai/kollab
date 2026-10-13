@@ -514,6 +514,24 @@ class LoadoutManager:
         if loadout is None:
             return None
 
+        selected_profile = self.profile_manager.get_profile(loadout.provider_profile)
+        selected_provider = (
+            selected_profile.get_provider()
+            if hasattr(selected_profile, "get_provider")
+            else getattr(selected_profile, "provider", "")
+        )
+        if str(selected_provider).lower() == "acp":
+            if not self.profile_manager.set_active_profile(loadout.provider_profile):
+                return None
+            orchestrator = None
+            if event_bus and hasattr(event_bus, "get_service"):
+                orchestrator = event_bus.get_service("acp_orchestrator")
+            if orchestrator is not None:
+                await orchestrator.close()
+                await orchestrator.start(selected_profile)
+            await self._announce_model_switch(event_bus, loadout, None)
+            return loadout
+
         previous_model: Optional[str] = None
         get_profile = getattr(self.profile_manager, "get_profile", None)
         if callable(get_profile):
