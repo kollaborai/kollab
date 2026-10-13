@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 
 import pytest
 
@@ -1045,6 +1046,176 @@ def test_local_unix_delivery_unchanged_without_auth(tmp_path):
             assert received[0].content == "local hello"
         finally:
             await server.stop()
+
+    _run(run())
+
+
+def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
+    """Exercise a real Ed25519 message/reply/turn_end exchange over Unix sockets."""
+
+    async def run():
+        requester_received = []
+        model_wakes = []
+        requester_done = asyncio.Event()
+        request_id = ""
+
+        requester_storage, requester_identity, requester_registry = _make_dns(
+            tmp_path / "requester"
+        )
+        receiver_storage, receiver_identity, receiver_registry = _make_dns(
+            tmp_path / "receiver"
+        )
+        del requester_storage, receiver_storage
+
+        requester_identity.get_or_create_keypair("requester-agent")
+        _, requester_public_key = requester_identity.get_or_create_keypair(
+            "requester-agent"
+        )
+        receiver_identity.get_or_create_keypair("receiver-agent")
+        _, receiver_public_key = receiver_identity.get_or_create_keypair(
+            "receiver-agent"
+        )
+
+        for registry in (requester_registry, receiver_registry):
+            registry.register(
+                AgentRecord(
+                    designation="requester-agent",
+                    public_key=requester_public_key,
+                    approval_state="approved",
+                )
+            )
+            registry.register(
+                AgentRecord(
+                    designation="receiver-agent",
+                    public_key=receiver_public_key,
+                    approval_state="approved",
+                )
+            )
+
+        requester_server = None
+        receiver_server = None
+        socket_suffix = uuid.uuid4().hex
+        requester_socket_name = f"ep-auth-requester-{socket_suffix}"
+        receiver_socket_name = f"ep-auth-receiver-{socket_suffix}"
+
+
+        def unix_auth(identity, registry, *, designation, server):
+            auth = _remote_auth(
+                identity,
+                registry,
+                designation=designation,
+                server=server,
+            )
+            auth["require_auth"] = True
+            return auth
+
+        async def on_requester_message(message):
+            requester_received.append(message)
+            if message.action == "message":
+                model_wakes.append(message)
+            elif message.action == "turn_end":
+                requester_done.set()
+
+        async def on_receiver_message(message):
+            assert message.action == "message"
+            reply = HubMessage(
+                id=f"{message.id}-reply",
+                from_agent="receiver-agent",
+                from_identity="receiver-agent",
+                to="requester-agent",
+                content="final reply",
+                thread_id=message.thread_id,
+                reply_to=message.id,
+            )
+            assert await AgentMessenger.send_to_agent(
+                requester_socket,
+                reply,
+                auth=unix_auth(
+                    receiver_identity,
+                    receiver_registry,
+                    designation="receiver-agent",
+                    server="requester-agent",
+                ),
+            )
+            assert await AgentMessenger.send_turn_end(
+                requester_socket,
+                thread_id=message.thread_id,
+                reply_to=message.id,
+                replies=1,
+                failed=False,
+                outcome="end_turn",
+                auth=unix_auth(
+                    receiver_identity,
+                    receiver_registry,
+                    designation="receiver-agent",
+                    server="requester-agent",
+                ),
+            )
+
+        requester_server = AgentSocketServer(
+            "requester-server",
+            on_requester_message,
+            socket_name=requester_socket_name,
+        )
+        requester_server.set_dns_auth(
+            requester_registry,
+            requester_identity,
+            require_auth=True,
+            local_designation="requester-agent",
+        )
+        receiver_server = AgentSocketServer(
+            "receiver-server",
+            on_receiver_message,
+            socket_name=receiver_socket_name,
+        )
+        receiver_server.set_dns_auth(
+            receiver_registry,
+            receiver_identity,
+            require_auth=True,
+            local_designation="receiver-agent",
+        )
+
+        requester_socket = await requester_server.start()
+        receiver_socket = await receiver_server.start()
+        try:
+            request = HubMessage(
+                from_agent="requester-agent",
+                from_identity="requester-agent",
+                to="receiver-agent",
+                content="please answer",
+            )
+            request_id = request.id
+            assert await AgentMessenger.send_to_agent(
+                receiver_socket,
+                request,
+                auth=unix_auth(
+                    requester_identity,
+                    requester_registry,
+                    designation="requester-agent",
+                    server="receiver-agent",
+                ),
+            )
+            await asyncio.wait_for(requester_done.wait(), timeout=2)
+
+            assert len(model_wakes) == 1
+            assert [message.action for message in requester_received] == [
+                "message",
+                "turn_end",
+            ]
+            reply, turn_end = requester_received
+            assert reply.content == "final reply"
+            assert reply.thread_id == request.thread_id
+            assert reply.reply_to == request_id
+            assert turn_end.thread_id == request.thread_id
+            assert turn_end.reply_to == request_id
+            assert turn_end.metadata["turn_end"] == {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        finally:
+            await requester_server.stop()
+            await receiver_server.stop()
 
     _run(run())
 
