@@ -514,23 +514,45 @@ class LoadoutManager:
         if loadout is None:
             return None
 
+        get_active_profile = getattr(self.profile_manager, "get_active_profile", None)
+        current_profile = get_active_profile() if callable(get_active_profile) else None
         selected_profile = self.profile_manager.get_profile(loadout.provider_profile)
         selected_provider = (
             selected_profile.get_provider()
             if hasattr(selected_profile, "get_provider")
             else getattr(selected_profile, "provider", "")
         )
+        orchestrator = None
+        if event_bus and hasattr(event_bus, "get_service"):
+            orchestrator = event_bus.get_service("acp_orchestrator")
+        current_provider = (
+            current_profile.get_provider()
+            if hasattr(current_profile, "get_provider")
+            else getattr(current_profile, "provider", "")
+        )
         if str(selected_provider).lower() == "acp":
-            if not self.profile_manager.set_active_profile(loadout.provider_profile):
+            if orchestrator is None:
+                logger.error("ACP loadout '%s' unavailable: no ACP orchestrator", loadout.name)
                 return None
-            orchestrator = None
-            if event_bus and hasattr(event_bus, "get_service"):
-                orchestrator = event_bus.get_service("acp_orchestrator")
-            if orchestrator is not None:
+            try:
                 await orchestrator.close()
                 await orchestrator.start(selected_profile)
+                if not self.profile_manager.set_active_profile(loadout.provider_profile):
+                    await orchestrator.close()
+                    return None
+            except Exception:
+                logger.exception("ACP loadout '%s' failed to start", loadout.name)
+                return None
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
+
+        if str(current_provider).lower() == "acp" and orchestrator is not None:
+            try:
+                if getattr(orchestrator, "active", False):
+                    await orchestrator.close()
+            except Exception:
+                logger.exception("Failed to close ACP runner before native activation")
+                return None
 
         previous_model: Optional[str] = None
         get_profile = getattr(self.profile_manager, "get_profile", None)
