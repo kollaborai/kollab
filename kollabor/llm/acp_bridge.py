@@ -5,7 +5,7 @@ import asyncio
 import os
 import shutil
 import signal
-from contextlib import AsyncExitStack
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -109,6 +109,8 @@ class ACPPermissionBridge:
         if self._decide is None:
             return None
         selected = await self._decide(request)
+        if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
+            return None
         if selected is None or selected not in offered:
             return None
         if offered[selected].get("kind") not in {"allow_once", "reject_once"}:
@@ -124,6 +126,7 @@ class ACPResult:
     stop_reason: str | None
     updates: tuple[dict[str, Any], ...]
     end_frame: dict[str, Any]
+    turn_id: int = 0
 
 
 class _Client(acp.Client):
@@ -144,68 +147,84 @@ class ACPRunner:
         self.profile = profile
         self.permission_bridge = permission_bridge or ACPPermissionBridge()
         self.generation = 0
+        self._next_turn_id = 0
+        self._active_turn_id = 0
+        self._active_future: asyncio.Future[ACPResult] | None = None
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
-        self._stack: AsyncExitStack | None = None
         self._client = _Client(self)
-        self._queue: asyncio.Queue[tuple[int, str, asyncio.Future[ACPResult]]] = asyncio.Queue(maxsize=10)
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._queue: asyncio.Queue[tuple[int, int, str, asyncio.Future[ACPResult]]] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
 
     async def start(self) -> str:
         command, env, cwd = self.profile.resolve()
-        self._stack = AsyncExitStack()
-        await self._stack.__aenter__()
-        self._connection, self._process = await self._stack.enter_async_context(
-            acp.spawn_agent_process(
-                self._client,
-                command[0],
-                *command[1:],
-                env=env,
-                cwd=cwd,
-            )
+        self._process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._connection = acp.connect_to_agent(self._client, self._process.stdin, self._process.stdout)
         await self._connection.initialize(protocol_version=1)
         result = await self._connection.new_session(
             cwd=cwd,
             mcp_servers=self.profile.sdk_mcp_servers(),
         )
         self.session_id = str(result.sessionId)
+        self.generation = 1
         self._worker = asyncio.create_task(self._drain_queue())
         return self.session_id
+
+    async def _drain_stderr(self) -> None:
+        if self._process is None or self._process.stderr is None:
+            return
+        while chunk := await self._process.stderr.readline():
+            sys.stderr.buffer.write(b"[acp] " + chunk)
+            sys.stderr.buffer.flush()
 
     async def prompt(self, text: str) -> ACPResult:
         if not self.session_id or self._connection is None:
             raise ACPError("ACP runner is not started")
         if not text.strip():
             raise ValueError("prompt must not be empty")
-        self.generation += 1
         generation = self.generation
+        self._next_turn_id += 1
+        turn_id = self._next_turn_id
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ACPResult] = loop.create_future()
         try:
-            self._queue.put_nowait((generation, text, future))
+            self._queue.put_nowait((generation, turn_id, text, future))
         except asyncio.QueueFull as exc:
             raise ACPError("ACP prompt queue is full") from exc
         return await future
 
     async def _drain_queue(self) -> None:
         while self.session_id is not None:
-            generation, text, future = await self._queue.get()
+            generation, turn_id, text, future = await self._queue.get()
             if future.cancelled():
                 continue
+            self._active_future = future
             try:
-                result = await self._run_prompt(generation, text)
+                result = await self._run_prompt(generation, turn_id, text)
                 if not future.done():
                     future.set_result(result)
             except Exception as exc:
                 if not future.done():
                     future.set_exception(exc)
+            finally:
+                self._active_future = None
 
-    async def _run_prompt(self, generation: int, text: str) -> ACPResult:
+    async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
         self._active_generation = generation
+        self._active_turn_id = turn_id
         self._updates = []
         self.permission_bridge.bind(self.session_id or "", generation)
         try:
@@ -225,13 +244,16 @@ class ACPRunner:
                 end_frame={
                     "type": "turn_end",
                     "generation": generation,
+                    "turnId": turn_id,
                     "sessionId": self.session_id,
                     "stopReason": stop_reason,
                 },
+                turn_id=turn_id,
             )
         finally:
             self.permission_bridge.cancel()
             self._active_generation = 0
+            self._active_turn_id = 0
 
     async def _session_update(self, session_id: str, update: Any) -> None:
         if session_id != self.session_id or self._active_generation != self.generation:
@@ -273,6 +295,8 @@ class ACPRunner:
     async def cancel(self) -> None:
         self.permission_bridge.cancel()
         self.generation += 1
+        if self._active_future and not self._active_future.done():
+            self._active_future.set_exception(ACPError("ACP turn cancelled"))
         if self.session_id and self._connection:
             await self._connection.cancel(session_id=self.session_id)
 
@@ -290,8 +314,18 @@ class ACPRunner:
                 os.killpg(self._process.pid, signal.SIGTERM)
             except (AttributeError, ProcessLookupError):
                 pass
-        if self._stack:
-            await self._stack.aclose()
-            self._stack = None
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            await asyncio.gather(self._stderr_task, return_exceptions=True)
+            self._stderr_task = None
+        if self._process is not None:
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(self._process.pid, signal.SIGKILL)
+                except (AttributeError, ProcessLookupError):
+                    pass
+                await self._process.wait()
         self._connection = None
         self._process = None

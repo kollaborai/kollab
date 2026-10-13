@@ -1,3 +1,4 @@
+import asyncio
 import sys
 
 import pytest
@@ -19,6 +20,8 @@ class FakeAgent:
     async def new_session(self, cwd, mcp_servers=None, **kwargs):
         return NewSessionResponse(sessionId='s1')
     async def prompt(self, session_id, prompt, **kwargs):
+        import asyncio
+        await asyncio.sleep(0.05)
         await self._conn.session_update(session_id, AgentMessageChunk(
             sessionUpdate='agent_message_chunk',
             content=TextContentBlock(type='text', text='hello '),
@@ -45,6 +48,43 @@ async def test_profile_resolution_strips_environment_by_default(tmp_path, monkey
     assert command[0] == sys.executable
     assert "OPENAI_API_KEY" not in env
     assert cwd == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_queued_turn_keeps_first_generation_updates(tmp_path):
+    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    runner = ACPRunner(profile)
+    await runner.start()
+    first = asyncio.create_task(runner.prompt("first"))
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(runner.prompt("second"))
+    result1, result2 = await asyncio.gather(first, second)
+    assert result1.text == "hello "
+    assert result2.text == "hello "
+    await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_cancel_after_decider_await_fails_closed():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def decide(request):
+        started.set()
+        await release.wait()
+        return "allow"
+
+    bridge = ACPPermissionBridge(decide)
+    bridge.bind("s1", 1)
+    request = type("Request", (), {
+        "session_id": "s1", "generation": 1,
+        "options": ({"optionId": "allow", "kind": "allow_once"},),
+    })()
+    pending = asyncio.create_task(bridge.request(request))
+    await started.wait()
+    bridge.cancel()
+    release.set()
+    assert await pending is None
 
 
 @pytest.mark.asyncio

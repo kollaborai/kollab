@@ -79,6 +79,7 @@ dependencies = [
     # Pinned ACP compatibility baseline; transport remains narrow and tested.
     "agent-client-protocol==0.12.1",
     "redis>=6.4,<7",
+    "mcp>=1.0,<2",
 ]
 
 [project.optional-dependencies]
