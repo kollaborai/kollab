@@ -1160,7 +1160,17 @@ class TerminalLLMChat:
         orchestrator = ACPOrchestrator(
             self.event_bus, identity=identity, hub_plugin=hub_plugin
         )
-        await orchestrator.start(profile)
+        try:
+            await orchestrator.start(profile)
+        except BaseException:
+            # Startup is transactional: a partially spawned child/session must
+            # be closed and its Hub binding revoked before the error escapes.
+            try:
+                await orchestrator.close()
+            except BaseException as cleanup_exc:
+                logger.warning("ACP startup cleanup failed: %s", cleanup_exc)
+            self.acp_orchestrator = None
+            raise
         self.acp_orchestrator = orchestrator
         logger.info("ACP runner started for identity=%s profile=%s", identity, profile.name)
 
