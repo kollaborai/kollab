@@ -325,7 +325,18 @@ class TerminalLLMChat:
                         self.profile_manager, config=self.config
                     )
                     loadout, _ = loadout_manager.resolve(default_loadout)
-                    if loadout:
+                    loadout_profile = (
+                        self.profile_manager.get_profile(loadout.provider_profile)
+                        if loadout
+                        else None
+                    )
+                    if loadout and getattr(loadout_profile, "provider", "") == "acp":
+                        # ACP owns model/effort/temperature inside its harness;
+                        # do not synthesize native model settings at startup.
+                        applied = self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                    elif loadout:
                         update_kwargs = {
                             "model": loadout.model,
                             "save_to_config": False,
@@ -370,19 +381,31 @@ class TerminalLLMChat:
                 loadout, suggestions = loadout_manager.resolve(profile_name)
                 activated_via_loadout = False
                 if loadout is not None:
+                    loadout_profile = self.profile_manager.get_profile(
+                        loadout.provider_profile
+                    )
+                    is_acp_loadout = getattr(loadout_profile, "provider", "") == "acp"
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
-                    if loadout.temperature is not None:
+                    if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
-                    if loadout.effort:
+                    if not is_acp_loadout and loadout.effort:
                         update_kwargs["effort"] = loadout.effort
-                    if loadout.max_tokens is not None:
+                    if not is_acp_loadout and loadout.max_tokens is not None:
                         update_kwargs["max_tokens"] = loadout.max_tokens
 
-                    if self.profile_manager.update_profile(
-                        loadout.provider_profile, **update_kwargs
-                    ) and self.profile_manager.set_active_profile(
-                        loadout.provider_profile, persist=False
-                    ):
+                    activated = (
+                        self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                        if is_acp_loadout
+                        else self.profile_manager.update_profile(
+                            loadout.provider_profile, **update_kwargs
+                        )
+                        and self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                    )
+                    if activated:
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "
@@ -431,21 +454,29 @@ class TerminalLLMChat:
         # the user's saved profile (R3).
         if model_override or effort_override:
             target = self.profile_manager.active_profile_name
-            overrides: dict[str, Any] = {"save_to_config": False}
-            if model_override:
-                overrides["model"] = model_override
-            if effort_override:
-                overrides["effort"] = effort_override
-            if self.profile_manager.update_profile(target, **overrides):
-                logger.info(
-                    "Applied launch overrides to profile '%s': %s",
+            active_profile = self.profile_manager.get_profile(target)
+            if getattr(active_profile, "provider", "") == "acp":
+                logger.warning(
+                    "Ignoring --model/--effort for ACP profile '%s'; "
+                    "the ACP harness owns these settings",
                     target,
-                    {k: v for k, v in overrides.items() if k != "save_to_config"},
                 )
             else:
-                logger.warning(
-                    "Failed to apply launch overrides to profile '%s'", target
-                )
+                overrides: dict[str, Any] = {"save_to_config": False}
+                if model_override:
+                    overrides["model"] = model_override
+                if effort_override:
+                    overrides["effort"] = effort_override
+                if self.profile_manager.update_profile(target, **overrides):
+                    logger.info(
+                        "Applied launch overrides to profile '%s': %s",
+                        target,
+                        {k: v for k, v in overrides.items() if k != "save_to_config"},
+                    )
+                else:
+                    logger.warning(
+                        "Failed to apply launch overrides to profile '%s'", target
+                    )
 
         # Initialize agent manager (for agent/skill system)
         self.agent_manager = AgentManager(self.config)
