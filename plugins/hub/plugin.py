@@ -2875,6 +2875,22 @@ class HubPlugin(BasePlugin):
             return
         await self._end_network_turn(turn, failed=turn.failed)
 
+    @staticmethod
+    def _acp_outcome_text(outcome: str, failed: bool) -> str:
+        if not failed and outcome == "end_turn":
+            return "The receiving agent finished this request."
+        return {
+            "cancelled": "The receiving agent stopped this request.",
+            "refusal": "The receiving agent refused this request.",
+            "max_tokens": "The receiving agent reached its output limit.",
+            "max_turn_requests": "The receiving agent reached its turn limit.",
+            "busy": "The receiving agent is busy.",
+            "skipped": "The receiving agent skipped this request.",
+            "timeout": "The receiving agent timed out.",
+            "error": "The receiving agent could not complete this request.",
+        }.get(outcome, "The receiving agent could not complete this request.")
+
+
     async def _end_network_turn(
         self, turn: "_NetworkTurn", *, failed: bool, acp: bool = False,
         outcome: str | None = None,
@@ -2887,7 +2903,7 @@ class HubPlugin(BasePlugin):
         # ACP always emits an outcome/final message before its hidden end frame.
         answer = _network_answer_text(turn.answer, MAX_CONTENT)
         if acp:
-            content = answer if answer and not failed else _NET_TURN_FAILED
+            content = answer or self._acp_outcome_text(outcome or "error", failed)
             if await self._send_on_thread(turn, content, "reply"):
                 turn.replies += 1
         elif answer and not turn.replies and not failed:
@@ -7313,8 +7329,13 @@ class HubPlugin(BasePlugin):
         turns = getattr(self, "_acp_network_turns", None)
         if turns is None:
             turns = self._acp_network_turns = {}
-        if getattr(self, "_net_turn", None) is not None:
-            turns[message.id] = self._net_turn
+        sender = message.from_identity or message.from_agent or ""
+        turns[message.id] = _NetworkTurn(
+            handle=sender,
+            thread_id=getattr(message, "thread_id", "") or message.id,
+            message_id=message.id,
+            opened_at=time.monotonic(),
+        )
         result = await llm_service.submit_human_input(
             message.content,
             source="agent",
@@ -7408,13 +7429,17 @@ class HubPlugin(BasePlugin):
 
             turns = getattr(self, "_acp_network_turns", None) or {}
             matched = None
-            turns = getattr(self, "_acp_network_turns", None) or {}
-            matched = None
+            sender_values = {message.from_identity or "", message.from_agent or ""}
             for key, candidate in list(turns.items()):
+                expected_sender = getattr(candidate, "handle", "") or ""
+                sender_ok = not expected_sender or expected_sender in sender_values
+                if "@" in expected_sender:
+                    sender_ok = sender_ok or expected_sender.split("@", 1)[0] in sender_values
                 if (
                     key == message.reply_to
                     and candidate.message_id == message.reply_to
                     and candidate.thread_id == message.thread_id
+                    and sender_ok
                 ):
                     matched = candidate
                     turns.pop(key, None)
