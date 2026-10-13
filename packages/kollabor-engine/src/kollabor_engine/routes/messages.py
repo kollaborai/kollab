@@ -43,6 +43,9 @@ STREAM_PUBLISH_INTERVAL = 0.15
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
+    request_id: str | None = None
+    thread_id: str | None = None
+    origin_context: dict[str, Any] | None = None
 
 
 @router.post("/{session_id}/message")
@@ -58,7 +61,12 @@ async def send_message(session_id: str, body: MessageRequest):
     queue = session.subscribe()
 
     try:
-        accepted = await session.send_message(body.content)
+        accepted = await session.send_message(
+            body.content,
+            request_id=body.request_id,
+            thread_id=body.thread_id,
+            origin_context=body.origin_context,
+        )
     except Exception as e:
         session.unsubscribe(queue)
         logger.error("send_message failed for %s: %s", session_id, e)

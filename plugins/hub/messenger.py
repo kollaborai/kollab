@@ -1906,7 +1906,23 @@ class AgentSocketServer:
                                     )
                                 except (TypeError, ValueError):
                                     accepts_context = False
-                                result = callback(text, **context) if accepts_context else callback(text)
+                                if accepts_context:
+                                    has_var_kwargs = any(
+                                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                                        for parameter in signature.parameters.values()
+                                    )
+                                    callback_context = (
+                                        context
+                                        if has_var_kwargs
+                                        else {
+                                            name: value
+                                            for name, value in context.items()
+                                            if name in signature.parameters
+                                        }
+                                    )
+                                    result = callback(text, **callback_context)
+                                else:
+                                    result = callback(text)
                                 if asyncio.iscoroutine(result):
                                     await result
                             except Exception as e:
