@@ -25,6 +25,7 @@ from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events import EventType
 from plugins.hub.device_names import default_device_name, format_handle
 from plugins.hub.models import HubMessage
+from plugins.hub.messenger import AgentMessenger
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_conversations import (
     MAX_CONTENT,
@@ -1287,3 +1288,86 @@ async def test_turn_end_rejects_wrong_thread_or_schema_without_waking_model():
     assert waiter.empty()
     assert llm.conversation_history == []
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_correlated_turn_end_settles_outbound_cli_waiter_before_inbound_map():
+    """An outbound requester waiter must not depend on inbound ACP origins."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    thread_id = "request-thread"
+    request_id = "request-id"
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {thread_id: waiter}
+    plugin._cli_waiter_request_ids = {thread_id: request_id}
+    plugin._acp_network_turns = {}
+    message = HubMessage(
+        id="turn-end-id",
+        action="turn_end",
+        from_agent="receiver-agent",
+        from_identity="receiver-agent",
+        to="infra",
+        thread_id=thread_id,
+        reply_to=request_id,
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert await asyncio.wait_for(waiter.get(), timeout=0.2) == (
+        "end",
+        1,
+        False,
+        "",
+    )
+    assert plugin._acp_network_turns == {}
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_local_acp_turn_end_uses_hidden_sender_not_normal_message():
+    """Local completion metadata must select the dedicated turn_end action."""
+    plugin, _ = _responder([])
+    agent = SimpleNamespace(
+        identity="receiver",
+        socket_path="/tmp/receiver.sock",
+        state="idle",
+        cooldown_until=None,
+    )
+    message = HubMessage(
+        id="completion",
+        action="message",
+        from_agent="sender",
+        from_identity="sender",
+        to="receiver",
+        thread_id="thread-1",
+        reply_to="request-1",
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    original = AgentMessenger.send_turn_end
+    calls: list[dict] = []
+
+    async def fake_send_turn_end(target, **kwargs):
+        calls.append({"target": target, **kwargs})
+        return True
+
+    AgentMessenger.send_turn_end = staticmethod(fake_send_turn_end)
+    try:
+        assert await plugin._deliver_to_agent(agent, message) is True
+    finally:
+        AgentMessenger.send_turn_end = original
+    assert len(calls) == 1
+    assert calls[0]["thread_id"] == "thread-1"
+    assert calls[0]["reply_to"] == "request-1"
+    assert calls[0]["outcome"] == "end_turn"
