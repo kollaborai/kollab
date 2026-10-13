@@ -127,3 +127,31 @@ async def test_runner_update_publishes_contextual_metadata_to_real_display_tap()
     assert event["turn_id"] == 7
     assert event["input_source"] == "hub"
     assert event["thread_id"] == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_selected_profile_has_one_runner_fifo_and_cleanup(monkeypatch):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    monkeypatch.setattr(
+        mod,
+        "publish_semantic",
+        lambda *_args, **_fields: None,
+    )
+    bus = Bus()
+    hub = Hub()
+    profile_manager = SimpleNamespace(
+        get_active_profile=lambda: LLMProfile(
+            name="claude-code", provider="acp", command=("fake",)
+        )
+    )
+    orchestrator = mod.ACPOrchestrator(bus, identity="daemon-1", hub_plugin=hub)
+    await orchestrator.start(profile_manager.get_active_profile())
+    first = orchestrator.admit("first", request_id="req-1", source="cli")
+    second = orchestrator.admit("second", request_id="req-2", source="cli")
+    assert [first.request_id, second.request_id] == ["req-1", "req-2"]
+    assert orchestrator.runner is not None
+    assert orchestrator.runner.profile.name == "claude-code"
+    await asyncio.gather(first.future, second.future)
+    await orchestrator.close()
+    assert hub.rotations == 2
+    assert orchestrator.runner is None
