@@ -7363,6 +7363,40 @@ class HubPlugin(BasePlugin):
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
 
+        # A correlated ACP completion arrives as a standalone turn_end message
+        # (the sender ACKs the admission connection, then opens a new message
+        # connection for the terminal frame).  Consume it before any display or
+        # model-wake path; only the matching request/thread may settle a waiter.
+        if message.action == "turn_end":
+            frame = (message.metadata or {}).get("turn_end")
+            if (
+                not isinstance(frame, dict)
+                or set(frame) != {"replies", "failed", "outcome"}
+                or not isinstance(frame.get("replies"), int)
+                or not isinstance(frame.get("failed"), bool)
+                or not isinstance(frame.get("outcome"), str)
+                or not message.reply_to
+                or not message.thread_id
+            ):
+                logger.warning("ignoring malformed correlated turn_end from %s", message.from_identity)
+                return
+            turns = getattr(self, "_acp_network_turns", None) or {}
+            matched = None
+            for key, candidate in list(turns.items()):
+                if (
+                    key == message.reply_to
+                    and candidate.message_id == message.reply_to
+                    and candidate.thread_id == message.thread_id
+                ):
+                    matched = candidate
+                    turns.pop(key, None)
+                    break
+            if matched is None:
+                logger.debug("ignoring unmatched correlated turn_end %s", message.reply_to)
+                return
+            self.on_network_turn_end(message.thread_id, frame, message.content)
+            return
+
         # A request from a remote agent@device (not a reply to ours) is handled
         # by one turn, and that turn's replies go on this request's thread.
         network_request = bool(
