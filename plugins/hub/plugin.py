@@ -9270,6 +9270,18 @@ class HubPlugin(BasePlugin):
                     # can fail under hairpin/NAT. Remote imports have no
                     # socket_path, so this cleanly separates the two.
                     if local_sock:
+                        socket_server = getattr(self, "_socket_server", None)
+                        if (
+                            socket_server is not None
+                            and getattr(socket_server, "_auth_enabled", False)
+                            and self._dns_identity is not None
+                            and self._identity is not None
+                        ):
+                            return local_sock, {
+                                "identity_manager": self._dns_identity,
+                                "designation": self._identity.identity,
+                                "require_auth": True,
+                            }
                         return local_sock, None
 
                     # Rule 2: remote-only record -> upgrade when we can auth.

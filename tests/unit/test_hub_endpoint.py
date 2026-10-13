@@ -1135,28 +1135,31 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
                 thread_id=message.thread_id,
                 reply_to=message.id,
             )
-            assert await AgentMessenger.send_to_agent(
-                requester_socket,
-                reply,
-                auth=unix_auth(
-                    receiver_identity,
-                    receiver_registry,
-                    designation="receiver-agent",
-                    server="requester-agent",
-                ),
+            requester_agent = SimpleNamespace(
+                identity="requester-agent",
+                socket_path=requester_socket,
+                state="idle",
+                cooldown_until=None,
             )
-            assert await AgentMessenger.send_turn_end(
-                requester_socket,
-                thread_id=message.thread_id,
-                reply_to=message.id,
-                replies=1,
-                failed=False,
-                outcome="end_turn",
-                auth=unix_auth(
-                    receiver_identity,
-                    receiver_registry,
-                    designation="receiver-agent",
-                    server="requester-agent",
+            assert await receiver_plugin._deliver_to_agent(requester_agent, reply)
+            assert await receiver_plugin._deliver_to_agent(
+                requester_agent,
+                HubMessage(
+                    id=f"{message.id}-end",
+                    action="message",
+                    from_agent="receiver-agent",
+                    from_identity="receiver-agent",
+                    to="requester-agent",
+                    content="",
+                    thread_id=message.thread_id,
+                    reply_to=message.id,
+                    metadata={
+                        "turn_end": {
+                            "replies": 1,
+                            "failed": False,
+                            "outcome": "end_turn",
+                        }
+                    },
                 ),
             )
 
@@ -1182,9 +1185,18 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
             require_auth=True,
             local_designation="receiver-agent",
         )
+        receiver_plugin = HubPlugin(event_bus=MagicMock())
+        receiver_plugin._identity = SimpleNamespace(identity="receiver-agent", solo=False)
+        receiver_plugin._dns_identity = receiver_identity
+        receiver_plugin._dns_registry = receiver_registry
+        receiver_plugin._socket_server = receiver_server
 
         requester_socket = await requester_server.start()
         receiver_socket = await receiver_server.start()
+        receiver_record = receiver_registry.resolve("requester-agent")
+        assert receiver_record is not None
+        receiver_record.socket_path = requester_socket
+
         try:
             request = HubMessage(
                 from_agent="requester-agent",
