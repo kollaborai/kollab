@@ -1099,6 +1099,10 @@ class AgentSocketServer:
                 "socket type) — connection allowed"
             )
 
+        # Keep the sender identity defined for local same-UID connections as
+        # well; hidden local turn_end frames are authenticated by peer creds
+        # rather than the Ed25519 designation handshake.
+        authenticated_as = None
         # --- Ed25519 challenge-response auth ---
         if self._auth_enabled or require_auth:
             if self._dns_registry is None or self._dns_identity is None:
