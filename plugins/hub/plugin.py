@@ -559,6 +559,7 @@ class HubPlugin(BasePlugin):
         # Expected outbound request IDs for correlated hidden turn_end frames.
         self._cli_waiter_request_ids: Dict[str, str] = {}
         self._cli_waiter_senders: Dict[str, str] = {}
+        self._cli_waiter_acp_outcomes: Dict[str, bool] = {}
         # The inbound remote request whose turn this agent is running.
         self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
@@ -2904,7 +2905,11 @@ class HubPlugin(BasePlugin):
             line = answer or cls._acp_outcome_text(outcome, True)
             return line, cls._acp_outcome_text(outcome, True)
         if outcome == "error":
-            line = error or cls._acp_outcome_text(outcome, True)
+            line = (
+                f"The receiving agent failed: {error}"
+                if error
+                else cls._acp_outcome_text(outcome, True)
+            )
             return line, line
         if answer:
             return answer, "The receiving agent finished this request."
@@ -3015,8 +3020,12 @@ class HubPlugin(BasePlugin):
         gets no end frame on its screen or in its model.
         """
         waiter = (getattr(self, "_cli_waiters", None) or {}).get(thread_id)
-        if waiter is not None:
-            waiter.put_nowait(("end", end["replies"], end["failed"], text))
+        if waiter is None:
+            return
+        acp_outcome = bool(end.get("outcome"))
+        if acp_outcome:
+            getattr(self, "_cli_waiter_acp_outcomes", {})[thread_id] = True
+        waiter.put_nowait(("end", end["replies"], end["failed"], text))
 
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
@@ -9417,10 +9426,20 @@ class HubPlugin(BasePlugin):
                     replies=int(turn_end.get("replies", 0)),
                     failed=bool(turn_end.get("failed", False)),
                     outcome=str(turn_end.get("outcome", "error")),
-                    text=(message.content or self._acp_outcome_text(
-                        str(turn_end.get("outcome", "error")),
-                        bool(turn_end.get("failed", False)),
-                    )),
+                    text=(
+                        message.content
+                        or (
+                            "The receiving agent finished this request."
+                            if (
+                                str(turn_end.get("outcome", "error")) == "end_turn"
+                                and int(turn_end.get("replies", 0)) > 0
+                            )
+                            else self._acp_outcome_text(
+                                str(turn_end.get("outcome", "error")),
+                                bool(turn_end.get("failed", False)),
+                            )
+                        )
+                    ),
                     auth=dial_auth,
                 )
                 self._trace_delivery(
@@ -13686,6 +13705,7 @@ class HubPlugin(BasePlugin):
         self._cli_waiters[msg.thread_id] = events
         self._cli_waiter_request_ids[msg.thread_id] = msg.id
         self._cli_waiter_senders[msg.thread_id] = handle_str
+        self._cli_waiter_acp_outcomes[msg.thread_id] = False
         try:
             rejections = await self._route_message(msg)
             self._display_outgoing_message(handle_str, content)
@@ -13719,10 +13739,17 @@ class HubPlugin(BasePlugin):
                 else:
                     end = event[1:]
             if end[1]:
-                # The end frame's text is the far agent's own claim: show it as
-                # its message, and keep this CLI's error line to what we know.
+                # Native failures carry useful detail in the terminal frame.
+                # ACP frames already delivered their visible outcome reply;
+                # redisplaying the hidden frame would duplicate cancellation
+                # and error text in the CLI.
                 said = _network_display_text(end[2]).strip()
-                if said and said != _NET_TURN_FAILED:
+                is_acp = bool(
+                    getattr(self, "_cli_waiter_acp_outcomes", {}).get(
+                        msg.thread_id, False
+                    )
+                )
+                if not is_acp and said and said != _NET_TURN_FAILED:
                     yield {"type": "network_reply", "from": handle_str, "content": said}
                 yield {"type": "error", "msg": f"{handle_str} reported that its turn failed"}
             else:
@@ -13731,6 +13758,7 @@ class HubPlugin(BasePlugin):
             self._cli_waiters.pop(msg.thread_id, None)
             self._cli_waiter_request_ids.pop(msg.thread_id, None)
             self._cli_waiter_senders.pop(msg.thread_id, None)
+            self._cli_waiter_acp_outcomes.pop(msg.thread_id, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
