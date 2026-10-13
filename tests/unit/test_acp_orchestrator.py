@@ -155,3 +155,38 @@ async def test_selected_profile_has_one_runner_fifo_and_cleanup(monkeypatch):
     await orchestrator.close()
     assert hub.rotations == 2
     assert orchestrator.runner is None
+
+
+@pytest.mark.asyncio
+async def test_restart_start_failure_closes_replacement_and_clears_state(monkeypatch):
+    created = []
+
+    class RestartRunner(FakeRunner):
+        def __init__(self, profile, update_callback=None):
+            super().__init__(profile, update_callback)
+            self.start_count = 0
+            created.append(self)
+
+        async def start(self):
+            self.start_count += 1
+            self.started = True
+            if len(created) > 1:
+                raise RuntimeError("replacement child failed")
+
+    monkeypatch.setattr(mod, "ACPRunner", RestartRunner)
+    bus = Bus()
+    hub = Hub()
+    orchestrator = mod.ACPOrchestrator(bus, identity="daemon-1", hub_plugin=hub)
+    profile = LLMProfile(name="claude-code", provider="acp", command=("fake",))
+    await orchestrator.start(profile)
+    old = orchestrator.runner
+    assert old is created[0]
+
+    with pytest.raises(RuntimeError, match="replacement child failed"):
+        await orchestrator.start(profile)
+
+    assert old.closed is True
+    assert created[1].closed is True
+    assert orchestrator.runner is None
+    assert orchestrator.active is False
+    assert orchestrator._binding is None

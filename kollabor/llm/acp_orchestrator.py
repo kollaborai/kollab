@@ -57,40 +57,54 @@ class ACPOrchestrator:
         if not profile.command:
             raise ValueError(f"ACP profile {profile.name!r} has no command")
         if self._runner is not None:
-            raise RuntimeError("ACP runner already started for this identity")
-
-        command = tuple(profile.command)
-        mcp_servers = []
-        if self.hub_plugin is not None:
-            token, generation = self.hub_plugin.rotate_acp_hub_binding()
-            self._binding = (token, generation)
-            socket_path = getattr(getattr(self.hub_plugin, "_socket_server", None), "socket_path", "")
-            if not socket_path:
-                raise RuntimeError("ACP hub socket is not ready before session/new")
-            from kollabor.mcp_hub import kollab_hub_argv
-            mcp_servers.append({
-                "name": "kollab-hub",
-                "command": kollab_hub_argv()[0],
-                "args": kollab_hub_argv()[1:],
-                "env": {
-                    "KOLLAB_ACP_HUB_TOKEN": token,
-                    "KOLLAB_ACP_GENERATION": str(generation),
-                    "KOLLAB_ACP_HUB_SOCKET": str(socket_path),
-                },
-            })
-        acp_profile = ACPProfile(
-            name=profile.name,
-            command=command,
-            cwd=profile.cwd or profile.workspace or None,
-            workspace=profile.workspace or None,
-            pass_env=profile.pass_env,
-            mcp_servers=tuple(mcp_servers),
-        )
-        self._runner = ACPRunner(acp_profile, update_callback=self._on_runner_update)
-        self._profile_name = profile.name
-        await self._runner.start()
+            # A restart is transactional: retire the old child/session before
+            # acquiring a replacement, without creating a second owner.
+            await self.close()
         self._closed = False
-        self.event_bus.register_service("acp_orchestrator", self)
+        self._terminal_session_id = None
+
+        try:
+            command = tuple(profile.command)
+            mcp_servers = []
+            if self.hub_plugin is not None:
+                token, generation = self.hub_plugin.rotate_acp_hub_binding()
+                self._binding = (token, generation)
+                socket_path = getattr(getattr(self.hub_plugin, "_socket_server", None), "socket_path", "")
+                if not socket_path:
+                    raise RuntimeError("ACP hub socket is not ready before session/new")
+                from kollabor.mcp_hub import kollab_hub_argv
+                mcp_servers.append({
+                    "name": "kollab-hub",
+                    "command": kollab_hub_argv()[0],
+                    "args": kollab_hub_argv()[1:],
+                    "env": {
+                        "KOLLAB_ACP_HUB_TOKEN": token,
+                        "KOLLAB_ACP_GENERATION": str(generation),
+                        "KOLLAB_ACP_HUB_SOCKET": str(socket_path),
+                    },
+                })
+            acp_profile = ACPProfile(
+                name=profile.name,
+                command=command,
+                cwd=profile.cwd or profile.workspace or None,
+                workspace=profile.workspace or None,
+                pass_env=profile.pass_env,
+                mcp_servers=tuple(mcp_servers),
+            )
+            self._runner = ACPRunner(acp_profile, update_callback=self._on_runner_update)
+            self._profile_name = profile.name
+            await self._runner.start()
+            self.event_bus.register_service("acp_orchestrator", self)
+        except BaseException:
+            try:
+                await self.close()
+            except BaseException as cleanup_exc:
+                logger.warning("ACP runner restart cleanup failed: %s", cleanup_exc)
+            self._runner = None
+            self._binding = None
+            self._profile_name = None
+            self._closed = True
+            raise
 
     def admit(
         self, text: str, *, request_id: str, source: str, thread_id: str | None = None
