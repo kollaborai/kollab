@@ -456,10 +456,9 @@ class TerminalLLMChat:
             target = self.profile_manager.active_profile_name
             active_profile = self.profile_manager.get_profile(target)
             if getattr(active_profile, "provider", "") == "acp":
-                logger.warning(
-                    "Ignoring --model/--effort for ACP profile '%s'; "
-                    "the ACP harness owns these settings",
-                    target,
+                raise ValueError(
+                    f"--model/--effort are not supported for ACP profile '{target}'; "
+                    "the ACP harness owns these settings"
                 )
             else:
                 overrides: dict[str, Any] = {"save_to_config": False}
