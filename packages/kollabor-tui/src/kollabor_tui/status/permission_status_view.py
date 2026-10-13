@@ -48,6 +48,21 @@ class PermissionStatusView:
         if R is None:
             return []
 
+        acp_options = self._details.get("acp_options")
+        if isinstance(acp_options, list) and acp_options:
+            options = []
+            for index, option in enumerate(acp_options):
+                if not isinstance(option, dict):
+                    continue
+                option_id = str(option.get("optionId") or "")
+                if not option_id:
+                    continue
+                key = str(index + 1) if index < 9 else chr(ord("a") + index - 9)
+                label = str(option.get("name") or option.get("label") or option.get("kind") or option_id)
+                options.append((key, label, option_id))
+            if options:
+                return options
+
         tool_type = self._details.get("tool_type", "unknown")
 
         # Build project option label based on tool type

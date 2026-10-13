@@ -742,6 +742,7 @@ class TerminalLLMChat:
         ):
             # Import response handler
             from kollabor_agent.permissions import handle_confirmation_response
+            from kollabor_events.permissions_models import ConfirmationResponse
 
             # Create wrapper that converts ConfirmationResponse to PermissionDecision
             async def confirmation_callback_wrapper(details):
@@ -756,12 +757,43 @@ class TerminalLLMChat:
                             details
                         )
                     )
-                # Convert to PermissionDecision using response handler
+                # Convert to PermissionDecision using response handler. ACP
+                # attach clients return an opaque option ID; map it back to
+                # the enum kind only for the native decision machinery.
+                if details.get("source") == "acp" and isinstance(response, str):
+                    selected_option = next(
+                        (item for item in details.get("options", ())
+                         if isinstance(item, dict) and str(item.get("optionId")) == response),
+                        None,
+                    )
+                    if selected_option is None:
+                        return None
+                    kind_to_name = {
+                        "allow_once": "APPROVE_ONCE",
+                        "allow_always": "APPROVE_ALWAYS",
+                        "allow_tool_always": "APPROVE_TOOL_ALWAYS",
+                        "reject_once": "DENY",
+                        "reject_always": "DENY",
+                    }
+                    response = getattr(ConfirmationResponse, kind_to_name.get(
+                        str(selected_option.get("kind")), "DENY"
+                    ))
                 decision = await handle_confirmation_response(
                     self.permission_manager, details, response
                 )
                 if details.get("source") == "acp":
-                    selected = getattr(response, "name", str(response)).lower()
+                    selected = str(
+                        (selected_option or {}).get("kind")
+                        or getattr(response, "name", str(response))
+                    ).lower()
+                    choice_by_kind = {
+                        "allow_once": "approve_once",
+                        "allow_always": "approve_always",
+                        "allow_tool_always": "approve_tool_always",
+                        "reject_once": "reject_once",
+                        "reject_always": "reject_always",
+                    }
+                    selected = choice_by_kind.get(selected, selected)
                     scope = {"approve_session": "session", "approve_project": "project"}.get(selected)
                     decision.confirmation_details = {
                         "acp_grant_scope": scope,
@@ -1219,6 +1251,7 @@ class TerminalLLMChat:
             "workspace": request.workspace,
             "profile": request.profile,
             "options": options,
+            "acp_options": options,
             "waiting": True,
             "source": "acp",
             "approval_scope": "once",
