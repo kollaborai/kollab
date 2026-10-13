@@ -4546,6 +4546,24 @@ class HubPlugin(BasePlugin):
             loop = asyncio.get_running_loop()
             self._startup_task = loop.create_task(_safe_start())
 
+            self._startup_task = loop.create_task(_safe_start())
+
+    async def wait_until_ready(self, timeout: float = 30.0) -> None:
+        """Wait until the local Hub socket is bound and published.
+
+        ACP startup depends on Hub identity/socket binding for authenticated
+        completion delivery.  Callers should await this barrier rather than
+        racing the fire-and-forget startup task.
+        """
+        task = self._startup_task
+        if task is None:
+            if self._socket_server is None:
+                raise RuntimeError("Hub startup was not scheduled")
+            return
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        if self._socket_server is None:
+            raise RuntimeError("Hub startup completed without a socket")
+
     async def _register_mesh_hooks(self) -> None:
         """Register the hooks that make this agent a peer on the mesh."""
         # These guards share the normal model/tool pipeline. The final tool
