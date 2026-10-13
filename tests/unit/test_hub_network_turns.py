@@ -1223,3 +1223,65 @@ def test_a_driver_that_only_lowers_is_processing_still_ends_the_chain(completed,
     hub.network_chain_ended.assert_not_called()
     qp.is_processing = False
     hub.network_chain_ended.assert_called_once_with(failed=failed)
+
+@pytest.mark.asyncio
+async def test_correlated_turn_end_settles_waiter_without_model_wake():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {T1: waiter}
+    turn = SimpleNamespace(message_id=W1, thread_id=T1)
+    plugin._acp_network_turns = {W1: turn}
+    message = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        content="",
+        thread_id=T1,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False, "outcome": "end_turn"}},
+    )
+    await plugin._on_message_received(message)
+    assert await asyncio.wait_for(waiter.get(), timeout=0.2) == (
+        "end", 1, False, ""
+    )
+    assert plugin._acp_network_turns == {}
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_turn_end_rejects_wrong_thread_or_schema_without_waking_model():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {T1: waiter}
+    plugin._acp_network_turns = {W1: SimpleNamespace(message_id=W1, thread_id=T1)}
+    wrong_thread = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        thread_id=T2,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False, "outcome": "end_turn"}},
+    )
+    malformed = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        thread_id=T1,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False}},
+    )
+    await plugin._on_message_received(wrong_thread)
+    await plugin._on_message_received(malformed)
+    assert plugin._acp_network_turns == {W1: plugin._acp_network_turns[W1]}
+    assert waiter.empty()
+    assert llm.conversation_history == []
+    assert sent == []
