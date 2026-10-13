@@ -13263,7 +13263,10 @@ class HubPlugin(BasePlugin):
             if not callable(submit):
                 logger.debug("Attached input rejected: LLM input pipeline unavailable")
                 return
-            submit_kwargs = {"source": UserInputSource.HUB_ATTACHMENT}
+            is_authenticated_agent = bool(sender) and not operator
+            submit_kwargs = {
+                "source": "agent" if is_authenticated_agent else UserInputSource.HUB_ATTACHMENT,
+            }
             thread_id = thread_id or getattr(self, "_active_thread_id", None) or None
             if request_id is not None:
                 submit_kwargs["request_id"] = request_id
@@ -13272,7 +13275,7 @@ class HubPlugin(BasePlugin):
             submit_kwargs["origin_context"] = {
                 "sender": sender,
                 "operator": bool(operator),
-                "authenticated": bool(sender),
+                "authenticated": is_authenticated_agent,
             }
             result = await submit(text, **submit_kwargs)
             if isinstance(result, dict) and result.get("status") in {

@@ -1891,9 +1891,17 @@ class AgentSocketServer:
                                 }
                                 try:
                                     signature = inspect.signature(callback)
+                                    context_names = {"request_id", "thread_id", "sender", "operator"}
                                     accepts_context = any(
                                         parameter.kind == inspect.Parameter.VAR_KEYWORD
-                                        or name in signature.parameters
+                                        or (
+                                            name in context_names
+                                            and parameter.kind
+                                            in {
+                                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                                inspect.Parameter.KEYWORD_ONLY,
+                                            }
+                                        )
                                         for name, parameter in signature.parameters.items()
                                     )
                                 except (TypeError, ValueError):
