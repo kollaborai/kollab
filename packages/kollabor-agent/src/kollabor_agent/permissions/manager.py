@@ -1,6 +1,7 @@
 """Permission manager for tool execution."""
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -58,6 +59,9 @@ class PermissionManager:
 
         # Project-scoped approvals (persistent, loaded from project data dir)
         self._project_approvals: Set[str] = set()
+        # ACP grants are namespaced separately from native approval keys.
+        self._acp_project_grants: Set[str] = set()
+        self._acp_session_grants: Set[str] = set()
         self._load_project_approvals()
 
         # Approval mode (can change during session)
@@ -566,6 +570,7 @@ class PermissionManager:
             if approvals_file.exists():
                 data = json.loads(approvals_file.read_text(encoding="utf-8"))
                 self._project_approvals = set(data.get("approved_keys", []))
+                self._acp_project_grants = set(data.get("acp_grants", []))
                 logger.info(
                     f"Loaded {len(self._project_approvals)} project approvals from {approvals_file}"
                 )
@@ -584,6 +589,7 @@ class PermissionManager:
 
             data = {
                 "approved_keys": list(self._project_approvals),
+                "acp_grants": sorted(self._acp_project_grants),
                 "updated_at": datetime.now().isoformat(),
             }
             approvals_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -629,6 +635,45 @@ class PermissionManager:
     def get_project_approvals(self) -> List[str]:
         """Get list of project approvals."""
         return sorted(self._project_approvals)
+
+
+    @staticmethod
+    def acp_grant_key(operation: Any, workspace: str, profile: str) -> str:
+        """Build a stable ACP-only grant key without changing native keys."""
+        payload = json.dumps(
+            {
+                "operation": operation,
+                "workspace": str(Path(workspace).expanduser().resolve()),
+                "profile": str(profile),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"acp:{digest}"
+
+    def grant_acp(self, operation: Any, workspace: str, profile: str, *, scope: str = "session") -> str:
+        """Store an ACP grant in its own namespace."""
+        key = self.acp_grant_key(operation, workspace, profile)
+        target = self._acp_project_grants if scope == "project" else self._acp_session_grants
+        target.add(key)
+        if scope == "project":
+            self._save_project_approvals()
+        return key
+
+    def has_acp_grant(self, operation: Any, workspace: str, profile: str) -> bool:
+        key = self.acp_grant_key(operation, workspace, profile)
+        return key in self._acp_session_grants or key in self._acp_project_grants
+
+    def get_acp_grants(self) -> List[str]:
+        return sorted(self._acp_session_grants | self._acp_project_grants)
+
+    def clear_acp_grants(self, *, scope: str | None = None) -> None:
+        if scope in (None, "session"):
+            self._acp_session_grants.clear()
+        if scope in (None, "project"):
+            self._acp_project_grants.clear()
+            self._save_project_approvals()
 
     def _build_confirmation_details(
         self,

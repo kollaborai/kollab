@@ -1183,10 +1183,23 @@ class TerminalLLMChat:
         back to that exact offered ID.
         """
         manager = getattr(self, "permission_manager", None)
+        options = list(request.options or ())
+
+        def offered(kind: str) -> str | None:
+            for option in options:
+                if str(option.get("kind")) == kind:
+                    return str(option.get("optionId"))
+            return None
+
+        # Reuse an exact ACP grant without opening a second native prompt.
+        if manager is not None and manager.has_acp_grant(
+            request.operation, request.workspace, request.profile
+        ):
+            return offered("allow_once")
+
         callback = getattr(manager, "_confirmation_callback", None)
         if callback is None:
             return None
-        options = list(request.options or ())
         details = {
             "tool_id": request.request_id,
             "tool_type": request.kind or "acp",
@@ -1207,9 +1220,19 @@ class TerminalLLMChat:
             logger.exception("ACP permission confirmation failed")
             return None
         allowed = bool(getattr(decision, "allowed", False))
-        # Native confirmation handling has already persisted session/project
-        # grants (when selected). ACP must receive a one-shot opaque outcome;
-        # never widen an ACP adapter request into a reusable ACP grant.
+        # Native confirmation handling persists its own approvals. Mirror
+        # session/project choices into the ACP namespace while returning only
+        # the one-shot opaque outcome to the adapter.
+        reason = str(getattr(decision, "reason", "")).lower()
+        if allowed and manager is not None:
+            if "project" in reason:
+                manager.grant_acp(
+                    request.operation, request.workspace, request.profile, scope="project"
+                )
+            elif "session" in reason:
+                manager.grant_acp(
+                    request.operation, request.workspace, request.profile, scope="session"
+                )
         wanted = "allow_once" if allowed else "reject_once"
         for option in options:
             if str(option.get("kind")) == wanted:
