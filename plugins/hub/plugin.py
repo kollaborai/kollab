@@ -556,6 +556,8 @@ class HubPlugin(BasePlugin):
         # the wire in the relay payload and the answering turn echoes it (see
         # _net_turn), so a waiter sees only the replies to its own request.
         self._cli_waiters: Dict[str, "asyncio.Queue"] = {}
+        # Expected outbound request IDs for correlated hidden turn_end frames.
+        self._cli_waiter_request_ids: Dict[str, str] = {}
         # The inbound remote request whose turn this agent is running.
         self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
@@ -7383,6 +7385,18 @@ class HubPlugin(BasePlugin):
             ):
                 logger.warning("ignoring malformed correlated turn_end from %s", message.from_identity)
                 return
+            # Outbound /hub msg waiters are keyed by the request thread.  A
+            # correlated terminal frame must settle that waiter directly;
+            # _acp_network_turns contains only requests received by this agent.
+            cli_waiters = getattr(self, "_cli_waiters", None) or {}
+            waiter = cli_waiters.get(message.thread_id)
+            expected_ids = getattr(self, "_cli_waiter_request_ids", None) or {}
+            if waiter is not None and message.reply_to == expected_ids.get(message.thread_id):
+                self.on_network_turn_end(message.thread_id, frame, message.content)
+                return
+
+            turns = getattr(self, "_acp_network_turns", None) or {}
+            matched = None
             turns = getattr(self, "_acp_network_turns", None) or {}
             matched = None
             for key, candidate in list(turns.items()):
@@ -9310,6 +9324,36 @@ class HubPlugin(BasePlugin):
         dial_target, dial_auth = self._resolve_dial_target(
             agent.identity, agent.socket_path
         )
+
+        # Correlated ACP completion frames on local Unix sockets use the
+        # dedicated hidden turn_end action; never send them as ordinary
+        # model-visible messages or queue them in the identity mailbox.
+        turn_end = (message.metadata or {}).get("turn_end")
+        if message.action == "message" and isinstance(turn_end, dict):
+            try:
+                from .dns.endpoint import is_remote_uri
+
+                is_local = not is_remote_uri(dial_target)
+            except Exception:
+                is_local = True
+            if is_local:
+                success = await AgentMessenger.send_turn_end(
+                    dial_target,
+                    thread_id=message.thread_id,
+                    reply_to=message.reply_to or "",
+                    replies=int(turn_end.get("replies", 0)),
+                    failed=bool(turn_end.get("failed", False)),
+                    outcome=str(turn_end.get("outcome", "error")),
+                    auth=dial_auth,
+                )
+                self._trace_delivery(
+                    message,
+                    "socket_turn_end_succeeded" if success else "socket_turn_end_failed",
+                    target=agent.identity,
+                    detail=dial_target,
+                )
+                return success
+
 
         # Control-plane traffic bypasses the WAITING gate entirely.
         # These messages never trigger a LLM turn so there is no loop risk.
@@ -13563,6 +13607,7 @@ class HubPlugin(BasePlugin):
         )
         events: asyncio.Queue = asyncio.Queue()
         self._cli_waiters[msg.thread_id] = events
+        self._cli_waiter_request_ids[msg.thread_id] = msg.id
         try:
             rejections = await self._route_message(msg)
             self._display_outgoing_message(handle_str, content)
@@ -13606,6 +13651,7 @@ class HubPlugin(BasePlugin):
                 yield {"type": "network_done", "replies": replies}
         finally:
             self._cli_waiters.pop(msg.thread_id, None)
+            self._cli_waiter_request_ids.pop(msg.thread_id, None)
 
     async def _on_remote_shutdown(self, reason: str = "") -> None:
         """Handle shutdown signal received via hub socket.
