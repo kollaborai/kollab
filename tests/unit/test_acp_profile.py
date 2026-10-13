@@ -50,3 +50,20 @@ def test_default_acp_profiles_are_selectable_without_native_fallback():
         assert profile.get_provider() == "acp"
         assert profile.command[0] == command
         assert package in profile.install_guidance
+
+
+
+def test_model_env_cannot_replace_builtin_acp_profile(monkeypatch):
+    from kollabor_ai.profile_manager import ProfileManager
+
+    monkeypatch.setenv("KOLLAB_CLAUDE_CODE_MODEL", "native-model")
+    manager = object.__new__(ProfileManager)
+    manager._profiles = {
+        name: LLMProfile.from_dict(name, data)
+        for name, data in ProfileManager.DEFAULT_PROFILES.items()
+    }
+    manager._active_profile_name = "default"
+    assert manager.set_active_profile("claude-code", persist=False)
+    active = manager.get_active_profile()
+    assert active.provider == "acp"
+    assert active.command == ("claude-agent-acp",)
