@@ -414,3 +414,11 @@ def test_authenticated_agent_route_requires_selected_active_acp():
         get_provider=lambda: "acp"
     )
     assert plugin._acp_agent_admission_enabled(llm) is False
+
+
+def test_authenticated_agent_route_falls_back_when_registry_lookup_fails():
+    event_bus = MagicMock()
+    event_bus.get_service.side_effect = RuntimeError("registry closed")
+    plugin = HubPlugin(event_bus=event_bus)
+    llm = SimpleNamespace(profile_manager=MagicMock())
+    assert plugin._acp_agent_admission_enabled(llm) is False
