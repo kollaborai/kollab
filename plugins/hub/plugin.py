@@ -7241,17 +7241,18 @@ class HubPlugin(BasePlugin):
 
     def _acp_agent_admission_enabled(self, llm_service: Any) -> bool:
         """Return true only when ACP is the selected, live agent transport."""
-        event_bus = getattr(self, "event_bus", None)
-        acp = event_bus.get_service("acp_orchestrator") if event_bus else None
-        if getattr(acp, "active", False) is not True:
-            return False
-        profile_manager = getattr(llm_service, "profile_manager", None)
-        if profile_manager is None:
-            return False
         try:
+            event_bus = getattr(self, "event_bus", None)
+            acp = event_bus.get_service("acp_orchestrator") if event_bus else None
+            if getattr(acp, "active", False) is not True:
+                return False
+            profile_manager = getattr(llm_service, "profile_manager", None)
+            if profile_manager is None:
+                return False
             profile = profile_manager.get_active_profile()
             return profile is not None and profile.get_provider() == "acp"
         except Exception:
+            # Registry teardown/fault must retain the native peer path.
             return False
 
     async def _submit_authenticated_agent_message(
