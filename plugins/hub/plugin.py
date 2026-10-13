@@ -2890,15 +2890,18 @@ class HubPlugin(BasePlugin):
         elif answer and not turn.replies and not failed:
             if await self._send_on_thread(turn, answer, "reply"):
                 turn.replies += 1
+        turn_end = {
+            "replies": min(turn.replies, MAX_TURN_REPLIES),
+            "failed": failed,
+        }
+        if acp:
+            turn_end["outcome"] = outcome or ("error" if failed else "end_turn")
+        end_content = _NET_TURN_DONE if (not failed or acp) else _NET_TURN_FAILED
         await self._send_on_thread(
             turn,
-            _NET_TURN_DONE,
+            end_content,
             "turn end",
-            turn_end={
-                "replies": min(turn.replies, MAX_TURN_REPLIES),
-                "failed": failed,
-                "outcome": outcome or ("error" if failed else "end_turn"),
-            },
+            turn_end=turn_end,
         )
 
     async def _send_on_thread(
