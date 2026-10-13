@@ -556,3 +556,41 @@ async def test_authenticated_acp_admission_rejection_settles_origin(
     assert sent[1][3]["turn_end"]["outcome"] == outcome
     assert sent[1][3]["turn_end"]["failed"] is True
     assert message.id not in plugin._acp_network_turns
+
+
+@pytest.mark.asyncio
+async def test_acp_origin_settlement_releases_matching_network_gate_only():
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn.message_id, what))
+        return True
+
+    plugin._send_on_thread = capture
+    current = _NetworkTurn(
+        handle=PEER, thread_id="same-thread", message_id="same-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    clone = _NetworkTurn(
+        handle=PEER, thread_id=current.thread_id, message_id=current.message_id,
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._net_turn = current
+    await plugin._end_network_turn(
+        clone, failed=True, acp=True, outcome="error", outcome_text="failed"
+    )
+    assert plugin._net_turn is None
+    assert sent == [("same-request", "reply"), ("same-request", "turn end")]
+
+    other = _NetworkTurn(
+        handle=PEER, thread_id="other-thread", message_id="other-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._net_turn = other
+    await plugin._end_network_turn(
+        clone, failed=True, acp=True, outcome="error", outcome_text="failed"
+    )
+    assert plugin._net_turn is other
