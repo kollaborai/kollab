@@ -7388,7 +7388,24 @@ class HubPlugin(BasePlugin):
             },
         )
         if isinstance(result, dict) and result.get("status") == "rejected":
-            turns.pop(message.id, None)
+            turn = turns.pop(message.id, None)
+            reason = str(result.get("reason") or "acp_admission_failed")
+            is_busy = "queue" in reason.lower() or "full" in reason.lower()
+            outcome = "busy" if is_busy else "error"
+            reply_text, outcome_text = self._normalize_acp_completion(
+                outcome, "", reason
+            )
+            if turn is not None:
+                turn.answer = reply_text
+                turn.failed = True
+                turn.ended = True
+                await self._end_network_turn(
+                    turn,
+                    failed=True,
+                    acp=True,
+                    outcome=outcome,
+                    outcome_text=outcome_text,
+                )
         return result
 
     async def _on_message_received(self, message: HubMessage) -> None:
