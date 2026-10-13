@@ -301,9 +301,14 @@ class ACPRunner:
                     self._queue_release.set()
 
     async def _restart_process(self) -> None:
+        if self._closing:
+            return
         old_process = self._process
         if self._connection is not None:
             await self._connection.close()
+        if self._closing:
+            await self._terminate_process()
+            return
         if old_process is not None and old_process.returncode is None:
             try:
                 os.killpg(old_process.pid, signal.SIGTERM)
@@ -321,7 +326,11 @@ class ACPRunner:
         self._connection = None
         self._process = None
         self._stderr_task = None
+        if self._closing:
+            return
         await self._start_process()
+        if self._closing:
+            await self._terminate_process()
 
     async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
         self._active_generation = generation
