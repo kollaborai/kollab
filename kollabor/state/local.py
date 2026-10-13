@@ -1204,6 +1204,8 @@ class LocalStateService(StateService):
             if event_bus else None
         )
         if str(target_provider).lower() == "acp":
+            if model or effort:
+                raise ValueError("ACP profile owns model/effort settings")
             if orchestrator is None:
                 raise ValueError("ACP profile unavailable: orchestrator is not running")
             try:

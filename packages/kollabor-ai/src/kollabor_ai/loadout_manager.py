@@ -531,7 +531,28 @@ class LoadoutManager:
             else getattr(current_profile, "provider", "")
         )
         if str(selected_provider).lower() == "acp":
+            if (
+                loadout.temperature is not None
+                or loadout.effort
+                or loadout.max_tokens is not None
+            ):
+                logger.error(
+                    "ACP loadout '%s' cannot override native model parameters",
+                    loadout.name,
+                )
+                return None
             if orchestrator is None:
+                state_service = (
+                    event_bus.get_service("state_service")
+                    if event_bus and hasattr(event_bus, "get_service")
+                    else None
+                )
+                if state_service is not None and hasattr(state_service, "set_active_profile"):
+                    try:
+                        await state_service.set_active_profile(loadout.provider_profile, reload_profile=True)
+                        return loadout
+                    except Exception:
+                        logger.exception("Remote ACP profile activation failed for '%s'", loadout.name)
                 logger.error("ACP loadout '%s' unavailable: no ACP orchestrator", loadout.name)
                 return None
             try:
