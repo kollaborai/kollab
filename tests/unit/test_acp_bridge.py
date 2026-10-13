@@ -349,11 +349,60 @@ async def test_permission_operation_uses_structured_command_paths_and_id_merge(t
     })
     await runner._request_permission("s1", tool({"toolCallId": "merged"}), [option])
 
-    assert seen[0].operation == ["echo", "a b"]
+    assert seen[0].operation == {"kind": "execute", "command": ["echo", "a b"]}
     assert seen[1].operation is None
-    assert seen[2].operation == [str((tmp_path / "x.py").resolve())]
+    assert seen[2].operation == {
+        "kind": "edit", "paths": [str((tmp_path / "x.py").resolve())]
+    }
     assert seen[3].operation is None
-    assert seen[4].operation == ["git", "status"]
+    assert seen[4].operation == {"kind": "execute", "command": ["git", "status"]}
+    assert seen[0].kind == "execute"
+    assert seen[2].kind == "edit"
+
+
+@pytest.mark.asyncio
+async def test_permission_operation_keeps_kind_distinct_and_sparse_updates(tmp_path):
+    seen = []
+
+    async def decide(request):
+        seen.append(request)
+        return "allow"
+
+    runner = ACPRunner(
+        ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)),
+        ACPPermissionBridge(decide),
+    )
+    runner.session_id = "s1"
+    runner._active_generation = 1
+    runner.permission_bridge.bind("s1", 1)
+    option = PermissionOption(optionId="allow", name="Allow once", kind="allow_once")
+
+    def tool(payload):
+        return type("Tool", (), {"model_dump": lambda self: payload})()
+
+    path = str((tmp_path / "same").resolve())
+    runner._updates.extend([
+        {"kind": "tool_call", "payload": {
+            "toolCallId": "sparse", "kind": "execute",
+            "rawInput": {"command": ["echo", "ok"]}, "title": "original",
+        }},
+        {"kind": "tool_call_update", "payload": {
+            "toolCallId": "sparse", "kind": None, "rawInput": None,
+            "title": None,
+        }},
+    ])
+    await runner._request_permission("s1", tool({"toolCallId": "sparse"}), [option])
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "edit", "kind": "edit", "locations": [{"path": path}]}), [option]
+    )
+    await runner._request_permission(
+        "s1", tool({"toolCallId": "delete", "kind": "delete", "locations": [{"path": path}]}), [option]
+    )
+    assert seen[0].operation == {"kind": "execute", "command": ["echo", "ok"]}
+    assert seen[0].kind == "execute"
+    assert seen[1].operation == {"kind": "edit", "paths": [path]}
+    assert seen[2].operation == {"kind": "delete", "paths": [path]}
+    assert seen[1].operation != seen[2].operation
 
 
 @pytest.mark.asyncio
