@@ -1371,3 +1371,36 @@ async def test_local_acp_turn_end_uses_hidden_sender_not_normal_message():
     assert calls[0]["thread_id"] == "thread-1"
     assert calls[0]["reply_to"] == "request-1"
     assert calls[0]["outcome"] == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_turn_end_rejects_foreign_authenticated_sender_even_with_matching_ids():
+    """A foreign authenticated identity cannot settle another requester."""
+    plugin, llm = _responder([])
+    plugin._cli_waiters = {}
+    plugin._acp_network_turns = {
+        "request-id": SimpleNamespace(
+            message_id="request-id",
+            thread_id="thread-id",
+            handle="expected-agent",
+        )
+    }
+    message = HubMessage(
+        id="foreign-end",
+        action="turn_end",
+        from_agent="foreign-agent",
+        from_identity="foreign-agent",
+        to="infra",
+        thread_id="thread-id",
+        reply_to="request-id",
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert "request-id" in plugin._acp_network_turns
+    assert llm.conversation_history == []
