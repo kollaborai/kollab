@@ -422,3 +422,20 @@ def test_authenticated_agent_route_falls_back_when_registry_lookup_fails():
     plugin = HubPlugin(event_bus=event_bus)
     llm = SimpleNamespace(profile_manager=MagicMock())
     assert plugin._acp_agent_admission_enabled(llm) is False
+
+
+def test_authenticated_agent_dispatch_is_tri_state_and_fail_closed_for_acp():
+    plugin = HubPlugin(event_bus=MagicMock())
+    llm = SimpleNamespace(
+        profile_manager=SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+        )
+    )
+    plugin.event_bus.get_service.return_value = None
+    assert plugin._agent_dispatch_mode(llm) == "unavailable"
+    plugin.event_bus.get_service.side_effect = RuntimeError("registry closed")
+    assert plugin._agent_dispatch_mode(llm) == "unavailable"
+    llm.profile_manager.get_active_profile = lambda: SimpleNamespace(
+        get_provider=lambda: "native"
+    )
+    assert plugin._agent_dispatch_mode(llm) == "native"
