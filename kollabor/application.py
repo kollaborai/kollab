@@ -3407,7 +3407,7 @@ class TerminalLLMChat:
         if acp_orchestrator is not None:
             try:
                 await acp_orchestrator.close()
-            except Exception as exc:
+            except BaseException as exc:
                 logger.warning("ACP runner cleanup failed: %s", exc)
             self.acp_orchestrator = None
         self.running = False
