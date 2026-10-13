@@ -377,6 +377,19 @@ async def test_pipe_plain_text_still_reaches_the_llm():
     assert calls == [("pre", "pipe", "ordinary question")]
 
 @pytest.mark.asyncio
+async def test_selected_acp_profile_rejects_when_orchestrator_missing():
+    service = object.__new__(LLMService)
+    service.event_bus = EventBus()
+    profile = SimpleNamespace(get_provider=lambda: "acp")
+    service.profile_manager = SimpleNamespace(get_active_profile=lambda: profile)
+
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+
+    assert result == {"status": "rejected", "reason": "acp_unavailable"}
+
+
+
+@pytest.mark.asyncio
 async def test_acp_admission_emits_hooks_once_and_returns_immediately():
     bus = EventBus()
     service = object.__new__(LLMService)
@@ -426,7 +439,7 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
 
         def admit(self, message, *, request_id, source, thread_id=None):
             calls.append((message, source))
-            return SimpleNamespace(request_id=request_id)
+            return SimpleNamespace(request_id=request_id, turn_id="turn-1")
 
     bus.register_service("acp_orchestrator", ACP())
     event = SimpleNamespace(source="state_rpc")
@@ -436,6 +449,7 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
     )
     assert result["status"] == "queued"
     assert result["request_id"]
+    assert result["turn_id"] == "turn-1"
     await asyncio.gather(*tasks)
     assert calls == [("hello", "state_rpc")]
 

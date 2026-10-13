@@ -4,6 +4,7 @@ import sys
 import pytest
 from acp.schema import PermissionOption, ToolCallStart
 
+from kollabor.llm import acp_bridge as bridge_mod
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
 
 STUBBORN_ADAPTER = """
@@ -320,3 +321,37 @@ async def test_admission_accepts_exactly_ten_waiting_turns(tmp_path):
     with pytest.raises(ACPError, match="full"):
         runner.admit("overflow", request_id="overflow", source="state_rpc")
     await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_failure_cleans_connection_process_and_stderr(tmp_path, monkeypatch):
+    runner = ACPRunner(ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)))
+
+    class Connection:
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    class Process:
+        pid = 4242
+        returncode = None
+
+        async def wait(self):
+            self.returncode = 0
+
+    process = Process()
+    runner._connection = Connection()
+    runner._process = process
+    runner._stderr_task = asyncio.create_task(asyncio.sleep(60))
+    monkeypatch.setattr(bridge_mod.os, "killpg", lambda *_args: None)
+
+    async def fail_start():
+        raise RuntimeError("initialize failed")
+
+    runner._start_process = fail_start
+    with pytest.raises(RuntimeError, match="initialize failed"):
+        await runner._restart_process()
+
+    assert runner._connection is None
+    assert runner._process is None
+    assert runner._stderr_task is None
+    assert process.returncode == 0

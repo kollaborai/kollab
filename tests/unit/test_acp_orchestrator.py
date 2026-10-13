@@ -5,6 +5,7 @@ import pytest
 
 from kollabor.llm import acp_orchestrator as mod
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_tui.display_tap import DisplayTap
 
 
 class Tap:
@@ -101,3 +102,28 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     await orchestrator.close()
     assert not orchestrator.active
     assert hub.rotations == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_update_publishes_contextual_metadata_to_real_display_tap():
+    tap = DisplayTap()
+    bus = Bus()
+    bus.services["display_tap"] = tap
+    orchestrator = mod.ACPOrchestrator(bus)
+
+    orchestrator._on_runner_update({
+        "kind": "text",
+        "text": "chunk",
+        "request_id": "req-1",
+        "turn_id": 7,
+        "source": "hub",
+        "thread_id": "thread-1",
+    })
+
+    event = tap.get_snapshot()[-1]
+    assert event["type"] == "token"
+    assert event["text"] == "chunk"
+    assert event["request_id"] == "req-1"
+    assert event["turn_id"] == 7
+    assert event["input_source"] == "hub"
+    assert event["thread_id"] == "thread-1"

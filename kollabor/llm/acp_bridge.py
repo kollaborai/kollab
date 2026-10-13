@@ -326,36 +326,23 @@ class ACPRunner:
                     self._queue_release.set()
 
     async def _restart_process(self) -> None:
+        """Replace the owned ACP process, even if SDK close is stuck."""
         if self._closing:
             return
-        old_process = self._process
-        if self._connection is not None:
-            await self._connection.close()
-        if self._closing:
+        try:
+            # _terminate_process bounds connection.close and always tears down
+            # the process group/stderr task before a fresh session is started.
             await self._terminate_process()
-            return
-        if old_process is not None and old_process.returncode is None:
-            try:
-                os.killpg(old_process.pid, signal.SIGTERM)
-                await asyncio.wait_for(old_process.wait(), timeout=2)
-            except (AttributeError, PermissionError, ProcessLookupError, asyncio.TimeoutError):
-                if old_process.returncode is None:
-                    try:
-                        os.killpg(old_process.pid, signal.SIGKILL)
-                    except (AttributeError, PermissionError, ProcessLookupError):
-                        pass
-                    await old_process.wait()
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            await asyncio.gather(self._stderr_task, return_exceptions=True)
-        self._connection = None
-        self._process = None
-        self._stderr_task = None
-        if self._closing:
-            return
-        await self._start_process()
-        if self._closing:
+            if self._closing:
+                return
+            await self._start_process()
+            if self._closing:
+                await self._terminate_process()
+        except BaseException:
+            # Never leave a half-restarted process or connection behind when
+            # initialization/new_session fails (including cancellation).
             await self._terminate_process()
+            raise
 
     async def _run_prompt(self, admission: ACPAdmission, generation: int) -> ACPResult:
         turn_id, text = admission.turn_id, admission.text

@@ -1735,6 +1735,17 @@ class LLMService:
 
         acp = self.event_bus.get_service("acp_orchestrator")
         acp_dispatch = acp is not None and getattr(acp, "active", False)
+        selected_acp = False
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is not None:
+            try:
+                profile = profile_manager.get_active_profile()
+                provider = profile.get_provider() if profile is not None else ""
+                selected_acp = provider == "acp"
+            except Exception:
+                selected_acp = False
+        if selected_acp and not acp_dispatch:
+            return {"status": "rejected", "reason": "acp_unavailable"}
         if acp_dispatch and not isinstance(message, str):
             return {"status": "rejected", "reason": "acp_text_only"}
 
@@ -1793,13 +1804,6 @@ class LLMService:
             await self._message_handler.handle_context_injection(data, event),
         )
 
-    async def _release_acp_slot(self) -> None:
-        lock = getattr(self, "_acp_admission_lock", None)
-        if lock is None:
-            return
-        async with lock:
-            self._acp_pending = max(0, self._acp_pending - 1)
-
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
         """Admit ACP input through its owner; otherwise delegate native handling."""
         acp = self.event_bus.get_service("acp_orchestrator")
@@ -1819,7 +1823,11 @@ class LLMService:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}
                 return {"status": "rejected", "reason": "acp_admission_failed"}
-            return {"status": "queued", "request_id": admission.request_id}
+            return {
+                "status": "queued",
+                "request_id": admission.request_id,
+                "turn_id": admission.turn_id,
+            }
         return cast(
             Dict[str, Any], await self._message_handler.handle_user_input(data, event)
         )
