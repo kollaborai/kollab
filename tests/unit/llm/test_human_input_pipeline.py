@@ -512,9 +512,30 @@ async def test_authenticated_agent_input_is_nonhuman_and_permission_pending_reje
     ))
     service = object.__new__(LLMService)
     service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    bus.register_service("acp_orchestrator", SimpleNamespace(active=True))
     result = await service.submit_human_input(
         "agent command", source="agent",
         origin_context={"authenticated": True, "sender": "agent-a"},
     )
     assert result == {"status": "cancelled", "phase": "pre_user_input"}
     assert seen == ["agent"]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_rejects_acp_registry_lookup_failure():
+    service = object.__new__(LLMService)
+    service.event_bus = MagicMock()
+    service.event_bus.get_service.side_effect = RuntimeError("registry closed")
+    service.profile_manager = MagicMock()
+    service.profile_manager.get_active_profile.return_value = SimpleNamespace(
+        get_provider=lambda: "acp"
+    )
+    result = await service.submit_human_input(
+        "agent command", source="agent",
+        origin_context={"authenticated": True, "sender": "agent-a"},
+        request_id="req-fail", thread_id="thread-fail",
+    )
+    assert result == {"status": "rejected", "reason": "acp_unavailable"}

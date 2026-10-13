@@ -1738,18 +1738,25 @@ class LLMService:
             return {"status": "rejected", "reason": "invalid_input_source"}
         source_value = "agent" if is_agent else source.value
 
-        acp = self.event_bus.get_service("acp_orchestrator")
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+        except Exception:
+            acp = None
         acp_dispatch = acp is not None and getattr(acp, "active", False) is True
         selected_acp = False
+        profile_unknown = False
         profile_manager = getattr(self, "profile_manager", None)
         if profile_manager is not None:
             try:
                 profile = profile_manager.get_active_profile()
+                profile_unknown = profile is None
                 provider = profile.get_provider() if profile is not None else ""
                 selected_acp = provider == "acp"
             except Exception:
-                selected_acp = False
-        if selected_acp and not acp_dispatch:
+                profile_unknown = True
+        else:
+            profile_unknown = True
+        if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
             return {"status": "rejected", "reason": "acp_unavailable"}
         if acp_dispatch and not isinstance(message, str):
             return {"status": "rejected", "reason": "acp_text_only"}
@@ -1924,8 +1931,6 @@ class LLMService:
         queue_processor = self._queue_processor
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
-            if queue_processor.cancel_processing:
-                return queue_processor.cancel_generation
             generation = queue_processor.request_cancellation(origin=origin)
             async def cancel_acp() -> None:
                 try:
