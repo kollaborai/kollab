@@ -34,8 +34,8 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
-from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .capture import normalize_records, paginate, plain_text
+from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext

@@ -42,6 +42,16 @@ def _timestamp(value: Any) -> str | None:
         return None
 
 
+def _normalize_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return normalize_text(value)
+    if isinstance(value, dict):
+        return {str(key): _normalize_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_payload(item) for item in value]
+    return value
+
+
 def _record(raw: Any, seq: int) -> dict[str, Any]:
     data: dict[str, Any]
     if isinstance(raw, dict):
@@ -66,20 +76,30 @@ def _record(raw: Any, seq: int) -> dict[str, Any]:
     text = data.get("text", data.get("rendered", data.get("message", data.get("content", ""))))
     if isinstance(text, (dict, list)):
         text = json.dumps(text, ensure_ascii=False)
+    try:
+        event_seq = int(data.get("seq", seq))
+    except (TypeError, ValueError):
+        event_seq = seq
     timestamp = _timestamp(data.get("timestamp", data.get("ts")))
     normalized = normalize_text(text)
+    excluded = {"type", "kind", "seq", "timestamp", "ts", "text", "rendered", "message", "content"}
+    payload = _normalize_payload({key: value for key, value in data.items() if key not in excluded})
+    if not payload:
+        payload = {"text": normalized}
     item: dict[str, Any] = {
-        "seq": int(data.get("seq", seq)),
+        "seq": event_seq,
         "timestamp": timestamp,
         "ts": timestamp,
         "kind": kind,
         "text": normalized,
-        "payload": normalized,
+        "payload": payload,
     }
     tool = data.get("tool", data.get("tool_name", data.get("name")))
     if tool and kind in {"tool-call", "tool-result"}:
         item["tool"] = str(tool)
     status = data.get("status")
+    if status is None and kind == "tool-result" and "success" in data:
+        status = "ok" if data.get("success") else "error"
     if status is None and kind == "error":
         status = "error"
     if status is not None:
@@ -93,31 +113,34 @@ def normalize_records(raw_events: Iterable[Any]) -> list[dict[str, Any]]:
     return [record for record in records if record["text"] or record["kind"] != "text"]
 
 
-def paginate(records: list[dict[str, Any]], cursor: Any = None, max_chars: int | None = None) -> tuple[list[dict[str, Any]], bool, str | None]:
+def paginate(
+    records: list[dict[str, Any]],
+    cursor: Any = None,
+    max_chars: int | None = None,
+) -> tuple[list[dict[str, Any]], bool, str | None]:
     try:
-        start = max(0, int(cursor or 0))
+        after_seq = int(cursor) if cursor is not None else 0
     except (TypeError, ValueError):
-        start = 0
-    page = records[start:]
+        after_seq = 0
+    page = [record for record in records if int(record["seq"]) > after_seq]
     truncated = False
     used = 0
-    if max_chars is not None:
-        try:
-            budget = max(1, int(max_chars))
-        except (TypeError, ValueError):
-            budget = None
-        if budget is not None:
-            kept: list[dict[str, Any]] = []
-            for record in page:
-                cost = len(record.get("text", ""))
-                if kept and used + cost > budget:
-                    truncated = True
-                    break
-                kept.append(record)
-                used += cost
-            page = kept
-            truncated = truncated or start + len(page) < len(records)
-    next_cursor = str(start + len(page)) if start + len(page) < len(records) else None
+    try:
+        budget = max(1, int(max_chars)) if max_chars is not None else None
+    except (TypeError, ValueError):
+        budget = None
+    if budget is not None:
+        kept: list[dict[str, Any]] = []
+        for record in page:
+            cost = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            if kept and used + cost > budget:
+                truncated = True
+                break
+            kept.append(record)
+            used += cost
+        page = kept
+        truncated = truncated or len(page) < len([record for record in records if int(record["seq"]) > after_seq])
+    next_cursor = str(page[-1]["seq"]) if truncated and page else None
     return page, truncated, next_cursor
 
 

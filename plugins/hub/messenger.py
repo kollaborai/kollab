@@ -2478,7 +2478,11 @@ class AgentMessenger:
             reader, writer = await AgentMessenger._open(
                 socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
-            request: Dict[str, Any] = {"action": "get_output", "lines": _coerce_line_count(lines, 100), "format": capture_format}
+            request: Dict[str, Any] = {
+                "action": "get_output",
+                "lines": _coerce_line_count(lines, 100),
+                "format": capture_format,
+            }
             if max_chars is not None:
                 request["max_chars"] = max_chars
             if cursor is not None:
