@@ -1026,13 +1026,26 @@ class LLMService:
         if hasattr(self, "_queue_processor"):
             self._queue_processor.processing_start_time = value
 
+    def _active_profile_is_acp(self) -> bool:
+        """Return whether the selected profile is handled by the ACP runner."""
+        try:
+            if self.profile_manager is None:
+                return False
+            profile = self.profile_manager.get_active_profile()
+            provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+            return str(provider).lower() == "acp"
+        except Exception:
+            # Profile discovery failures preserve native startup behavior.
+            return False
+
     async def initialize(self) -> bool:
         """Initialize the LLM service components."""
-        # Initialize API communication service (KISS refactoring)
-        await self.api_service.initialize()
-
-        # Initialize provider system (wrapper pattern - transparent integration)
-        await self._initialize_provider()
+        # ACP profiles own their transport and must not initialize the native
+        # API/provider stack. Native profiles retain the historical startup
+        # order and behavior unchanged.
+        if not self._active_profile_is_acp():
+            await self.api_service.initialize()
+            await self._initialize_provider()
 
         # Register hooks
         await self.hook_system.register_hooks()
