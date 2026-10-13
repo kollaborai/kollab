@@ -1234,11 +1234,14 @@ def test_authenticated_unix_two_server_turn_end_preserves_correlation(tmp_path):
                 "replies": 1,
                 "failed": False,
                 "outcome": "end_turn",
+                "text": "The receiving agent finished this request.",
             }
             assert await asyncio.wait_for(
                 requester_plugin._cli_waiters[request.thread_id].get(),
                 timeout=0.2,
-            ) == ("end", 1, False, "")
+            ) == (
+                "end", 1, False, "The receiving agent finished this request."
+            )
         finally:
             await requester_server.stop()
             await receiver_server.stop()
