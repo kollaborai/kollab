@@ -168,6 +168,8 @@ class ACPRunner:
         self._queue_release.set()
         self._active_rpc_task: asyncio.Task[ACPResult] | None = None
         self._force_cancel = False
+        self._cancel_lock = asyncio.Lock()
+        self._cancel_hold = False
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -232,6 +234,7 @@ class ACPRunner:
 
     async def _drain_queue(self) -> None:
         while self.session_id is not None:
+            await self._queue_release.wait()
             generation, turn_id, text, future = await self._queue.get()
             if future.cancelled():
                 continue
@@ -259,10 +262,21 @@ class ACPRunner:
                 self._active_rpc_task = None
                 self._active_future = None
                 self._active_done.set()
-            if self._restart_before_next:
-                self._restart_before_next = False
-                await self._restart_process()
-            self._queue_release.set()
+            try:
+                if self._restart_before_next:
+                    self._restart_before_next = False
+                    await self._restart_process()
+            except Exception as exc:
+                while True:
+                    try:
+                        _, _, _, queued = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if not queued.done():
+                        queued.set_exception(exc)
+            finally:
+                if not self._cancel_hold:
+                    self._queue_release.set()
 
     async def _restart_process(self) -> None:
         old_process = self._process
@@ -358,37 +372,43 @@ class ACPRunner:
         return acp.RequestPermissionResponse(outcome=AllowedOutcome(optionId=selected, outcome="selected"))
 
     async def cancel(self) -> None:
-        self.permission_bridge.cancel()
-        if self._active_done.is_set():
-            return
-        self.generation += 1
-        if self._active_future and not self._active_future.done():
-            self._active_future.set_exception(ACPError("ACP turn cancelled"))
-        if self.session_id and self._connection:
-            await self._connection.cancel(session_id=self.session_id)
-        active = self._active_rpc_task
-        if active is None:
-            return
-        try:
-            await asyncio.wait_for(asyncio.shield(active), timeout=self.cancel_timeout)
-        except asyncio.TimeoutError:
-            self._restart_before_next = True
-            self._force_cancel = True
+        async with self._cancel_lock:
+            self.permission_bridge.cancel()
+            active = self._active_rpc_task
+            if active is None or active.done():
+                return
+            # Hold the worker at the queue boundary before sending cancel so a
+            # completion cannot release B between our snapshot and the RPC.
+            self._cancel_hold = True
+            self._queue_release.clear()
+            if self._active_future and not self._active_future.done():
+                self._active_future.set_exception(ACPError("ACP turn cancelled"))
+            if self.session_id and self._connection:
+                await self._connection.cancel(session_id=self.session_id)
             try:
-                await self._terminate_process()
+                await asyncio.wait_for(asyncio.shield(active), timeout=self.cancel_timeout)
+                # The protocol response (including stopReason=cancelled) and
+                # all reader-delivered updates are now drained. Preserve the
+                # process/session and fence the next queued generation.
+                self.generation += 1
+            except asyncio.TimeoutError:
+                self.generation += 1
+                self._restart_before_next = True
+                self._force_cancel = True
                 try:
-                    await asyncio.wait_for(asyncio.shield(active), timeout=2)
-                except asyncio.TimeoutError:
-                    active.cancel()
-                    await asyncio.gather(active, return_exceptions=True)
-                except Exception:
-                    # Closing the transport is the expected completion for a
-                    # stubborn adapter; the worker owns restart and cleanup.
-                    pass
+                    await self._terminate_process()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(active), timeout=2)
+                    except asyncio.TimeoutError:
+                        active.cancel()
+                        await asyncio.gather(active, return_exceptions=True)
+                    except Exception:
+                        pass
+                finally:
+                    self._force_cancel = False
             finally:
-                self._force_cancel = False
-        finally:
-            await asyncio.wait_for(self._queue_release.wait(), timeout=self.cancel_timeout + 2)
+                self._cancel_hold = False
+                self._queue_release.set()
 
     async def _terminate_process(self) -> None:
         connection, process, stderr_task = self._connection, self._process, self._stderr_task
@@ -422,4 +442,12 @@ class ACPRunner:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
             self._worker = None
+        while True:
+            try:
+                _, _, _, queued = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not queued.done():
+                queued.set_exception(ACPError("ACP runner closed"))
+        self._queue_release.set()
         await self._terminate_process()

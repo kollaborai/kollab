@@ -28,6 +28,13 @@ class FakeAgent:
         return NewSessionResponse(sessionId=f"s{self._run}")
     async def prompt(self, session_id, prompt, **kwargs):
         if self._run == 1:
+            async def late_update():
+                await asyncio.sleep(0.2)
+                await self._conn.session_update(session_id, AgentMessageChunk(
+                    sessionUpdate="agent_message_chunk",
+                    content=TextContentBlock(type="text", text="late-a "),
+                ))
+            asyncio.create_task(late_update())
             await asyncio.Future()
         await self._conn.session_update(session_id, AgentMessageChunk(
             sessionUpdate="agent_message_chunk",
@@ -36,6 +43,35 @@ class FakeAgent:
         return PromptResponse(stopReason="end_turn")
     async def cancel(self, session_id, **kwargs):
         return None
+    def on_connect(self, conn):
+        self._conn = conn
+
+asyncio.run(acp.run_agent(FakeAgent()))
+"""
+
+
+COMPLIANT_ADAPTER = """
+import asyncio
+import acp
+from acp.schema import AgentMessageChunk, InitializeResponse, NewSessionResponse, PromptResponse, TextContentBlock
+
+class FakeAgent:
+    def __init__(self):
+        self._conn = None
+        self._cancel = asyncio.Event()
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocolVersion=1)
+    async def new_session(self, cwd, mcp_servers=None, **kwargs):
+        return NewSessionResponse(sessionId="preserved")
+    async def prompt(self, session_id, prompt, **kwargs):
+        await self._cancel.wait()
+        await self._conn.session_update(session_id, AgentMessageChunk(
+            sessionUpdate="agent_message_chunk",
+            content=TextContentBlock(type="text", text="drained "),
+        ))
+        return PromptResponse(stopReason="cancelled")
+    async def cancel(self, session_id, **kwargs):
+        self._cancel.set()
     def on_connect(self, conn):
         self._conn = conn
 
@@ -128,7 +164,7 @@ async def test_queued_turn_keeps_first_generation_updates(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compliant_cancel_preserves_process_session_and_single_consumer(tmp_path):
-    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    profile = ACPProfile("compliant", (sys.executable, "-c", COMPLIANT_ADAPTER), cwd=str(tmp_path))
     runner = ACPRunner(profile)
     await runner.start()
     process = runner._process
@@ -139,7 +175,7 @@ async def test_compliant_cancel_preserves_process_session_and_single_consumer(tm
     with pytest.raises(ACPError):
         await first
     assert runner._process is process
-    assert runner.session_id == "s1"
+    assert runner.session_id == "preserved"
     assert runner._worker is worker
     assert not runner._worker.done()
     await runner.close()
