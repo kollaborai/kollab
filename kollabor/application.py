@@ -1243,8 +1243,22 @@ class TerminalLLMChat:
         ):
             return str(allow_once[0].get("optionId"))
 
+        def schedule_cancel() -> None:
+            orchestrator = getattr(self, "acp_orchestrator", None)
+            cancel = getattr(orchestrator, "cancel", None)
+            if callable(cancel):
+                # The ACP request callback runs inside the active prompt RPC;
+                # awaiting cancellation here deadlocks that RPC. Schedule the
+                # owner and return immediately so the runner can emit the
+                # protocol-cancelled response and drain its queue boundary.
+                asyncio.create_task(cancel())
+
+        if not options:
+            schedule_cancel()
+            return None
         callback = getattr(manager, "_confirmation_callback", None)
         if callback is None:
+            schedule_cancel()
             return None
         details = {
             "tool_id": request.request_id,
@@ -1267,16 +1281,6 @@ class TerminalLLMChat:
             logger.exception("ACP permission confirmation failed")
             return None
         decision_details = getattr(decision, "confirmation_details", None) or {}
-
-        def schedule_cancel() -> None:
-            orchestrator = getattr(self, "acp_orchestrator", None)
-            cancel = getattr(orchestrator, "cancel", None)
-            if callable(cancel):
-                # The ACP request callback runs inside the active prompt RPC;
-                # awaiting cancellation here deadlocks that RPC. Schedule the
-                # owner and return immediately so the runner can emit the
-                # protocol-cancelled response and drain its queue boundary.
-                asyncio.create_task(cancel())
 
         if decision_details.get("acp_choice") == "cancel":
             schedule_cancel()

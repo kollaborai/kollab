@@ -232,7 +232,7 @@ class ACPPermissionBridge:
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
         offered = {str(option.get("optionId")): option for option in request.options}
-        if self._decide is None or not offered:
+        if self._decide is None:
             return None
         decision = asyncio.get_running_loop().create_future()
         self._pending.add(decision)
@@ -244,7 +244,14 @@ class ACPPermissionBridge:
             if not done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-                return None
+                reject_once = [
+                    option for option in request.options
+                    if str(option.get("kind")) == "reject_once"
+                ]
+                # A timeout may safely select the sole one-shot rejection;
+                # ambiguous or empty offerings fail closed and are cancelled
+                # by the owning orchestrator.
+                return str(reject_once[0].get("optionId")) if reject_once else None
             selected = next(iter(done)).result()
         except (asyncio.CancelledError, asyncio.TimeoutError):
             task.cancel()
