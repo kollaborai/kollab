@@ -355,3 +355,34 @@ async def test_restart_failure_cleans_connection_process_and_stderr(tmp_path, mo
     assert runner._process is None
     assert runner._stderr_task is None
     assert process.returncode == 0
+
+
+def test_final_answer_uses_last_message_id_and_preserves_stream():
+    updates = [
+        {"kind": "text", "text": "working", "message_id": "commentary"},
+        {"kind": "tool_call", "payload": {}},
+        {"kind": "text", "text": "answer ", "message_id": "final"},
+        {"kind": "text", "text": "now", "message_id": "final"},
+    ]
+    assert ACPRunner._select_answer(updates) == "answer now"
+    assert updates[0]["message_id"] == "commentary"
+    assert updates[-1]["message_id"] == "final"
+
+
+def test_final_answer_without_ids_prefers_text_after_last_tool():
+    updates = [
+        {"kind": "text", "text": "before "},
+        {"kind": "tool_call", "payload": {"x": 1}},
+        {"kind": "thought", "payload": {"hidden": True}},
+        {"kind": "text", "text": "after"},
+    ]
+    assert ACPRunner._select_answer(updates) == "after"
+
+
+def test_final_answer_without_ids_falls_back_before_tool_and_ignores_output():
+    updates = [
+        {"kind": "text", "text": "answer"},
+        {"kind": "tool_output", "payload": {"secret": "ignored"}},
+        {"kind": "thought", "payload": {"secret": "ignored"}},
+    ]
+    assert ACPRunner._select_answer(updates) == "answer"

@@ -357,7 +357,7 @@ class ACPRunner:
             )
             await asyncio.sleep(0)
             stop_reason = str(response.stopReason) if response else None
-            answer = "".join(update["text"] for update in self._updates if update.get("kind") == "text")
+            answer = self._select_answer(self._updates)
             return ACPResult(
                 generation=generation,
                 session_id=self.session_id or "",
@@ -381,6 +381,34 @@ class ACPRunner:
             self._active_generation = 0
             self._active_turn_id = 0
 
+    @staticmethod
+    def _select_answer(updates: list[dict[str, Any]]) -> str:
+        """Select the final assistant message while retaining every stream update."""
+        text_updates = [item for item in updates if item.get("kind") == "text"]
+        if not text_updates:
+            return ""
+        identified = [item for item in text_updates if item.get("message_id")]
+        if identified:
+            message_id = str(identified[-1]["message_id"])
+            return "".join(
+                str(item.get("text", ""))
+                for item in text_updates
+                if str(item.get("message_id", "")) == message_id
+            )
+        tool_indexes = [
+            index for index, item in enumerate(updates)
+            if str(item.get("kind", "")).lower() in {
+                "tool_call", "tool_call_update", "tool_output", "tool_result",
+            }
+        ]
+        if tool_indexes:
+            tail = [item for item in updates[tool_indexes[-1] + 1:] if item.get("kind") == "text"]
+            if tail:
+                return "".join(str(item.get("text", "")) for item in tail)
+            head = [item for item in updates[:tool_indexes[-1]] if item.get("kind") == "text"]
+            return "".join(str(item.get("text", "")) for item in head)
+        return "".join(str(item.get("text", "")) for item in text_updates)
+
     async def _session_update(self, session_id: str, update: Any) -> None:
         if session_id != self.session_id or self._active_generation != self.generation:
             return
@@ -390,6 +418,9 @@ class ACPRunner:
             content = payload.get("content") or {}
             text = content.get("text", "") if isinstance(content, dict) else getattr(content, "text", "")
             update_data = {"kind": "text", "text": str(text)}
+            message_id = payload.get("messageId", payload.get("message_id"))
+            if message_id:
+                update_data["message_id"] = str(message_id)
         else:
             update_data = {"kind": str(kind), "payload": payload}
         update_data.update({
