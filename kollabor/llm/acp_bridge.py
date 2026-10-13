@@ -154,9 +154,15 @@ class _Client(acp.Client):
 class ACPRunner:
     """One SDK-owned ACP process/session with FIFO prompt queue."""
 
-    def __init__(self, profile: ACPProfile, permission_bridge: ACPPermissionBridge | None = None):
+    def __init__(
+        self,
+        profile: ACPProfile,
+        permission_bridge: ACPPermissionBridge | None = None,
+        update_callback: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self.profile = profile
         self.permission_bridge = permission_bridge or ACPPermissionBridge()
+        self.update_callback = update_callback
         self.generation = 0
         self._next_turn_id = 0
         self._active_turn_id = 0
@@ -168,6 +174,7 @@ class ACPRunner:
         self._queue_release.set()
         self._active_rpc_task: asyncio.Task[ACPResult] | None = None
         self._force_cancel = False
+        self._closing = False
         self._cancel_lock = asyncio.Lock()
         self._cancel_hold = False
         self.cancel_timeout = 30.0
@@ -176,7 +183,9 @@ class ACPRunner:
         self._process: Any = None
         self._client = _Client(self)
         self._stderr_task: asyncio.Task[None] | None = None
-        self._queue: asyncio.Queue[tuple[int, int, str, asyncio.Future[ACPResult]]] = asyncio.Queue(maxsize=10)
+        self._queue: asyncio.Queue[
+            tuple[int, int, str, asyncio.Future[ACPResult]] | None
+        ] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -204,6 +213,7 @@ class ACPRunner:
         return self.session_id
 
     async def start(self) -> str:
+        self._closing = False
         session_id = await self._start_process()
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._drain_queue())
@@ -233,9 +243,14 @@ class ACPRunner:
         return await future
 
     async def _drain_queue(self) -> None:
-        while self.session_id is not None:
+        while True:
             await self._queue_release.wait()
-            generation, turn_id, text, future = await self._queue.get()
+            item = await self._queue.get()
+            if item is None:
+                if self._closing:
+                    return
+                continue
+            generation, turn_id, text, future = item
             if future.cancelled():
                 continue
             if generation != self.generation:
@@ -267,15 +282,18 @@ class ACPRunner:
                 if self.generation == generation:
                     self.generation += 1
             try:
-                if self._restart_before_next:
+                if self._restart_before_next and not self._closing:
                     self._restart_before_next = False
                     await self._restart_process()
             except Exception as exc:
                 while True:
                     try:
-                        _, _, _, queued = self._queue.get_nowait()
+                        item = self._queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
+                    if item is None:
+                        continue
+                    _, _, _, queued = item
                     if not queued.done():
                         queued.set_exception(exc)
             finally:
@@ -290,11 +308,11 @@ class ACPRunner:
             try:
                 os.killpg(old_process.pid, signal.SIGTERM)
                 await asyncio.wait_for(old_process.wait(), timeout=2)
-            except (AttributeError, ProcessLookupError, asyncio.TimeoutError):
+            except (AttributeError, PermissionError, ProcessLookupError, asyncio.TimeoutError):
                 if old_process.returncode is None:
                     try:
                         os.killpg(old_process.pid, signal.SIGKILL)
-                    except (AttributeError, ProcessLookupError):
+                    except (AttributeError, PermissionError, ProcessLookupError):
                         pass
                     await old_process.wait()
         if self._stderr_task:
@@ -346,9 +364,12 @@ class ACPRunner:
         if kind == "agent_message_chunk":
             content = payload.get("content") or {}
             text = content.get("text", "") if isinstance(content, dict) else getattr(content, "text", "")
-            self._updates.append({"kind": "text", "text": str(text)})
+            update_data = {"kind": "text", "text": str(text)}
         else:
-            self._updates.append({"kind": str(kind), "payload": payload})
+            update_data = {"kind": str(kind), "payload": payload}
+        self._updates.append(update_data)
+        if self.update_callback is not None:
+            self.update_callback(dict(update_data))
 
     async def _request_permission(self, session_id: str, tool_call: Any, options: list[Any]) -> Any:
         if session_id != self.session_id or not self._active_generation:
@@ -387,14 +408,20 @@ class ACPRunner:
             self._queue_release.clear()
             if self._active_future and not self._active_future.done():
                 self._active_future.set_exception(ACPError("ACP turn cancelled"))
-            if self.session_id and self._connection:
-                await self._connection.cancel(session_id=self.session_id)
+            deadline = asyncio.get_running_loop().time() + self.cancel_timeout
+            cancel_task = None
             try:
-                await asyncio.wait_for(asyncio.shield(active), timeout=self.cancel_timeout)
-                # The protocol response (including stopReason=cancelled) and
-                # all reader-delivered updates are now drained. Preserve the
-                # process/session; the worker advances the turn fence after
-                # this RPC completes.
+                if self.session_id and self._connection:
+                    cancel_task = asyncio.create_task(self._connection.cancel(session_id=self.session_id))
+                    remaining = max(0.01, deadline - asyncio.get_running_loop().time())
+                    await asyncio.wait_for(asyncio.shield(cancel_task), timeout=remaining)
+                remaining = max(0.01, deadline - asyncio.get_running_loop().time())
+                cancel_result = await asyncio.wait_for(asyncio.shield(active), timeout=remaining)
+                if getattr(cancel_result, "stop_reason", None) != "cancelled":
+                    self._restart_before_next = True
+                    self.generation += 1
+                # A protocol cancelled response and reader drain preserve the
+                # process/session; the worker advances the turn fence.
             except asyncio.TimeoutError:
                 self.generation += 1
                 self._restart_before_next = True
@@ -411,6 +438,9 @@ class ACPRunner:
                 finally:
                     self._force_cancel = False
             finally:
+                if cancel_task is not None and not cancel_task.done():
+                    cancel_task.cancel()
+                    await asyncio.gather(cancel_task, return_exceptions=True)
                 self._cancel_hold = False
                 self._queue_release.set()
 
@@ -428,11 +458,11 @@ class ACPRunner:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
                 await asyncio.wait_for(process.wait(), timeout=2)
-            except (AttributeError, ProcessLookupError, asyncio.TimeoutError):
+            except (AttributeError, PermissionError, ProcessLookupError, asyncio.TimeoutError):
                 if process.returncode is None:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
-                    except (AttributeError, ProcessLookupError):
+                    except (AttributeError, PermissionError, ProcessLookupError):
                         pass
                     await process.wait()
         if stderr_task is not None:
@@ -440,18 +470,34 @@ class ACPRunner:
             await asyncio.gather(stderr_task, return_exceptions=True)
 
     async def close(self) -> None:
+        self._closing = True
         self.permission_bridge.cancel()
         self.session_id = None
-        if self._worker:
-            self._worker.cancel()
-            await asyncio.gather(self._worker, return_exceptions=True)
-            self._worker = None
+        self._queue_release.set()
         while True:
             try:
-                _, _, _, queued = self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if not queued.done():
-                queued.set_exception(ACPError("ACP runner closed"))
-        self._queue_release.set()
+            if item is not None:
+                _, _, _, queued = item
+                if not queued.done():
+                    queued.set_exception(ACPError("ACP runner closed"))
+        # Wake an idle consumer without relying on task cancellation of a
+        # Queue.get waiter, which can remain pending under SDK callbacks.
+        self._queue.put_nowait(None)
+        if self._active_future is not None and not self._active_future.done():
+            self._active_future.set_exception(ACPError("ACP runner closed"))
         await self._terminate_process()
+        worker = self._worker
+        if worker is not None:
+            worker.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                worker.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(worker), timeout=1)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            self._worker = None

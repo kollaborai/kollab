@@ -37,8 +37,9 @@ class Bus:
 
 
 class FakeRunner:
-    def __init__(self, profile):
+    def __init__(self, profile, update_callback=None):
         self.profile = profile
+        self.update_callback = update_callback
         self.started = False
         self.closed = False
         self._updates = []
@@ -49,7 +50,10 @@ class FakeRunner:
     async def prompt(self, text):
         import asyncio
         await asyncio.sleep(0.03)
-        self._updates.append({"kind": "text", "text": text})
+        update = {"kind": "text", "text": text}
+        self._updates.append(update)
+        if self.update_callback:
+            self.update_callback(update)
         return mod.ACPResult(1, "s1", text, "end_turn", tuple(self._updates), {"type": "turn_end"}, 1)
 
     async def cancel(self):

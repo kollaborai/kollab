@@ -5,7 +5,6 @@ ACP transport and permission protocol details remain in ``acp_bridge``.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -28,6 +27,7 @@ class ACPOrchestrator:
         self._runner: ACPRunner | None = None
         self._profile_name: str | None = None
         self._closed = False
+        self._active_source = "rpc"
 
     @property
     def active(self) -> bool:
@@ -72,7 +72,7 @@ class ACPOrchestrator:
             pass_env=profile.pass_env,
             mcp_servers=tuple(mcp_servers),
         )
-        self._runner = ACPRunner(acp_profile)
+        self._runner = ACPRunner(acp_profile, update_callback=self._on_runner_update)
         self._profile_name = profile.name
         await self._runner.start()
         self._closed = False
@@ -81,13 +81,8 @@ class ACPOrchestrator:
     async def submit(self, text: str, *, source: str = "rpc") -> dict[str, Any]:
         if self._runner is None or self._closed:
             raise RuntimeError("ACP runner is not active")
-        seen = 0
-        prompt_task = asyncio.create_task(self._runner.prompt(text))
-        while not prompt_task.done():
-            seen = self._publish_pending_updates(seen, source)
-            await asyncio.sleep(0.01)
-        result: ACPResult = await prompt_task
-        self._publish_pending_updates(seen, source, updates=result.updates)
+        self._active_source = source
+        result: ACPResult = await self._runner.prompt(text)
         publish_semantic(
             self.event_bus,
             "turn_complete",
@@ -113,18 +108,14 @@ class ACPOrchestrator:
             "end_frame": result.end_frame,
         }
 
-    def _publish_pending_updates(
-        self, seen: int, source: str, *, updates: tuple[dict[str, Any], ...] | None = None
-    ) -> int:
-        current = updates if updates is not None else tuple(getattr(self._runner, "_updates", ()))
-        for update in current[seen:]:
-            publish_semantic(
-                self.event_bus,
-                "token" if update.get("kind") == "text" else str(update.get("kind", "update")),
-                **{k: v for k, v in update.items() if k != "kind"},
-                input_source=source,
-            )
-        return len(current)
+    def _on_runner_update(self, update: dict[str, Any]) -> None:
+        kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
+        publish_semantic(
+            self.event_bus,
+            kind,
+            **{k: v for k, v in update.items() if k != "kind"},
+            input_source=self._active_source,
+        )
 
     async def cancel(self) -> None:
         if self._runner is not None and not self._closed:
