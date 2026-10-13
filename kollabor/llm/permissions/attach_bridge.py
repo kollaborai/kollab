@@ -262,7 +262,10 @@ class AttachPermissionBridge:
                 return (
                     len(once) == 1
                     and bool(operation)
-                    and str(operation).split(":", 1)[0] == "edit"
+                    and (
+                        (isinstance(operation, dict) and operation.get("kind") == "edit")
+                        or (isinstance(operation, str) and operation.split(":", 1)[0] == "edit")
+                    )
                 )
             return response is ConfirmationResponse.DENY
         if not details.get("acp_options"):
