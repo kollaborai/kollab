@@ -422,7 +422,9 @@ async def test_profile_resolution_uses_cache_and_strips_provider_keys(tmp_path, 
     assert command[0] == str(adapter)
     assert env["OPENAI_API_KEY"] == "must-not-pass"
     assert env["CUSTOM_ENV"] == "kept"
-    assert (config / "acp" / "resolved.json").exists()
+    cache_path = config / "acp" / "resolved.json"
+    assert cache_path.exists()
+    assert __import__("json").loads(cache_path.read_text())["custom"]["path"] == str(adapter)
     adapter.unlink()
     with pytest.raises(ACPError, match="adapter executable not found"):
         profile.resolve()

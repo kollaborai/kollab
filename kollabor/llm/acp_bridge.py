@@ -132,7 +132,7 @@ class ACPProfile:
             pass
         cache[self.name] = {"path": executable, "directory": resolved_dir, "node": node_path}
         try:
-            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\\n")
+            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
         except OSError:
             pass
         path_prefix = [resolved_dir]
