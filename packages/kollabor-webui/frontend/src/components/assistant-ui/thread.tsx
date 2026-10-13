@@ -48,6 +48,7 @@ import {
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
   useAui,
+  useAssistantTransportSendCommand,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -304,6 +305,7 @@ const Composer: FC<{
   attachmentsEnabled: boolean;
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
+  const sendTransportCommand = useAssistantTransportSendCommand();
   const voice = useVoiceMode();
   const placeholder = useContext(ComposerPlaceholderContext);
   // Text typed into a chat that is about to be swapped out would be lost, or
@@ -361,7 +363,25 @@ const Composer: FC<{
     }
     lastBusySubmit.current = { fingerprint, at: now };
     event.preventDefault();
-    aui.composer.send({ steer: true });
+    const parts: Array<
+      | { type: "text"; text: string }
+      | { type: "image"; image: string }
+    > = [];
+    if (state.text.trim()) parts.push({ type: "text", text: state.text });
+    for (const attachment of state.attachments) {
+      for (const part of attachment.content ?? []) {
+        if (part.type === "text") parts.push({ type: "text", text: part.text });
+        if (part.type === "image") parts.push({ type: "image", image: part.image });
+      }
+    }
+    if (parts.length === 0) return;
+    sendTransportCommand({
+      type: "add-message",
+      message: { role: "user", parts },
+      parentId: null,
+      sourceId: null,
+    });
+    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
