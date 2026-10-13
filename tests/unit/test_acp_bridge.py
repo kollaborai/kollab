@@ -305,3 +305,18 @@ def test_missing_adapter_is_a_hard_gate(tmp_path):
     profile = ACPProfile("missing", ("definitely-not-an-acp-adapter",), cwd=str(tmp_path))
     with pytest.raises(ACPError):
         profile.resolve()
+
+@pytest.mark.asyncio
+async def test_admission_accepts_exactly_ten_waiting_turns(tmp_path):
+    profile = ACPProfile("fake", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path))
+    runner = ACPRunner(profile)
+    await runner.start()
+    runner._queue_release.clear()
+    admissions = [
+        runner.admit(f"m{i}", request_id=f"r{i}", source="state_rpc")
+        for i in range(10)
+    ]
+    assert [item.request_id for item in admissions] == [f"r{i}" for i in range(10)]
+    with pytest.raises(ACPError, match="full"):
+        runner.admit("overflow", request_id="overflow", source="state_rpc")
+    await runner.close()

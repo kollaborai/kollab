@@ -1,3 +1,6 @@
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from kollabor.llm import acp_orchestrator as mod
@@ -47,14 +50,22 @@ class FakeRunner:
     async def start(self):
         self.started = True
 
-    async def prompt(self, text):
-        import asyncio
-        await asyncio.sleep(0.03)
-        update = {"kind": "text", "text": text}
+    def admit(self, text, *, request_id, source, thread_id=None):
+        future = asyncio.get_running_loop().create_future()
+        update = {"kind": "text", "text": text, "request_id": request_id}
         self._updates.append(update)
         if self.update_callback:
             self.update_callback(update)
-        return mod.ACPResult(1, "s1", text, "end_turn", tuple(self._updates), {"type": "turn_end"}, 1)
+        future.set_result(
+            mod.ACPResult(
+                1, "s1", text, "end_turn", tuple(self._updates),
+                {"type": "turn_end"}, 1, request_id, source, thread_id,
+            )
+        )
+        return SimpleNamespace(request_id=request_id, future=future)
+
+    async def prompt(self, text):
+        return (await self.admit(text, request_id="legacy", source="rpc").future)
 
     async def cancel(self):
         pass
@@ -66,6 +77,12 @@ class FakeRunner:
 @pytest.mark.asyncio
 async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    monkeypatch.setattr(
+        mod, "publish_semantic",
+        lambda bus, event_type, **fields: bus.get_service("display_tap").publish_semantic(
+            {"type": event_type, **fields}
+        ),
+    )
     bus = Bus()
     hub = Hub()
     orchestrator = mod.ACPOrchestrator(bus, identity="lapis", hub_plugin=hub)
@@ -73,6 +90,7 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     await orchestrator.start(profile)
     result = await orchestrator.submit("hello", source="rpc")
     assert result["text"] == "hello"
+    await asyncio.sleep(0)
     assert bus.services["acp_orchestrator"] is orchestrator
     assert any(event.get("type") == "turn_complete" for event in bus.services["display_tap"].events)
     assert any(

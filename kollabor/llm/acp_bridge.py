@@ -130,6 +130,17 @@ class ACPPermissionBridge:
 
 
 @dataclass(frozen=True)
+class ACPAdmission:
+    request_id: str
+    source: str
+    thread_id: str | None
+    generation: int
+    turn_id: int
+    text: str
+    future: asyncio.Future["ACPResult"]
+
+
+@dataclass(frozen=True)
 class ACPResult:
     generation: int
     session_id: str
@@ -138,6 +149,9 @@ class ACPResult:
     updates: tuple[dict[str, Any], ...]
     end_frame: dict[str, Any]
     turn_id: int = 0
+    request_id: str = ""
+    source: str = ""
+    thread_id: str | None = None
 
 
 class _Client(acp.Client):
@@ -183,9 +197,7 @@ class ACPRunner:
         self._process: Any = None
         self._client = _Client(self)
         self._stderr_task: asyncio.Task[None] | None = None
-        self._queue: asyncio.Queue[
-            tuple[int, int, str, asyncio.Future[ACPResult]] | None
-        ] = asyncio.Queue(maxsize=10)
+        self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -226,7 +238,14 @@ class ACPRunner:
             sys.stderr.buffer.write(b"[acp] " + chunk)
             sys.stderr.buffer.flush()
 
-    async def prompt(self, text: str) -> ACPResult:
+    def admit(
+        self,
+        text: str,
+        *,
+        request_id: str,
+        source: str,
+        thread_id: str | None = None,
+    ) -> ACPAdmission:
         if not self.session_id or self._connection is None:
             raise ACPError("ACP runner is not started")
         if not text.strip():
@@ -234,13 +253,17 @@ class ACPRunner:
         generation = self.generation
         self._next_turn_id += 1
         turn_id = self._next_turn_id
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ACPResult] = loop.create_future()
+        future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
+        admission = ACPAdmission(request_id, source, thread_id, generation, turn_id, text, future)
         try:
-            self._queue.put_nowait((generation, turn_id, text, future))
+            self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
             raise ACPError("ACP prompt queue is full") from exc
-        return await future
+        return admission
+
+    async def prompt(self, text: str) -> ACPResult:
+        admission = self.admit(text, request_id=f"turn-{self._next_turn_id + 1}", source="rpc")
+        return await admission.future
 
     async def _drain_queue(self) -> None:
         while True:
@@ -250,16 +273,19 @@ class ACPRunner:
                 if self._closing:
                     return
                 continue
-            generation, turn_id, text, future = item
+            admission = item
+            generation = admission.generation
+            future = admission.future
             if future.cancelled():
                 continue
             if generation != self.generation:
                 generation = self.generation
             self._active_future = future
+            self._active_context = admission
             self._active_done.clear()
             self._queue_release.clear()
             self._active_rpc_task = asyncio.create_task(
-                self._run_prompt(generation, turn_id, text)
+                self._run_prompt(admission, generation)
             )
             try:
                 result = await self._active_rpc_task
@@ -293,9 +319,8 @@ class ACPRunner:
                         break
                     if item is None:
                         continue
-                    _, _, _, queued = item
-                    if not queued.done():
-                        queued.set_exception(exc)
+                    if not item.future.done():
+                        item.future.set_exception(exc)
             finally:
                 if not self._cancel_hold:
                     self._queue_release.set()
@@ -332,7 +357,8 @@ class ACPRunner:
         if self._closing:
             await self._terminate_process()
 
-    async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
+    async def _run_prompt(self, admission: ACPAdmission, generation: int) -> ACPResult:
+        turn_id, text = admission.turn_id, admission.text
         self._active_generation = generation
         self._active_turn_id = turn_id
         self._updates = []
@@ -359,6 +385,9 @@ class ACPRunner:
                     "stopReason": stop_reason,
                 },
                 turn_id=turn_id,
+                request_id=admission.request_id,
+                source=admission.source,
+                thread_id=admission.thread_id,
             )
         finally:
             self.permission_bridge.cancel()
@@ -376,6 +405,12 @@ class ACPRunner:
             update_data = {"kind": "text", "text": str(text)}
         else:
             update_data = {"kind": str(kind), "payload": payload}
+        update_data.update({
+            "request_id": getattr(getattr(self, "_active_context", None), "request_id", ""),
+            "turn_id": self._active_turn_id,
+            "source": getattr(getattr(self, "_active_context", None), "source", ""),
+            "thread_id": getattr(getattr(self, "_active_context", None), "thread_id", None),
+        })
         self._updates.append(update_data)
         if self.update_callback is not None:
             self.update_callback(dict(update_data))
@@ -488,10 +523,8 @@ class ACPRunner:
                 item = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if item is not None:
-                _, _, _, queued = item
-                if not queued.done():
-                    queued.set_exception(ACPError("ACP runner closed"))
+            if item is not None and not item.future.done():
+                item.future.set_exception(ACPError("ACP runner closed"))
         # Wake an idle consumer without relying on cancellation of a Queue.get
         # waiter, which can remain pending under SDK callbacks.
         self._queue.put_nowait(None)

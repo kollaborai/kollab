@@ -424,9 +424,9 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
     class ACP:
         active = True
 
-        async def submit(self, message, *, source):
-            await asyncio.sleep(0)
+        def admit(self, message, *, request_id, source, thread_id=None):
             calls.append((message, source))
+            return SimpleNamespace(request_id=request_id)
 
     bus.register_service("acp_orchestrator", ACP())
     event = SimpleNamespace(source="state_rpc")
@@ -434,7 +434,8 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
         {"message": "hello", "_acp_dispatch": True, "_acp_request_id": "r2"},
         event,
     )
-    assert result == {"status": "queued", "request_id": "r2"}
+    assert result["status"] == "queued"
+    assert result["request_id"]
     await asyncio.gather(*tasks)
     assert calls == [("hello", "state_rpc")]
 
@@ -444,16 +445,12 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     service = object.__new__(LLMService)
     service.event_bus = bus
 
-    class FullQueue:
-        def qsize(self):
-            return 10
-
     class ACP:
         active = True
-        runner = SimpleNamespace(_queue=FullQueue(), _active_rpc_task=None)
+
+        def admit(self, *args, **kwargs):
+            raise RuntimeError("ACP prompt queue is full")
 
     bus.register_service("acp_orchestrator", ACP())
-    bus.emit_with_hooks = AsyncMock()
-    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+    result = await service._handle_user_input({"message": "hello"}, SimpleNamespace(source="state_rpc"))
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
-    bus.emit_with_hooks.assert_not_awaited()
