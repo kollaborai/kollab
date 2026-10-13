@@ -214,7 +214,7 @@ class ACPPermissionBridge:
         self._generation = 0
         self._session_id: str | None = None
         self._cancelled = False
-        self._pending: set[asyncio.Task[str | None]] = set()
+        self._pending: set[asyncio.Future[str | None]] = set()
 
     def bind(self, session_id: str, generation: int) -> None:
         self._session_id = session_id
@@ -224,23 +224,35 @@ class ACPPermissionBridge:
     def cancel(self) -> None:
         self._cancelled = True
         for pending in tuple(self._pending):
-            pending.cancel()
+            if not pending.done():
+                pending.set_result(None)
 
     async def request(self, request: ACPPermissionRequest) -> str | None:
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
         offered = {str(option.get("optionId")): option for option in request.options}
-        if self._decide is None:
+        if self._decide is None or not offered:
             return None
-        pending = asyncio.create_task(self._decide(request))
-        self._pending.add(pending)
+        decision = asyncio.get_running_loop().create_future()
+        self._pending.add(decision)
+        task = asyncio.create_task(self._decide(request))
         try:
-            selected = await asyncio.wait_for(asyncio.shield(pending), timeout=300)
+            done, _ = await asyncio.wait(
+                (task, decision), timeout=300, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return None
+            selected = next(iter(done)).result()
         except (asyncio.CancelledError, asyncio.TimeoutError):
-            pending.cancel()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             return None
         finally:
-            self._pending.discard(pending)
+            self._pending.discard(decision)
+            if not task.done():
+                task.cancel()
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
         if selected is None or selected not in offered:
@@ -590,15 +602,44 @@ class ACPRunner:
                 "optionId": raw.get("optionId", raw.get("option_id")),
                 "kind": raw.get("kind"),
             })
+        raw_tool = tool_call.model_dump() if hasattr(tool_call, "model_dump") else {}
+        tool_name = (
+            raw_tool.get("name")
+            or raw_tool.get("toolName")
+            or raw_tool.get("title")
+            or getattr(tool_call, "name", None)
+            or getattr(tool_call, "title", None)
+        )
+        argv = raw_tool.get("arguments") or raw_tool.get("argv") or raw_tool.get("input")
+        if isinstance(argv, dict):
+            argv = json.dumps(argv, sort_keys=True, separators=(",", ":"))
+        if isinstance(argv, (list, tuple)):
+            operation = " ".join(str(item) for item in (argv or []))
+        else:
+            operation = str(argv or tool_name or "unknown")
         request = ACPPermissionRequest(
-            request_id=str(getattr(tool_call, "toolCallId", "permission")),
+            request_id=str(getattr(tool_call, "toolCallId", raw_tool.get("toolCallId", "permission"))),
             session_id=session_id,
             generation=self._active_generation,
-            operation=str(getattr(tool_call, "title", "unknown")),
-            workspace=self.profile.workspace or self.profile.cwd or os.getcwd(),
+            operation=operation,
+            workspace=os.path.realpath(self.profile.workspace or self.profile.cwd or os.getcwd()),
             profile=self.profile.name,
             options=tuple(option_data),
         )
+        if self.update_callback is not None:
+            self.update_callback({
+                "kind": "permission_request",
+                "request_id": request.request_id,
+                "turn_id": self._active_turn_id,
+                "source": getattr(getattr(self, "_active_context", None), "source", "acp"),
+                "thread_id": getattr(getattr(self, "_active_context", None), "thread_id", None),
+                "payload": {
+                    "operation": operation,
+                    "workspace": request.workspace,
+                    "profile": request.profile,
+                    "options": option_data,
+                },
+            })
         selected = await self.permission_bridge.request(request)
         if selected is None:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
