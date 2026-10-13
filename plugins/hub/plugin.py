@@ -4546,8 +4546,6 @@ class HubPlugin(BasePlugin):
             loop = asyncio.get_running_loop()
             self._startup_task = loop.create_task(_safe_start())
 
-            self._startup_task = loop.create_task(_safe_start())
-
     async def wait_until_ready(self, timeout: float = 30.0) -> None:
         """Wait until the local Hub socket is bound and published.
 
