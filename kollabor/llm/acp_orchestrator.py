@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from kollabor_ai.profile_manager import LLMProfile
@@ -28,6 +29,7 @@ class ACPOrchestrator:
         self._runner: ACPRunner | None = None
         self._profile_name: str | None = None
         self._closed = False
+        self._completion_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def active(self) -> bool:
@@ -86,21 +88,47 @@ class ACPOrchestrator:
         admission = self._runner.admit(
             text, request_id=request_id, source=source, thread_id=thread_id
         )
-        asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
+        task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
+        self._completion_tasks.add(task)
+        task.add_done_callback(self._completion_tasks.discard)
         return admission
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
-        result: ACPResult = await admission.future
+        try:
+            result: ACPResult = await admission.future
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Admission is immediately acknowledged, so every admitted request
+            # must still receive one correlated terminal event on close/failure.
+            session_id = self._runner.session_id if self._runner is not None else ""
+            generation = admission.generation
+            stop_reason = "error"
+            end_frame = {
+                "type": "turn_end", "generation": generation,
+                "turnId": admission.turn_id, "sessionId": session_id,
+                "stopReason": stop_reason, "error": type(exc).__name__,
+            }
+            publish_semantic(
+                self.event_bus, "turn_complete", request_id=admission.request_id,
+                session_id=session_id, generation=generation,
+                turn_id=admission.turn_id, stop_reason=stop_reason,
+                input_source=admission.source, thread_id=admission.thread_id,
+            )
+            publish_semantic(
+                self.event_bus, "turn_end", **end_frame, hidden=True,
+                request_id=admission.request_id, input_source=admission.source,
+                thread_id=admission.thread_id,
+            )
+            return {"text": "", "session_id": session_id,
+                    "generation": generation, "turn_id": admission.turn_id,
+                    "request_id": admission.request_id,
+                    "stop_reason": stop_reason, "end_frame": end_frame}
         publish_semantic(
-            self.event_bus,
-            "turn_complete",
-            request_id=result.request_id,
-            session_id=result.session_id,
-            generation=result.generation,
-            turn_id=result.turn_id,
-            stop_reason=result.stop_reason,
-            input_source=result.source,
-            thread_id=result.thread_id,
+            self.event_bus, "turn_complete", request_id=result.request_id,
+            session_id=result.session_id, generation=result.generation,
+            turn_id=result.turn_id, stop_reason=result.stop_reason,
+            input_source=result.source, thread_id=result.thread_id,
         )
         publish_semantic(
             self.event_bus, "turn_end", **result.end_frame, hidden=True,
@@ -113,7 +141,7 @@ class ACPOrchestrator:
                 "end_frame": result.end_frame}
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
-        request_id = f"request-{id(text)}"
+        request_id = f"request-{uuid.uuid4().hex}"
         admission = self.admit(text, request_id=request_id, source=source, thread_id=thread_id)
         result: ACPResult = await admission.future
         return {"text": result.text, "session_id": result.session_id,
@@ -144,6 +172,8 @@ class ACPOrchestrator:
         if self._runner is not None:
             await self._runner.close()
             self._runner = None
+        if self._completion_tasks:
+            await asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
         if self.hub_plugin is not None and self._binding is not None:
             self.hub_plugin.rotate_acp_hub_binding()
             self._binding = None

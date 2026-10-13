@@ -1807,6 +1807,17 @@ class LLMService:
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
         """Admit ACP input through its owner; otherwise delegate native handling."""
         acp = self.event_bus.get_service("acp_orchestrator")
+        selected_acp = False
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is not None:
+            try:
+                profile = profile_manager.get_active_profile()
+                provider = profile.get_provider() if profile is not None else ""
+                selected_acp = provider == "acp"
+            except Exception:
+                selected_acp = False
+        if selected_acp and not (acp is not None and getattr(acp, "active", False)):
+            return {"status": "rejected", "reason": "acp_unavailable"}
         if acp is not None and getattr(acp, "active", False):
             request_id = uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
