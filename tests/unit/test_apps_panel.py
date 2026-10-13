@@ -17,7 +17,7 @@ from kollabor.panels.base import PanelError, get_panel
 from kollabor_agent import MCPManager
 
 PY = sys.executable  # absolute path: the MCP validator checks the command exists
-SECRET = "sk-test-SECRET-7f3a"
+SECRET = "fixture-secret-7f3a"
 
 
 def _catalog():

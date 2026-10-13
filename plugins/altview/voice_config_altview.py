@@ -7,10 +7,13 @@ from plugins.altview.config_altview import ConfigAltView
 
 
 class VoiceConfigAltView(ConfigAltView):
-    def __init__(self, plugin):
+    def __init__(self, plugin=None):
         super().__init__()
         self.title = TITLE
-        self.plugin = plugin
+        self.plugin = plugin or SimpleNamespace(
+            _event_bus=None,
+            status=lambda: {"state": "off"},
+        )
         self.metadata.plugin_type = "voice-config"
         self.metadata.description = "Configure device voice preferences"
         self._panel = None

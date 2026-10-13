@@ -1,0 +1,4 @@
+[allowlist]
+description = "Historical test fixture was intentionally non-secret"
+regexTarget = "match"
+regexes = ['''sk-test-SECRET-7f3a''']
