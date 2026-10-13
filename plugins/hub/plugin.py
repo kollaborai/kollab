@@ -7239,21 +7239,26 @@ class HubPlugin(BasePlugin):
         )
         return True
 
-    def _acp_agent_admission_enabled(self, llm_service: Any) -> bool:
-        """Return true only when ACP is the selected, live agent transport."""
+    def _agent_dispatch_mode(self, llm_service: Any) -> str:
+        """Classify authenticated peer input without native fallback on ACP faults."""
         try:
-            event_bus = getattr(self, "event_bus", None)
-            acp = event_bus.get_service("acp_orchestrator") if event_bus else None
-            if getattr(acp, "active", False) is not True:
-                return False
             profile_manager = getattr(llm_service, "profile_manager", None)
             if profile_manager is None:
-                return False
+                return "unavailable"
             profile = profile_manager.get_active_profile()
-            return profile is not None and profile.get_provider() == "acp"
+            if profile is None:
+                return "unavailable"
+            if profile.get_provider() != "acp":
+                return "native"
+            event_bus = getattr(self, "event_bus", None)
+            acp = event_bus.get_service("acp_orchestrator") if event_bus else None
+            return "acp" if getattr(acp, "active", False) is True else "unavailable"
         except Exception:
-            # Registry teardown/fault must retain the native peer path.
-            return False
+            return "unavailable"
+
+    def _acp_agent_admission_enabled(self, llm_service: Any) -> bool:
+        """Compatibility predicate for callers/tests; tri-state logic lives above."""
+        return self._agent_dispatch_mode(llm_service) == "acp"
 
     async def _submit_authenticated_agent_message(
         self, message: HubMessage, llm_service: Any
@@ -7864,13 +7869,15 @@ class HubPlugin(BasePlugin):
                         getattr(message, "from_agent", None)
                         and message.from_agent != "human"
                     )
-                    if (
-                        authenticated_agent
-                        and self._acp_agent_admission_enabled(llm_service)
-                        and hasattr(llm_service, "submit_human_input")
-                    ):
-                        await self._submit_authenticated_agent_message(message, llm_service)
-                        return
+                    if authenticated_agent:
+                        dispatch_mode = self._agent_dispatch_mode(llm_service)
+                        if dispatch_mode in {"acp", "unavailable"} and hasattr(
+                            llm_service, "submit_human_input"
+                        ):
+                            await self._submit_authenticated_agent_message(
+                                message, llm_service
+                            )
+                            return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
                         {
