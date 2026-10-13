@@ -1736,7 +1736,7 @@ class LLMService:
             return {"status": "rejected", "reason": "invalid_input_source"}
 
         acp = self.event_bus.get_service("acp_orchestrator")
-        acp_dispatch = acp is not None and getattr(acp, "active", False)
+        acp_dispatch = acp is not None and getattr(acp, "active", False) is True
         selected_acp = False
         profile_manager = getattr(self, "profile_manager", None)
         if profile_manager is not None:
@@ -1820,9 +1820,9 @@ class LLMService:
                 selected_acp = provider == "acp"
             except Exception:
                 selected_acp = False
-        if selected_acp and not (acp is not None and getattr(acp, "active", False)):
+        if selected_acp and not (acp is not None and getattr(acp, "active", False) is True):
             return {"status": "rejected", "reason": "acp_unavailable"}
-        if acp is not None and getattr(acp, "active", False):
+        if acp is not None and getattr(acp, "active", False) is True:
             request_id = data.get("request_id") or uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
             try:
