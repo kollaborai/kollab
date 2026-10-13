@@ -406,7 +406,7 @@ async def test_permission_operation_keeps_kind_distinct_and_sparse_updates(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_permission_bridge_rejects_non_actionable_options():
+async def test_permission_bridge_honors_explicit_allow_always_option():
     async def decide(request):
         return "always"
 
@@ -416,7 +416,21 @@ async def test_permission_bridge_rejects_non_actionable_options():
         "session_id": "s1", "generation": 1,
         "options": ({"optionId": "always", "kind": "allow_always"},),
     })()
-    assert await bridge.request(request) is None
+    assert await bridge.request(request) == "always"
+
+
+@pytest.mark.asyncio
+async def test_permission_bridge_honors_explicit_reject_always_option():
+    async def decide(request):
+        return "reject"
+
+    bridge = ACPPermissionBridge(decide)
+    bridge.bind("s1", 1)
+    request = type("Request", (), {
+        "session_id": "s1", "generation": 1,
+        "options": ({"optionId": "reject", "kind": "reject_always"},),
+    })()
+    assert await bridge.request(request) == "reject"
 
 
 def test_missing_adapter_is_a_hard_gate(tmp_path):

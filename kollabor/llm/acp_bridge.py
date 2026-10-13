@@ -258,7 +258,9 @@ class ACPPermissionBridge:
             return None
         if selected is None or selected not in offered:
             return None
-        if offered[selected].get("kind") not in {"allow_once", "reject_once"}:
+        if offered[selected].get("kind") not in {
+            "allow_once", "reject_once", "allow_always", "reject_always",
+        }:
             return None
         return selected
 
@@ -687,6 +689,8 @@ class ACPRunner:
                     "workspace": request.workspace,
                     "profile": request.profile,
                     "options": option_data,
+                    "waiting": True,
+                    "kind": request.kind,
                 },
             })
         selected = await self.permission_bridge.request(request)
