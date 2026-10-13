@@ -335,6 +335,7 @@ class ACPRunner:
         self._cancel_lock = asyncio.Lock()
         self._cancel_hold = False
         self._cancel_target: tuple[str | None, int | None] | None = None
+        self._cancel_active_task: asyncio.Task[Any] | None = None
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -722,6 +723,7 @@ class ACPRunner:
         if active is None or active.done():
             return False
         self._cancel_target = (expected_session_id, expected_generation)
+        self._cancel_active_task = active
         self._cancel_hold = True
         self._queue_release.clear()
         return True
@@ -742,7 +744,7 @@ class ACPRunner:
             elif target != (expected_session_id, expected_generation):
                 return
             self.permission_bridge.cancel()
-            active = self._active_rpc_task
+            active = self._cancel_active_task or self._active_rpc_task
             if active is None and self._cancel_target is None:
                 return
             # Hold the worker at the queue boundary before sending cancel so a
@@ -791,6 +793,7 @@ class ACPRunner:
                     await asyncio.gather(cancel_task, return_exceptions=True)
                 self._cancel_hold = False
                 self._cancel_target = None
+                self._cancel_active_task = None
                 self._queue_release.set()
 
     async def _terminate_process(self) -> None:
