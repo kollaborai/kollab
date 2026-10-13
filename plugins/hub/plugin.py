@@ -19,6 +19,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
@@ -4554,13 +4555,21 @@ class HubPlugin(BasePlugin):
         racing the fire-and-forget startup task.
         """
         task = self._startup_task
-        if task is None:
-            if self._socket_server is None:
-                raise RuntimeError("Hub startup was not scheduled")
-            return
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-        if self._socket_server is None:
-            raise RuntimeError("Hub startup completed without a socket")
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        elif self._socket_server is None:
+            raise RuntimeError("Hub startup was not scheduled")
+        server = self._socket_server
+        if (
+            server is None
+            or getattr(server, "_server", None) is None
+            or not Path(server.socket_path).exists()
+        ):
+            raise RuntimeError("Hub startup completed without a bound socket")
+        if self.event_bus is not None:
+            registered = self.event_bus.get_service("hub_plugin")
+            if registered is not self:
+                raise RuntimeError("Hub startup completed before service publication")
 
     async def _register_mesh_hooks(self) -> None:
         """Register the hooks that make this agent a peer on the mesh."""

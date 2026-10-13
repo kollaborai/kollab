@@ -43,9 +43,10 @@ async def test_hub_plugin_real_init_and_cleanup_in_temp_scope(tmp_path, monkeypa
         }.get(key, default),
         register_reload_callback=lambda callback: None,
     )
+    services = {}
     event_bus = SimpleNamespace(
-        register_service=lambda name, value: None,
-        get_service=lambda name: None,
+        register_service=lambda name, value: services.__setitem__(name, value),
+        get_service=lambda name: services.get(name),
     )
     plugin = HubPlugin(event_bus=event_bus, config=config)
 
@@ -99,36 +100,63 @@ def test_terminal_constructor_uses_isolated_profile_fixture(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_hub_readiness_barrier_waits_for_delayed_socket():
-    plugin = HubPlugin()
+async def test_hub_readiness_barrier_waits_for_delayed_socket(tmp_path):
+    services = {}
+    event_bus = SimpleNamespace(
+        register_service=lambda name, value: services.__setitem__(name, value),
+        get_service=lambda name: services.get(name),
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    socket_path = Path("/tmp") / f"acp-ready-{os.getpid()}-{id(plugin)}.sock"
 
     async def delayed_start():
         await asyncio.sleep(0.01)
-        plugin._socket_server = object()
+        server = await asyncio.start_unix_server(lambda r, w: w.close(), path=str(socket_path))
+        plugin._socket_server = SimpleNamespace(_server=server, socket_path=socket_path)
+        services["hub_plugin"] = plugin
 
     plugin._startup_task = asyncio.create_task(delayed_start())
     await plugin.wait_until_ready(timeout=1.0)
-    assert plugin._socket_server is not None
+    assert socket_path.exists()
+    plugin._socket_server._server.close()
+    await plugin._socket_server._server.wait_closed()
+    socket_path.unlink()
 
 
 @pytest.mark.asyncio
-async def test_register_hooks_waits_for_actual_delayed_hub_start(monkeypatch):
+async def test_register_hooks_waits_for_actual_delayed_hub_start(monkeypatch, tmp_path):
+    services = {}
+
     class EventBus:
         async def register_hook(self, hook):
             return None
+
+        def register_service(self, name, value):
+            services[name] = value
+
+        def get_service(self, name):
+            return services.get(name)
 
     plugin = HubPlugin(event_bus=EventBus())
     plugin._identity = SimpleNamespace(solo=True)
     plugin._cli_args = SimpleNamespace(attach=None)
 
+    socket_path = Path("/tmp") / f"acp-delay-{os.getpid()}-{id(plugin)}.sock"
+
     async def delayed_start():
         await asyncio.sleep(0.01)
-        plugin._socket_server = object()
+        server = await asyncio.start_unix_server(lambda r, w: w.close(), path=str(socket_path))
+        plugin._socket_server = SimpleNamespace(_server=server, socket_path=socket_path)
+        plugin.event_bus.register_service("hub_plugin", plugin)
+
 
     monkeypatch.setattr(plugin, "_start_hub", delayed_start)
     await plugin.register_hooks()
     await plugin.wait_until_ready(timeout=1.0)
     assert plugin._socket_server is not None
+    plugin._socket_server._server.close()
+    await plugin._socket_server._server.wait_closed()
+    socket_path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
@@ -149,6 +177,9 @@ async def test_deferred_startup_orders_plugins_hub_ready_then_acp(monkeypatch):
         running = True
         plugin_instances = {"hub": DelayedHub()}
         event_bus = SimpleNamespace(get_service=lambda name: None)
+        profile_manager = SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(provider="acp")
+        )
         args = SimpleNamespace(stay=True)
         input_handler = None
         _startup_ready = asyncio.Event()
