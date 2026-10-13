@@ -512,3 +512,47 @@ async def test_acp_completion_normalizes_outcome_text(
     assert sent[1][2]["turn_end"]["outcome"] == outcome
     if outcome == "cancelled":
         assert "DRAFT" not in sent[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "outcome", "marker"),
+    [
+        ("acp_queue_full", "busy", "busy"),
+        ("acp_unavailable", "error", "harness failed"),
+    ],
+)
+async def test_authenticated_acp_admission_rejection_settles_origin(
+    reason, outcome, marker
+):
+    from plugins.hub.models import HubMessage
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn, content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    llm = SimpleNamespace(
+        submit_human_input=AsyncMock(return_value={"status": "rejected", "reason": reason})
+    )
+    message = HubMessage(
+        id="rejected-request",
+        from_identity=PEER,
+        from_agent=PEER,
+        to="koordinator",
+        content="agent task",
+        thread_id="rejected-thread",
+    )
+
+    result = await plugin._submit_authenticated_agent_message(message, llm)
+
+    assert result == {"status": "rejected", "reason": reason}
+    assert len(sent) == 2
+    assert sent[0][2] == "reply" and marker in sent[0][1].lower()
+    assert sent[1][2] == "turn end"
+    assert sent[1][3]["turn_end"]["outcome"] == outcome
+    assert sent[1][3]["turn_end"]["failed"] is True
+    assert message.id not in plugin._acp_network_turns
