@@ -1368,6 +1368,28 @@ class AgentSocketServer:
                     writer.write((json.dumps({"type": "acp_hub_status", **result}) + "\n").encode())
                     await writer.drain()
 
+                elif action == "turn_end":
+                    required = {"action", "thread_id", "reply_to", "turn_end"}
+                    frame = msg_data.get("turn_end")
+                    if (
+                        set(msg_data) != required
+                        or not isinstance(frame, dict)
+                        or set(frame) != {"replies", "failed", "outcome"}
+                    ):
+                        writer.write(b'{"type":"error","msg":"invalid turn_end"}\n')
+                        await writer.drain()
+                        return
+                    end_message = HubMessage(
+                        id=str(msg_data["reply_to"]), action="turn_end", content="",
+                        from_identity=authenticated_as or "local",
+                        from_agent=authenticated_as or "local",
+                        thread_id=str(msg_data["thread_id"]),
+                        reply_to=str(msg_data["reply_to"]), metadata={"turn_end": frame},
+                    )
+                    await self._on_message(end_message)
+                    writer.write((json.dumps({"type": "ack", "id": end_message.id}) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "ping":
                     pong = (
                         json.dumps(
