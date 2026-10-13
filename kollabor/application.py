@@ -757,9 +757,15 @@ class TerminalLLMChat:
                         )
                     )
                 # Convert to PermissionDecision using response handler
-                return await handle_confirmation_response(
+                decision = await handle_confirmation_response(
                     self.permission_manager, details, response
                 )
+                if details.get("source") == "acp":
+                    selected = getattr(response, "name", str(response)).lower()
+                    scope = {"approve_session": "session", "approve_project": "project"}.get(selected)
+                    if scope:
+                        decision.confirmation_details = {"acp_grant_scope": scope}
+                return decision
 
             self.permission_manager.set_confirmation_callback(
                 confirmation_callback_wrapper
@@ -1192,10 +1198,16 @@ class TerminalLLMChat:
             return None
 
         # Reuse an exact ACP grant without opening a second native prompt.
-        if manager is not None and manager.has_acp_grant(
+        if not request.operation or not isinstance(request.operation, dict):
+            return None
+        allow_once = [option for option in options if str(option.get("kind")) == "allow_once"]
+        if len(allow_once) != 1:
+            return None
+        has_grant = getattr(manager, "has_acp_grant", None)
+        if callable(has_grant) and has_grant(
             request.operation, request.workspace, request.profile
         ):
-            return offered("allow_once")
+            return str(allow_once[0].get("optionId"))
 
         callback = getattr(manager, "_confirmation_callback", None)
         if callback is None:
@@ -1223,16 +1235,12 @@ class TerminalLLMChat:
         # Native confirmation handling persists its own approvals. Mirror
         # session/project choices into the ACP namespace while returning only
         # the one-shot opaque outcome to the adapter.
-        reason = str(getattr(decision, "reason", "")).lower()
-        if allowed and manager is not None:
-            if "project" in reason:
-                manager.grant_acp(
-                    request.operation, request.workspace, request.profile, scope="project"
-                )
-            elif "session" in reason:
-                manager.grant_acp(
-                    request.operation, request.workspace, request.profile, scope="session"
-                )
+        scope = (getattr(decision, "confirmation_details", None) or {}).get(
+            "acp_grant_scope"
+        )
+        grant_acp = getattr(manager, "grant_acp", None)
+        if allowed and callable(grant_acp) and scope in ("session", "project"):
+            grant_acp(request.operation, request.workspace, request.profile, scope=scope)
         wanted = "allow_once" if allowed else "reject_once"
         for option in options:
             if str(option.get("kind")) == wanted:
