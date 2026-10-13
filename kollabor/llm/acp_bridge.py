@@ -191,7 +191,7 @@ class ACPRunner:
             mcp_servers=self.profile.sdk_mcp_servers(),
         )
         self.session_id = str(result.sessionId)
-        self.generation = 1
+        self.generation = self.generation + 1 if self.generation else 1
         self._worker = asyncio.create_task(self._drain_queue())
         return self.session_id
 
@@ -237,12 +237,30 @@ class ACPRunner:
                 self._active_future = None
             if self._restart_before_next and self._connection is not None:
                 self._restart_before_next = False
-                cwd = self.profile.cwd or self.profile.workspace or os.getcwd()
-                result = await self._connection.new_session(
-                    cwd=cwd,
-                    mcp_servers=self.profile.sdk_mcp_servers(),
-                )
-                self.session_id = str(result.sessionId)
+                await self._restart_process()
+
+    async def _restart_process(self) -> None:
+        old_process = self._process
+        if self._connection is not None:
+            await self._connection.close()
+        if old_process is not None and old_process.returncode is None:
+            try:
+                os.killpg(old_process.pid, signal.SIGTERM)
+                await asyncio.wait_for(old_process.wait(), timeout=2)
+            except (AttributeError, ProcessLookupError, asyncio.TimeoutError):
+                if old_process.returncode is None:
+                    try:
+                        os.killpg(old_process.pid, signal.SIGKILL)
+                    except (AttributeError, ProcessLookupError):
+                        pass
+                    await old_process.wait()
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            await asyncio.gather(self._stderr_task, return_exceptions=True)
+        self._connection = None
+        self._process = None
+        self._stderr_task = None
+        await self.start()
 
     async def _run_prompt(self, generation: int, turn_id: int, text: str) -> ACPResult:
         self._active_generation = generation
