@@ -13,7 +13,7 @@ from typing import Any
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_tui.display_tap import publish_semantic
 
-from .acp_bridge import ACPAdmission, ACPProfile, ACPResult, ACPRunner
+from .acp_bridge import ACPAdmission, ACPError, ACPProfile, ACPResult, ACPRunner
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,11 @@ class ACPOrchestrator:
         self._closed = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
+
+    @property
+    def is_processing(self) -> bool:
+        """Whether an admitted ACP turn is active or waiting in FIFO."""
+        return bool(self._completion_tasks)
 
     @property
     def active(self) -> bool:
@@ -105,7 +110,12 @@ class ACPOrchestrator:
                 session_id = self._runner.session_id
             session_id = session_id or ""
             generation = admission.generation
-            stop_reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            stop_reason = (
+                "cancelled"
+                if isinstance(exc, asyncio.CancelledError)
+                or (isinstance(exc, ACPError) and "cancel" in str(exc).lower())
+                else "error"
+            )
             end_frame = {
                 "type": "turn_end", "generation": generation,
                 "turnId": admission.turn_id, "sessionId": session_id,
