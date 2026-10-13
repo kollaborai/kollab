@@ -4,6 +4,7 @@ These tests deliberately isolate config/home/socket state under ``tmp_path``;
 real adapter qualification and the full deferred plugin graph remain separate.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,3 +88,16 @@ def test_terminal_constructor_uses_isolated_profile_fixture(tmp_path, monkeypatc
         )
     assert app.profile_manager.get_active_profile().provider == "acp"
     assert app.profile_manager.get_active_profile().model == ""
+
+
+@pytest.mark.asyncio
+async def test_hub_readiness_barrier_waits_for_delayed_socket():
+    plugin = HubPlugin()
+
+    async def delayed_start():
+        await asyncio.sleep(0.01)
+        plugin._socket_server = object()
+
+    plugin._startup_task = asyncio.create_task(delayed_start())
+    await plugin.wait_until_ready(timeout=1.0)
+    assert plugin._socket_server is not None

@@ -1264,6 +1264,13 @@ class TerminalLLMChat:
             await asyncio.sleep(0)  # Yield after plugin init
             await self._initialize_acp_orchestrator()
 
+            await self._initialize_plugins()
+            await asyncio.sleep(0)  # Yield after plugin init
+            hub_plugin = self.event_bus.get_service("hub_plugin")
+            if hub_plugin is not None and hasattr(hub_plugin, "wait_until_ready"):
+                await hub_plugin.wait_until_ready(timeout=30.0)
+            await self._initialize_acp_orchestrator()
+
             # Process CLI command if provided (after plugins so all commands are registered)
             cli_command = await self._process_cli_command()
             if cli_command:
