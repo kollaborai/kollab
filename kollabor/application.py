@@ -760,7 +760,9 @@ class TerminalLLMChat:
                 # Convert to PermissionDecision using response handler. ACP
                 # attach clients return an opaque option ID; map it back to
                 # the enum kind only for the native decision machinery.
+                selected_option = None
                 if details.get("source") == "acp" and isinstance(response, str):
+                    details["acp_selected_option_id"] = response
                     selected_option = next(
                         (item for item in details.get("options", ())
                          if isinstance(item, dict) and str(item.get("optionId")) == response),
@@ -798,6 +800,7 @@ class TerminalLLMChat:
                     decision.confirmation_details = {
                         "acp_grant_scope": scope,
                         "acp_choice": selected,
+                        "acp_selected_option_id": details.get("acp_selected_option_id"),
                     }
                 return decision
 
@@ -1264,6 +1267,16 @@ class TerminalLLMChat:
             logger.exception("ACP permission confirmation failed")
             return None
         allowed = bool(getattr(decision, "allowed", False))
+        selected_id = (getattr(decision, "confirmation_details", None) or {}).get(
+            "acp_selected_option_id"
+        )
+        if selected_id is not None:
+            offered_ids = {
+                str(option.get("optionId")) for option in options
+            }
+            if str(selected_id) not in offered_ids:
+                return None
+            return str(selected_id)
         # Native confirmation handling persists its own approvals. Mirror
         # session/project choices into the ACP namespace while returning only
         # the one-shot opaque outcome to the adapter.

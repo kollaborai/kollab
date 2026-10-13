@@ -400,3 +400,33 @@ def test_attach_bridge_accepts_offered_opaque_acp_option_id():
         assert await task == "opaque-second"
 
     asyncio.run(run_bridge())
+
+
+def test_attach_bridge_rejects_unoffered_acp_id_without_consuming_prompt():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-opaque",
+                    "source": "acp",
+                    "acp_options": [
+                        {"optionId": "owned-first", "kind": "allow_once", "name": "First"},
+                        {"optionId": "owned-second", "kind": "allow_once", "name": "Second"},
+                    ],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        handler = rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD]
+        assert (await handler({"tool_id": "acp-opaque", "response": "not-offered"}))["ok"] is False
+        assert not task.done()
+        assert await handler({"tool_id": "acp-opaque", "response": "owned-second"}) == {"ok": True}
+        assert await task == "owned-second"
+
+    asyncio.run(run_bridge())

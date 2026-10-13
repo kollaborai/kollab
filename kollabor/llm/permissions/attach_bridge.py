@@ -57,7 +57,10 @@ class AttachPermissionBridge:
             tool_id = str(params.get("tool_id") or "")
             response_name = str(params.get("response") or "")
             future = self._pending.get(tool_id)
-            if response_name in self._pending_option_ids.get(tool_id, set()):
+            offered_ids = self._pending_option_ids.get(tool_id, set())
+            if offered_ids:
+                if response_name not in offered_ids:
+                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
                 response: ConfirmationResponse | str = response_name
             else:
                 response = self._parse_response(response_name)
