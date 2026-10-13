@@ -136,7 +136,7 @@ class LoadoutManager:
             is_local_with_endpoint = provider in _LOCAL_ENDPOINT_PROVIDERS and bool(
                 profile.get_endpoint()
             )
-            if has_key or is_oauth or is_local_with_endpoint:
+            if has_key or is_oauth or is_local_with_endpoint or provider == "acp":
                 result.append(profile)
         return result
 
@@ -194,6 +194,22 @@ class LoadoutManager:
 
         for profile in self.provider_profiles():
             provider = (profile.get_provider() or "").lower()
+            if provider == "acp":
+                command = tuple(getattr(profile, "command", ()) or ())
+                result.append(
+                    Loadout(
+                        name=profile.name,
+                        provider_profile=profile.name,
+                        model=command[0] if command else profile.name,
+                        description=(
+                            getattr(profile, "install_guidance", "")
+                            or getattr(profile, "description", "")
+                        ),
+                        implicit=True,
+                    )
+                )
+                seen.add(profile.name)
+                continue
             registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
             model_names = [
                 name for name, _info in list_models_for_provider(registry_provider)
