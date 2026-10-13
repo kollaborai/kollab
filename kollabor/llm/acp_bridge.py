@@ -395,18 +395,31 @@ class ACPRunner:
                 for item in text_updates
                 if str(item.get("message_id", "")) == message_id
             )
-        tool_indexes = [
-            index for index, item in enumerate(updates)
-            if str(item.get("kind", "")).lower() in {
-                "tool_call", "tool_call_update", "tool_output", "tool_result",
-            }
-        ]
+        tool_indexes: list[int] = []
+        active_tool_id: str | None = None
+        for index, item in enumerate(updates):
+            kind = str(item.get("kind", "")).lower()
+            if kind not in {"tool_call", "tool_call_update", "tool_output", "tool_result"}:
+                continue
+            payload = item.get("payload") or {}
+            tool_id = payload.get("toolCallId", payload.get("tool_call_id", payload.get("id")))
+            tool_id = str(tool_id) if tool_id else None
+            # Progress/output updates for the same tool do not start a new
+            # assistant message boundary; a subsequent call does.
+            if kind == "tool_call_update" and tool_id and tool_id == active_tool_id:
+                continue
+            if kind in {"tool_output", "tool_result"} and tool_id and tool_id == active_tool_id:
+                continue
+            tool_indexes.append(index)
+            active_tool_id = tool_id
         if tool_indexes:
-            tail = [item for item in updates[tool_indexes[-1] + 1:] if item.get("kind") == "text"]
+            last_tool = tool_indexes[-1]
+            tail = [item for item in updates[last_tool + 1:] if item.get("kind") == "text"]
             if tail:
                 return "".join(str(item.get("text", "")) for item in tail)
-            head = [item for item in updates[:tool_indexes[-1]] if item.get("kind") == "text"]
-            return "".join(str(item.get("text", "")) for item in head)
+            previous_tool = tool_indexes[-2] if len(tool_indexes) > 1 else -1
+            segment = [item for item in updates[previous_tool + 1:last_tool] if item.get("kind") == "text"]
+            return "".join(str(item.get("text", "")) for item in segment)
         return "".join(str(item.get("text", "")) for item in text_updates)
 
     async def _session_update(self, session_id: str, update: Any) -> None:

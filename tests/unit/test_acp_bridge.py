@@ -386,3 +386,23 @@ def test_final_answer_without_ids_falls_back_before_tool_and_ignores_output():
         {"kind": "thought", "payload": {"secret": "ignored"}},
     ]
     assert ACPRunner._select_answer(updates) == "answer"
+
+
+def test_final_answer_without_ids_uses_last_segment_before_new_tool():
+    updates = [
+        {"kind": "text", "text": "Planning. "},
+        {"kind": "tool_call", "payload": {"toolCallId": "t1"}},
+        {"kind": "text", "text": "Last answer. "},
+        {"kind": "tool_call", "payload": {"toolCallId": "t2"}},
+    ]
+    assert ACPRunner._select_answer(updates) == "Last answer. "
+
+
+def test_tool_progress_does_not_create_new_message_boundary():
+    updates = [
+        {"kind": "text", "text": "Planning. "},
+        {"kind": "tool_call", "payload": {"toolCallId": "t1"}},
+        {"kind": "text", "text": "Final answer. "},
+        {"kind": "tool_call_update", "payload": {"toolCallId": "t1"}},
+    ]
+    assert ACPRunner._select_answer(updates) == "Final answer. "
