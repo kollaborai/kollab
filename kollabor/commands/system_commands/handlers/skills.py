@@ -776,8 +776,13 @@ CRITICAL: Use @@@FILE/@@@END blocks to generate the file."""
             ],
         }
 
+    def _is_builtin(self, skill) -> bool:
+        """True for a skill that ships with Kollab: its folder is part of the install."""
+        bundled = getattr(getattr(self.agent_manager, "skill_library", None), "bundled_dir", None)
+        return bool(bundled) and skill.skill_dir.resolve().is_relative_to(bundled.resolve())
+
     def _rename_skill_file(self, agent, original_name: str, new_name: str) -> bool:
-        """Rename a skill directory in the skill library."""
+        """Rename a skill directory in the skill library. Built-in skills are refused."""
         try:
             if original_name == new_name:
                 return True
@@ -785,6 +790,9 @@ CRITICAL: Use @@@FILE/@@@END blocks to generate the file."""
             # Find the skill to get its directory
             skill = agent.get_skill(original_name)
             if not skill or not skill.skill_dir:
+                return False
+            if self._is_builtin(skill):
+                logger.warning(f"Refusing to rename built-in skill {original_name}")
                 return False
 
             new_dir = skill.skill_dir.parent / new_name
@@ -809,12 +817,15 @@ CRITICAL: Use @@@FILE/@@@END blocks to generate the file."""
             return False
 
     def _delete_skill_file(self, agent, skill_name: str) -> bool:
-        """Delete a skill directory from the skill library."""
+        """Delete a skill directory from the skill library. Built-in skills are refused."""
         import shutil
 
         try:
             skill = agent.get_skill(skill_name)
             if not skill or not skill.skill_dir:
+                return False
+            if self._is_builtin(skill):
+                logger.warning(f"Refusing to delete built-in skill {skill_name}")
                 return False
 
             if not skill.skill_dir.exists():

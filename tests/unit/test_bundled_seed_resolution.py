@@ -43,9 +43,8 @@ def test_initialize_system_prompt_finds_bundles_next_to_package(tmp_path, monkey
     assert (seeded_default / "sections" / "00-header.md").read_text(
         encoding="utf-8"
     ) == "Packaged section."
-    assert (home / ".kollab" / "skills" / "demo" / "SKILL.md").read_text(
-        encoding="utf-8"
-    ) == "Packaged skill."
+    # Skills are read from bundles/skills directly; startup copies none of them
+    assert not (home / ".kollab" / "skills" / "demo").exists()
 
 
 def test_create_agent_from_defaults_copies_nested_sections(tmp_path, monkeypatch):

@@ -927,6 +927,8 @@ class RemoteStateService(StateService):
     # panel_action can wait on a provider (the setup connection test is
     # bounded at 25 s), so it outlasts DEFAULT_TIMEOUT.
     PANEL_ACTION_TIMEOUT: float = 40.0
+    PANEL_ACTION_TIMEOUTS: dict[str, float] = {"apps": 630.0, "apps-install": 630.0}
+    PANEL_DESCRIBE_TIMEOUTS: dict[str, float] = {"apps-registry": 45.0, "apps-install": 45.0}
 
     async def get_panel(
         self, name: str, params: dict[str, Any] | None = None
@@ -934,7 +936,7 @@ class RemoteStateService(StateService):
         result = await self._rpc.call(
             "state.get_panel",
             {"name": name, "params": params or {}},
-            timeout=self._timeout,
+            timeout=max(self._timeout, self.PANEL_DESCRIBE_TIMEOUTS.get(name, 0.0)),
         )
         return _panel_answer(result, "panel")
 
@@ -944,7 +946,7 @@ class RemoteStateService(StateService):
         result = await self._rpc.call(
             "state.panel_action",
             {"name": name, "action": action, "payload": payload or {}},
-            timeout=max(self._timeout, self.PANEL_ACTION_TIMEOUT),
+            timeout=max(self._timeout, self.PANEL_ACTION_TIMEOUTS.get(name, self.PANEL_ACTION_TIMEOUT)),
         )
         return _panel_answer(result, "result")
 

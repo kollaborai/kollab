@@ -3,6 +3,7 @@ import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -275,6 +276,7 @@ export default function App() {
   // Null: the whole Gem Studio; a gem: that session's Properties.
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
+  const [appsOpen, setAppsOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -787,6 +789,7 @@ export default function App() {
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
+          onApps={() => setAppsOpen(true)}
           onSettings={() => openSettings()}
           onStudio={() => {
             setStudioFocus(null);
@@ -801,6 +804,15 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        {activeSession ? (
+          <AppsDialog
+            api={api}
+            sessionId={activeSession.session_id}
+            open={appsOpen}
+            onOpenChange={setAppsOpen}
+            onChanged={() => void loadSessions()}
+          />
+        ) : null}
         <ProfilesDialog
           api={api}
           profiles={profiles}

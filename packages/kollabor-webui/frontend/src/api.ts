@@ -464,6 +464,32 @@ export type PanelPicker = PanelBase & {
   empty_groups?: { group: string; reason: string }[];
 };
 
+
+export type AppRowState = "available" | "added" | "off" | "unavailable";
+
+export type AppRow = PanelRow & {
+  kind: "mcp" | "cli" | "skill";
+  state: AppRowState;
+  publisher?: string | null;
+  homepage?: string | null;
+  icon?: { path: string; hex: string } | null;
+  tags?: string[] | null;
+  note?: string | null;
+  preview?: string | null;
+};
+
+export type AppsSection = { id: string; title: string; ids: string[] };
+
+export type AppsPicker = Omit<PanelPicker, "rows"> & {
+  rows: AppRow[];
+  sections?: AppsSection[] | null;
+};
+
+export type AppsRegistryResult = AppsPicker & {
+  query?: string | null;
+  note?: string | null;
+};
+
 export type PanelWizardStep = {
   id: string;
   title: string;

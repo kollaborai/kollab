@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { ChevronDown, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
+import { ChevronDown, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
@@ -127,6 +127,7 @@ export function AppSidebar({
   onIdentityChange,
   onBundleChange,
   onWorkspaceChange,
+  onApps,
   onSettings,
   onStudio,
   onManageProfiles,
@@ -164,6 +165,7 @@ export function AppSidebar({
   onIdentityChange: (identity: string) => void;
   onBundleChange: (bundle: string) => void;
   onWorkspaceChange: (path: string) => void;
+  onApps: () => void;
   onSettings: () => void;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
@@ -717,6 +719,18 @@ export function AppSidebar({
 
       <SidebarFooter className="border-t p-2">
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                setOpenMobile(false);
+                onApps();
+              }}
+              disabled={!activeId}
+            >
+              <LayoutGrid className="size-4" />
+              <span>Apps</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => {

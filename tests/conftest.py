@@ -9,6 +9,17 @@ import pytest
 _state = threading.local()
 
 
+@pytest.fixture(autouse=True)
+def _scratch_home(tmp_path_factory, monkeypatch):
+    """Point HOME at a scratch dir, so app startup in a test never migrates the developer's ~/.kollab.
+
+    Building TerminalLLMChat runs initialize_system_prompt(), which moves seed
+    skill copies aside; a unit run once did that to a real ~/.kollab/skills.
+    A test that needs its own HOME still sets one.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 def _policy_loop(policy: asyncio.AbstractEventLoopPolicy):
     """Return the current policy loop without allocating one."""
     policy_local = getattr(policy, "_local", None)

@@ -1,9 +1,12 @@
 """Configuration utilities for Kollab."""
 
+import hashlib
+import json
 import logging
 import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -529,6 +532,7 @@ def initialize_system_prompt() -> None:
     Priority order:
     1. Migrate from old global system_prompt/default.md if it exists
     2. Copy ALL agents from seed folder to global ~/.kollab/agents/
+    3. Retire unmodified seed copies of bundled skills (moves, never deletes)
     """
     try:
         global_config_dir = get_config_directory()
@@ -539,9 +543,8 @@ def initialize_system_prompt() -> None:
         # Ensure global agents directory has all seed agents
         _copy_seed_agents_to_global(global_agents_dir, old_global_prompt_dir)
 
-        # Ensure global skills directory has all seed skills
-        global_skills_dir = global_config_dir / "skills"
-        _copy_seed_skills_to_global(global_skills_dir)
+        # Skills load from bundles/skills; stale global copies would shadow them
+        _retire_seeded_skills(global_config_dir / "skills")
 
     except Exception as e:
         logger.error(f"Failed to initialize system prompt: {e}")
@@ -645,35 +648,104 @@ def _copy_seed_agents_to_global(
             )
 
 
-def _copy_seed_skills_to_global(global_skills_dir: Path) -> None:
-    """Copy all skills from bundled seed folder to global skills directory.
+SEED_BACKUP_DIR_NAME = ".seed-backup"
+SKILL_SEED_HASHES_NAME = "skill-seed-hashes.json"
 
-    Args:
-        global_skills_dir: Target global skills directory (~/.kollab/skills/)
+
+def _load_skill_seed_hashes() -> dict[str, dict[str, set[str]]] | None:
+    """Return {skill name: {file path: sha256s ever bundled}}, None if unreadable."""
+    data_dir = _get_bundled_dir("data")
+    if data_dir is None:
+        return None
+    try:
+        raw = json.loads(
+            (data_dir / SKILL_SEED_HASHES_NAME).read_text(encoding="utf-8")
+        )
+        return {
+            name: {rel: set(hashes) for rel, hashes in files.items()}
+            for name, files in raw.items()
+        }
+    except (OSError, ValueError, AttributeError) as e:
+        logger.warning(f"Skill seed hashes unreadable, keeping global skills: {e}")
+        return None
+
+
+def _is_seed_copy(folder: Path, known: dict[str, set[str]]) -> bool:
+    """True when every file in folder is a version this app bundled at that path.
+
+    The old seeding copied only missing files, so one copy can mix versions:
+    each file is checked on its own. Finder and Python caches don't count; a
+    link, an unknown file or an unreadable one means the user changed it.
     """
-    seed_skills_dir = _get_bundled_dir("skills")
+    try:
+        skill_md = folder / "SKILL.md"
+        if hashlib.sha256(skill_md.read_bytes()).hexdigest() not in known.get("SKILL.md", ()):
+            return False  # the usual edit, checked first
+        for path in folder.rglob("*"):
+            rel = path.relative_to(folder)
+            if rel.name == ".DS_Store" or "__pycache__" in rel.parts:
+                continue
+            if path.is_symlink():
+                return False
+            if path.is_file() and (
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                not in known.get(rel.as_posix(), ())
+            ):
+                return False
+    except OSError:
+        return False
+    return True
 
-    if seed_skills_dir is None:
-        logger.debug("No seed skills folder found")
-        return
 
-    global_skills_dir.mkdir(parents=True, exist_ok=True)
+def _classify_global_skills(global_skills_dir: Path) -> tuple[list[Path], int]:
+    """Split global skill folders into unmodified seed copies and edited ones.
 
-    total_copied = 0
-    total_preserved = 0
+    Only folders named like a skill this app ever bundled count, including
+    skills since removed from the bundle. Symlinks are the user's own links,
+    so they are left alone.
 
-    for skill_dir in seed_skills_dir.iterdir():
-        if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
-            target_skill_dir = global_skills_dir / skill_dir.name
-            copied, preserved = _copy_missing_tree_contents(skill_dir, target_skill_dir)
-            total_copied += copied
-            total_preserved += preserved
+    Returns (seed folders to retire, folders kept as edited).
+    """
+    seed_hashes = _load_skill_seed_hashes()
+    if seed_hashes is None or not global_skills_dir.is_dir():
+        return [], 0
 
-    logger.info(
-        f"Seeded {sum(1 for d in seed_skills_dir.iterdir() if d.is_dir())} "
-        f"skills to global: {global_skills_dir} "
-        f"(copied={total_copied}, preserved_existing={total_preserved})"
-    )
+    seeds: list[Path] = []
+    edited = 0
+    for folder in sorted(global_skills_dir.iterdir()):
+        known = seed_hashes.get(folder.name)
+        if known is None or folder.is_symlink() or not (folder / "SKILL.md").is_file():
+            continue
+        if _is_seed_copy(folder, known):
+            seeds.append(folder)
+        else:
+            edited += 1
+    return seeds, edited
+
+
+def _unused_backup_path(backup_dir: Path, name: str) -> Path:
+    """Return backup_dir/name, or a timestamped sibling when that name is taken."""
+    target = backup_dir / name
+    if target.exists():
+        target = backup_dir / f"{name}-{datetime.now():%Y%m%d-%H%M%S-%f}"
+    return target
+
+
+def _retire_seeded_skills(global_skills_dir: Path) -> None:
+    """Move unmodified seed copies of bundled skills into .seed-backup/.
+
+    Earlier builds copied every bundled skill into ~/.kollab/skills/. The skill
+    library ranks global above bundled, so those frozen copies hid every later
+    bundled update. Retired folders move aside; nothing is deleted.
+    """
+    seeds, edited = _classify_global_skills(global_skills_dir)
+    if seeds:
+        backup_dir = global_skills_dir / SEED_BACKUP_DIR_NAME
+        backup_dir.mkdir(exist_ok=True)
+        for folder in seeds:
+            shutil.move(str(folder), str(_unused_backup_path(backup_dir, folder.name)))
+    if seeds or edited:
+        logger.info(f"Retired seed skills: moved={len(seeds)}, kept_as_edited={edited}")
 
 
 def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None:

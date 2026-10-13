@@ -96,6 +96,32 @@ def test_panel_action_outlasts_the_default_timeout(wire):
     assert rpc.last_timeout == RemoteStateService.DEFAULT_TIMEOUT
 
 
+def test_apps_actions_outlast_a_cli_install(wire):
+    from kollabor.apps.service import CLI_TIMEOUT_SECONDS
+
+    remote, rpc, _ = wire
+    try:
+        run(remote.panel_action("apps", "refresh", {}))
+    except PanelError:
+        pass
+    assert rpc.last_timeout > CLI_TIMEOUT_SECONDS
+
+
+def test_registry_describes_outlast_a_slow_registry(wire, monkeypatch):
+    from kollabor.apps import registry
+
+    monkeypatch.setattr(registry, "http_get", lambda path: {"servers": []})
+    registry.clear_cache()
+    remote, rpc, _ = wire
+    for name in ("apps-registry", "apps-install"):
+        try:
+            run(remote.get_panel(name, {"query": "notion"}))
+        except PanelError:
+            pass
+        assert rpc.last_timeout > registry.CALL_SECONDS + registry.PLAIN_GRACE_SECONDS
+
+
+
 def test_handlers_reject_malformed_requests(wire):
     _, _, handlers = wire
     bad = run(handlers["state.get_panel"]({"name": 5}))
