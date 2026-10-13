@@ -287,7 +287,10 @@ async def test_permission_bridge_fails_closed_without_decider():
 
 @pytest.mark.asyncio
 async def test_permission_response_is_nested_and_option_bound(tmp_path):
+    seen = []
+
     async def decide(request):
+        seen.append(request)
         return "allow"
 
     runner = ACPRunner(ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)), ACPPermissionBridge(decide))
@@ -301,6 +304,23 @@ async def test_permission_response_is_nested_and_option_bound(tmp_path):
     )
     assert response.outcome.outcome == "selected"
     assert response.outcome.optionId == "allow"
+    assert seen[0].operation == "read"
+    assert seen[0].workspace == str(tmp_path.resolve())
+    assert seen[0].profile == "fake"
+
+
+@pytest.mark.asyncio
+async def test_permission_bridge_rejects_non_actionable_options():
+    async def decide(request):
+        return "always"
+
+    bridge = ACPPermissionBridge(decide)
+    bridge.bind("s1", 1)
+    request = type("Request", (), {
+        "session_id": "s1", "generation": 1,
+        "options": ({"optionId": "always", "kind": "allow_always"},),
+    })()
+    assert await bridge.request(request) is None
 
 
 def test_missing_adapter_is_a_hard_gate(tmp_path):
