@@ -1262,10 +1262,6 @@ class TerminalLLMChat:
             # Initialize all plugins dynamically (always - attach mode needs /hub etc)
             await self._initialize_plugins()
             await asyncio.sleep(0)  # Yield after plugin init
-            await self._initialize_acp_orchestrator()
-
-            await self._initialize_plugins()
-            await asyncio.sleep(0)  # Yield after plugin init
             hub_plugins = [
                 plugin
                 for plugin in self.plugin_instances.values()

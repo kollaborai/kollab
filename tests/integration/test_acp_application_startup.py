@@ -6,6 +6,7 @@ real adapter qualification and the full deferred plugin graph remain separate.
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,8 +29,8 @@ async def test_hub_plugin_real_init_and_cleanup_in_temp_scope(tmp_path, monkeypa
     global_config.mkdir()
     monkeypatch.chdir(project)
     monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
-    socket_root = Path("/tmp") / f"acp-test-{tmp_path.name[-6:]}"
-    socket_root.mkdir()
+    socket_root = Path("/tmp") / f"a{os.getpid()}"
+    socket_root.mkdir(exist_ok=True)
     monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", socket_root)
     (global_config / "config.json").write_text(
         json.dumps({"plugins": {"hub": {"enabled": True, "project_scoped": True}}})
@@ -128,3 +129,55 @@ async def test_register_hooks_waits_for_actual_delayed_hub_start(monkeypatch):
     await plugin.register_hooks()
     await plugin.wait_until_ready(timeout=1.0)
     assert plugin._socket_server is not None
+
+
+@pytest.mark.asyncio
+async def test_deferred_startup_orders_plugins_hub_ready_then_acp(monkeypatch):
+    events = []
+
+    class DelayedHub:
+        async def wait_until_ready(self, timeout=30.0):
+            events.append("hub-ready")
+
+    class StopAfterStartupGate(Exception):
+        pass
+
+    class App:
+        _attach_to = None
+        _attach_socket = None
+        pipe_mode = True
+        running = True
+        plugin_instances = {"hub": DelayedHub()}
+        event_bus = SimpleNamespace(get_service=lambda name: None)
+        args = SimpleNamespace(stay=True)
+        input_handler = None
+        _startup_ready = asyncio.Event()
+
+        def create_background_task(self, coro, name):
+            coro.close()
+
+        async def _check_for_updates(self):
+            return None
+
+        async def _load_config_hooks(self):
+            return None
+
+        async def _initialize_llm_core(self):
+            return None
+
+        async def _display_provider_warning(self):
+            return None
+
+        async def _initialize_plugins(self):
+            events.append("plugins")
+
+        async def _initialize_acp_orchestrator(self):
+            events.append(f"acp-before-ready={'hub-ready' not in events}")
+
+        async def _process_cli_command(self):
+            raise StopAfterStartupGate()
+
+    app = App()
+    with pytest.raises(StopAfterStartupGate):
+        await application_module.TerminalLLMChat._deferred_startup(app)
+    assert events == ["plugins", "hub-ready", "acp-before-ready=False"]
