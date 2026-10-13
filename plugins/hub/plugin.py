@@ -2906,7 +2906,7 @@ class HubPlugin(BasePlugin):
             return line, cls._acp_outcome_text(outcome, True)
         if outcome == "error":
             line = (
-                f"The receiving agent failed: {error}"
+                f"The receiving agent's harness failed: {error}"
                 if error
                 else cls._acp_outcome_text(outcome, True)
             )
