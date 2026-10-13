@@ -2878,22 +2878,42 @@ class HubPlugin(BasePlugin):
     @staticmethod
     def _acp_outcome_text(outcome: str, failed: bool) -> str:
         if not failed and outcome == "end_turn":
-            return "The receiving agent finished this request."
+            return "The receiving agent finished this request without an answer."
         return {
             "cancelled": "The receiving agent stopped this request.",
             "refusal": "The receiving agent refused this request.",
-            "max_tokens": "The receiving agent reached its output limit.",
-            "max_turn_requests": "The receiving agent reached its turn limit.",
+            "max_tokens": "The receiving agent cut off this request.",
+            "max_turn_requests": "The receiving agent cut off this request.",
             "busy": "The receiving agent is busy.",
             "skipped": "The receiving agent skipped this request.",
             "timeout": "The receiving agent timed out.",
             "error": "The receiving agent could not complete this request.",
         }.get(outcome, "The receiving agent could not complete this request.")
 
+    @classmethod
+    def _normalize_acp_completion(
+        cls, outcome: str, answer: str, error: str = ""
+    ) -> tuple[str, str]:
+        """Return the visible reply and the hidden terminal outcome text."""
+        if outcome == "cancelled":
+            return "The receiving agent stopped this request.", cls._acp_outcome_text(outcome, True)
+        if outcome in {"max_tokens", "max_turn_requests"}:
+            line = cls._acp_outcome_text(outcome, True)
+            return (f"{answer}\n\n{line}" if answer else line), line
+        if outcome == "refusal":
+            line = answer or cls._acp_outcome_text(outcome, True)
+            return line, cls._acp_outcome_text(outcome, True)
+        if outcome == "error":
+            line = error or cls._acp_outcome_text(outcome, True)
+            return line, line
+        if answer:
+            return answer, "The receiving agent finished this request."
+        line = cls._acp_outcome_text(outcome, False)
+        return line, line
 
     async def _end_network_turn(
         self, turn: "_NetworkTurn", *, failed: bool, acp: bool = False,
-        outcome: str | None = None,
+        outcome: str | None = None, outcome_text: str | None = None,
     ) -> None:
         """Close ``turn`` and tell its requester, on the request's thread."""
         from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
@@ -2915,7 +2935,12 @@ class HubPlugin(BasePlugin):
         }
         if acp:
             turn_end["outcome"] = outcome or ("error" if failed else "end_turn")
-        end_content = _NET_TURN_DONE if (not failed or acp) else _NET_TURN_FAILED
+        if acp:
+            end_content = outcome_text or self._acp_outcome_text(
+                outcome or "error", failed
+            )
+        else:
+            end_content = _NET_TURN_DONE if (not failed or acp) else _NET_TURN_FAILED
         await self._send_on_thread(
             turn,
             end_content,
@@ -2968,13 +2993,19 @@ class HubPlugin(BasePlugin):
             return
         if getattr(turn, "ended", False):
             return
-        turn.answer = text
+        outcome = str(end_frame.get("stopReason") or ("error" if failed else "end_turn"))
+        reply_text, outcome_text = self._normalize_acp_completion(
+            outcome,
+            text,
+            str(end_frame.get("error") or ""),
+        )
+        turn.answer = reply_text
         turn.failed = failed
         turn.ended = True
         getattr(self, "_acp_network_turns", {}).pop(request_id, None)
         await self._end_network_turn(
-            turn, failed=failed, acp=True,
-            outcome=str(end_frame.get("stopReason") or ("error" if failed else "end_turn")),
+            turn, failed=failed, acp=True, outcome=outcome,
+            outcome_text=outcome_text,
         )
 
     def on_network_turn_end(self, thread_id: str, end: dict, text: str) -> None:

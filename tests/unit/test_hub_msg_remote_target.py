@@ -468,3 +468,47 @@ async def test_acp_completion_forwards_one_reply_and_hidden_end_on_original_thre
     assert [item[2] for item in sent] == ["final answer", "The receiving agent finished this request."]
     assert all(item[0:2] == ("thread-a", "req-a") for item in sent)
     assert plugin._net_turn is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "answer", "error", "reply_marker", "frame_marker"),
+    [
+        ("end_turn", "", "", "without an answer", "finished"),
+        ("max_tokens", "Partial", "", "cut off", "cut off"),
+        ("refusal", "I cannot assist.", "", "I cannot assist", "refused"),
+        ("cancelled", "DRAFT", "", "stopped", "stopped"),
+        ("error", "", "ACPDisconnected", "ACPDisconnected", "ACPDisconnected"),
+    ],
+)
+async def test_acp_completion_normalizes_outcome_text(
+    outcome, answer, error, reply_marker, frame_marker
+):
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    turn = _NetworkTurn(
+        handle=PEER, thread_id="outcome-thread", message_id="outcome-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._acp_network_turns = {turn.message_id: turn}
+    sent = []
+
+    async def capture(bound, content, what, **metadata):
+        sent.append((content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    await plugin.on_acp_completion(
+        request_id=turn.message_id, turn_id=1, thread_id=turn.thread_id,
+        source="agent", text=answer,
+        end_frame={"stopReason": outcome, "error": error},
+        failed=outcome != "end_turn",
+    )
+
+    assert len(sent) == 2
+    assert reply_marker.lower() in sent[0][0].lower()
+    assert frame_marker.lower() in sent[1][0].lower()
+    assert sent[1][2]["turn_end"]["outcome"] == outcome
+    if outcome == "cancelled":
+        assert "DRAFT" not in sent[0][0]
