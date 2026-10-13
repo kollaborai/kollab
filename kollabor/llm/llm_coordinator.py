@@ -1732,6 +1732,19 @@ class LLMService:
         if not isinstance(source, UserInputSource):
             return {"status": "rejected", "reason": "invalid_input_source"}
 
+        # ACP profiles own the transport loop; keep this public entrypoint
+        # canonical while bypassing the native provider/tool loop.
+        acp = self.event_bus.get_service("acp_orchestrator")
+        if acp is not None and getattr(acp, "active", False):
+            if not isinstance(message, str):
+                return {"status": "rejected", "reason": "acp_text_only"}
+            try:
+                result = await acp.submit(message, source=source.value)
+            except Exception as exc:
+                logger.error("ACP input dispatch failed (%s)", type(exc).__name__)
+                return {"status": "rejected", "reason": "acp_dispatch_failed"}
+            return {"status": "completed", **result}
+
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
             return {"status": "rejected", "reason": "input_pipeline_unavailable"}
