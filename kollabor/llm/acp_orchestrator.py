@@ -14,7 +14,14 @@ from typing import Any
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_tui.display_tap import publish_semantic
 
-from .acp_bridge import ACPAdmission, ACPError, ACPProfile, ACPResult, ACPRunner
+from .acp_bridge import (
+    ACPAdmission,
+    ACPError,
+    ACPPermissionBridge,
+    ACPProfile,
+    ACPResult,
+    ACPRunner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +29,18 @@ logger = logging.getLogger(__name__)
 class ACPOrchestrator:
     """Own one ACP runner for one daemon identity/profile."""
 
-    def __init__(self, event_bus: Any, *, identity: str = "default", hub_plugin: Any = None) -> None:
+    def __init__(
+        self,
+        event_bus: Any,
+        *,
+        identity: str = "default",
+        hub_plugin: Any = None,
+        permission_decider: Any = None,
+    ) -> None:
         self.event_bus = event_bus
         self.identity = identity
         self.hub_plugin = hub_plugin
+        self.permission_decider = permission_decider
         self._binding: tuple[str, int] | None = None
         self._runner: ACPRunner | None = None
         self._profile_name: str | None = None
@@ -91,7 +106,12 @@ class ACPOrchestrator:
                 pass_env=profile.pass_env,
                 mcp_servers=tuple(mcp_servers),
             )
-            self._runner = ACPRunner(acp_profile, update_callback=self._on_runner_update)
+            permission_bridge = ACPPermissionBridge(self.permission_decider)
+            self._runner = ACPRunner(
+                acp_profile,
+                permission_bridge=permission_bridge,
+                update_callback=self._on_runner_update,
+            )
             self._profile_name = profile.name
             await self._runner.start()
             self.event_bus.register_service("acp_orchestrator", self)

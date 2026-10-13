@@ -1174,6 +1174,59 @@ class TerminalLLMChat:
             logger.info("Executing guaranteed cleanup")
             await self.cleanup()
 
+    async def _acp_permission_decider(self, request: Any) -> str | None:
+        """Adapt ACP permission cards to the existing human confirmation owner.
+
+        ACP-originated agent requests must never auto-approve when no visible
+        human callback is installed. The callback chooses among the opaque
+        option IDs offered by the adapter; this adapter only maps its decision
+        back to that exact offered ID.
+        """
+        manager = getattr(self, "permission_manager", None)
+        callback = getattr(manager, "_confirmation_callback", None)
+        if callback is None:
+            return None
+        options = list(request.options or ())
+        details = {
+            "tool_id": request.request_id,
+            "tool_type": request.kind or "acp",
+            "tool_name": request.kind or "acp_permission",
+            "operation": request.operation,
+            "workspace": request.workspace,
+            "profile": request.profile,
+            "options": options,
+            "waiting": True,
+            "source": "acp",
+            "approval_scope": "once",
+        }
+        try:
+            decision = await callback(details)
+        except (asyncio.CancelledError, TimeoutError):
+            return None
+        except Exception:
+            logger.exception("ACP permission confirmation failed")
+            return None
+        allowed = bool(getattr(decision, "allowed", False))
+        requested_scope = str(
+            getattr(decision, "scope", None)
+            or getattr(decision, "approval_scope", None)
+            or details.get("approval_scope")
+            or "once"
+        ).lower()
+        wanted = (
+            "allow_always" if allowed and requested_scope in {"always", "project", "session"}
+            else "allow_once" if allowed
+            else "reject_always" if requested_scope in {"always", "project", "session"}
+            else "reject_once"
+        )
+        for option in options:
+            if str(option.get("kind")) == wanted:
+                return str(option.get("optionId"))
+        # A human can explicitly choose always/reject-always only when that
+        # opaque option was actually offered; never synthesize an option.
+        return None
+
+
     async def _initialize_acp_orchestrator(self) -> None:
         """Start the daemon-owned ACP runner for an ACP-selected profile."""
         if self._attach_to or self.acp_orchestrator is not None:
@@ -1188,7 +1241,10 @@ class TerminalLLMChat:
         )
         hub_plugin = self.event_bus.get_service("hub_plugin")
         orchestrator = ACPOrchestrator(
-            self.event_bus, identity=identity, hub_plugin=hub_plugin
+            self.event_bus,
+            identity=identity,
+            hub_plugin=hub_plugin,
+            permission_decider=self._acp_permission_decider,
         )
         try:
             await orchestrator.start(profile)
