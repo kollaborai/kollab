@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 
 import pytest
@@ -472,4 +473,28 @@ def test_profile_cache_invalid_or_non_executable_and_profile_keys_stay_stripped(
     _, _, _ = profile.resolve()
     adapter.chmod(0o644)
     with pytest.raises(ACPError, match="adapter executable not found"):
+        profile.resolve()
+
+
+
+def test_profile_prefixes_adapter_path_over_profile_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    adapter = tmp_path / "adapter"
+    adapter.write_text("#!/bin/sh\n")
+    adapter.chmod(0o755)
+    command, env, _ = ACPProfile(
+        "path", (str(adapter),), cwd=str(tmp_path), env={"PATH": "/profile/path"}
+    ).resolve()
+    assert env["PATH"].split(os.pathsep)[0] == str(tmp_path)
+    assert command[0] == str(adapter)
+
+
+def test_node_shebang_requires_existing_executable_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    adapter = tmp_path / "node-adapter"
+    adapter.write_text("#!/usr/bin/env node\n")
+    adapter.chmod(0o755)
+    profile = ACPProfile("node", (str(adapter),), cwd=str(tmp_path))
+    monkeypatch.setattr(ACPProfile, "_login_shell_node", lambda self: str(tmp_path / "missing-node"))
+    with pytest.raises(ACPError, match="Node executable"):
         profile.resolve()

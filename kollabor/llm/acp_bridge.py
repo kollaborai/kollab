@@ -137,6 +137,12 @@ class ACPProfile:
             first_line = Path(executable).read_text(errors="ignore").splitlines()[0]
             if first_line.startswith("#!") and "env node" in first_line:
                 node_path = self._login_shell_node()
+                node_file = Path(node_path)
+                if not node_path or not node_file.is_file() or not os.access(node_file, os.X_OK):
+                    raise ACPError(
+                        f"Node executable for ACP adapter is unavailable: {node_path or 'node'}. "
+                        f"{self.install_guidance}"
+                    )
         except (OSError, IndexError):
             pass
         cache[self.name] = {
@@ -157,8 +163,8 @@ class ACPProfile:
             key: value for key, value in os.environ.items()
             if key not in self._PROVIDER_KEYS or key in self.pass_env
         }
-        safe_env["PATH"] = os.pathsep.join(path_prefix + ([original_path] if original_path else []))
         safe_env.update({k: v for k, v in self.env.items() if k not in self._PROVIDER_KEYS})
+        safe_env["PATH"] = os.pathsep.join(path_prefix + ([original_path] if original_path else []))
         if node_path:
             safe_env.setdefault("ACP_NODE", node_path)
         return (executable, *self.command[1:]), safe_env, cwd
