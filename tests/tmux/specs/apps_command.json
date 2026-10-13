@@ -1,0 +1,183 @@
+{
+  "name": "apps-command",
+  "description": "/apps lists the Apps directory in three kinds (MCP Servers, CLI Tools, Skills), /apps search finds one row and lists the MCP Registry after the directory, and /apps add registry:<name> shows the command and its code without saving anything. Throwaway HOME, --no-daemon, no keyring. The registry steps need the network.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-apps-command\"; cd \"$H\"; KOLLAB_NO_KEYRING=1 HOME=\"$H\" PYTHONPATH=\"$R:$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-webui/src:$R/packages/kollabor-voice/src\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 10,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 35,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "Throwaway HOME: an empty MCP config (no npx example servers), one fake provider profile, and a plugins link",
+      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-apps-command\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab/mcp\"; ln -sfn \"$PWD/plugins\" \"$H/plugins\"; printf '%s' '{\"servers\": {}}' > \"$H/.kollab/mcp/mcp_settings.json\"; printf '%s' '{\"kollabor\": {\"llm\": {\"active_profile\": \"anthropic\", \"profiles\": {\"anthropic\": {\"provider\": \"anthropic\", \"model\": \"claude-opus-5-5\", \"api_key\": \"sk-fake-apps-command-spec\"}}}, \"updates\": {\"check_enabled\": false}}, \"plugins\": {\"hub\": {\"enabled\": false}}}' > \"$H/.kollab/config.json\"; echo \"fixture ready\"",
+      "assert_contains": "fixture ready"
+    }
+  ],
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 20,
+      "description": "app ready at the input prompt"
+    },
+    {
+      "action": "section",
+      "title": "search finds the one row"
+    },
+    {
+      "action": "type",
+      "text": "/apps search ripgrep"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\\(cli:ripgrep\\)",
+      "timeout": 25,
+      "description": "the search reply painted (it waits up to 10 s for the MCP Registry)"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\\(cli:ripgrep\\)",
+      "description": "ripgrep is the match"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "MCP Servers",
+      "description": "a search shows only the sections with matches"
+    },
+    {
+      "action": "section",
+      "title": "search lists the MCP Registry after the directory"
+    },
+    {
+      "action": "type",
+      "text": "/apps search notion"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\\(mcp:notion\\)",
+      "timeout": 25,
+      "description": "the whole reply painted (directory and registry come together, after at most 10 s)"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "MCP Registry",
+      "description": "the registry part follows the directory"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "registry:com\\.notion/mcp|Still searching",
+      "description": "Notion's own registry server, or a slow-registry line"
+    },
+    {
+      "action": "section",
+      "title": "add registry:<name> shows the command and saves nothing"
+    },
+    {
+      "action": "type",
+      "text": "/apps add registry:com.notion/mcp"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "To add it: /apps add registry:com\\.notion/mcp [0-9a-f]{16}",
+      "timeout": 45,
+      "description": "the confirm step painted"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Runs: npx -y mcp-remote https://mcp\\.notion\\.com/mcp",
+      "description": "the exact command"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Kollab has not reviewed it",
+      "description": "the not-reviewed line"
+    },
+    {
+      "action": "shell",
+      "description": "showing it saved nothing",
+      "command": "python3 -c \"import json,os; print('servers:', json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'kollab-spec-apps-command/.kollab/mcp/mcp_settings.json')))['servers'])\"",
+      "assert_contains": "servers: {}"
+    },
+    {
+      "action": "section",
+      "title": "/apps lists the three kinds"
+    },
+    {
+      "action": "type",
+      "text": "/apps"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "MCP Servers",
+      "timeout": 10,
+      "description": "the directory painted"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "CLI Tools",
+      "description": "CLI Tools section"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Skills",
+      "description": "Skills section"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|Exception",
+      "description": "no error text"
+    }
+  ]
+}

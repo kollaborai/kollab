@@ -317,6 +317,27 @@ class HubBridge:
             logger.warning(f"Socket query failed for {label}: {e}")
             return None
 
+    async def get_agent_capture(
+        self,
+        agent_id: str,
+        *,
+        capture_format: str = "json",
+        lines: int = 100,
+        max_chars: Optional[int] = None,
+        cursor: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch an opt-in normalized capture envelope."""
+        return await self.query_socket(
+            agent_id,
+            "get_output",
+            {
+                "lines": lines,
+                "format": capture_format,
+                **({"max_chars": max_chars} if max_chars is not None else {}),
+                **({"cursor": cursor} if cursor is not None else {}),
+            },
+        )
+
     async def get_agent_output(self, agent_id: str, lines: int = 100) -> Optional[str]:
         """Fetch recent output from an agent via get_output socket action."""
         resp = await self.query_socket(agent_id, "get_output", {"lines": lines})

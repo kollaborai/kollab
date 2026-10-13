@@ -1,5 +1,38 @@
 # Voice service implementation evidence
 
+## October 12: shared Voice Configuration
+
+Local source changes: `/voice` is canonical; `/voice config` opens a shared form
+in the terminal or web Settings → Voice. Retired voice command names are removed
+from the live catalog, composer and recovery messages. The device preference
+store validates complete updates, serializes concurrent writes and preserves
+unknown keys. Classifier and transcript context are editable; fixed engines,
+voice and speed are labeled read-only. Configuration never activates capture.
+
+Runtime evidence in `/tmp/kollab-voice-config-qa-29uq629p/`:
+- Fresh engine on 7439 and web UI on 8089, session `voice-config-qa`, dummy profile
+  and isolated HOME/voice root. `/voice config` opened the Voice tab. A direct
+  daemon slash-command request also completed with the Settings → Voice reply.
+- Web save persisted context 20. Real TUI arrow input plus Ctrl+S persisted 21;
+  web Refresh displayed 21. `tui-save-100.txt` and `voice-config-final.png` record
+  the two interfaces; the preference JSON confirms the value on disk.
+- Web at 390px and 820px had dialog bounds inside the viewport and no horizontal
+  overflow. `voice-config-390.png` and `voice-config-820.png` record the layouts.
+- TUI at 80x24 and 120x36 displayed the title and context 21 after idle resize.
+  `tui-voice-80.txt` and `tui-voice-120.txt` record the final frames.
+- Live checking caught numeric-widget rendering and unsaved arrow adjustments,
+  plus idle fullscreen resize handling. The shared widget and renderer/session
+  fixes cover System Configuration and other fullscreen views as well.
+
+Frontend typecheck, build and two routing tests passed. Targeted Python checks
+cover the panel/RPC contract, invalid values, corruption, concurrent writes,
+voice lifecycle/context/delivery, System Configuration and fullscreen behavior.
+No microphone or playback was activated in this pass. The user's existing
+engine/session processes were preserved; voice configuration is local and unreleased.
+Read `bundles/skills/kollab-development/SKILL.md` before continuing implementation.
+
+Earlier evidence follows with its original dates and runtime boundaries.
+
 September 26, 2026. Current source is tracked against the
 [device service](device-service-redesign.md), [classifier selection](classifier-providers.md)
 and [spoken response](spoken-response-review.md) contracts. This ledger separates

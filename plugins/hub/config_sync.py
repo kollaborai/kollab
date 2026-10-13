@@ -71,7 +71,9 @@ LOCAL_ONLY: tuple[tuple[str, ...], ...] = (
 # OAuth material is never config, wherever it might have landed.
 TOKEN_NAMES = frozenset({"access_token", "refresh_token", "id_token", "oauth_tokens"})
 SYNC_DIRS = ("agents", "skills")
-SKIP_DIR_NAMES = frozenset({"__pycache__", ".git", ".hg", ".svn", "node_modules"})
+SKIP_DIR_NAMES = frozenset(
+    {"__pycache__", ".git", ".hg", ".svn", "node_modules", ".seed-backup"}
+)
 SKIP_FILE_NAMES = frozenset({".DS_Store"})
 SKIP_SUFFIXES = (".pyc", ".pyo", ".swp", ".tmp")
 SENTINEL = KEYRING_SENTINEL_PREFIX

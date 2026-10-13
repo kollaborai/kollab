@@ -53,14 +53,18 @@ class VoicePlugin(BasePlugin):
         self._remote_jobs = {}
         self._remote_heartbeat_task = None
         self._routing_error = None
-        from kollabor_voice.classifiers import load_classifier, load_context_lines
+        from kollabor_voice.classifiers import load_preferences
 
-        self.classifier_name = load_classifier()
-        self.context_lines = load_context_lines()
+        self._preferences_revision = self._preference_revision()
+        preferences = load_preferences()
+        self._voice_preferences = preferences
+        self.classifier_name = preferences["classifier"]
+        self.context_lines = preferences["context_lines"]
+        self._needs_classifier_prepare = False
         self._classifier_generation = 0
         self._last_decision = None
         self._decision_deferred_ids = []
-        # /voicemode classifier: each classifier call, oldest first.
+        # /voice classifier: each classifier call, oldest first.
         self._classifier_log = deque(maxlen=50)
         self._classifier_seq = itertools.count(1)
         self._classifier_entry = None
@@ -114,6 +118,7 @@ class VoicePlugin(BasePlugin):
             loop.request_render()
 
     def status(self):
+        self.sync_preferences()
         state = dict(self._state)
         if self._speech_error:
             state["output"] = {**state.get("output", {}), "error": self._speech_error}
@@ -133,19 +138,61 @@ class VoicePlugin(BasePlugin):
         )
         return state
 
+    @staticmethod
+    def _preference_revision():
+        from kollabor_voice.control import service_root
+
+        try:
+            stat = (service_root() / "preferences.json").stat()
+            return stat.st_mtime_ns, stat.st_ino
+        except OSError:
+            return None
+
+    def sync_preferences(self):
+        """Other chats and interfaces save to the same device preference file."""
+        revision = self._preference_revision()
+        if revision == self._preferences_revision:
+            return
+        from kollabor_voice.classifiers import load_preferences
+
+        preferences = load_preferences()
+        changed = preferences != self._voice_preferences
+        self._voice_preferences = preferences
+        if self.classifier_name != preferences["classifier"]:
+            self._needs_classifier_prepare = preferences["classifier"] == "laya"
+        self.classifier_name = preferences["classifier"]
+        self.context_lines = preferences["context_lines"]
+        self._preferences_revision = revision
+        if changed:
+            self._classifier_generation += 1
+            self._last_decision = None
+            self._observer_error = self._routing_error
+            self._retry.set()
+            self._refresh()
+
+    async def configure_voice(self, changes):
+        from kollabor_voice.classifiers import save_preferences
+
+        save_preferences(changes)
+        self.sync_preferences()
+        if "classifier" in changes:
+            # Selecting the current classifier also retries a stopped worker.
+            self._classifier_generation += 1
+            self._last_decision = None
+            self._observer_error = self._routing_error
+            self._needs_classifier_prepare = self.classifier_name == "laya"
+            self._retry.set()
+        if self._needs_classifier_prepare and self._client and self.requested:
+            await self._prepare_classifier()
+            self._needs_classifier_prepare = False
+
     async def set_classifier(self, name):
-        from kollabor_voice.classifiers import CLASSIFIERS, save_classifier
+        from kollabor_voice.classifiers import CLASSIFIERS
 
         if name not in CLASSIFIERS:
             raise ValueError("Choose laya or provider")
-        save_classifier(name)
-        self.classifier_name = name
-        self._classifier_generation += 1
-        self._last_decision = None
-        self._observer_error = self._routing_error
+        await self.configure_voice({"classifier": name})
         self._allow_stale = True
-        if name == "laya" and self._client and self.requested:
-            await self._prepare_classifier()
         self._retry.set()
         self._refresh()
         return f"Voice classifier: {CLASSIFIERS[name]}. Saved for this device; pending speech is preserved."
@@ -154,9 +201,7 @@ class VoicePlugin(BasePlugin):
         from kollabor_voice.classifiers import save_context_lines
 
         save_context_lines(value)
-        self.context_lines = value
-        self._classifier_generation += 1
-        self._refresh()
+        self.sync_preferences()
         return (
             f"Voice context: previous {value} transcript lines. Saved for this device."
         )
@@ -306,6 +351,11 @@ class VoicePlugin(BasePlugin):
                         )
                 else:
                     update(initial)
+                speech = initial.get("speech", {})
+                if speech.get("state") == "error":
+                    raise RuntimeError(
+                        speech.get("detail", "Speech engine setup failed; /voice retry")
+                    )
                 if initial.get("state") == "error":
                     raise RuntimeError(
                         initial.get("error")
@@ -340,6 +390,10 @@ class VoicePlugin(BasePlugin):
                 self._observe_loop(), name="voice-observer"
             )
             while self.requested:
+                self.sync_preferences()
+                if self._needs_classifier_prepare:
+                    await self._prepare_classifier()
+                    self._needs_classifier_prepare = False
                 self._state = await self._client.call("heartbeat", **self._auth())
                 if len(self._pending) < 32:
                     result = await self._client.call(
@@ -357,7 +411,7 @@ class VoicePlugin(BasePlugin):
                 else:
                     self._observer_error = (
                         "Voice observation is behind; speech remains in the transcript. "
-                        "Run /voicemode retry"
+                        "Run /voice retry"
                     )
                 self._refresh()
                 await asyncio.sleep(0.35)
@@ -391,7 +445,7 @@ class VoicePlugin(BasePlugin):
             # durable transcription. Routing pauses with pending speech visible.
             self._routing_error = str(exc)
             self._observer_error = (
-                f"AI connection lost; transcription continues. /voicemode retry ({exc})"
+                f"AI connection lost; transcription continues. /voice retry ({exc})"
             )
             self._refresh()
 
@@ -428,7 +482,9 @@ class VoicePlugin(BasePlugin):
                     r for r in self._pending if r["event_id"] not in dropped
                 ]
                 self._log_classifier(echoes, echo=True)
-                logger.info("Dropped %d microphone line(s) echoing playback", len(echoes))
+                logger.info(
+                    "Dropped %d microphone line(s) echoing playback", len(echoes)
+                )
                 continue
             if self._observer_error:
                 await self._retry.wait()
@@ -438,7 +494,7 @@ class VoicePlugin(BasePlugin):
                 classifier = self._state.get("classifier", {})
                 if classifier.get("state") == "error":
                     self._observer_error = classifier.get(
-                        "detail", "Laya failed; /voicemode retry"
+                        "detail", "Laya failed; /voice retry"
                     )
                     self._refresh()
                     continue
@@ -465,7 +521,7 @@ class VoicePlugin(BasePlugin):
                 newest = datetime.fromisoformat(records[-1]["ended_at"]).timestamp()
                 if not self._allow_stale and time.time() - newest > 30:
                     raise RuntimeError(
-                        "Speech is older than 30 seconds and awaits review; /voicemode retry retries it explicitly"
+                        "Speech is older than 30 seconds and awaits review; /voice retry retries it explicitly"
                     )
                 # An initially ignored lead-in can be followed by a question.
                 # Keep a bounded lookback so that early classification cannot
@@ -553,7 +609,7 @@ class VoicePlugin(BasePlugin):
                 if classifier_generation != self._classifier_generation:
                     continue
                 self._observer_error = (
-                    str(exc) or "Voice observer timed out; /voicemode retry"
+                    str(exc) or "Voice observer timed out; /voice retry"
                 )
                 if self._classifier_entry is None:
                     self._log_classifier(records, error=self._observer_error)
@@ -598,7 +654,10 @@ class VoicePlugin(BasePlugin):
         try:
             decision = await classifier.decide(
                 DecisionRequest(
-                    records, context, self._decision_transcript_context, self.context_lines
+                    records,
+                    context,
+                    self._decision_transcript_context,
+                    self.context_lines,
                 )
             )
             self._last_decision = entry["decision"] = decision.to_wire()
@@ -786,7 +845,7 @@ class VoicePlugin(BasePlugin):
         async with self._admission_lock:
             if voice.get("expires_at") and voice["expires_at"] < time.time():
                 raise RuntimeError(
-                    "Voice request expired before admission; review pending speech with /voicemode retry"
+                    "Voice request expired before admission; review pending speech with /voice retry"
                 )
             await self.validate_turn(voice)
             if self._admissions is None:

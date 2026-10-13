@@ -401,7 +401,7 @@ class TestSendMessage:
         await svc._llm_service.turn_task
 
     @pytest.mark.asyncio
-    async def test_rejects_empty_and_busy(self):
+    async def test_empty_rejects_but_busy_text_queues_through_shared_pipeline(self):
         from kollabor.state.local import LocalStateService
 
         svc = LocalStateService.__new__(LocalStateService)
@@ -412,10 +412,17 @@ class TestSendMessage:
         class Busy:
             is_processing = True
 
-            async def process_user_input(self, message, pre_displayed=False):
-                raise AssertionError("must not run while a turn is in flight")
+            def __init__(self):
+                self.submissions = []
 
-        svc._llm_service = Busy()
-        busy = await svc.send_message("hi")
-        assert busy["accepted"] is False
-        assert "in flight" in busy["reason"]
+            async def submit_human_input(self, message, *, source):
+                self.submissions.append((message, source))
+                return {"status": "queued"}
+
+        llm = Busy()
+        svc._llm_service = llm
+        result = await svc.send_message("hi")
+        assert result == {"accepted": True, "reason": ""}
+        assert len(llm.submissions) == 1
+        assert llm.submissions[0][0] == "hi"
+        assert llm.submissions[0][1].value == "state_rpc"

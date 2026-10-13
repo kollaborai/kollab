@@ -8,7 +8,7 @@ HEAD `9bb8085dc5592972f5a35eb72156821ca475e28e` plus pre-existing uncommitted vo
 
 ## 1. Product contract
 
-The user types `/voicemode` and can immediately see what is happening. Kollab
+The user types `/voice` and can immediately see what is happening. Kollab
 checks for a working shared service, installs missing support and downloads the
 defaults in the background, warms the models, then starts listening. The user does not choose
 models, runtimes, caches, or a voice during setup.
@@ -50,7 +50,7 @@ The implementation is mostly untracked local work. It has reusable pieces, but
 the running path is an in-process engine attached to each plugin instance:
 
 ```text
-/voicemode
+/voice
   -> check imports and per-project model cache
   -> model-selection wizard if anything is missing
   -> set kollabor.voice.enabled
@@ -229,7 +229,7 @@ readiness depends on real boundary tests. Acceptance: V01–V18.
 ## 4. Replacement architecture
 
 ```text
-TUI /voicemode -> small client -> one Kollab Voice process per local OS user
+TUI /voice -> small client -> one Kollab Voice process per local OS user
                                  |
                                  + input: mic -> speech segments -> Whisper base
                                  |                              -> transcript JSONL
@@ -295,7 +295,7 @@ Only the lock owner starts the daemon. A crash releases the lock; recovery check
 socket liveness and version before replacing stale artifacts. Do not kill by PID
 alone. A daemon launched by a terminal must detach from that terminal's lifetime.
 
-Only an explicit `/voicemode` activation grants a recording/response lease. One
+Only an explicit `/voice` activation grants a recording/response lease. One
 conversation owns the response lease; the latest explicit activation moves it
 atomically and tells both clients where responses now go. Merely opening another
 chat or spawning an agent does not take ownership.
@@ -332,8 +332,8 @@ Voice Listening · MacBook Pro Microphone · mic [|||..]
 Voice Listening · transcribing · 1 segment waiting
 Heard 14:03:22 · "Can you check the failing test?"
 Voice Listening · speaking · 2 sentences queued
-Voice Error · microphone unavailable · /voicemode retry
-Voice Disconnected · service heartbeat lost · /voicemode retry
+Voice Error · microphone unavailable · /voice retry
+Voice Disconnected · service heartbeat lost · /voice retry
 Voice Off
 ```
 
@@ -355,11 +355,11 @@ not permission denial. A heartbeat loss clears healthy status within three
 seconds. An STT failure preserves mic/service diagnostics and shows an error,
 rather than leaving a green state or invisible failed task.
 
-`/voicemode` toggles this chat. `/voicemode on|off|status|retry` are explicit forms.
+`/voice` toggles this chat. `/voice on|off|status|retry` are explicit forms.
 `status` shows the actual service, recording owner, microphone, transcript path,
 last transcript time, queue depth, and errors. It does not open a configuration
-wizard. Existing `/vm` and `/voice` aliases remain; `/voicemodels` becomes a
-compatibility alias to status, not a second setup flow.
+wizard. `/voice config` opens one shared device-preference panel in the TUI
+or web Settings → Voice. The old `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` commands are removed.
 
 ### Transcript contract
 
@@ -401,7 +401,7 @@ a new recording epoch; do not attach an earlier conversation's pending audio or
 transcript context to the new owner. Preserve that audio as partial/history and
 start a fresh segment. Reconnect recovery is scoped to the same owner and epoch.
 
-Use Laya locally by default, with `/voicemode classifier provider` retaining the
+Use Laya locally by default, with `/voice classifier provider` retaining the
 original tool-free observer through the active conversation's configured AI
 provider. Both implement the same typed decision contract: `ignore`, `respond`,
 or `defer`, plus exact source event IDs and optional confidence. They receive
@@ -532,7 +532,7 @@ This document does not claim those files have already been removed.
 Every result must name its tested boundary. Synthetic audio is useful for
 determinism; only an actual spoken phrase can prove the microphone/STT path.
 
-- **V01 — First run:** no service/deps/models; `/voicemode` acknowledges within
+- **V01 — First run:** no service/deps/models; `/voice` acknowledges within
   250 ms, automatically shows setup progress, and needs no configuration choices.
   The input box remains usable while downloads run.
 - **V02 — Status surfaces:** existing JSON layout, saved custom layout, Python
@@ -619,3 +619,61 @@ rate. Both model weights and the voice asset belong in the manifest. The
 [upstream README](https://github.com/thewh1teagle/kokoro-onnx) documents the model
 release assets. These sources support adapter selection, not a claim of tested
 Kollab playback. Verified September 26, 2026; pin artifacts before shipping.
+
+
+## Voice configuration in both interfaces (October 12, 2026)
+
+`/voice` is the canonical command. With no argument it toggles listening;
+`on`, `off`, `status`, `retry`, `classifier` and `context` retain their behavior.
+`config` opens a settings editor. In web chat only `/voice config` is intercepted
+to open Settings → Voice; `/voice`, `/voice on` and `/voice off` reach the daemon.
+The composer microphone sends `/voice on|off` and checks the live command catalog.
+
+One daemon-owned `voice` form defines both interfaces. It exposes every current
+user preference: classifier (`laya` or `provider`) and transcript context (integer
+1–50). Fixed Whisper base, Kokoro, af_heart and speed 1.0 are read-only rows,
+with microphone, state and preferences location. Unsupported engines cannot be
+saved. The panel is available before audio setup and does not acquire a microphone
+lease or download models.
+
+Both editors validate the whole update before writing and save one atomic snapshot
+to the existing device `preferences.json`, preserving unrelated keys. Concurrent
+saves serialize their read/merge/write. Corrupt preferences are never overwritten.
+Active voice clients observe changed preferences during heartbeat; classification
+is fenced by its generation and pending speech remains intact. Saving does not
+automatically admit stale speech, activate listening, or switch the AI profile.
+
+Acceptance: canonical catalog and completion list omit retired commands; ordinary
+voice toggles remain chat commands; TUI Ctrl+S and web Save for This Device use
+the same action; values survive a fresh plugin and are read by other active chats;
+invalid, fractional, unknown and read-only changes do not alter disk or runtime.
+Check the web panel at 390px and 820px and the TUI at narrow and wide sizes.
+
+
+## Selectable local speech engines (October 12, 2026)
+
+This extends the configuration contract above: Speech Engine is now editable
+(`kokoro` or `vibevoice`). All engine preferences share the existing device
+preference transaction. Kokoro Voice/Speed and VibeVoice Voice/Custom Prompt/Model/
+Device/Diffusion Steps/Guidance are validated before publication. Only the
+selected engine is prepared; changing inactive options does not reload it.
+
+VibeVoice runs as one service-owned persistent child in a separately pinned
+runtime, using the pinned official Microsoft source archive. Preset prompts are
+hash-verified; default model downloads use a pinned Hugging Face revision. Local
+model and custom prompt paths are explicit user-owned overrides. Model/prompt
+files and another application's VibeVoice worker are never changed.
+
+The worker returns float32 waveform samples and sample rate over a bounded pipe
+protocol. Each response carries the request identity; timeout/identity failure
+ends that worker and cannot be mistaken for a later sentence. Logs use stderr.
+The worker performs silent warmup, never microphone capture or device playback.
+Kollab's existing SpeechQueue retains FIFO, cancellation fences and actual
+playback receipts. The service watches preference revisions and loads a changed
+backend without starting capture when no conversation owns the microphone.
+Readiness reports actual backend state/PID/voice/device, including setup errors.
+
+Acceptance: valid presets/configuration persist from either editor; invalid
+paths/numbers/options leave preferences unchanged; selecting VibeVoice yields
+real waveform audio; cancellation fences late generation; switching back to
+Kokoro closes only the owned inference worker; busy coding agents remain running.

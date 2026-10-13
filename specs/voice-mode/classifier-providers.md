@@ -12,7 +12,7 @@ See [spoken-response-review.md](spoken-response-review.md) for the format bounda
 single rewrite nudge, silent rejection, and attached routing contract.
 
 Contract:
-- `/voicemode classifier` shows the choices. `laya` and `provider` save a device
+- `/voice classifier` shows the choices. `laya` and `provider` save a device
   preference without enabling the microphone. New installations default to Laya.
 - Switching while listening preserves pending transcript records and the current
   capture lease. A result from the previous selection cannot admit a user turn.
@@ -62,7 +62,7 @@ gap remains open; integration and unit-test success do not close it. See
 
 Objective: a decision about new speech can use the preceding microphone transcript,
 including lines previously ignored or already admitted. Default: 10 complete final
-lines; `/voicemode context N` selects 1–50 and persists the device preference.
+lines; `/voice context N` selects 1–50 and persists the device preference.
 
 The window is chronological and scoped to the current capture ownership epoch.
 It is context only: prior IDs cannot become fresh requests. Connected lead-ins

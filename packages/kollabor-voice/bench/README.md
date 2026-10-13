@@ -1,6 +1,6 @@
 # Local voice classifier evidence
 
-Laya is the default. `provider` remains available through `/voicemode classifier`.
+Laya is the default. `provider` remains available through `/voice classifier`.
 The bundled `voice-intent-v1.safetensors` is a small radial-basis decision head
 trained on frozen representations from Laya's pinned `typed-decisions` encoder.
 It uses the CLS vector, the difference between option-marker vectors, and the

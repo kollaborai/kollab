@@ -123,6 +123,8 @@ def fill_primary(kollab):
         b"pyc"
     )
     (kollab / "agents" / ".DS_Store").write_bytes(b"junk")
+    (kollab / "skills" / ".seed-backup" / "tdd").mkdir(parents=True)
+    (kollab / "skills" / ".seed-backup" / "tdd" / "SKILL.md").write_text("old seed copy\n")
     (kollab / "skills" / "linked").symlink_to(kollab.parent / "project")
     write_json(kollab / "oauth" / "openai.json", {"refresh_token": OAUTH_TEXT})
     (kollab / "hub" / "vaults" / "lapis").mkdir(parents=True)
@@ -262,6 +264,7 @@ def test_excluded_items_never_enter_the_snapshot(homes):
         ".DS_Store",
         "__pycache__",
         "linked",
+        ".seed-backup",
     ):
         assert banned not in everything, banned
     assert 5 not in leaves.values()  # the project .kollab/config.json is never read
@@ -896,6 +899,7 @@ def test_paths_outside_agents_and_skills_are_refused(homes, keys):
     for bad in (
         "../escape.txt", "agents/../../escape.txt", "/etc/passwd", "config.json",
         "agents/x/__pycache__/y.pyc", "skills//x", "agents\\x", "skills",
+        "skills/.seed-backup/tdd/SKILL.md",
     ):  # fmt: skip
         with homes("server"):
             reply = receiver.sync(

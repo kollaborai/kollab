@@ -166,8 +166,13 @@ class LocalModels:
         ]
         return " ".join(accepted).strip(), info.language
 
-    def synthesize(self, text):
-        return self.kokoro.create(text, voice="af_heart", speed=1.0, lang="en-us")
+    def synthesize(self, text, voice="af_heart", speed=1.0):
+        return self.kokoro.create(
+            text,
+            voice=voice,
+            speed=speed,
+            lang="en-gb" if voice.startswith("b") else "en-us",
+        )
 
 
 def play_audio(samples, rate, cancelled: threading.Event):

@@ -174,7 +174,9 @@ class TestAgentsListTrender(unittest.TestCase):
         """Test trender actually renders agents list."""
         from kollabor_agent import AgentManager
         from kollabor_ai import PromptRenderer
+        from kollabor_config.config_utils import initialize_system_prompt
 
+        initialize_system_prompt()  # seeds the bundled agents into the test's HOME, as startup does
         am = AgentManager()
         renderer = PromptRenderer(agent_manager=am)
 

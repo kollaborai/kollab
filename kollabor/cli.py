@@ -9,7 +9,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .commands.registry import SlashCommandRegistry
@@ -492,6 +492,28 @@ Telegram bridge setup (run inside interactive mode):
     )
 
     parser.add_argument(
+        "--acp-profile",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Run one outbound ACP prompt using a configured profile name",
+    )
+    parser.add_argument(
+        "--acp-command",
+        nargs="+",
+        default=None,
+        metavar="CMD",
+        help="Local ACP adapter command (overrides profile command)",
+    )
+    parser.add_argument(
+        "--acp-prompt",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help="Run one outbound ACP prompt and print the assembled answer",
+    )
+
+    parser.add_argument(
         "--context",
         type=str,
         default=None,
@@ -529,6 +551,12 @@ Telegram bridge setup (run inside interactive mode):
         action="store_true",
         default=False,
         help="Open kollab in your browser (http://127.0.0.1:8080)",
+    )
+    parser.add_argument(
+        "--mcp-hub",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -903,6 +931,44 @@ def handle_early_plugin_args(args, plugin_classes: list) -> bool:
     return should_exit
 
 
+async def _run_acp_cli(args: Any) -> None:
+    from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
+
+    command = tuple(args.acp_command or ())
+    profile_name = args.acp_profile or "cli"
+    profile_data = None
+    if not command and args.acp_profile:
+        profile_path = Path(args.acp_profile).expanduser()
+        if profile_path.is_file():
+            import json
+
+            profile_data = json.loads(profile_path.read_text())
+            profile_name = str(profile_data.get("name") or profile_path.stem)
+            command = tuple(profile_data.get("command") or ())
+    if not command:
+        raise SystemExit("--acp-command or a JSON --acp-profile is required")
+    prompt = args.acp_prompt or args.query
+    if not prompt:
+        raise SystemExit("--acp-prompt or a positional query is required")
+    profile = (
+        ACPProfile.from_dict(profile_name, profile_data)
+        if profile_data is not None
+        else ACPProfile(
+            name=profile_name,
+            command=command,
+            cwd=os.getcwd(),
+            workspace=os.getcwd(),
+        )
+    )
+    runner = ACPRunner(profile)
+    try:
+        await runner.start()
+        result = await runner.prompt(prompt)
+        print(result.text, end="" if result.text.endswith("\\n") else "\\n")
+    finally:
+        await runner.close()
+
+
 async def async_main() -> None:
     """Main async entry point for the application with proper error handling."""
     import time
@@ -927,6 +993,16 @@ async def async_main() -> None:
     # Parse all args (core + plugin)
     args = parse_arguments(plugin_classes)
     args._start_time = _start_time  # For timing display in help
+
+    if args.mcp_hub:
+        from kollabor.mcp_hub import main as mcp_hub_main
+
+        mcp_hub_main()
+        return
+
+    if args.acp_prompt is not None or args.acp_command is not None:
+        await _run_acp_cli(args)
+        return
 
     # Handle early-exit args from plugins (like --capture)
     if handle_early_plugin_args(args, plugin_classes):
@@ -2186,6 +2262,10 @@ def _interactive_app_launch(args: list[str]) -> bool:
         "--login",
         "-p",
         "--pipe",
+        "--mcp-hub",
+        "--acp-profile",
+        "--acp-command",
+        "--acp-prompt",
     }
     daemon_launch_flags = {
         "--agent",

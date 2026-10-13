@@ -53,9 +53,9 @@ from .runtime import AgentRuntime
 logger = logging.getLogger(__name__)
 
 # Cache settings
-CACHE_VERSION = 3  # Strict Agent Skills SKILL.md validation (agentskills.io)
+CACHE_VERSION = 4  # Every agent gets the skills the user added; skills_fingerprint
 CACHE_TTL_SECONDS = 86400  # 24 hours
-AGENT_CACHE_FILE = get_config_directory() / "agent_metadata.cache"
+AGENT_CACHE_NAME = "agent_metadata.cache"  # under get_config_directory(), read at use so HOME can change
 
 
 _SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
@@ -339,6 +339,23 @@ class SkillLibrary:
 
         logger.info(f"Discovered {len(self._skill_dirs)} skills in library")
 
+    def refresh(self) -> None:
+        """Rescan the tiers, so a skill added or removed on disk shows without a restart."""
+        self._skills.clear()
+        self._loaded = False
+        self._discover()
+
+    def fingerprint(self) -> str:
+        """Changes when a skill folder is added, removed or moved, or its SKILL.md is edited."""
+        parts = []
+        for name, (skill_dir, _source) in sorted(self._skill_dirs.items()):
+            try:
+                mtime = (skill_dir / "SKILL.md").stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            parts.append(f"{name}:{skill_dir}:{mtime}")
+        return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
     def _ensure_loaded(self) -> None:
         """Lazy-load skill metadata from SKILL.md frontmatter."""
         if self._loaded:
@@ -371,7 +388,8 @@ class SkillLibrary:
             spec: List of skill names. ["*"] means all skills.
 
         Returns:
-            Dict of skill name -> Skill for the agent's assigned skills.
+            Dict of skill name -> Skill for the agent's assigned skills, plus
+            every skill the user added (global or local), which every agent gets.
         """
         self._ensure_loaded()
         if spec == ["*"]:
@@ -382,6 +400,9 @@ class SkillLibrary:
                 result[name] = self._skills[name]
             else:
                 logger.warning(f"Skill '{name}' not found in library")
+        for name, skill in self._skills.items():
+            if skill.source != "bundled":
+                result.setdefault(name, skill)
         return result
 
     def list_all(self) -> List[Skill]:
@@ -414,8 +435,11 @@ def _get_cache_key(agent_dir: Path) -> str:
     return hashlib.md5(hash_source).hexdigest()
 
 
-def _load_cached_agents(cache_file: Path) -> Dict[str, Dict]:
+def _load_cached_agents(cache_file: Path, skills_fingerprint: str = "") -> Dict[str, Dict]:
     """Load cached agent metadata from disk.
+
+    The cache holds each agent's resolved skills, so it is ignored once the
+    skill library changed (a skill added, removed, moved or edited).
 
     Returns:
         Dict mapping agent names to cached metadata
@@ -431,6 +455,10 @@ def _load_cached_agents(cache_file: Path) -> Dict[str, Dict]:
             logger.debug("Agent cache version mismatch, ignoring")
             return {}
 
+        if data.get("skills_fingerprint", "") != skills_fingerprint:
+            logger.debug("Skill library changed, ignoring agent cache")
+            return {}
+
         cache_age = time.time() - data.get("timestamp", 0)
         if cache_age > CACHE_TTL_SECONDS:
             logger.debug(f"Agent cache expired (age={cache_age}s), ignoring")
@@ -444,12 +472,15 @@ def _load_cached_agents(cache_file: Path) -> Dict[str, Dict]:
         return {}
 
 
-def _save_cached_agents(cache_file: Path, agents: List[AgentRuntime]) -> None:
+def _save_cached_agents(
+    cache_file: Path, agents: List[AgentRuntime], skills_fingerprint: str = ""
+) -> None:
     """Save agent metadata to cache.
 
     Args:
         cache_file: Path to cache file
         agents: List of Agent instances to cache
+        skills_fingerprint: SkillLibrary.fingerprint() the agents' skills came from
     """
     try:
         cache_dir = cache_file.parent
@@ -484,6 +515,7 @@ def _save_cached_agents(cache_file: Path, agents: List[AgentRuntime]) -> None:
         cache_data = {
             "version": CACHE_VERSION,
             "timestamp": int(time.time()),
+            "skills_fingerprint": skills_fingerprint,
             "agents": agents_data,
         }
 
@@ -960,7 +992,7 @@ class AgentManager:
         Uses disk cache if available and valid.
         """
         # Try loading from cache first
-        cached_agents = _load_cached_agents(AGENT_CACHE_FILE)
+        cached_agents = _load_cached_agents(get_config_directory() / AGENT_CACHE_NAME, self.skill_library.fingerprint())
 
         loaded_from_cache = []
         needs_load = []
@@ -1058,7 +1090,11 @@ class AgentManager:
 
         # Update cache if we loaded anything new
         if needs_load:
-            _save_cached_agents(AGENT_CACHE_FILE, list(self._agents.values()))
+            _save_cached_agents(
+                get_config_directory() / AGENT_CACHE_NAME,
+                list(self._agents.values()),
+                self.skill_library.fingerprint(),
+            )
 
         cache_stats = (
             f"{len(loaded_from_cache)} from cache, {len(needs_load)} from disk"
@@ -1529,7 +1565,9 @@ class AgentManager:
         return "\n".join(lines)
 
     def refresh(self) -> None:
-        """Re-discover agents from directories, preserving active skills."""
+        """Re-discover skills and agents from directories, preserving active skills."""
+        self.skill_library.refresh()
+
         # Preserve active skills state before refresh
         active_skills_backup: Dict[str, List[str]] = {}
         for name, agent in self._agents.items():

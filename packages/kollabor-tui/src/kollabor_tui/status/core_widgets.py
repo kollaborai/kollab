@@ -149,7 +149,7 @@ def voice_classifier_label(state: dict) -> str:
     """What the speech classifier did with the last words, e.g. "laya sent 2 pending".
 
     "" when no classifier is configured. "stopped" means its request failed
-    and speech waits until /voicemode retry.
+    and speech waits until /voice retry.
     """
     name = str(state.get("classifier_name") or "").strip().lower()
     if not name:

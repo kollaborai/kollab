@@ -69,21 +69,49 @@ async def get_agent(agent_id: str, ping: bool = Query(False)):
 async def get_agent_output(
     agent_id: str,
     lines: int = Query(100, ge=1, le=1000),
+    format: str = Query("terminal", pattern="^(terminal|plain|json)$"),
+    max_chars: int | None = Query(None, ge=1, le=200000),
+    cursor: str | None = Query(None),
 ):
-    """Fetch recent output from an agent via unix socket."""
+    """Fetch recent output; plain/json are explicit browser formats."""
     agent, resolved_id = _resolve_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
-    output = await _bridge.get_agent_output(resolved_id, lines=lines)
-    if output is None:
-        return {
-            "agent_id": agent_id,
-            "output": None,
-            "error": "Agent socket unavailable or timed out",
-        }
+    if format == "terminal":
+        output = await _bridge.get_agent_output(resolved_id, lines=lines)
+        if output is None:
+            return {
+                "agent_id": agent_id,
+                "output": None,
+                "error": "Agent socket unavailable or timed out",
+            }
+        return {"agent_id": agent_id, "output": output}
 
-    return {"agent_id": agent_id, "output": output}
+    capture = await _bridge.get_agent_capture(
+        resolved_id,
+        capture_format=format,
+        lines=lines,
+        max_chars=max_chars,
+        cursor=cursor,
+    )
+    if capture is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_unavailable", "agent": agent_id},
+        )
+    capture.pop("type", None)
+    capture["agent_id"] = agent_id
+    capture["agent"] = {
+        "identity": agent.get("identity", agent_id),
+        "status": agent.get("status"),
+        "duration": agent.get("duration"),
+    }
+    if format == "plain":
+        capture["output"] = capture.pop("text", "")
+        capture.pop("lines", None)
+        return capture
+    return capture
 
 
 @router.get("/agents/{agent_id}/status")

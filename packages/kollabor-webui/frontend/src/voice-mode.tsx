@@ -12,9 +12,9 @@ import {
 import type { EngineApi } from "./api";
 
 export type VoiceMode = {
-  /** A /voicemode command is in flight; the mic holds still until it settles. */
+  /** A /voice command is in flight; the mic holds still until it settles. */
   pending: boolean;
-  /** The last /voicemode on reported success and no later off did. */
+  /** The last /voice on reported success and no later off did. */
   on: boolean;
   toggle: () => void;
 };
@@ -26,7 +26,7 @@ const VoiceModeContext = createContext<VoiceMode>(IDLE);
 export const useVoiceMode = () => useContext(VoiceModeContext);
 
 /**
- * The composer mic is a /voicemode toggle. The command goes out as a normal
+ * The composer mic is a /voice toggle. The command goes out as a normal
  * chat turn, the same path a typed slash command takes, and the daemon runs it
  * (LocalStateService._run_web_slash_command).
  *
@@ -79,7 +79,7 @@ export function VoiceModeProvider({
     const action = on ? "off" : "on";
     sawRun.current = false;
     setPending(action);
-    aui.thread.append(`/voicemode ${action}`);
+    aui.thread.append(`/voice ${action}`);
   }, [aui, isRunning, on, pending]);
 
   // The command is a chat turn: once its run has started and ended, its reply
@@ -99,7 +99,7 @@ export function VoiceModeProvider({
         const reply = [...(history ?? [])].reverse().find((message) => {
           const meta = (message.metadata ?? {}) as Record<string, unknown>;
           return (
-            meta.slash_command === `/voicemode ${pending}` &&
+            meta.slash_command === `/voice ${pending}` &&
             typeof meta.command_success === "boolean"
           );
         });

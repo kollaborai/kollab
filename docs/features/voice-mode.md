@@ -1,38 +1,43 @@
 # Voice mode
 
-Run `/voicemode on` in the chat that should respond to you. Kollab prepares local
-voice support in the background, downloads Whisper base, the default Kokoro
-voice and the default Laya classifier, warms them, then starts the microphone. There is no
-model picker. The input box stays usable during setup.
+Run `/voice on` in the chat that should respond to you. Kollab prepares local
+voice support in the background, downloads Whisper base and the default Laya classifier, and prepares the selected
+speech engine (Kokoro by default), warms them, then starts the microphone. Engine setup is automatic. The input box stays usable during setup.
 
-Use `/voicemode status` to inspect setup/download progress, microphone activity,
+Use `/voice status` to inspect setup/download progress, microphone activity,
 model warmup, transcription, speech playback and errors. The transcript file uses
 UTC timestamps. The compact status row shows mic state, what the classifier did
 with your last words (`laya sent`, `ignored`, `unsure`, `deciding` or `stopped`, then
 how many lines wait) and, when space permits, the latest transcript. It has no
 input-level meter.
 
-- `/voicemode` toggles voice for this chat.
-- `/voicemode on` makes this chat the responding conversation.
-- `/voicemode off` releases its microphone lease and cancels unplayed speech.
-- `/voicemode status` shows the service, owner, devices, transcript and queues.
-- `/voicemode retry` retries failed setup or explicitly retries pending speech.
-- `/voicemode classifier` opens the decision log: each classifier call on the left;
+- `/voice` toggles voice for this chat.
+- `/voice on` makes this chat the responding conversation.
+- `/voice off` releases its microphone lease and cancels unplayed speech.
+- `/voice status` shows the service, owner, devices, transcript and queues.
+- `/voice retry` retries failed setup or explicitly retries pending speech.
+- `/voice classifier` opens the decision log: each classifier call on the left;
   on the right what was heard, what the classifier read (transcript history, recent
   conversation, the agent's own speech), each pass's answer, the decision, and what
   reached the agent. Lines dropped as the agent's own voice show as `echo`. It
   updates while open. Without a terminal it names the classifier and both choices.
-- `/voicemode classifier laya` selects the default local classifier.
-- `/voicemode classifier provider` selects the active AI provider instead.
-- `/voicemode context` shows the recent transcript window (default 10 lines).
-- `/voicemode context 20` changes it to 20 lines; the allowed range is 1–50.
-- `/vm` and `/voice` are aliases. `/voicemodels` now shows status.
+- `/voice classifier laya` selects the default local classifier.
+- `/voice classifier provider` selects the active AI provider instead.
+- `/voice context` shows the recent transcript window (default 10 lines).
+- `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
+- `/voice config` opens Voice Configuration in the TUI or Settings → Voice in the web UI.
+  Change the classifier and transcript context there, then save for this device.
+  Select Kokoro or VibeVoice and configure their voices there. The panel also shows
+  microphone, transcription engine, operating state and speech readiness. Saving does not enable the microphone.
+  Preferences are shared across chats on the device running Kollab; an attached
+  remote host's web settings apply to that host.
+  `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` are no longer registered.
 
 ## Flow at a glance
 
 ```mermaid
 flowchart TD
-    Start["/voicemode on"] --> Plugin["VoicePlugin connects to device voice service"]
+    Start["/voice on"] --> Plugin["VoicePlugin connects to device voice service"]
     Plugin --> Prepare["Prepare local Whisper and Kokoro<br/>Prepare Laya if selected"]
     Prepare --> Ready{"Service and selected classifier ready?"}
     Ready -->|waiting| Poll["Poll readiness"]
@@ -71,9 +76,9 @@ also defer uncertain or unsupported speech to the main agent.
 ```mermaid
 flowchart TD
     Batch["Settled transcript batch<br/>up to 8 pending records + recent context"] --> Fresh{"Within 30 seconds<br/>or explicitly retried?"}
-    Fresh -->|No| Pending["Keep pending; retry explicitly<br/>(/voicemode retry)"]
+    Fresh -->|No| Pending["Keep pending; retry explicitly<br/>(/voice retry)"]
     Fresh -->|Yes| Route{"Selected classifier"}
-    Pending -->|/voicemode retry| Batch
+    Pending -->|/voice retry| Batch
 
     Route -->|Laya default| Laya["Local Laya worker<br/>on the microphone-owning device"]
     Route -->|Provider| Provider["Tool-free provider observer<br/>configured provider or attached agent"]
@@ -93,7 +98,7 @@ flowchart TD
     PResult --> Validate
 
     Validate -->|Error, timeout, invalid IDs| Retry["Keep speech pending; show error;<br/>explicit retry"]
-    Retry -->|/voicemode retry| Batch
+    Retry -->|/voice retry| Batch
     Validate -->|Valid| Current{"Classifier and lease<br/>still current?"}
     Current -->|No| Recheck["Do not admit a stale result"]
     Current -->|Yes| Any{"Any response or deferred IDs?"}
@@ -180,7 +185,7 @@ for speech Laya deferred. A new voice session, or a history that compaction
 emptied of the rules, sends them again.
 Invalid results or provider failures pause admission with a visible error;
 there is no automatic switch to another provider.
-`/voicemode status` names the selected classifier and reports actual setup/readiness.
+`/voice status` names the selected classifier and reports actual setup/readiness.
 
 Choosing `provider` uses a separate tool-free request through the active chat's
 AI profile. That option sends transcript text and limited recent conversation
@@ -224,7 +229,7 @@ is no text-match filter that discards speech before classification. Uncertain
 echoes reach the main agent with the same playback context and silence instruction.
 Overlapping speech remains in the transcript. This is not
 acoustic echo cancellation. Recognition and response decisions can be imperfect;
-use `/voicemode off` to close the microphone immediately.
+use `/voice off` to close the microphone immediately.
 
 If inference fails, the transcript remains pending instead of becoming an
 automatic command. Unadmitted speech older than 30 seconds requires an explicit
@@ -264,3 +269,30 @@ is recorded as cancelled and is never automatically replayed.
 
 Implementation and measured platform/acceptance coverage are recorded in
 [`implementation-status.md`](../../specs/voice-mode/implementation-status.md).
+
+
+## Select a speech engine
+
+Open `/voice config` (terminal) or Settings → Voice (web). Choose `vibevoice`
+under Speech Engine and save for this device. This prepares an isolated runtime
+from a pinned Microsoft VibeVoice source archive, verifies the selected voice
+preset by hash, and warms the model without opening the microphone. Read Speech
+Readiness or `/voice status`; use `/voice retry` after a setup error.
+
+VibeVoice uses Microsoft VibeVoice-Realtime-0.5B. Presets are Carter, Davis, Emma,
+Frank, Grace, Mike and Samuel. A trusted cached `.pt` file in Custom VibeVoice
+Prompt overrides the preset. Model accepts the default Microsoft model name or
+an existing absolute model directory; an installed model in the usual local
+VibeVoice directory is detected. Auto device chooses MPS, then CUDA, then CPU.
+Diffusion Steps (1–20) and Guidance (1.0–3.0) control generation.
+
+Kokoro remains selectable with its English voice presets and Speed (0.5–2.0).
+Inactive engine settings are retained. A change applies at the next sentence;
+failed VibeVoice inference is shown as an error and never silently becomes
+Kokoro. Both engines return waveform samples to the same serialized speaker
+queue. Cancellation and ownership changes still suppress late synthesis. The
+VibeVoice worker never plays audio itself or changes the Codex speech hook.
+
+Dependencies, voice presets and default weights download on first use and are
+cached. Heavy libraries stay out of the main Kollab process. Custom model
+directories and custom voice prompts are user-owned files and are preserved.

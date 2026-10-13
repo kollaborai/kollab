@@ -154,6 +154,19 @@ class AltViewCommandIntegrator:
             from kollabor_tui.altview.base import AltView
 
             module_name = f"plugins.altview.{plugin_file.stem}"
+            # Reuse an already-imported module so callers retain class identity.
+            # Re-executing the same file creates a distinct class object and makes
+            # isinstance checks fail when a slash command opens the view.
+            module = sys.modules.get(module_name)
+            if module is not None:
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, AltView)
+                        and attr is not AltView
+                    ):
+                        return attr
             spec = importlib.util.spec_from_file_location(module_name, plugin_file)
             if not spec or not spec.loader:
                 return None

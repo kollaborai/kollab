@@ -375,3 +375,96 @@ async def test_pipe_plain_text_still_reaches_the_llm():
     assert exc_info.value.code == 1
     executor.execute_command.assert_not_awaited()
     assert calls == [("pre", "pipe", "ordinary question")]
+
+@pytest.mark.asyncio
+async def test_selected_acp_profile_rejects_when_orchestrator_missing():
+    service = object.__new__(LLMService)
+    service.event_bus = EventBus()
+    profile = SimpleNamespace(get_provider=lambda: "acp")
+    service.profile_manager = SimpleNamespace(get_active_profile=lambda: profile)
+
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+
+    assert result == {"status": "rejected", "reason": "acp_unavailable"}
+
+
+
+@pytest.mark.asyncio
+async def test_acp_admission_emits_hooks_once_and_returns_immediately():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    calls = []
+
+    class ACP:
+        active = True
+
+        async def submit(self, message, *, source):
+            calls.append((message, source))
+
+    bus.register_service("acp_orchestrator", ACP())
+    bus.emit_with_hooks = AsyncMock(
+        return_value={
+            "pre": {},
+            "main": {
+                "hook_results": [
+                    {
+                        "hook_key": "llm_core.process_user_input",
+                        "success": True,
+                        "result": {"status": "queued", "request_id": "r1"},
+                    }
+                ]
+            },
+        }
+    )
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+    assert result == {"status": "queued", "request_id": "r1"}
+    bus.emit_with_hooks.assert_awaited_once()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    tasks = []
+    service.create_background_task = lambda coro, name=None: tasks.append(
+        asyncio.create_task(coro, name=name)
+    )
+    calls = []
+
+    class ACP:
+        active = True
+
+        def admit(self, message, *, request_id, source, thread_id=None):
+            calls.append((message, source))
+            return SimpleNamespace(request_id=request_id, turn_id="turn-1")
+
+    bus.register_service("acp_orchestrator", ACP())
+    event = SimpleNamespace(source="state_rpc")
+    result = await service._handle_user_input(
+        {"message": "hello", "_acp_dispatch": True, "_acp_request_id": "r2"},
+        event,
+    )
+    assert result["status"] == "queued"
+    assert result["request_id"]
+    assert result["turn_id"] == "turn-1"
+    await asyncio.gather(*tasks)
+    assert calls == [("hello", "state_rpc")]
+
+@pytest.mark.asyncio
+async def test_acp_admission_rejects_full_queue_before_hooks():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+
+    class ACP:
+        active = True
+
+        def admit(self, *args, **kwargs):
+            raise RuntimeError("ACP prompt queue is full")
+
+    bus.register_service("acp_orchestrator", ACP())
+    result = await service._handle_user_input({"message": "hello"}, SimpleNamespace(source="state_rpc"))
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}

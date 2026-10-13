@@ -28,6 +28,7 @@ const TARGET_NAMES: Record<string, string> = { local: "Project", global: "Global
 function buttonLabel(action: PanelAction, target: string | null): string {
   const base = action.label || titleCase(action.id);
   if (!target) return base;
+  if (target === "device") return "Save for This Device";
   if (action.id === "save") {
     return target === "local" ? "Save to Project" : "Save Globally";
   }
@@ -150,12 +151,12 @@ export function FormPanel({
                 >
                   {busy ? "Saving…" : buttonLabel(action, target)}
                 </Button>
-                {target && paths[target as "local" | "global"] ? (
+                {target && paths[target] ? (
                   <span
                     className="text-muted-foreground text-[0.6875rem] break-all"
-                    title={paths[target as "local" | "global"] ?? undefined}
+                    title={paths[target] ?? undefined}
                   >
-                    {paths[target as "local" | "global"]}
+                    {paths[target]}
                   </span>
                 ) : null}
               </div>

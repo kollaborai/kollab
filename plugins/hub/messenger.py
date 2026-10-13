@@ -365,6 +365,7 @@ class AgentSocketServer:
         on_network_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
+        on_acp_hub_status: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -380,6 +381,7 @@ class AgentSocketServer:
         self._on_network_status = on_network_status
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
+        self._on_acp_hub_status = on_acp_hub_status
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1352,6 +1354,20 @@ class AgentSocketServer:
                     writer.write(response_line)
                     await writer.drain()
 
+                elif action == "acp_hub_status":
+                    result = None
+                    if self._on_acp_hub_status:
+                        result = self._on_acp_hub_status(
+                            token=msg_data.get("token"),
+                            generation=msg_data.get("generation"),
+                        )
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                    if not isinstance(result, dict):
+                        result = {"error": "stale or unavailable ACP hub binding"}
+                    writer.write((json.dumps({"type": "acp_hub_status", **result}) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "ping":
                     pong = (
                         json.dumps(
@@ -1396,17 +1412,39 @@ class AgentSocketServer:
 
                 elif action == "get_output":
                     lines_requested = _coerce_line_count(msg_data.get("lines"), 100)
+                    capture_format = str(msg_data.get("format") or "terminal").lower()
+                    if capture_format not in {"terminal", "plain", "json"}:
+                        capture_format = "terminal"
+                    max_chars = msg_data.get("max_chars")
+                    cursor = msg_data.get("cursor")
                     output_lines: List[str] = []
+                    output_payload: Dict[str, Any] | None = None
                     if self._on_get_output:
                         try:
-                            result = self._on_get_output(lines_requested)
+                            try:
+                                result = self._on_get_output(
+                                    lines_requested,
+                                    format=capture_format,
+                                    max_chars=max_chars,
+                                    cursor=cursor,
+                                )
+                            except TypeError:
+                                # Existing plugin callbacks only accept a line count.
+                                result = self._on_get_output(lines_requested)
                             if asyncio.iscoroutine(result):
                                 result = await result
-                            if isinstance(result, list):
+                            if isinstance(result, dict):
+                                output_payload = result
+                            elif isinstance(result, list):
                                 output_lines = result
+                            elif isinstance(result, str):
+                                output_lines = result.splitlines()
                         except Exception as exc:
                             logger.debug(f"get_output callback error: {exc}")
-                    resp = json.dumps({"type": "output", "lines": output_lines}) + "\n"
+                    body: Dict[str, Any] = {"type": "output", "lines": output_lines}
+                    if output_payload is not None:
+                        body.update(output_payload)
+                    resp = json.dumps(body) + "\n"
                     writer.write(resp.encode())
                     await writer.drain()
 
@@ -2381,6 +2419,9 @@ class AgentMessenger:
         *,
         auth: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
+        capture_format: str = "terminal",
+        max_chars: Optional[int] = None,
+        cursor: Any = None,
     ) -> tuple[List[str], Optional[str]]:
         """Request output while distinguishing transport failure from empty output."""
         lines = _coerce_line_count(lines, 100)
@@ -2389,7 +2430,14 @@ class AgentMessenger:
             reader, writer = await AgentMessenger._open(
                 socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
             )
-            req = json.dumps({"action": "get_output", "lines": lines}) + "\n"
+            request = {"action": "get_output", "lines": lines}
+            if capture_format != "terminal":
+                request["format"] = capture_format
+            if max_chars is not None:
+                request["max_chars"] = max_chars
+            if cursor is not None:
+                request["cursor"] = cursor
+            req = json.dumps(request) + "\n"
             writer.write(req.encode())
             await writer.drain()
 
@@ -2420,6 +2468,54 @@ class AgentMessenger:
             if detail:
                 return [], f"{type(exc).__name__}: {detail}"
             return [], type(exc).__name__
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_capture(
+        socket_path: str,
+        lines: int = 100,
+        timeout: float = 5.0,
+        *,
+        capture_format: str = "json",
+        max_chars: Optional[int] = None,
+        cursor: Any = None,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Request an opt-in structured/plain capture envelope."""
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            request: Dict[str, Any] = {
+                "action": "get_output",
+                "lines": _coerce_line_count(lines, 100),
+                "format": capture_format,
+            }
+            if max_chars is not None:
+                request["max_chars"] = max_chars
+            if cursor is not None:
+                request["cursor"] = cursor
+            writer.write((json.dumps(request) + "\n").encode())
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            if not raw:
+                return None, "empty response"
+            response = json.loads(raw.decode().strip())
+            if not isinstance(response, dict) or response.get("type") != "output":
+                return None, "invalid output response"
+            return response, None
+        except asyncio.TimeoutError:
+            return None, f"timeout after {timeout:g}s"
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
         finally:
             if writer:
                 writer.close()

@@ -310,6 +310,7 @@ class TerminalLLMChat:
         # Initialize profile manager (for LLM endpoint profiles)
         # Pass cli_profile so auto-detection is skipped when --llm is used
         self.profile_manager = ProfileManager(self.config, cli_profile=profile_name)
+        self.acp_orchestrator = None
 
         # Apply a persisted loadout default when no explicit --llm override was given.
         if not profile_name:
@@ -1143,6 +1144,26 @@ class TerminalLLMChat:
             logger.info("Executing guaranteed cleanup")
             await self.cleanup()
 
+    async def _initialize_acp_orchestrator(self) -> None:
+        """Start the daemon-owned ACP runner for an ACP-selected profile."""
+        if self._attach_to or self.acp_orchestrator is not None:
+            return
+        profile = self.profile_manager.get_active_profile()
+        if profile.provider != "acp":
+            return
+        from .llm.acp_orchestrator import ACPOrchestrator
+
+        identity = getattr(self.args, "as_identity", None) or os.environ.get(
+            "KOLLAB_IDENTITY", "default"
+        )
+        hub_plugin = self.event_bus.get_service("hub_plugin")
+        orchestrator = ACPOrchestrator(
+            self.event_bus, identity=identity, hub_plugin=hub_plugin
+        )
+        await orchestrator.start(profile)
+        self.acp_orchestrator = orchestrator
+        logger.info("ACP runner started for identity=%s profile=%s", identity, profile.name)
+
     async def _submit_cli_initial_message(self, message: str) -> Dict[str, Any]:
         """Submit a CLI-provided initial prompt through user-input hooks."""
         return await self.llm_service.submit_human_input(
@@ -1201,6 +1222,7 @@ class TerminalLLMChat:
             # Initialize all plugins dynamically (always - attach mode needs /hub etc)
             await self._initialize_plugins()
             await asyncio.sleep(0)  # Yield after plugin init
+            await self._initialize_acp_orchestrator()
 
             # Process CLI command if provided (after plugins so all commands are registered)
             cli_command = await self._process_cli_command()
@@ -3323,6 +3345,13 @@ class TerminalLLMChat:
         Ensures no orphaned tasks or resources remain.
         """
         logger.info("Starting application cleanup...")
+        acp_orchestrator = getattr(self, "acp_orchestrator", None)
+        if acp_orchestrator is not None:
+            try:
+                await acp_orchestrator.close()
+            except Exception as exc:
+                logger.warning("ACP runner cleanup failed: %s", exc)
+            self.acp_orchestrator = None
         self.running = False
         if hasattr(self, "input_handler"):
             self.input_handler.running = False

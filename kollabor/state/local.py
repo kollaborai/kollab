@@ -96,6 +96,8 @@ def _needs_terminal_reply(command_name: str) -> str:
     panel = COMMAND_PANELS.get(command_name)
     if panel is None:
         return f"/{command_name} needs the terminal UI"
+    if command_name == "voice":
+        return "/voice config opens in Settings → Voice in the web UI"
     return f"/{command_name} opens in {PANEL_LOCATIONS[panel]} in the web UI"
 
 
@@ -2498,6 +2500,7 @@ class LocalStateService(StateService):
         DisplayTap. Awaiting admission lets the RPC report rejected input
         instead of acknowledging a turn that never entered the pipeline.
         """
+        metadata = message if isinstance(message, dict) else {}
         text = content_to_text(message).strip()
         if not text:
             return {"accepted": False, "reason": "empty message"}
@@ -2513,9 +2516,6 @@ class LocalStateService(StateService):
         goal_handled = self._try_goal_command(text, message)
         if goal_handled is not None:
             return goal_handled
-
-        if getattr(llm, "is_processing", False):
-            return {"accepted": False, "reason": "turn already in flight"}
 
         if contains_image_content(message):
             supports_images = getattr(llm, "supports_image_input", None)
@@ -2569,9 +2569,12 @@ class LocalStateService(StateService):
             return {"accepted": True, "reason": "slash command"}
 
         try:
-            submission = await llm.submit_human_input(
-                message, source=UserInputSource.STATE_RPC
-            )
+            submit_kwargs = {"source": UserInputSource.STATE_RPC}
+            if metadata.get("request_id") is not None:
+                submit_kwargs["request_id"] = metadata["request_id"]
+            if metadata.get("thread_id") is not None:
+                submit_kwargs["thread_id"] = metadata["thread_id"]
+            submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)
             return {"accepted": False, "reason": "input submission failed"}

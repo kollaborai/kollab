@@ -34,6 +34,7 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
+from .capture import normalize_records, paginate, plain_text
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
@@ -587,6 +588,8 @@ class HubPlugin(BasePlugin):
 
         # State
         self._roster: List[Dict] = []
+        self._acp_hub_token = secrets.token_urlsafe(32)
+        self._acp_hub_generation = 1
         self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
@@ -4760,6 +4763,7 @@ class HubPlugin(BasePlugin):
                 on_network_status=self._handle_network_status_request,
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
+                on_acp_hub_status=self._handle_acp_hub_status,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -10817,7 +10821,15 @@ class HubPlugin(BasePlugin):
                 return peer
         return None
 
-    async def _capture_peer_output(self, peer: AgentRuntime, lines: int) -> str:
+    async def _capture_peer_output(
+        self,
+        peer: AgentRuntime,
+        lines: int,
+        *,
+        format: str = "terminal",
+        max_chars: Any = None,
+        cursor: Any = None,
+    ) -> Any:
         """Capture output directly from a live hub peer via its socket."""
         if not peer.socket_path:
             if self._presence:
@@ -10827,6 +10839,22 @@ class HubPlugin(BasePlugin):
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
         )
+        if format != "terminal":
+            payload, capture_error = await AgentMessenger.request_capture(
+                dial_target,
+                lines=lines,
+                timeout=5.0,
+                capture_format=format,
+                max_chars=max_chars,
+                cursor=cursor,
+                auth=dial_auth,
+            )
+            if capture_error:
+                return f"capture failed for '{peer.identity}': {capture_error}"
+            if payload is None:
+                return f"no recent output from '{peer.identity}'"
+            return payload
+
         output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
             lines=lines,
@@ -13169,30 +13197,47 @@ class HubPlugin(BasePlugin):
 
         return None
 
-    def _get_output_lines(self, limit: int = 50) -> List[str]:
-        """Return recent rendered UI output as lines.
-
-        Pulls from DisplayTap (the same stream attach clients see) so
-        `kollab --hub capture` mirrors what's visible on the agent's
-        screen -- tool boxes, messages, status, etc. Events are filtered
-        to type=="output" and sliced to the most recent ``limit`` events.
-        Each event's ``rendered`` payload is already multi-line, so
-        callers join with "\\n" cleanly.
-        """
+    def _get_output_lines(
+        self,
+        limit: int = 50,
+        *,
+        format: str = "terminal",
+        max_chars: Any = None,
+        cursor: Any = None,
+    ) -> Any:
+        """Return terminal lines by default, or opt-in normalized capture."""
         limit = _coerce_line_count(limit, 50)
-        if not self._display_tap:
+        if format == "terminal" and not self._display_tap:
             return ["(no display tap)"]
+        raw_events = self._display_tap.get_snapshot() if self._display_tap else []
+        if format == "terminal":
+            if not raw_events:
+                return ["(no recent output)"]
+            rendered_events = [e for e in raw_events if e.get("type") == "output"]
+            if not rendered_events:
+                return ["(no recent output)"]
+            return [str(e.get("rendered", "")) for e in rendered_events[-limit:]]
 
-        snapshot = self._display_tap.get_snapshot()
-        if not snapshot:
-            return ["(no recent output)"]
-
-        rendered_events = [e for e in snapshot if e.get("type") == "output"]
-        if not rendered_events:
-            return ["(no recent output)"]
-
-        recent = rendered_events[-limit:]
-        return [str(e.get("rendered", "")) for e in recent]
+        semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"]
+        if not semantic:
+            semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") == "output"]
+        records = normalize_records(semantic[-limit:])
+        page, truncated, next_cursor = paginate(records, cursor=cursor, max_chars=max_chars)
+        if format == "plain":
+            return {
+                "format": "plain",
+                "order": "oldest-first",
+                "text": plain_text(page),
+                "truncated": truncated,
+                "next_cursor": next_cursor,
+            }
+        return {
+            "format": "json",
+            "order": "oldest-first",
+            "lines": page,
+            "truncated": truncated,
+            "next_cursor": next_cursor,
+        }
 
     async def _inject_attacher_input(self, text: Any) -> None:
         """Inject input from a remote attacher as if the user typed it.
@@ -13210,10 +13255,11 @@ class HubPlugin(BasePlugin):
             if not callable(submit):
                 logger.debug("Attached input rejected: LLM input pipeline unavailable")
                 return
-            result = await submit(
-                text,
-                source=UserInputSource.HUB_ATTACHMENT,
-            )
+            submit_kwargs = {"source": UserInputSource.HUB_ATTACHMENT}
+            thread_id = getattr(self, "_active_thread_id", None) or None
+            if thread_id is not None:
+                submit_kwargs["thread_id"] = thread_id
+            result = await submit(text, **submit_kwargs)
             if isinstance(result, dict) and result.get("status") in {
                 "cancelled",
                 "rejected",
@@ -13224,6 +13270,20 @@ class HubPlugin(BasePlugin):
                 )
         except Exception as e:
             logger.debug("Attacher input inject error (%s)", type(e).__name__)
+
+    def rotate_acp_hub_binding(self) -> tuple[str, int]:
+        """Rotate the child-binding credential for each ACP session owner."""
+        self._acp_hub_generation += 1
+        self._acp_hub_token = secrets.token_urlsafe(32)
+        return self._acp_hub_token, self._acp_hub_generation
+
+    async def _handle_acp_hub_status(self, *, token: str | None, generation: str | None) -> Dict[str, Any]:
+        if token != self._acp_hub_token or str(generation) != str(self._acp_hub_generation):
+            return {"error": "stale or invalid ACP hub binding"}
+        roster = list(self._roster)
+        if self._identity:
+            roster = [{"identity": self._identity.identity, "state": "online"}, *roster]
+        return {"generation": self._acp_hub_generation, "roster": roster}
 
     async def _handle_network_status_request(self) -> Dict[str, Any]:
         """Answer the CLI's `network_status` socket request.

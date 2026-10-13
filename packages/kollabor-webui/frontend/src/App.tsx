@@ -3,6 +3,7 @@ import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -48,6 +49,8 @@ import {
 } from "./runtime";
 import { sessionHeading } from "@/utils/session-display";
 
+const OPEN_SESSION_TIMEOUT_MS = 2_000;
+
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
     const finish = () => {
@@ -60,6 +63,16 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
     };
     timerRef.current = window.setTimeout(finish, delayMs);
     signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: number | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== null) window.clearTimeout(timer);
   });
 }
 
@@ -275,6 +288,7 @@ export default function App() {
   // Null: the whole Gem Studio; a gem: that session's Properties.
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
+  const [appsOpen, setAppsOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -377,7 +391,11 @@ export default function App() {
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
       const [history, permissions] = await Promise.all([
-        api.getHistory(sessionId),
+        withTimeout(
+          api.getHistory(sessionId),
+          OPEN_SESSION_TIMEOUT_MS,
+          "Timed out opening conversation. Try again while the agent is available.",
+        ),
         // A prompt that arrives later comes as an event anyway: this read never stops a chat opening.
         api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);
@@ -787,6 +805,7 @@ export default function App() {
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
+          onApps={() => setAppsOpen(true)}
           onSettings={() => openSettings()}
           onStudio={() => {
             setStudioFocus(null);
@@ -801,6 +820,15 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        {activeSession ? (
+          <AppsDialog
+            api={api}
+            sessionId={activeSession.session_id}
+            open={appsOpen}
+            onOpenChange={setAppsOpen}
+            onChanged={() => void loadSessions()}
+          />
+        ) : null}
         <ProfilesDialog
           api={api}
           profiles={profiles}

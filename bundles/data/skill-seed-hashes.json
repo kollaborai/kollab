@@ -1,0 +1,944 @@
+{
+  "analyze-plugin-lifecycle": {
+    "SKILL.md": [
+      "7167750ceca74fd63579b4ab3b2a1a607fda578dadd689ee98d548443b4de230",
+      "8e28afd81e27135ce05c18f6d5fbaede0a2246fecbbe339dc9a59a6cc0d08542"
+    ]
+  },
+  "analyze-terminal-rendering": {
+    "SKILL.md": [
+      "78ec546e10728dd39d7196658e79d0703b7152af52ebf92b4422e09525d62d52",
+      "e7a2552ea0a6c33ebc7a2f299c4669b123a53c749e12ccb554f00ea5322b481a"
+    ]
+  },
+  "api-documentation": {
+    "SKILL.md": [
+      "945fbaab2937d303f7840b2a1739e217d1e63ed2dcbcd5ca2fd96172c95734de"
+    ]
+  },
+  "api-integration": {
+    "SKILL.md": [
+      "1804bec16ecf69a271f8e17c6882f17d5cb1622b57f07d55ed7a3531d138e0b6"
+    ]
+  },
+  "architecture-mapping": {
+    "SKILL.md": [
+      "0344734f5998608fe7fec18046c537b4f9816cafc45346642ea50ac4fd4fbe7c"
+    ]
+  },
+  "changelog-management": {
+    "SKILL.md": [
+      "71456d0728efeb7dd5e16bfc957e58e8815d29ea4388d4e1af2cfb1276b9c3c9"
+    ]
+  },
+  "character-development": {
+    "SKILL.md": [
+      "c61252562155af1f9dfb3c37aa8db00a402b673250b05f716b9d1e172a839c38"
+    ]
+  },
+  "cli-pretty": {
+    "SKILL.md": [
+      "450f69a56e505c18c67fef53095cd51a4752656f125665025caa08a1c7473e19",
+      "c05a185be286cdc14f88c011c3f2b2b989c345ef6050b40ac73ec32a4222d1bc"
+    ]
+  },
+  "code-review": {
+    "SKILL.md": [
+      "9cd722d29691080cb0b3797ed2904ba6e8d875940ef211b7451ffe8c842f2fa5"
+    ]
+  },
+  "codebase-analysis": {
+    "SKILL.md": [
+      "3affefc3ff80e096d6424b52ccfd29c4b9862c655ec91282e9793c607ce027d1"
+    ]
+  },
+  "data-visualization": {
+    "SKILL.md": [
+      "956eecee9acbfe8b573f8cc3ff6c2ba6045c7007c79ee691864464ff7c558b3a"
+    ]
+  },
+  "database-design": {
+    "SKILL.md": [
+      "727af22bb860b5f75f6759f1f8d03f7cb43bfe39324c43cd64f36bef5dc33afe"
+    ]
+  },
+  "dead-code": {
+    "SKILL.md": [
+      "87a7ade09b5a0329aa9457a20dcdef5110066892bf0dd48354b6505733dadd8d"
+    ]
+  },
+  "debug-mcp-integration": {
+    "SKILL.md": [
+      "0055aa5f73214bdb5b0655f5df27d0839bf8283d42f6ef32b8d9f32d62fffc8c",
+      "5be9c3172ff1ec70f556e44346b3be5c204302b0af3a70c462dfcf9dd37493ab"
+    ]
+  },
+  "debug-plugin-hooks": {
+    "SKILL.md": [
+      "69fa0afe0ca8650db951087776755c686196abf689a3aa64dffc625705293ad9",
+      "dbe28052a4f4cb1db9fff43351d5b88058288330764601b07308685db27ab20c"
+    ]
+  },
+  "debugging": {
+    "SKILL.md": [
+      "eb1b1424a0858cd971a41488b4c2ca071f8c59f6c95d9d641601d60ce174438b"
+    ]
+  },
+  "dependency-audit": {
+    "SKILL.md": [
+      "1f261c2d7e898ab51796694a7ffc2e9942b81ee82fff5df41f7d5a907cdd63b4"
+    ]
+  },
+  "dependency-management": {
+    "SKILL.md": [
+      "5d271c84f80c1d57ba4a0232bd1ac60d4eef76405e4671997a658c61c50e5f94"
+    ]
+  },
+  "dialogue-craft": {
+    "SKILL.md": [
+      "541abec29ef38fc709d0e2522b982be63ca59e57703c5702c19f10b2da739c43"
+    ]
+  },
+  "docx": {
+    "SKILL.md": [
+      "cfbabd72b1aec7dfaad988fb6e5e16b27dc744b9a00cae15db9045e95f53903e"
+    ],
+    "scripts/__init__.py": [
+      "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    ],
+    "scripts/accept_changes.py": [
+      "0c991d2bc7304a1248e9f3bf9b1498f0b6e76641fc457e7cbd73c99b4eef3a74"
+    ],
+    "scripts/comment.py": [
+      "dd1124044424b3dec33415f8d5aeacb6f3f11a27a515e417eed33be2740e9839"
+    ],
+    "scripts/office/helpers/__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "scripts/office/helpers/merge_runs.py": [
+      "d4110e084c32f2a0560ed7a9b923bb55a88ce94fe2270d3379943abf4a5b2957"
+    ],
+    "scripts/office/helpers/simplify_redlines.py": [
+      "997caad305eb63979b4a0e110656ad0cbed2edfd7d2cabebafbde43f5e115cc0"
+    ],
+    "scripts/office/pack.py": [
+      "7bd0eb114d499aee55d1fbaf74ab14e25027461fb8d49f454d2ccf2573e13920"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chart.xsd": [
+      "41b93bd8857cc68b1e43be2806a872d736a9bdd6566900062d8fdb57d7bbb354"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chartDrawing.xsd": [
+      "3fd0586f2637b98bb9886f0e0b67d89e1cc987c2d158cc7deb5f5b9890ced412"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-diagram.xsd": [
+      "29b254ee0d10414a8504b5a08149c7baec35a60d5ff607d6b3f492aa36815f40"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-lockedCanvas.xsd": [
+      "5cb76dabd8b97d1e9308a1700b90c20139be4d50792d21a7f09789f5cccd6026"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-main.xsd": [
+      "5375417f0f5394b8dd1a7035b9679151f19a6b65df309dec10cfb4a420cb00e9"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-picture.xsd": [
+      "5d389d42befbebd91945d620242347caecd3367f9a3a7cf8d97949507ae1f53c"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-spreadsheetDrawing.xsd": [
+      "b4532b6d258832953fbb3ee4c711f4fe25d3faf46a10644b2505f17010d01e88"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-wordprocessingDrawing.xsd": [
+      "bdad416b096b61d37b71603b2c949484f9070c830bdaeba93bf35e15c8900614"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/pml.xsd": [
+      "d173c3e5d61e42e2e3a97226c632fd2ab7cc481fc4e492365b87024ab546daff"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-additionalCharacteristics.xsd": [
+      "3c6709101c6aaa82888df5d8795c33f9e857196790eb320d9194e64be2b6bdd8"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-bibliography.xsd": [
+      "0b364451dc36a48dd6dae0f3b6ada05fd9b71e5208211f8ee5537d7e51a587e2"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-commonSimpleTypes.xsd": [
+      "e2abacbb9a55ce1365f8961bc1b1395bbc811e512b111000d8c333f98458dece"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlDataProperties.xsd": [
+      "0ef4bb354ff44b923564c4ddbdda5987919d220225129ec94614a618ceafc281"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlSchemaProperties.xsd": [
+      "0d103b99a4a8652f8871552a69d42d2a3760ac6a5e3ef02d979c4273257ff6a4"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesCustom.xsd": [
+      "9c085407751b9061c1f996f6c39ce58451be22a8d334f09175f0e89e42736285"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesExtended.xsd": [
+      "bc92e36ccd233722d4c5869bec71ddc7b12e2df56059942cce5a39065cc9c368"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesVariantTypes.xsd": [
+      "7b5b7413e2c895b1e148e82e292a117d53c7ec65b0696c992edca57b61b4a74b"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-math.xsd": [
+      "3213ef1631606250f5010b42cad7ef716f7c59426367798e33c374c0ec391d3a"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-relationshipReference.xsd": [
+      "12264f3c03d738311cd9237d212f1c07479e70f0cbe1ae725d29b36539aef637"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/sml.xsd": [
+      "beffeed56945c22a77440122c8bdc426f3fcbe7f3b12ea0976c770d1f8d54578"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-main.xsd": [
+      "f5ee623b08b6a66935e5aced2f5d8ad0fc71bf9e8e833cd490150c0fa94b8763"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-officeDrawing.xsd": [
+      "585bedc1313b40888dcc544cb74cd939a105ee674f3b1d3aa1cc6d34f70ff155"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-presentationDrawing.xsd": [
+      "133c9f64a5c5d573b78d0a474122b22506d8eadb5e063f67cdbbb8fa2f161d0e"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-spreadsheetDrawing.xsd": [
+      "6bdeb169c3717eb01108853bd9fc5a3750fb1fa5b82abbdd854d49855a40f519"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-wordprocessingDrawing.xsd": [
+      "475dcae1e7d1ea46232db6f8481040c15e53a52a3c256831d3df204212b0e831"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd": [
+      "c2dd9f61f892deae6acd8d20771ea79b12018af25f3bf8d06639c8542d218cfd"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/xml.xsd": [
+      "a539aa2fb154fa50e0f5cc97e6ad7cbc66f8ec3e3746f61ec6a8b0d5d15ecdf2"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-contentTypes.xsd": [
+      "9e0b7209fc69ab11987900404540969976000c5ebe4d4f58c43dc3842886bf3a"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-coreProperties.xsd": [
+      "451958454e8588dfc7cd945981ada142ca06ff3307937f5700df059c2b307fa8"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-digSig.xsd": [
+      "6de111e11403f7cd49027400755bae0ea1cabef2815f09bd40a24f0017613b24"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-relationships.xsd": [
+      "f565adfef5a502044abc3a9153e157edc25af78304d335994afb958874b15e26"
+    ],
+    "scripts/office/schemas/mce/mc.xsd": [
+      "3a37e461ecf5a8670fdec34029703401f8728ab9c96ec1739a6ae58d55212413"
+    ],
+    "scripts/office/schemas/microsoft/wml-2010.xsd": [
+      "568b26ee156cb9549aa439ca2158965f77b7c1602b7e0316f40ac6cf586e35f2"
+    ],
+    "scripts/office/schemas/microsoft/wml-2012.xsd": [
+      "0fa75578a000439a7988ba0c59fdc69f774bbd416cbacc14d07125b3f686cb74"
+    ],
+    "scripts/office/schemas/microsoft/wml-2018.xsd": [
+      "be0ff793a22dd31384650c3a4da14c2fa8062751c2e97b0e5ee852bda13c60ad"
+    ],
+    "scripts/office/schemas/microsoft/wml-cex-2018.xsd": [
+      "fddc2b880cabb9005aebbc7e783e53c19fec1c03df7d0e2f2076a33a0fdfd081"
+    ],
+    "scripts/office/schemas/microsoft/wml-cid-2016.xsd": [
+      "127ca209fa73d7cb708449cb355c871867948a96e4a74f7bf5811ef62d17991d"
+    ],
+    "scripts/office/schemas/microsoft/wml-sdtdatahash-2020.xsd": [
+      "842e7163409c8d74f4d7088a8bc99500d80bc75332681a0980055b08f374a604"
+    ],
+    "scripts/office/schemas/microsoft/wml-symex-2015.xsd": [
+      "16f6f8072249f431370723c2cd8974672e0d9c897e00e97dd918079df934871b"
+    ],
+    "scripts/office/soffice.py": [
+      "11760e54331fa47178646c006a3dac653eea1e06c4161add64d255886da3a92c"
+    ],
+    "scripts/office/unpack.py": [
+      "aed41122e1777274304cd95e3c26779e611f5a71ee4f94450e3c90e226487762"
+    ],
+    "scripts/office/validate.py": [
+      "ca9d653f1299305db8296dc07b86fdb6cfa757da5464a7b757ebd41aec3e2705"
+    ],
+    "scripts/office/validators/__init__.py": [
+      "83e0f035c5abea238d3f2c3968afbd511ed022b527b7c9cb60a9434cc34ff987"
+    ],
+    "scripts/office/validators/base.py": [
+      "295dac979ff95cd4bb3d009a83c90921d1632b223af7eea3dd0ec58df1a21ca9"
+    ],
+    "scripts/office/validators/docx.py": [
+      "27cf88911e2c7a04778201d32ea6db9a49af673b9751f82c7ebeb9f5e5bb7168"
+    ],
+    "scripts/office/validators/pptx.py": [
+      "1453cd0f6aec7d41443e6e3715d286d8bee7912c5f1602170a61d774d2473ed0"
+    ],
+    "scripts/office/validators/redlining.py": [
+      "08549c4e237b718c79b48cdb85c88992834afa488b9a004dfad4260e90d07d33"
+    ],
+    "scripts/templates/comments.xml": [
+      "a08ba83ee8790ac9e3dc61921f4988f19edd7e06ac09d6f1897a877c1581818d"
+    ],
+    "scripts/templates/commentsExtended.xml": [
+      "544eeecfeceed4b468fff163cd9c366d33641c8b8ab691ce002576197846afe8"
+    ],
+    "scripts/templates/commentsExtensible.xml": [
+      "bad10b3283e6ad6e7ef6d1ca5169683721ed690ee331282c65df04017e080631"
+    ],
+    "scripts/templates/commentsIds.xml": [
+      "db20f9616e004ec42ef736e80c2384e45db0f8d1194d31dc8b37c7d6ecdd6420"
+    ],
+    "scripts/templates/people.xml": [
+      "056f63aa1197fd8c9dda980c9f1b9ff016fd5fa4a462df8aec5f384f39d23e37"
+    ]
+  },
+  "experimentation": {
+    "SKILL.md": [
+      "722581eb2dbccd2138949878cf290059261b1f6deabde27b81cd2a2145150395"
+    ]
+  },
+  "exploratory-data-analysis": {
+    "SKILL.md": [
+      "752011670fc888c1d36cfc6e1f6571fe40b81a20bbd5d2c5802603b79277df8f"
+    ]
+  },
+  "explore-agent-system": {
+    "SKILL.md": [
+      "1ff28053bd40d62dc60923c622872e89dedd9ff8232f3bf5fa772d94fc9cd09f",
+      "9a41d8ece13771db9c74920522ff140d324c3b6d1dc067fc843780c1e5fe9c2e"
+    ]
+  },
+  "frontend-design": {
+    "SKILL.md": [
+      "b81e2ff87ed8fa4d6c377ccb127a7254c9e6a77e3ae94f21e6b514f7bb2945a0"
+    ]
+  },
+  "git-workflow": {
+    "SKILL.md": [
+      "f1ae55e24d479f58e5723e89e671943099febbd995138734a0ab44252b5a7d8f"
+    ]
+  },
+  "inspect-llm-conversation": {
+    "SKILL.md": [
+      "b9f8ff069ea06224e65d6cac1e878a8d19b3a6ce3da3bb9837d673b4d534755e",
+      "bf7e5659943366f40b835118444243b6755714df6e2312de3554f4f5eb70291c",
+      "e90eaff66957a3dcc7cb751207b3f5cf64030ccacb33185b5af02feb46b2b85d"
+    ]
+  },
+  "knowledge-management": {
+    "SKILL.md": [
+      "7b766a3853e5f337b14d4e2cc08e8dff7c6c0099b840d4711f7a3a3d6f77e03b"
+    ]
+  },
+  "kollab-development": {
+    "SKILL.md": [
+      "bbdeb6ae50ecc5db187348695b0d646d4ca0104bd2b3f1c436208c0e4a4c25f9",
+      "e62823a1b0d96f3a7b66c4b1d2a57ea57246a21f6201f0e9029f2b26183336ec"
+    ],
+    "agents/openai.yaml": [
+      "a202172f8f25532c031b63f5454f859bf4abaa406197b0aca36a49f992e584ce"
+    ],
+    "references/relay-change-guide.md": [
+      "11cf9059bdc223aea94aaa301aad3c942e2dffd0d9415bfe92f2a73f04fa87d7",
+      "55c557f61b3d0941e2057a11000a8238c24ea9e2d1306163d2d6256e63e2ef11",
+      "5aaaa22a6ca64bd492e52233d848de8015edbfd743d711a0b464e6b87b1cab40",
+      "68f89d4ef688705a5485374ceb36be4dd3d09170e0f586bf1c3336002a7d68e1",
+      "7ff14680b64ee090d6963318548f2b8896b6dd8290aa0db8f8d13d3046eb3e92",
+      "8454f329787ffbee156b89379b128a3715d1bb3c33e26b93bee9832c66cc3f49",
+      "fc5f52aaf9d4856102b996954d9428730b69275493c1e6180e0b7f51ac3b7173"
+    ]
+  },
+  "kollabor-harness": {
+    "SKILL.md": [
+      "3b5646c77354fb9d97f6d427124455bdd6a8ec7b623ce157fdb6639913269739",
+      "9adb333f5925e47325450c3c666c814bdb4717c6b7310182b6317b3c8bc05534",
+      "c8254be7c96f8889ce3d7709c8a300a842cb4ef1c3a98e93d23aa1d8c72ceaf7",
+      "f347d8a607dcd96586018ba3a04289a4fbc4ff0721600b51666e3afe75c04295",
+      "f9dc593dbb610c511ae786a60f4256204813737cc9ff54b59a7411e13ab7a7a1",
+      "fc63c12234ce7b7f547b1d77696ed271135d887473ea040995e54ccb0b2810e6"
+    ]
+  },
+  "learning-roadmap": {
+    "SKILL.md": [
+      "7a29d9d5feb29c8977b6774b767c4690d15567d05b5be23f0f2e7cb40545e3cd"
+    ]
+  },
+  "mcp-builder": {
+    "SKILL.md": [
+      "0f4592dcb53cf2b5d6b7febee6b4152018b565551a1c29e3c612f57b218ab295"
+    ],
+    "reference/evaluation.md": [
+      "8c99479f8a2d22a636c38e274537aac3610879e26f34e0709825077c4576f427"
+    ],
+    "reference/mcp_best_practices.md": [
+      "80fb4369a349447cf18ecdd7494fe7938b6065377e9f08c077cec411093a3007"
+    ],
+    "reference/node_mcp_server.md": [
+      "c3ba35a4f599dd53be9c6555ae72c19a7bf412cd5426576c2c08d42755482c66"
+    ],
+    "reference/python_mcp_server.md": [
+      "2da52f77e675191014ca2e146a4b95aa04d0ca7dd7e2b100322df15ade685e80"
+    ],
+    "scripts/connections.py": [
+      "ec2942ff4144829589f74199e4503436e9beb393f4f7ea870e637f561a103ecf"
+    ],
+    "scripts/evaluation.py": [
+      "5525a8a8a69c8095a96f7b2c247e9373c14f9eab424519217c560192bb02c4c7"
+    ],
+    "scripts/example_evaluation.xml": [
+      "9272b348ddcc4b06ba562367ccd0770e018158c0068ac5116d5e34aaeff8777a"
+    ],
+    "scripts/requirements.txt": [
+      "d5d7558b2368ecea9dfeed7d1fbc71ee9e0750bebd1282faa527d528a344c3c7"
+    ]
+  },
+  "monitor-event-bus": {
+    "SKILL.md": [
+      "780e77c59d1243f3ea48d9bbbdc18c70d888a9a5a317d5fa5cd47cded8320b9c",
+      "7ab4b92ae3bfac601bf4470f4b0537eee7beb62e166ff74c40e8893e5005458a"
+    ]
+  },
+  "pandas-data-manipulation": {
+    "SKILL.md": [
+      "3db89fb053f45e2151d7ca6c6da5d8abc0e29498de951eb564216803eb80dbb3"
+    ]
+  },
+  "pdf": {
+    "SKILL.md": [
+      "9f78b8359fbd4943ad260a7a1e436e5a96503406d6c34e99f69223d647d85b9c"
+    ],
+    "forms.md": [
+      "9530b3f57034792e0242a3abfe8b3c296466329551916f2ff6c5a70db78f7e44"
+    ],
+    "reference.md": [
+      "03a5f964f8abecbbe156f363356e927e864d7ee964f1012c84ee1bfc8acbeb95"
+    ],
+    "scripts/check_bounding_boxes.py": [
+      "9ed2792a360b399352f00a476a210f7fd9888f37c77ad93d0fdf459a2528de38"
+    ],
+    "scripts/check_fillable_fields.py": [
+      "f28eb03441ee7f85792a5aff765555e44216a692452cab2921e1e0a54c2c6e6a"
+    ],
+    "scripts/convert_pdf_to_images.py": [
+      "2a038faf31333280cedebc61c7ec430dba6f7068fd4207fab9b5d26eed00b9c4"
+    ],
+    "scripts/create_validation_image.py": [
+      "669284923fd3897f1058423be53b727350eab3f6cc5c0d797a06e15d307dc85d"
+    ],
+    "scripts/extract_form_field_info.py": [
+      "36dea5826319878db58adb6f96bce8afd33303af095085474776652584e5e5e4"
+    ],
+    "scripts/extract_form_structure.py": [
+      "fbcc0201cc4245adfe480148ad5cf517153499741e5438380be206942316f233"
+    ],
+    "scripts/fill_fillable_fields.py": [
+      "2d1c4f6abad75887558e4999bd2f42f51eed0538524561b014493f01c874aa5a"
+    ],
+    "scripts/fill_pdf_form_with_annotations.py": [
+      "ca93392464999a19d341132a53e8752ac9cc817562a63e4bc40ed46aa6ab34e0"
+    ]
+  },
+  "performance-profiling": {
+    "SKILL.md": [
+      "da51a8a8e0707dd035965372cc0b80e61a87332f71bdec22aa814e7dd3f82cf2"
+    ]
+  },
+  "plot-structure": {
+    "SKILL.md": [
+      "f84b98da9ca752d41699c5a683e91957dd6fd424a01fef8ca74ee70e51a556d2"
+    ]
+  },
+  "pptx": {
+    "SKILL.md": [
+      "e5b0df918cbe9d62508b3cf808d73899633f82fc19f6258a25ef9f0de7e62125"
+    ],
+    "editing.md": [
+      "6cb47c3ab17e60b7de37e83131c409ef5a90a01bfb54e999905a9c9f7dd88e68"
+    ],
+    "pptxgenjs.md": [
+      "9539534d92b7170813b735a448750df3580390da2da6c52a02b687ed53ecba86"
+    ],
+    "scripts/__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "scripts/add_slide.py": [
+      "5dc4751f1cbf90146df8238495b0fd6258f823260702c9d7778bbbc58ec52b7f"
+    ],
+    "scripts/clean.py": [
+      "92dfadb3671675a9be184fc28b77a020d249b28bbcde53871fdf38b02180d63e"
+    ],
+    "scripts/office/helpers/__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "scripts/office/helpers/merge_runs.py": [
+      "d4110e084c32f2a0560ed7a9b923bb55a88ce94fe2270d3379943abf4a5b2957"
+    ],
+    "scripts/office/helpers/simplify_redlines.py": [
+      "997caad305eb63979b4a0e110656ad0cbed2edfd7d2cabebafbde43f5e115cc0"
+    ],
+    "scripts/office/pack.py": [
+      "7bd0eb114d499aee55d1fbaf74ab14e25027461fb8d49f454d2ccf2573e13920"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chart.xsd": [
+      "41b93bd8857cc68b1e43be2806a872d736a9bdd6566900062d8fdb57d7bbb354"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chartDrawing.xsd": [
+      "3fd0586f2637b98bb9886f0e0b67d89e1cc987c2d158cc7deb5f5b9890ced412"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-diagram.xsd": [
+      "29b254ee0d10414a8504b5a08149c7baec35a60d5ff607d6b3f492aa36815f40"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-lockedCanvas.xsd": [
+      "5cb76dabd8b97d1e9308a1700b90c20139be4d50792d21a7f09789f5cccd6026"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-main.xsd": [
+      "5375417f0f5394b8dd1a7035b9679151f19a6b65df309dec10cfb4a420cb00e9"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-picture.xsd": [
+      "5d389d42befbebd91945d620242347caecd3367f9a3a7cf8d97949507ae1f53c"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-spreadsheetDrawing.xsd": [
+      "b4532b6d258832953fbb3ee4c711f4fe25d3faf46a10644b2505f17010d01e88"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-wordprocessingDrawing.xsd": [
+      "bdad416b096b61d37b71603b2c949484f9070c830bdaeba93bf35e15c8900614"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/pml.xsd": [
+      "d173c3e5d61e42e2e3a97226c632fd2ab7cc481fc4e492365b87024ab546daff"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-additionalCharacteristics.xsd": [
+      "3c6709101c6aaa82888df5d8795c33f9e857196790eb320d9194e64be2b6bdd8"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-bibliography.xsd": [
+      "0b364451dc36a48dd6dae0f3b6ada05fd9b71e5208211f8ee5537d7e51a587e2"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-commonSimpleTypes.xsd": [
+      "e2abacbb9a55ce1365f8961bc1b1395bbc811e512b111000d8c333f98458dece"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlDataProperties.xsd": [
+      "0ef4bb354ff44b923564c4ddbdda5987919d220225129ec94614a618ceafc281"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlSchemaProperties.xsd": [
+      "0d103b99a4a8652f8871552a69d42d2a3760ac6a5e3ef02d979c4273257ff6a4"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesCustom.xsd": [
+      "9c085407751b9061c1f996f6c39ce58451be22a8d334f09175f0e89e42736285"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesExtended.xsd": [
+      "bc92e36ccd233722d4c5869bec71ddc7b12e2df56059942cce5a39065cc9c368"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesVariantTypes.xsd": [
+      "7b5b7413e2c895b1e148e82e292a117d53c7ec65b0696c992edca57b61b4a74b"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-math.xsd": [
+      "3213ef1631606250f5010b42cad7ef716f7c59426367798e33c374c0ec391d3a"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-relationshipReference.xsd": [
+      "12264f3c03d738311cd9237d212f1c07479e70f0cbe1ae725d29b36539aef637"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/sml.xsd": [
+      "beffeed56945c22a77440122c8bdc426f3fcbe7f3b12ea0976c770d1f8d54578"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-main.xsd": [
+      "f5ee623b08b6a66935e5aced2f5d8ad0fc71bf9e8e833cd490150c0fa94b8763"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-officeDrawing.xsd": [
+      "585bedc1313b40888dcc544cb74cd939a105ee674f3b1d3aa1cc6d34f70ff155"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-presentationDrawing.xsd": [
+      "133c9f64a5c5d573b78d0a474122b22506d8eadb5e063f67cdbbb8fa2f161d0e"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-spreadsheetDrawing.xsd": [
+      "6bdeb169c3717eb01108853bd9fc5a3750fb1fa5b82abbdd854d49855a40f519"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-wordprocessingDrawing.xsd": [
+      "475dcae1e7d1ea46232db6f8481040c15e53a52a3c256831d3df204212b0e831"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd": [
+      "c2dd9f61f892deae6acd8d20771ea79b12018af25f3bf8d06639c8542d218cfd"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/xml.xsd": [
+      "a539aa2fb154fa50e0f5cc97e6ad7cbc66f8ec3e3746f61ec6a8b0d5d15ecdf2"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-contentTypes.xsd": [
+      "9e0b7209fc69ab11987900404540969976000c5ebe4d4f58c43dc3842886bf3a"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-coreProperties.xsd": [
+      "451958454e8588dfc7cd945981ada142ca06ff3307937f5700df059c2b307fa8"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-digSig.xsd": [
+      "6de111e11403f7cd49027400755bae0ea1cabef2815f09bd40a24f0017613b24"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-relationships.xsd": [
+      "f565adfef5a502044abc3a9153e157edc25af78304d335994afb958874b15e26"
+    ],
+    "scripts/office/schemas/mce/mc.xsd": [
+      "3a37e461ecf5a8670fdec34029703401f8728ab9c96ec1739a6ae58d55212413"
+    ],
+    "scripts/office/schemas/microsoft/wml-2010.xsd": [
+      "568b26ee156cb9549aa439ca2158965f77b7c1602b7e0316f40ac6cf586e35f2"
+    ],
+    "scripts/office/schemas/microsoft/wml-2012.xsd": [
+      "0fa75578a000439a7988ba0c59fdc69f774bbd416cbacc14d07125b3f686cb74"
+    ],
+    "scripts/office/schemas/microsoft/wml-2018.xsd": [
+      "be0ff793a22dd31384650c3a4da14c2fa8062751c2e97b0e5ee852bda13c60ad"
+    ],
+    "scripts/office/schemas/microsoft/wml-cex-2018.xsd": [
+      "fddc2b880cabb9005aebbc7e783e53c19fec1c03df7d0e2f2076a33a0fdfd081"
+    ],
+    "scripts/office/schemas/microsoft/wml-cid-2016.xsd": [
+      "127ca209fa73d7cb708449cb355c871867948a96e4a74f7bf5811ef62d17991d"
+    ],
+    "scripts/office/schemas/microsoft/wml-sdtdatahash-2020.xsd": [
+      "842e7163409c8d74f4d7088a8bc99500d80bc75332681a0980055b08f374a604"
+    ],
+    "scripts/office/schemas/microsoft/wml-symex-2015.xsd": [
+      "16f6f8072249f431370723c2cd8974672e0d9c897e00e97dd918079df934871b"
+    ],
+    "scripts/office/soffice.py": [
+      "11760e54331fa47178646c006a3dac653eea1e06c4161add64d255886da3a92c"
+    ],
+    "scripts/office/unpack.py": [
+      "aed41122e1777274304cd95e3c26779e611f5a71ee4f94450e3c90e226487762"
+    ],
+    "scripts/office/validate.py": [
+      "ca9d653f1299305db8296dc07b86fdb6cfa757da5464a7b757ebd41aec3e2705"
+    ],
+    "scripts/office/validators/__init__.py": [
+      "83e0f035c5abea238d3f2c3968afbd511ed022b527b7c9cb60a9434cc34ff987"
+    ],
+    "scripts/office/validators/base.py": [
+      "295dac979ff95cd4bb3d009a83c90921d1632b223af7eea3dd0ec58df1a21ca9"
+    ],
+    "scripts/office/validators/docx.py": [
+      "27cf88911e2c7a04778201d32ea6db9a49af673b9751f82c7ebeb9f5e5bb7168"
+    ],
+    "scripts/office/validators/pptx.py": [
+      "1453cd0f6aec7d41443e6e3715d286d8bee7912c5f1602170a61d774d2473ed0"
+    ],
+    "scripts/office/validators/redlining.py": [
+      "08549c4e237b718c79b48cdb85c88992834afa488b9a004dfad4260e90d07d33"
+    ],
+    "scripts/thumbnail.py": [
+      "e959ecd4f19735161218bc44d0648a46da17874323fb3e19c2e9cb50cefe6ce7"
+    ]
+  },
+  "profile-performance": {
+    "SKILL.md": [
+      "894090e33b93d8105801d32d5265fa782cd071bfd9ca9bcdb3537896ff14a999",
+      "f1e08e3acd6dcafac4be68e35a8919f69cc7c12d3e3b1d28135d3a24527a5e8c",
+      "ff3bb33cde3fdd2ca5b7bc5a107db711d5f5072fa3236e9599cc0b68946a0f75"
+    ]
+  },
+  "readme-writing": {
+    "SKILL.md": [
+      "9eaf367375831ce56e00f265f1af4fe644e5fb03c75466e4806ed893b7dc7f1b",
+      "c199d3a17a185a9be0ece2f6bf183f28a139590ded49a30389d864eb238fd62a",
+      "fa21f8bfc2dd5d1e9a88a95820cb41bd562da5968723de3c64ca144ce24e3b76"
+    ]
+  },
+  "refactoring": {
+    "SKILL.md": [
+      "b98584233c8c0abfb5126361f519bc35126192f332b6f9337838d6db1069c38b"
+    ]
+  },
+  "release-manager": {
+    "SKILL.md": [
+      "2b3f382f218eff6baec757f3355f92cb4edc9333a32286994f1bfbc024877448"
+    ]
+  },
+  "revision-editing": {
+    "SKILL.md": [
+      "344c43d152da0579592910bdc83d0db712ff3a76f3206e9178e71e93329b7803"
+    ]
+  },
+  "scan-project": {
+    "SKILL.md": [
+      "a06c4e8c8d31083e8eba59f1b24acb092812bf2414d2d09191532b493e83a6c3"
+    ]
+  },
+  "security-hardening": {
+    "SKILL.md": [
+      "9fa4b35eadb4432f303160780097c5123d05c5b47239b2fca60966c63612847c"
+    ]
+  },
+  "security-review": {
+    "SKILL.md": [
+      "f5fd0a8adf087990b326bd6b2c836b472c14a5172e75e49d9e24bd0d69ea129f"
+    ]
+  },
+  "skill-creator": {
+    "SKILL.md": [
+      "dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf"
+    ],
+    "agents/analyzer.md": [
+      "bf68f4cac5a56c673a928c2e6d619586c5b93ea364026ab37547772cb45a663a"
+    ],
+    "agents/comparator.md": [
+      "fe1fc9787c495d864c5d6eada47396478572325fde1b33a96d78bf4b849b7a3e"
+    ],
+    "agents/grader.md": [
+      "57134da0c1a4eea33fbd74a1c9c44aa814f07d6bc64de303edb586f941e5d21a"
+    ],
+    "assets/eval_review.html": [
+      "ce477dcc74dc1c0d1d3352646a79167b5a63634e936b1019160025065974e452"
+    ],
+    "eval-viewer/generate_review.py": [
+      "8c0c43ca0bf2632b5fd461e8de56160a32eab2a75f48a8866b5ec97b6ee89814"
+    ],
+    "eval-viewer/viewer.html": [
+      "a53213426ee1100441d701a3a0d49cda7a842f992d2c36463f4d3cc0258575fa"
+    ],
+    "references/schemas.md": [
+      "ee919877e14852d01fdbf08c6c98a90a979bda75e2da445351fa90dd601ac527"
+    ],
+    "scripts/__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "scripts/aggregate_benchmark.py": [
+      "d7ebb41524fc177eb9647aed9a3d2ac030691fe6f3cc6b7a7f0cf50c068b524c"
+    ],
+    "scripts/generate_report.py": [
+      "8f90343acc0fd95fbf6658f634bd0f2ed3d7e776318d76c73358c6f84da00a36"
+    ],
+    "scripts/improve_description.py": [
+      "d1f744197990df0ef75de40e11ab5769296d9f60295b67ace1710bc8d65a1138"
+    ],
+    "scripts/package_skill.py": [
+      "3106a3d38239dd61d2f305e24c729b519cf3ecbe182de02b1d2211c3d0178749"
+    ],
+    "scripts/quick_validate.py": [
+      "66bb05d1935eeed248e5ebc34538d34b38dd0d743e0b469f8c677950bbe3d903"
+    ],
+    "scripts/run_eval.py": [
+      "f0511ae17b57cfefc2ef0745f7a308948dc77549d3b06749ed226dbcc611d711"
+    ],
+    "scripts/run_loop.py": [
+      "5894f4b3e201d4d044af9c647c845d2ef858d84e23c2b6588680fb55673d9470"
+    ],
+    "scripts/utils.py": [
+      "2cc60ae682d46cffd4d4b2ce622b690a739b49756951a64df7cf5207ebfcf569"
+    ]
+  },
+  "sql-query-optimization": {
+    "SKILL.md": [
+      "559d506a9e1b21de3b71eed102b4e8af4f7ffee563618b1447df51aa1046843c"
+    ]
+  },
+  "statistical-analysis": {
+    "SKILL.md": [
+      "e6f8ce20630f1ba8cc7e93f154feabc4923c38fb995e4b67931b01b8e33d1b0e"
+    ]
+  },
+  "style-guide": {
+    "SKILL.md": [
+      "74ffb15fe4eae14f7b309b9b58378de851cb5c74f8499b53a1c11cac91d2f979"
+    ]
+  },
+  "tdd": {
+    "SKILL.md": [
+      "e153256f6764b558bfb1513e88fd0fb4944c00825268e6d74e513695d3283613"
+    ]
+  },
+  "tech-research": {
+    "SKILL.md": [
+      "7065820c07ac601063c0b6eb6be640ce3ef4254fa0ce20105cb43240a843ed37"
+    ]
+  },
+  "trace-command-execution": {
+    "SKILL.md": [
+      "6b43919a38ef953d2696a6a87a278e86968a7d6676aa9edc4f567d56ac39c633",
+      "78af690900ef0a6234c9f98c19d8d8c2e5cb705183c8db4ca47fc2062079edae"
+    ]
+  },
+  "trend-tracking": {
+    "SKILL.md": [
+      "5e774ebdc1fbee8ef015ccc60a56f04e7de62d1e41aab887face4bfa2088c434"
+    ]
+  },
+  "tutorial-creation": {
+    "SKILL.md": [
+      "2c436b4bfb1f04c2150950eea0397b37c6a3f8b6bc5618ee2d0c30b6764ac2f8"
+    ]
+  },
+  "validate-config": {
+    "SKILL.md": [
+      "1fcf8b2c3c9c8e411cbf20d8981c1ced08047e1753fa0b59abaeb694806d1a6e",
+      "da2a8292a72c6c52aa0c89dd8b41e02304e78fd36fb3296b345df3b9da712aa1",
+      "f32da8b621c884c5d48ffdc7b945a90c56cdf3f9ad55e1a795c3cc00e855cbc6"
+    ]
+  },
+  "webapp-testing": {
+    "SKILL.md": [
+      "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2"
+    ],
+    "examples/console_logging.py": [
+      "0ed238ec24cf4330d7704f568c25ffaf6cb0904333b88837383b5a6d0c7d9103"
+    ],
+    "examples/element_discovery.py": [
+      "9bb6beb6055991e722abecd83f9aa45d08811d88b009ca3de49c1932b3fb0ad8"
+    ],
+    "examples/static_html_automation.py": [
+      "a0f578755bc3553979a203c8bcbf0469eeeba347774e6ee176252ecab1d3d1a1"
+    ],
+    "scripts/with_server.py": [
+      "aea3b86ae9a317a1d3fd8f37e543312c242e5be9daf7106124c1564b74f8ebf1"
+    ]
+  },
+  "worldbuilding": {
+    "SKILL.md": [
+      "913f8b36347774c75020655ffac789c782e316076d8c0c0892f10f3a5ef2e69a"
+    ]
+  },
+  "xlsx": {
+    "SKILL.md": [
+      "dd316db7785a6be12966c2a2d848931fbf5f518b3cdb0a66fa62ee835ead1cfc"
+    ],
+    "scripts/office/helpers/__init__.py": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "scripts/office/helpers/merge_runs.py": [
+      "d4110e084c32f2a0560ed7a9b923bb55a88ce94fe2270d3379943abf4a5b2957"
+    ],
+    "scripts/office/helpers/simplify_redlines.py": [
+      "997caad305eb63979b4a0e110656ad0cbed2edfd7d2cabebafbde43f5e115cc0"
+    ],
+    "scripts/office/pack.py": [
+      "7bd0eb114d499aee55d1fbaf74ab14e25027461fb8d49f454d2ccf2573e13920"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chart.xsd": [
+      "41b93bd8857cc68b1e43be2806a872d736a9bdd6566900062d8fdb57d7bbb354"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-chartDrawing.xsd": [
+      "3fd0586f2637b98bb9886f0e0b67d89e1cc987c2d158cc7deb5f5b9890ced412"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-diagram.xsd": [
+      "29b254ee0d10414a8504b5a08149c7baec35a60d5ff607d6b3f492aa36815f40"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-lockedCanvas.xsd": [
+      "5cb76dabd8b97d1e9308a1700b90c20139be4d50792d21a7f09789f5cccd6026"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-main.xsd": [
+      "5375417f0f5394b8dd1a7035b9679151f19a6b65df309dec10cfb4a420cb00e9"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-picture.xsd": [
+      "5d389d42befbebd91945d620242347caecd3367f9a3a7cf8d97949507ae1f53c"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-spreadsheetDrawing.xsd": [
+      "b4532b6d258832953fbb3ee4c711f4fe25d3faf46a10644b2505f17010d01e88"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/dml-wordprocessingDrawing.xsd": [
+      "bdad416b096b61d37b71603b2c949484f9070c830bdaeba93bf35e15c8900614"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/pml.xsd": [
+      "d173c3e5d61e42e2e3a97226c632fd2ab7cc481fc4e492365b87024ab546daff"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-additionalCharacteristics.xsd": [
+      "3c6709101c6aaa82888df5d8795c33f9e857196790eb320d9194e64be2b6bdd8"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-bibliography.xsd": [
+      "0b364451dc36a48dd6dae0f3b6ada05fd9b71e5208211f8ee5537d7e51a587e2"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-commonSimpleTypes.xsd": [
+      "e2abacbb9a55ce1365f8961bc1b1395bbc811e512b111000d8c333f98458dece"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlDataProperties.xsd": [
+      "0ef4bb354ff44b923564c4ddbdda5987919d220225129ec94614a618ceafc281"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-customXmlSchemaProperties.xsd": [
+      "0d103b99a4a8652f8871552a69d42d2a3760ac6a5e3ef02d979c4273257ff6a4"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesCustom.xsd": [
+      "9c085407751b9061c1f996f6c39ce58451be22a8d334f09175f0e89e42736285"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesExtended.xsd": [
+      "bc92e36ccd233722d4c5869bec71ddc7b12e2df56059942cce5a39065cc9c368"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-documentPropertiesVariantTypes.xsd": [
+      "7b5b7413e2c895b1e148e82e292a117d53c7ec65b0696c992edca57b61b4a74b"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-math.xsd": [
+      "3213ef1631606250f5010b42cad7ef716f7c59426367798e33c374c0ec391d3a"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/shared-relationshipReference.xsd": [
+      "12264f3c03d738311cd9237d212f1c07479e70f0cbe1ae725d29b36539aef637"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/sml.xsd": [
+      "beffeed56945c22a77440122c8bdc426f3fcbe7f3b12ea0976c770d1f8d54578"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-main.xsd": [
+      "f5ee623b08b6a66935e5aced2f5d8ad0fc71bf9e8e833cd490150c0fa94b8763"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-officeDrawing.xsd": [
+      "585bedc1313b40888dcc544cb74cd939a105ee674f3b1d3aa1cc6d34f70ff155"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-presentationDrawing.xsd": [
+      "133c9f64a5c5d573b78d0a474122b22506d8eadb5e063f67cdbbb8fa2f161d0e"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-spreadsheetDrawing.xsd": [
+      "6bdeb169c3717eb01108853bd9fc5a3750fb1fa5b82abbdd854d49855a40f519"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/vml-wordprocessingDrawing.xsd": [
+      "475dcae1e7d1ea46232db6f8481040c15e53a52a3c256831d3df204212b0e831"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd": [
+      "c2dd9f61f892deae6acd8d20771ea79b12018af25f3bf8d06639c8542d218cfd"
+    ],
+    "scripts/office/schemas/ISO-IEC29500-4_2016/xml.xsd": [
+      "a539aa2fb154fa50e0f5cc97e6ad7cbc66f8ec3e3746f61ec6a8b0d5d15ecdf2"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-contentTypes.xsd": [
+      "9e0b7209fc69ab11987900404540969976000c5ebe4d4f58c43dc3842886bf3a"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-coreProperties.xsd": [
+      "451958454e8588dfc7cd945981ada142ca06ff3307937f5700df059c2b307fa8"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-digSig.xsd": [
+      "6de111e11403f7cd49027400755bae0ea1cabef2815f09bd40a24f0017613b24"
+    ],
+    "scripts/office/schemas/ecma/fouth-edition/opc-relationships.xsd": [
+      "f565adfef5a502044abc3a9153e157edc25af78304d335994afb958874b15e26"
+    ],
+    "scripts/office/schemas/mce/mc.xsd": [
+      "3a37e461ecf5a8670fdec34029703401f8728ab9c96ec1739a6ae58d55212413"
+    ],
+    "scripts/office/schemas/microsoft/wml-2010.xsd": [
+      "568b26ee156cb9549aa439ca2158965f77b7c1602b7e0316f40ac6cf586e35f2"
+    ],
+    "scripts/office/schemas/microsoft/wml-2012.xsd": [
+      "0fa75578a000439a7988ba0c59fdc69f774bbd416cbacc14d07125b3f686cb74"
+    ],
+    "scripts/office/schemas/microsoft/wml-2018.xsd": [
+      "be0ff793a22dd31384650c3a4da14c2fa8062751c2e97b0e5ee852bda13c60ad"
+    ],
+    "scripts/office/schemas/microsoft/wml-cex-2018.xsd": [
+      "fddc2b880cabb9005aebbc7e783e53c19fec1c03df7d0e2f2076a33a0fdfd081"
+    ],
+    "scripts/office/schemas/microsoft/wml-cid-2016.xsd": [
+      "127ca209fa73d7cb708449cb355c871867948a96e4a74f7bf5811ef62d17991d"
+    ],
+    "scripts/office/schemas/microsoft/wml-sdtdatahash-2020.xsd": [
+      "842e7163409c8d74f4d7088a8bc99500d80bc75332681a0980055b08f374a604"
+    ],
+    "scripts/office/schemas/microsoft/wml-symex-2015.xsd": [
+      "16f6f8072249f431370723c2cd8974672e0d9c897e00e97dd918079df934871b"
+    ],
+    "scripts/office/soffice.py": [
+      "11760e54331fa47178646c006a3dac653eea1e06c4161add64d255886da3a92c"
+    ],
+    "scripts/office/unpack.py": [
+      "aed41122e1777274304cd95e3c26779e611f5a71ee4f94450e3c90e226487762"
+    ],
+    "scripts/office/validate.py": [
+      "ca9d653f1299305db8296dc07b86fdb6cfa757da5464a7b757ebd41aec3e2705"
+    ],
+    "scripts/office/validators/__init__.py": [
+      "83e0f035c5abea238d3f2c3968afbd511ed022b527b7c9cb60a9434cc34ff987"
+    ],
+    "scripts/office/validators/base.py": [
+      "295dac979ff95cd4bb3d009a83c90921d1632b223af7eea3dd0ec58df1a21ca9"
+    ],
+    "scripts/office/validators/docx.py": [
+      "27cf88911e2c7a04778201d32ea6db9a49af673b9751f82c7ebeb9f5e5bb7168"
+    ],
+    "scripts/office/validators/pptx.py": [
+      "1453cd0f6aec7d41443e6e3715d286d8bee7912c5f1602170a61d774d2473ed0"
+    ],
+    "scripts/office/validators/redlining.py": [
+      "08549c4e237b718c79b48cdb85c88992834afa488b9a004dfad4260e90d07d33"
+    ],
+    "scripts/recalc.py": [
+      "65389323b6bf0f5288525e70a78edf8f8ffd031e695208dce8de116b17962154"
+    ]
+  }
+}

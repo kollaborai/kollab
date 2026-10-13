@@ -833,8 +833,8 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # The daemon owns the conversation; pull a fresh copy rather than trusting
-    # the local mirror, which only refreshes on turn_complete.
+    # Refresh opportunistically; a busy daemon may not answer while a tool is
+    # running, in which case EngineSession returns its cached mirror promptly.
     history = await session.refresh_history()
     turn_error = session.last_turn_error
     if limit:

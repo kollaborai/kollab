@@ -9,12 +9,24 @@ Separated from mcp_command.py to enable reusability across the codebase.
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from kollabor_config.config_utils import resolve_global_path
 
+from .mcp_integration import MCPIntegration
+
 logger = logging.getLogger(__name__)
+
+
+def _masked_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy of a server entry with env values masked (an empty value stays empty)."""
+    masked = dict(entry)
+    if isinstance(entry.get("env"), dict):
+        masked["env"] = {key: "***" if value else "" for key, value in entry["env"].items()}
+    return masked
 
 
 class MCPManager:
@@ -92,12 +104,67 @@ class MCPManager:
         Raises:
             IOError: If unable to write config file
         """
-        self.ensure_directory()
-
-        with open(self.config_path, "w") as f:
-            json.dump(config, f, indent=2)
+        self._write_settings(config)
 
         logger.info(f"MCP configuration saved to {self.config_path}")
+
+    def _write_settings(self, config: Dict) -> None:
+        """Replace mcp_settings.json atomically: temp file in the same folder, then os.replace."""
+        self.ensure_directory()
+        fd, tmp_name = tempfile.mkstemp(dir=self.mcp_dir, prefix=".mcp_settings.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(config, f, indent=2)
+            os.replace(tmp_name, self.config_path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+
+    def _read_settings(self) -> Dict[str, Any]:
+        """Read mcp_settings.json before a write. A broken file raises instead of being overwritten."""
+        if not self.config_path.exists():
+            return {}
+        try:
+            config = json.loads(self.config_path.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{self.config_path} is not valid JSON; fix it before changing MCP servers") from exc
+        if not isinstance(config, dict):
+            raise ValueError(f"{self.config_path} must hold a JSON object")
+        return config
+
+    def upsert_server(self, name: str, definition: Dict[str, Any]) -> Dict[str, Any]:
+        """Add or replace servers.<name>. The one writer Apps uses.
+
+        Validates with MCPIntegration's rules and keeps every other key.
+
+        Returns:
+            The saved entry with env values masked
+
+        Raises:
+            ValueError: definition breaks the rules, or the settings file is not valid JSON
+        """
+        # ponytail: the validator is an instance method that never reads self, so borrow
+        # it without building an MCPIntegration. Make it a module function next time
+        # mcp_integration.py is open.
+        errors = MCPIntegration.__new__(MCPIntegration)._validate_server_config(name, definition)
+        if errors:
+            raise ValueError("; ".join(errors))
+        config = self._read_settings()
+        entry = dict(definition)
+        config.setdefault("servers", {})[name] = entry
+        self._write_settings(config)
+        logger.info(f"MCP server '{name}' saved")
+        return _masked_entry(entry)
+
+    def remove_server(self, name: str) -> None:
+        """Delete servers.<name>. Raises KeyError when it is not configured."""
+        config = self._read_settings()
+        servers = config.get("servers", {})
+        if name not in servers:
+            raise KeyError(name)
+        del servers[name]
+        self._write_settings(config)
+        logger.info(f"MCP server '{name}' removed")
 
     def get_server_status(self, server_name: str, mcp_integration) -> Dict[str, Any]:
         """Get status of a specific MCP server.

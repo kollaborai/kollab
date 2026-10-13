@@ -118,7 +118,12 @@ class LLMProfile:
     """
 
     name: str
-    provider: str  # "openai", "anthropic", "azure_openai", "gemini", "openai_responses", "openrouter", "custom"
+    provider: str  # "openai", "anthropic", "azure_openai", "gemini", "openai_responses", "openrouter", "custom", "acp"
+    # ACP adapter fields are portable profile data; resolved executable paths stay local.
+    command: tuple[str, ...] = ()
+    cwd: str = ""
+    workspace: str = ""
+    pass_env: tuple[str, ...] = ()
     model: str = ""
     temperature: float = 0.7
     max_tokens: Optional[int] = None
@@ -499,6 +504,14 @@ class LLMProfile:
             "timeout": self.get_timeout(),
             "description": self.description,
         }
+        if self.get_provider() == "acp":
+            result["command"] = list(self.command)
+            if self.cwd:
+                result["cwd"] = self.cwd
+            if self.workspace:
+                result["workspace"] = self.workspace
+            if self.pass_env:
+                result["pass_env"] = list(self.pass_env)
 
         # Include api_key (resolved from env var if set)
         api_key = self.get_api_key()
@@ -572,10 +585,31 @@ class LLMProfile:
         provider = data.get("provider")
         if not provider:
             raise ValueError(f"Profile '{name}' is missing required 'provider' field")
+        command = data.get("command", ())
+        pass_env = data.get("pass_env", ())
+        if provider == "acp":
+            if not isinstance(command, (list, tuple)) or not command or not all(
+                isinstance(item, str) and item.strip() for item in command
+            ):
+                raise ValueError(f"ACP profile '{name}' requires a non-empty string command")
+            if not isinstance(pass_env, (list, tuple)) or not all(
+                isinstance(item, str) and item.strip() for item in pass_env
+            ):
+                raise ValueError(f"ACP profile '{name}' pass_env must be string names")
+            for field_name in ("cwd", "workspace"):
+                value = data.get(field_name, "")
+                if value and not isinstance(value, str):
+                    raise ValueError(f"ACP profile '{name}' {field_name} must be a string")
+        else:
+            command, pass_env = (), ()
 
         return cls(
             name=name,
             provider=provider,
+            command=tuple(command),
+            cwd=data.get("cwd", "") if provider == "acp" else "",
+            workspace=data.get("workspace", "") if provider == "acp" else "",
+            pass_env=tuple(pass_env),
             api_key=data.get("api_key", ""),
             model=data.get("model", ""),
             temperature=data.get("temperature", 0.7),

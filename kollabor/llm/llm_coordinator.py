@@ -8,6 +8,7 @@ kollabor-tui (display, status), and kollabor-events (hooks).
 import asyncio
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Optional, cast
 
 from kollabor.user_input_source import UserInputSource
@@ -1722,6 +1723,8 @@ class LLMService:
         *,
         source: UserInputSource,
         pre_displayed: bool = False,
+        request_id: str | None = None,
+        thread_id: str | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -1731,6 +1734,22 @@ class LLMService:
         """
         if not isinstance(source, UserInputSource):
             return {"status": "rejected", "reason": "invalid_input_source"}
+
+        acp = self.event_bus.get_service("acp_orchestrator")
+        acp_dispatch = acp is not None and getattr(acp, "active", False) is True
+        selected_acp = False
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is not None:
+            try:
+                profile = profile_manager.get_active_profile()
+                provider = profile.get_provider() if profile is not None else ""
+                selected_acp = provider == "acp"
+            except Exception:
+                selected_acp = False
+        if selected_acp and not acp_dispatch:
+            return {"status": "rejected", "reason": "acp_unavailable"}
+        if acp_dispatch and not isinstance(message, str):
+            return {"status": "rejected", "reason": "acp_text_only"}
 
         emit = getattr(self.event_bus, "emit_with_hooks", None)
         if not callable(emit):
@@ -1742,6 +1761,8 @@ class LLMService:
                 {
                     "message": message,
                     "message_pre_displayed": pre_displayed,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
                 },
                 source.value,
             )
@@ -1788,7 +1809,40 @@ class LLMService:
         )
 
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
-        """Handle user input hook callback (delegated)."""
+        """Admit ACP input through its owner; otherwise delegate native handling."""
+        acp = self.event_bus.get_service("acp_orchestrator")
+        selected_acp = False
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is not None:
+            try:
+                profile = profile_manager.get_active_profile()
+                provider = profile.get_provider() if profile is not None else ""
+                selected_acp = provider == "acp"
+            except Exception:
+                selected_acp = False
+        if selected_acp and not (acp is not None and getattr(acp, "active", False) is True):
+            return {"status": "rejected", "reason": "acp_unavailable"}
+        if acp is not None and getattr(acp, "active", False) is True:
+            request_id = data.get("request_id") or uuid.uuid4().hex
+            source = getattr(event, "source", UserInputSource.STATE_RPC.value)
+            try:
+                admission = acp.admit(
+                    str(data["message"]), request_id=request_id, source=source,
+                    thread_id=data.get("thread_id"),
+                )
+            except (RuntimeError, ValueError) as exc:
+                if "full" in str(exc).lower():
+                    return {"status": "rejected", "reason": "acp_queue_full"}
+                return {"status": "rejected", "reason": "acp_unavailable"}
+            except Exception as exc:
+                if "full" in str(exc).lower():
+                    return {"status": "rejected", "reason": "acp_queue_full"}
+                return {"status": "rejected", "reason": "acp_admission_failed"}
+            return {
+                "status": "queued",
+                "request_id": admission.request_id,
+                "turn_id": admission.turn_id,
+            }
         return cast(
             Dict[str, Any], await self._message_handler.handle_user_input(data, event)
         )

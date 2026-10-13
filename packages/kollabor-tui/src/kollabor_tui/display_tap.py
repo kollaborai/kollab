@@ -72,6 +72,7 @@ class DisplayTap:
     def __init__(self, history_size: int = 200):
         self._history: deque = deque(maxlen=history_size)
         self._subscribers: Dict[str, queue.Queue] = {}
+        self._next_seq = 1
         self._lock = threading.Lock()
 
     def publish(self, event: Dict[str, Any]) -> None:
@@ -80,8 +81,12 @@ class DisplayTap:
         Thread-safe. Called from the render thread (not async).
         Uses stdlib queue.Queue which is safe across threads.
         """
+        event = dict(event)
         event.setdefault("ts", time.time())
-        self._history.append(event)
+        with self._lock:
+            event["seq"] = self._next_seq
+            self._next_seq += 1
+            self._history.append(event)
 
         with self._lock:
             dead = []

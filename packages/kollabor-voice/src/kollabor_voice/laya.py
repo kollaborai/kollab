@@ -29,7 +29,7 @@ class LayaWorker:
         ):
             self.state = {
                 "state": "error",
-                "detail": "Laya worker stopped; /voicemode retry",
+                "detail": "Laya worker stopped; /voice retry",
             }
         return {
             **self.state,
@@ -119,7 +119,7 @@ class LayaWorker:
             await self._stop_process()
             self.state = {
                 "state": "error",
-                "detail": f"Laya setup failed: {exc}. /voicemode retry or /voicemode classifier provider",
+                "detail": f"Laya setup failed: {exc}. /voice retry or /voice classifier provider",
             }
 
     async def decide(self, records, context, transcript_context=None, context_lines=10):
@@ -146,7 +146,7 @@ class LayaWorker:
     async def _exchange(self, payload):
         if self.status()["state"] != "ready":
             raise VoiceError(
-                "classifier_not_ready", "Laya is not ready; /voicemode retry"
+                "classifier_not_ready", "Laya is not ready; /voice retry"
             )
         async with self.exchange_lock:
             request_id = uuid.uuid4().hex
@@ -171,7 +171,7 @@ class LayaWorker:
                 await self._stop_process()
                 self.state = {
                     "state": "error",
-                    "detail": "Laya request stopped; /voicemode retry",
+                    "detail": "Laya request stopped; /voice retry",
                 }
                 raise
 

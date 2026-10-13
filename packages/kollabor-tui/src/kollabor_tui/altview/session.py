@@ -15,6 +15,7 @@ from kollabor_events.models import EventType, Hook, HookPriority
 from kollabor_tui.fullscreen.renderer import FullScreenRenderer
 from kollabor_tui.key_parser import KeyParser
 from kollabor_tui.render_loop import EventDrivenRenderLoop, RenderTrigger
+from kollabor_tui.terminal_state import get_global_terminal_state
 
 from .base import AltView, AltViewState
 from .display_queue import DisplayQueue
@@ -207,6 +208,16 @@ class AltViewSession:
             (input_processed: bool, should_exit: bool)
         """
         try:
+            terminal = get_global_terminal_state()
+            # Some launchers do not deliver SIGWINCH to this process. Polling
+            # the shared size also detects those changes while a view is idle.
+            terminal.update_size()
+            resized = terminal.check_and_clear_resize_flag() or terminal.get_size() != (
+                self.renderer.terminal_width, self.renderer.terminal_height
+            )
+            if resized:
+                self.renderer.get_terminal_size()
+                self.renderer.invalidate_render_cache()
             # Priority 1: Check pending_input queue (from hooks, if any)
             try:
                 key_press = self.pending_input.get_nowait()
@@ -219,11 +230,11 @@ class AltViewSession:
             # Priority 2: Direct stdin reading (primary path - main input
             # loop is blocked waiting for push() to return so we own stdin)
             if not sys.stdin.isatty():
-                return (False, False)
+                return (resized, False)
 
             ready, _, _ = select.select([sys.stdin], [], [], 0.01)
             if not ready:
-                return (False, False)
+                return (resized, False)
 
             # Non-blocking read
             import fcntl
@@ -243,7 +254,7 @@ class AltViewSession:
                 fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
 
             if not chars:
-                return (False, False)
+                return (resized, False)
 
             # Parse through key parser
             if not hasattr(self, "_key_parser"):

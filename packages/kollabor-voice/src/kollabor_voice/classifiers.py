@@ -29,12 +29,10 @@ LAYA_QUESTION = {
         ),
         "criteria": {
             "respond": (
-                "The speaker asks the assistant for help, gives it a task, "
-                "or continues their conversation with it."
+                "The speaker asks the assistant for help, gives it a task, or continues their conversation with it."
             ),
             "ignore": (
-                "Background speech, a conversation with somebody else, "
-                "or a thought not addressed to the assistant."
+                "Background speech, a conversation with somebody else, or a thought not addressed to the assistant."
             ),
         },
     }
@@ -42,13 +40,7 @@ LAYA_QUESTION = {
 
 
 def load_classifier(root=None):
-    try:
-        name = json.loads(((root or service_root()) / "preferences.json").read_text())[
-            "classifier"
-        ]
-        return name if name in CLASSIFIERS else DEFAULT_CLASSIFIER
-    except (OSError, ValueError, KeyError, TypeError):
-        return DEFAULT_CLASSIFIER
+    return load_preferences(root)["classifier"]
 
 
 def save_classifier(name, root=None):
@@ -58,15 +50,86 @@ def save_classifier(name, root=None):
 
 
 def load_context_lines(root=None):
+    return load_preferences(root)["context_lines"]
+
+
+def load_preferences(root=None):
+    """Read the complete device preference snapshot once, with valid defaults."""
     try:
-        value = json.loads(((root or service_root()) / "preferences.json").read_text())[
-            "context_lines"
-        ]
-        if type(value) is int and 1 <= value <= MAX_CONTEXT_LINES:
-            return value
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return DEFAULT_CONTEXT_LINES
+        value = json.loads(((root or service_root()) / "preferences.json").read_text())
+    except (OSError, ValueError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    name, lines = value.get("classifier"), value.get("context_lines")
+    from .speech_settings import speech_defaults, speech_errors
+
+    defaults = speech_defaults()
+    speech = {**defaults, **{k: v for k, v in value.items() if k in defaults}}
+    for key in speech_errors(speech):
+        speech[key] = defaults[key]
+    return {
+        **speech,
+        "classifier": (
+            name
+            if isinstance(name, str) and name in CLASSIFIERS
+            else DEFAULT_CLASSIFIER
+        ),
+        "context_lines": (
+            lines
+            if type(lines) is int and 1 <= lines <= MAX_CONTEXT_LINES
+            else DEFAULT_CONTEXT_LINES
+        ),
+    }
+
+
+def save_preferences(changes, root=None):
+    """Publish one validated device update without losing another client's keys."""
+    # The voice runtime is POSIX-only; importing its lightweight plugin and
+    # reading preferences must still work on other platforms.
+    import fcntl
+
+    from .speech_settings import speech_defaults, speech_errors
+
+    if not isinstance(changes, dict) or set(changes) - {
+        "classifier",
+        "context_lines",
+        *speech_defaults(),
+    }:
+        raise ValueError("Unknown voice preference")
+    if "classifier" in changes and (
+        not isinstance(changes["classifier"], str)
+        or changes["classifier"] not in CLASSIFIERS
+    ):
+        raise ValueError("Choose laya or provider")
+    if "context_lines" in changes and (
+        type(changes["context_lines"]) is not int
+        or not 1 <= changes["context_lines"] <= MAX_CONTEXT_LINES
+    ):
+        raise ValueError(f"Choose 1–{MAX_CONTEXT_LINES} transcript context lines")
+    path = (root or service_root()) / "preferences.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (path.parent / "preferences.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            preferences = json.loads(path.read_text())
+        except FileNotFoundError:
+            preferences = {}
+        except ValueError as exc:
+            raise ValueError(
+                "Voice preferences are unreadable; repair preferences.json before saving"
+            ) from exc
+        if not isinstance(preferences, dict):
+            raise ValueError("Voice preferences must be an object")
+        errors = speech_errors(
+            {**speech_defaults(), **preferences, **changes}, check_files=True
+        )
+        if errors:
+            raise ValueError(
+                "; ".join(f"{key}: {error}" for key, error in errors.items())
+            )
+        atomic_json(path, {**preferences, **changes})
+    return load_preferences(root)
 
 
 def save_context_lines(value, root=None):
@@ -76,15 +139,7 @@ def save_context_lines(value, root=None):
 
 
 def _save_preference(key, value, root=None):
-    path = (root or service_root()) / "preferences.json"
-    try:
-        preferences = json.loads(path.read_text())
-        if not isinstance(preferences, dict):
-            preferences = {}
-    except (OSError, ValueError):
-        preferences = {}
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    atomic_json(path, {**preferences, key: value})
+    save_preferences({key: value}, root)
 
 
 @dataclass(frozen=True)
@@ -106,7 +161,7 @@ class VoiceDecision:
     deferred_event_ids: list[str] = field(default_factory=list)
     context_event_ids: list[str] = field(default_factory=list)
     # Per utterance: the state the model read and each pass's choice, for
-    # /voicemode classifier. Display only; never part of the decision.
+    # /voice classifier. Display only; never part of the decision.
     trace: list[dict] = field(default_factory=list)
 
     def selected(self, records):

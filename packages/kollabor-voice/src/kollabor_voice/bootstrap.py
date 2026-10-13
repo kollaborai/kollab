@@ -122,7 +122,7 @@ def main() -> None:
             ],
         )
     except Exception as exc:
-        progress("error", f"Voice setup failed: {exc}. Run /voicemode retry")
+        progress("error", f"Voice setup failed: {exc}. Run /voice retry")
         raise
 
 

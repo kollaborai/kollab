@@ -48,7 +48,7 @@ def download(url: str, destination: Path, item: dict, progress) -> None:
     if not verified(partial, item):
         # Keep the previous published model intact. A corrupt partial can restart.
         raise RuntimeError(
-            f"Checksum mismatch for {item['name']}; run /voicemode retry"
+            f"Checksum mismatch for {item['name']}; run /voice retry"
         )
     partial.replace(destination)
 

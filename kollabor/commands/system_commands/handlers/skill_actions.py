@@ -12,6 +12,14 @@ from .skills import SkillCommandHandler
 logger = logging.getLogger(__name__)
 
 
+def _failure(verb: str, handler: SkillCommandHandler, agent, skill_name: str) -> str:
+    """The error line for a rename or delete that did not happen."""
+    skill = agent.get_skill(skill_name)
+    if skill and skill.skill_dir and handler._is_builtin(skill):
+        return f"[err] {skill_name} ships with Kollab and can't be {verb}d. Copy it to ~/.kollab/skills to change it."
+    return f"[err] Failed to {verb} skill: {skill_name}"
+
+
 async def handle_skill_modal_actions(
     data: dict, event: Event, handler: SkillCommandHandler
 ) -> dict:
@@ -232,7 +240,7 @@ async def handle_skill_modal_actions(
                         data["show_modal"] = modal_def
                 else:
                     data["display_messages"] = [
-                        ("error", "[err] Failed to rename skill", {}),
+                        ("error", _failure("rename", handler, active_agent, original_name), {}),
                     ]
 
     # Handle delete skill - show confirmation modal
@@ -272,7 +280,7 @@ async def handle_skill_modal_actions(
                         data["show_modal"] = modal_def
                 else:
                     data["display_messages"] = [
-                        ("error", f"[err] Failed to delete skill: {skill_name}", {}),
+                        ("error", _failure("delete", handler, active_agent, skill_name), {}),
                     ]
 
     return data
