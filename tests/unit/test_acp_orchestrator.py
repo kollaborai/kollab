@@ -46,7 +46,7 @@ class FakeRunner:
         self.started = True
 
     async def prompt(self, text):
-        return mod.ACPResult(1, "s1", text, "end_turn", (), {"type": "turn_complete"}, 1)
+        return mod.ACPResult(1, "s1", text, "end_turn", (), {"type": "turn_end"}, 1)
 
     async def cancel(self):
         pass
