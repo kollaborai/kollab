@@ -2492,7 +2492,14 @@ class LocalStateService(StateService):
         )
         return str(await definition.handler(command))
 
-    async def send_message(self, message: Any) -> dict[str, Any]:
+    async def send_message(
+        self,
+        message: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        origin_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
         The input pipeline only acknowledges admission to the LLM queue; model
@@ -2570,10 +2577,13 @@ class LocalStateService(StateService):
 
         try:
             submit_kwargs = {"source": UserInputSource.STATE_RPC}
-            if metadata.get("request_id") is not None:
-                submit_kwargs["request_id"] = metadata["request_id"]
-            if metadata.get("thread_id") is not None:
-                submit_kwargs["thread_id"] = metadata["thread_id"]
+            if request_id is not None or metadata.get("request_id") is not None:
+                submit_kwargs["request_id"] = request_id or metadata["request_id"]
+            if thread_id is not None or metadata.get("thread_id") is not None:
+                submit_kwargs["thread_id"] = thread_id or metadata["thread_id"]
+            context = origin_context or metadata.get("origin_context")
+            if context is not None:
+                submit_kwargs["origin_context"] = dict(context)
             submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)

@@ -73,10 +73,14 @@ class _StateLLMProxy:
         self._processing_states = iter(processing_states)
         self.tasks = []
         self.config = MagicMock()
+        self.context_calls = []
 
-    async def submit_human_input(self, message, *, source, pre_displayed=False):
+    async def submit_human_input(
+        self, message, *, source, pre_displayed=False, **kwargs
+    ):
+        self.context_calls.append(kwargs)
         return await self._service.submit_human_input(
-            message, source=source, pre_displayed=pre_displayed
+            message, source=source, pre_displayed=pre_displayed, **kwargs
         )
 
     def create_background_task(self, coro, name=None):
@@ -114,6 +118,26 @@ async def test_state_rpc_uses_one_full_user_input_event_and_propagates_pre_data(
         ("main", "state_rpc", "ordinary request [normalized]"),
         ("post", "state_rpc", "ordinary request [normalized]"),
     ]
+    pending_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_rpc_preserves_separate_request_thread_context():
+    bus, llm, _, pending_tool = await _pipeline()
+    proxy = _StateLLMProxy(llm)
+    state = LocalStateService(
+        llm_service=proxy, profile_manager=MagicMock(), event_bus=bus
+    )
+    result = await state.send_message(
+        {"message": "ordinary request", "request_id": "req-state",
+         "thread_id": "thread-state", "origin_context": {"sender": "agent-a"}}
+    )
+    assert result["accepted"] is True
+    await asyncio.gather(*proxy.tasks)
+    assert proxy.context_calls[-1] == {
+        "request_id": "req-state", "thread_id": "thread-state",
+        "origin_context": {"sender": "agent-a"},
+    }
     pending_tool.assert_awaited_once()
 
 

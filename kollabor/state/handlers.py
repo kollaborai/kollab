@@ -632,7 +632,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     async def _send_message(params: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await state_service.send_message(params.get("message", ""))
+            return await state_service.send_message(
+                params.get("message", ""),
+                request_id=params.get("request_id"),
+                thread_id=params.get("thread_id"),
+                origin_context=params.get("origin_context"),
+            )
         except Exception as e:
             return {"error": str(e)}
 
