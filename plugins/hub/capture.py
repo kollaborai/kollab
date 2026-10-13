@@ -133,6 +133,10 @@ def paginate(
         kept: list[dict[str, Any]] = []
         for record in page:
             cost = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            if not kept and cost > budget:
+                # An indivisible oversized first record is omitted explicitly;
+                # advancing its sequence lets a client continue pagination.
+                return [], True, str(record["seq"])
             if kept and used + cost > budget:
                 truncated = True
                 break

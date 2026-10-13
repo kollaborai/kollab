@@ -83,9 +83,10 @@ class DisplayTap:
         """
         event = dict(event)
         event.setdefault("ts", time.time())
-        event["seq"] = self._next_seq
-        self._next_seq += 1
-        self._history.append(event)
+        with self._lock:
+            event["seq"] = self._next_seq
+            self._next_seq += 1
+            self._history.append(event)
 
         with self._lock:
             dead = []

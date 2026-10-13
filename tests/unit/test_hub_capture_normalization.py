@@ -40,6 +40,21 @@ def test_display_tap_assigns_monotonic_sequence_numbers():
     assert [event["seq"] for event in snapshot] == [1, 2]
 
 
+def test_pagination_omits_oversized_first_record_with_advancing_cursor():
+    records = normalize_records([
+        {"seq": 10, "type": "text", "text": "oversized"},
+        {"seq": 20, "type": "text", "text": "ok"},
+    ])
+    page, truncated, cursor = paginate(records, max_chars=1)
+    assert page == []
+    assert truncated is True
+    assert cursor == "10"
+    page, truncated, cursor = paginate(records, cursor=cursor, max_chars=1000)
+    assert [item["seq"] for item in page] == [20]
+    assert truncated is False
+    assert cursor is None
+
+
 def test_pagination_cursor_continuity_and_serialized_char_limit():
     records = normalize_records([
         {"seq": 10, "type": "text", "text": "one", "metadata": "x" * 40},
