@@ -13270,6 +13270,12 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.debug("Attacher input inject error (%s)", type(e).__name__)
 
+    def rotate_acp_hub_binding(self) -> tuple[str, int]:
+        """Rotate the child-binding credential for each ACP session owner."""
+        self._acp_hub_generation += 1
+        self._acp_hub_token = secrets.token_urlsafe(32)
+        return self._acp_hub_token, self._acp_hub_generation
+
     async def _handle_acp_hub_status(self, *, token: str | None, generation: str | None) -> Dict[str, Any]:
         if token != self._acp_hub_token or str(generation) != str(self._acp_hub_generation):
             return {"error": "stale or invalid ACP hub binding"}
