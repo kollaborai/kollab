@@ -1266,6 +1266,14 @@ class TerminalLLMChat:
         except Exception:
             logger.exception("ACP permission confirmation failed")
             return None
+        decision_details = getattr(decision, "confirmation_details", None) or {}
+        if decision_details.get("acp_choice") == "cancel":
+            orchestrator = getattr(self, "acp_orchestrator", None)
+            cancel = getattr(orchestrator, "cancel", None)
+            if callable(cancel):
+                asyncio.create_task(cancel())
+                await asyncio.sleep(0.01)
+            return None
         allowed = bool(getattr(decision, "allowed", False))
         selected_id = (getattr(decision, "confirmation_details", None) or {}).get(
             "acp_selected_option_id"
@@ -1296,8 +1304,22 @@ class TerminalLLMChat:
             if len(allow_once) != 1:
                 return None
             wanted = "allow_once"
-        elif allowed and choice in ("approve_always", "approve_tool_always"):
-            wanted = "allow_always" if choice == "approve_always" else "allow_tool_always"
+        elif allowed and choice == "approve_always":
+            # Native ``A`` is an edit-mode control for ACP edit operations,
+            # not permission to persist a vendor allow_always option. Keep the
+            # ACP result one-shot while enabling the native edit mode.
+            if isinstance(request.operation, dict) and request.operation.get("kind") == "edit":
+                try:
+                    from kollabor_agent.permissions.manager import ApprovalMode
+
+                    manager.set_approval_mode(ApprovalMode.AUTO_APPROVE_EDITS, persist=False)
+                except Exception:
+                    logger.debug("Unable to enable ACP edit approval mode", exc_info=True)
+                wanted = "allow_once"
+            else:
+                wanted = "allow_always"
+        elif allowed and choice == "approve_tool_always":
+            wanted = "allow_tool_always"
         else:
             wanted = "allow_once" if allowed else "reject_once"
         for option in options:
