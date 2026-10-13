@@ -18,7 +18,7 @@ class Tap:
 class Hub:
     def __init__(self):
         self.rotations = 0
-        self._socket_server = None
+        self._socket_server = type("Socket", (), {"socket_path": "/tmp/hub.sock"})()
 
     def rotate_acp_hub_binding(self):
         self.rotations += 1
@@ -41,12 +41,16 @@ class FakeRunner:
         self.profile = profile
         self.started = False
         self.closed = False
+        self._updates = []
 
     async def start(self):
         self.started = True
 
     async def prompt(self, text):
-        return mod.ACPResult(1, "s1", text, "end_turn", (), {"type": "turn_end"}, 1)
+        import asyncio
+        await asyncio.sleep(0.03)
+        self._updates.append({"kind": "text", "text": text})
+        return mod.ACPResult(1, "s1", text, "end_turn", tuple(self._updates), {"type": "turn_end"}, 1)
 
     async def cancel(self):
         pass
@@ -67,6 +71,10 @@ async def test_orchestrator_owns_runner_and_publishes_semantic(monkeypatch):
     assert result["text"] == "hello"
     assert bus.services["acp_orchestrator"] is orchestrator
     assert any(event.get("type") == "turn_complete" for event in bus.services["display_tap"].events)
+    assert any(
+        event.get("type") == "token" and event.get("text") == "hello"
+        for event in bus.services["display_tap"].events
+    )
     assert any(event.get("type") == "turn_end" and event.get("hidden") for event in bus.services["display_tap"].events)
     await orchestrator.close()
     assert not orchestrator.active

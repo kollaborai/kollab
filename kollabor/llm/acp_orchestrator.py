@@ -5,10 +5,12 @@ ACP transport and permission protocol details remain in ``acp_bridge``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_tui.display_tap import publish_semantic
 
 from .acp_bridge import ACPProfile, ACPResult, ACPRunner
 
@@ -49,6 +51,8 @@ class ACPOrchestrator:
             token, generation = self.hub_plugin.rotate_acp_hub_binding()
             self._binding = (token, generation)
             socket_path = getattr(getattr(self.hub_plugin, "_socket_server", None), "socket_path", "")
+            if not socket_path:
+                raise RuntimeError("ACP hub socket is not ready before session/new")
             from kollabor.mcp_hub import kollab_hub_argv
             mcp_servers.append({
                 "name": "kollab-hub",
@@ -56,7 +60,7 @@ class ACPOrchestrator:
                 "args": kollab_hub_argv()[1:],
                 "env": {
                     "KOLLAB_ACP_HUB_TOKEN": token,
-                    "KOLLAB_ACP_HUB_GENERATION": str(generation),
+                    "KOLLAB_ACP_GENERATION": str(generation),
                     "KOLLAB_ACP_HUB_SOCKET": str(socket_path),
                 },
             })
@@ -77,28 +81,29 @@ class ACPOrchestrator:
     async def submit(self, text: str, *, source: str = "rpc") -> dict[str, Any]:
         if self._runner is None or self._closed:
             raise RuntimeError("ACP runner is not active")
-        result: ACPResult = await self._runner.prompt(text)
-        tap = self.event_bus.get_service("display_tap")
-        if tap is not None:
-            for update in result.updates:
-                tap.publish(update)
-            tap.publish_semantic(
-                {
-                    "type": "turn_complete",
-                    "session_id": result.session_id,
-                    "generation": result.generation,
-                    "turn_id": result.turn_id,
-                    "stop_reason": result.stop_reason,
-                    "source": source,
-                }
-            )
-            tap.publish_semantic(
-                {
-                    **result.end_frame,
-                    "hidden": True,
-                    "source": source,
-                }
-            )
+        seen = 0
+        prompt_task = asyncio.create_task(self._runner.prompt(text))
+        while not prompt_task.done():
+            seen = self._publish_pending_updates(seen, source)
+            await asyncio.sleep(0.01)
+        result: ACPResult = await prompt_task
+        self._publish_pending_updates(seen, source, updates=result.updates)
+        publish_semantic(
+            self.event_bus,
+            "turn_complete",
+            session_id=result.session_id,
+            generation=result.generation,
+            turn_id=result.turn_id,
+            stop_reason=result.stop_reason,
+            input_source=source,
+        )
+        publish_semantic(
+            self.event_bus,
+            "turn_end",
+            **result.end_frame,
+            hidden=True,
+            input_source=source,
+        )
         return {
             "text": result.text,
             "session_id": result.session_id,
@@ -107,6 +112,19 @@ class ACPOrchestrator:
             "stop_reason": result.stop_reason,
             "end_frame": result.end_frame,
         }
+
+    def _publish_pending_updates(
+        self, seen: int, source: str, *, updates: tuple[dict[str, Any], ...] | None = None
+    ) -> int:
+        current = updates if updates is not None else tuple(getattr(self._runner, "_updates", ()))
+        for update in current[seen:]:
+            publish_semantic(
+                self.event_bus,
+                "token" if update.get("kind") == "text" else str(update.get("kind", "update")),
+                **{k: v for k, v in update.items() if k != "kind"},
+                input_source=source,
+            )
+        return len(current)
 
     async def cancel(self) -> None:
         if self._runner is not None and not self._closed:
