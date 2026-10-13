@@ -7239,6 +7239,21 @@ class HubPlugin(BasePlugin):
         )
         return True
 
+    def _acp_agent_admission_enabled(self, llm_service: Any) -> bool:
+        """Return true only when ACP is the selected, live agent transport."""
+        event_bus = getattr(self, "event_bus", None)
+        acp = event_bus.get_service("acp_orchestrator") if event_bus else None
+        if getattr(acp, "active", False) is not True:
+            return False
+        profile_manager = getattr(llm_service, "profile_manager", None)
+        if profile_manager is None:
+            return False
+        try:
+            profile = profile_manager.get_active_profile()
+            return profile is not None and profile.get_provider() == "acp"
+        except Exception:
+            return False
+
     async def _submit_authenticated_agent_message(
         self, message: HubMessage, llm_service: Any
     ) -> dict[str, Any]:
@@ -7848,7 +7863,11 @@ class HubPlugin(BasePlugin):
                         getattr(message, "from_agent", None)
                         and message.from_agent != "human"
                     )
-                    if authenticated_agent and hasattr(llm_service, "submit_human_input"):
+                    if (
+                        authenticated_agent
+                        and self._acp_agent_admission_enabled(llm_service)
+                        and hasattr(llm_service, "submit_human_input")
+                    ):
                         await self._submit_authenticated_agent_message(message, llm_service)
                         return
                     await self.event_bus.emit_with_hooks(
