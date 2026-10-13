@@ -1262,13 +1262,24 @@ class TerminalLLMChat:
             # Initialize all plugins dynamically (always - attach mode needs /hub etc)
             await self._initialize_plugins()
             await asyncio.sleep(0)  # Yield after plugin init
-            hub_plugins = [
-                plugin
-                for plugin in self.plugin_instances.values()
-                if hasattr(plugin, "wait_until_ready")
-            ]
-            for hub_plugin in {id(plugin): plugin for plugin in hub_plugins}.values():
-                await hub_plugin.wait_until_ready(timeout=30.0)
+            active_profile = (
+                self.profile_manager.get_active_profile()
+                if hasattr(self, "profile_manager")
+                else None
+            )
+            needs_hub_ready = (
+                not self._attach_to and getattr(active_profile, "provider", "") == "acp"
+            )
+            if needs_hub_ready:
+                hub_plugins = [
+                    plugin
+                    for plugin in self.plugin_instances.values()
+                    if hasattr(plugin, "wait_until_ready")
+                ]
+                for hub_plugin in {
+                    id(plugin): plugin for plugin in hub_plugins
+                }.values():
+                    await hub_plugin.wait_until_ready(timeout=30.0)
             await self._initialize_acp_orchestrator()
 
             # Process CLI command if provided (after plugins so all commands are registered)
