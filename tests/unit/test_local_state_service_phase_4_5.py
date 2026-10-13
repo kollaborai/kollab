@@ -939,3 +939,28 @@ class TestSystemInfoVoice(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(snap.voice_requested)
         self.assertFalse(snap.voice_running)
+
+
+class TestSetActiveProfileACP(unittest.IsolatedAsyncioTestCase):
+    async def test_acp_activation_uses_orchestrator_and_skips_native_reinit(self):
+        profile = SimpleNamespace(name="claude-code", provider="acp", command=("fake",))
+        manager = MagicMock()
+        manager.set_active_profile.return_value = True
+        manager.get_profile.return_value = profile
+        manager.get_active_profile.side_effect = [
+            SimpleNamespace(name="native", provider="openai"), profile
+        ]
+        orchestrator = SimpleNamespace(close=AsyncMock(), start=AsyncMock())
+        bus = SimpleNamespace(get_service=lambda name: orchestrator if name == "acp_orchestrator" else None)
+        api = SimpleNamespace(reinitialize_provider=AsyncMock())
+        svc = LocalStateService(
+            llm_service=SimpleNamespace(api_service=api),
+            profile_manager=manager,
+            event_bus=bus,
+        )
+        svc._profile_to_snapshot = lambda value, **kwargs: SimpleNamespace(name=value.name)
+        snapshot = await svc.set_active_profile("claude-code")
+        orchestrator.close.assert_awaited_once()
+        orchestrator.start.assert_awaited_once_with(profile)
+        api.reinitialize_provider.assert_not_awaited()
+        self.assertEqual(snapshot.name, "claude-code")

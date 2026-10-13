@@ -809,3 +809,22 @@ def test_set_default_rejects_unknown_loadout():
     manager = LoadoutManager(_FakeProfileManager([]), config=_MemoryConfig())
     assert manager.set_default("missing") is False
     assert manager.get_default() is None
+
+
+@pytest.mark.asyncio
+async def test_activate_acp_rejects_native_overrides_and_remote_delegates():
+    profile = _FakeProfile("claude-code", "acp")
+    profile.command = ("owned-fixture",)
+    pm = _FakeProfileManager([profile])
+    manager = LoadoutManager(pm, config=_MemoryConfig())
+    state = SimpleNamespace(set_active_profile=AsyncMock())
+    bus = SimpleNamespace(get_service=lambda name: state if name == "state_service" else None)
+    rejected = await manager.activate(
+        Loadout("claude-code", "claude-code", "owned-fixture", effort="high"), bus
+    )
+    assert rejected is None
+    accepted = await manager.activate(
+        Loadout("claude-code", "claude-code", "owned-fixture"), bus
+    )
+    assert accepted is not None
+    state.set_active_profile.assert_awaited_once_with("claude-code", reload_profile=True)
