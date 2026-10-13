@@ -2923,7 +2923,12 @@ class HubPlugin(BasePlugin):
         """Close ``turn`` and tell its requester, on the request's thread."""
         from .relay_conversations import MAX_CONTENT, MAX_TURN_REPLIES
 
-        if self._net_turn is turn:
+        current = self._net_turn
+        if current is turn or (
+            current is not None
+            and current.message_id == turn.message_id
+            and current.thread_id == turn.thread_id
+        ):
             self._net_turn = None
         # ACP always emits an outcome/final message before its hidden end frame.
         answer = _network_answer_text(turn.answer, MAX_CONTENT)
