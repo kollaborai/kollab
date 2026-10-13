@@ -1032,7 +1032,12 @@ class LLMService:
             if self.profile_manager is None:
                 return False
             profile = self.profile_manager.get_active_profile()
-            provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+            if isinstance(profile, dict):
+                provider = profile.get("provider", "")
+            elif hasattr(profile, "get_provider"):
+                provider = profile.get_provider()
+            else:
+                provider = getattr(profile, "provider", "")
             return str(provider).lower() == "acp"
         except Exception:
             # Profile discovery failures preserve native startup behavior.

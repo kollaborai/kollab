@@ -112,10 +112,18 @@ class ACPProfile:
             cache = json.loads(cache_path.read_text())
         except (OSError, ValueError):
             pass
-        cached = cache.get(self.name) if isinstance(cache, dict) else None
+        if not isinstance(cache, dict):
+            cache = {}
+        cached = cache.get(self.name)
         executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
         cached_command = cached.get("command") if isinstance(cached, dict) else None
-        if cached_command != self.command[0] or not executable or not Path(executable).exists():
+        executable_path = Path(executable)
+        if (
+            cached_command != self.command[0]
+            or not executable
+            or not executable_path.is_file()
+            or not os.access(executable_path, os.X_OK)
+        ):
             executable = self._login_shell_path() or shutil.which(self.command[0]) or ""
         if not executable:
             raise ACPError(f"ACP adapter executable not found: {self.command[0]}. {self.install_guidance}")
@@ -150,7 +158,7 @@ class ACPProfile:
             if key not in self._PROVIDER_KEYS or key in self.pass_env
         }
         safe_env["PATH"] = os.pathsep.join(path_prefix + ([original_path] if original_path else []))
-        safe_env.update({k: v for k, v in self.env.items() if k not in self._PROVIDER_KEYS or k in self.pass_env})
+        safe_env.update({k: v for k, v in self.env.items() if k not in self._PROVIDER_KEYS})
         if node_path:
             safe_env.setdefault("ACP_NODE", node_path)
         return (executable, *self.command[1:]), safe_env, cwd
