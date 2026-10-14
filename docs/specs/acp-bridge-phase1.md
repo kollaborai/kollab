@@ -32,6 +32,25 @@ Verified fixes and boundaries:
   request/thread. The corrected application probe exited zero with no owned root
   PIDs. Trace: `/tmp/kacp-live-xVqw6o/codex-application.jsonl`; summary:
   `/tmp/kacp-live-xVqw6o/codex-live-summary.log`.
+- Native Hub lifecycle: `c65007ef` publishes idle when the owned input chain
+  settles, including provider errors and cancellation. A model response cannot
+  publish idle while tools, queued input or a turn lock remain; parked waiting
+  states are preserved. All 20 tracked cases pass after the fix; the broader
+  native/remote/Hub/CLI/queue/socket run passed 379 tests, and five unchanged
+  private reproduction cases pass. `8d8babd9` fixes the native roster formatter's
+  undefined label and renders harness labels and ACP permission waiting state
+  in both native Hub commands. Its adjacent run passed 142 tests. Evidence:
+  `/tmp/kacp-live-xVqw6o/roster-checkpoint.md`.
+- Native provider cleanup: `a1e0b14a` awaits OpenAI's async SDK close before
+  dropping the client; Azure inherits the fix. Actual SDK lifecycle tests cover
+  closure, repeated shutdown and shutdown before initialize. The provider run
+  passed 115 tests. A full native application run sent one controlled loopback
+  HTTP 400 request and observed working → provider failure → idle, then verified
+  the retained SDK client was closed before daemon exit with no unawaited-close
+  warning. Exit was zero, cleanup took 0.184 seconds and no owned processes,
+  socket, presence file or fault server remained. This is actual native lifecycle
+  evidence, not a successful vendor/model turn. Evidence:
+  `/tmp/kacp-native-cleanup.wf4nn29s/README.md` and `summary.json`.
 - Outbound: real Codex cancel, negotiated steering, resume and missing-login
   failure gates pass. Actual permission approve, deny and the complete 300-second
   timeout pass; only approval creates the owned sentinel. Evidence is in
@@ -67,6 +86,14 @@ Verified fixes and boundaries:
   subtests; later typed history checks passed 20 tests. A copied version of the
   actual old Zircon data recovered five ACP assistant rows and eight cards with
   source bytes unchanged: `/tmp/kacp-olddata-recovery-4f0ez6ss/summary.json`.
+  A separate copied native restore comparison at `8d8babd9` preserves all 64
+  assistant texts, 65 cards/results, IDs, arguments, order and result metadata.
+  All four logged raw user messages restore fully, including the complete
+  1,000-character B2 request. Two error strings differ only by the native
+  formatter's `Error: ` decoration; calling that actual formatter reproduces
+  them exactly. Display metadata stays out of prepared model messages. No logger
+  clipping or recovery of old injected context is justified. Evidence:
+  `/tmp/kacp-native-parity-_mz9y98_/summary.json` and hash-only ledgers.
 - Web UI: `decf3a83` serves the current source bundle; `d54ad450` clears the
   previous cancel header on admitted input; `95eaf915` omits unobserved durations
   instead of displaying 0 ms. `d39c99c3` uses the authoritative harness label for
@@ -95,6 +122,14 @@ Verified fixes and boundaries:
   parent UUID matches the manager's user UUID. Logger-generated message/request
   IDs use a separate namespace and were not used as runtime request authority.
   Neither operator C nor observation A substitutes for the blocked native B gate.
+  Retry B2 also terminated at the native provider rate limit before any Hub
+  admission or Zircon record. Its observer compared the input and provider ID
+  namespaces incorrectly and missed termination; an independent daemon query
+  verified `provider_failed` and processing false. No resend was inferred from
+  that timeout. Evidence: `/tmp/kacp-native-fresh-OoEaFR/verified-result.json`.
+  Only the native sender was subsequently restarted on the new Hub source with
+  its saved base restored; other user agents were preserved. Backup and restore
+  evidence: `/tmp/kacp-native-restart-Sjsq0d`.
 - Network: `99f4e9de` rechecks durable request authority after transport awaits
   and during remote ACP/CLI waits. Seven regressions reproduced hangs before
   the fix and pass afterward; 313 adjacent tests and two manual-grant/fast-final
@@ -107,6 +142,22 @@ Verified fixes and boundaries:
   `/tmp/kacp-cross-device-wb6byW/qualification_summary.json`, `events.jsonl` and
   `source_sha256.json`. Its remote application handler is controlled; this does
   not qualify a remote ACP provider/harness.
+- Real remote harness: a later isolated two-host run used an exact `9de09131`
+  source archive, Python 3.14.7, SDK 0.12.1, MCP 1.30.0 and pinned Codex adapter
+  2.1.1 (Codex 0.159.3) in a temporary remote runtime. Actual remote
+  `hub_agents`/`hub_status` calls completed, 23 text updates and four tool cards
+  rendered, and `ACP CROSS DEVICE CODEX OK` returned as one final message plus
+  one hidden `end_turn` with the original request/thread. The complete run took
+  41.256 seconds. Revoking only the isolated peer after model output began
+  ended the next MCP wait in 0.2162 seconds with no accepted late return. Root
+  independently reran the trace/correlation/hash validator. Credentials stayed
+  on their original host; temporary auth copies were removed. Existing remote
+  agents, source and the installed runtime were preserved; all owned processes
+  exited, relay ports closed and pending/dispatch maps drained. Evidence:
+  `/tmp/kacp-real-network-ILbHJu/qualification_summary.json`,
+  `runtime_manifest.json` and `build_evidence.py`. This proves the isolated
+  real transport/model boundary with explicit TLS and scoped membership;
+  production discovery, enrollment, release and deployment are outside it.
 
 Required open gates:
 
@@ -115,22 +166,26 @@ Required open gates:
    cancel and steering gates remain open. An isolated copied-auth probe also
    reported expired OAuth; neither result counts as a successful model turn.
 2. Gemini CLI 0.63.0: initialize passes, but session creation rejects the test
-   account's Code Assist individual client and reports an Antigravity migration.
-   The model/tool/permission/cancel matrix remains open; this is not treated as
-   a generic missing-login success or a reason to change account/billing settings.
+   account's consumer Google authentication and reports an Antigravity migration.
+   Google retired this consumer path on June 18, 2026. The pinned CLI advertises
+   API-key, Vertex and gateway alternatives; none is configured in the checked
+   CLI environment/store. The model/tool/permission/cancel matrix needs an
+   authorized supported mode. No account or billing settings were changed.
+   Diagnosis: `/tmp/kacp-live-xVqw6o/gemini-qualification-diagnosis.md`;
+   primary source: Google's
+   [consumer deprecation notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals).
 3. Actual Zed initialize/prompt/permission/cancel/attach remains unverified.
-   Isolated config/proxy artifacts are prepared; Zed's singleton reused its
-   existing process, and computer control cannot operate the owned restricted
-   test window. No successful ACP client trace exists. User project settings
-   and the existing Zed application were preserved.
+   The initial launch reused Zed's singleton and did not read its intended
+   settings. Corrected private `user-data-dir/config/settings.json` and upstream
+   `ZED_STATELESS=1` now launch a distinct owned Zed 1.23.3 process. Computer
+   control still selects the older user app; manual interaction in the owned
+   window is pending. Seven preparation checks pass, but no actual ACP client
+   trace exists. User projects/settings and the existing Zed app were preserved.
+   Corrected config, proxy and launch evidence: `/tmp/kacp-zed-owned-nhvlcy_n`.
 4. Repeat the separate native Koordinator → Zircon request B after sender capacity
    returns, checking a new request's original reply and terminal IDs. The actual
    sender failed before Hub admission; the earlier A reply-chain result and C
    operator result are recorded separately.
-5. Actual cross-device ACP harness collaboration needs a scoped remote runtime
-   preparation. Inspected remote installs are 0.14.2 and 0.15.5; current ACP
-   modules, SDK/MCP dependencies and pinned adapters are absent. The passing
-   isolated network boundary is not remote model proof.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folder are retained until qualification evidence

@@ -5,11 +5,10 @@ Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
 The source repairs and runtime fixes are committed. Focused suites, actual CLI/
 SDK boundaries, Codex model/tool/permission gates, Web UI persistence and an
-isolated two-host trust/revocation run pass. The full adapter/client/network
-matrix remains open: Claude is quota-blocked, Gemini rejects the pinned client
-for the test account, Zed is unverified, and remote ACP runtime prerequisites
-are absent. A separate fresh native sender probe hit its provider rate limit
-before Hub delivery. No release or deployment has been performed.
+isolated two-host real Codex request/reply/revocation run pass. The full matrix
+remains open: Claude is quota-blocked, Gemini needs supported authentication,
+Zed is unverified, and a separate fresh native sender probe hit its provider
+rate limit before Hub delivery. No release or deployment has been performed.
 Current evidence and the implementation inventory are in
 [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 
@@ -82,15 +81,23 @@ brain, and ACP is the only wire between them.
 Each device that runs a harness agent needs the harness's own CLI, to log in,
 and its ACP adapter. These pinned versions are the qualification targets. The
 current qualification pass has run all three: Codex model/tool gates pass,
-Claude is quota-blocked, and Gemini rejects this pinned client for the test
-account. Full qualification requires section 9's live runs for these versions
-and for any later update.
+Claude is quota-blocked, and Gemini rejects the configured consumer Google
+authentication. Full qualification requires section 9's live runs for these
+versions and for any later update.
 
 | Profile | Log in with | ACP adapter |
 |---|---|---|
 | `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0` |
 | `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1` |
-| `gemini-cli` | use the installed Gemini CLI and sign in | `npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0`; that CLI runs as `gemini --acp` |
+| `gemini-cli` | configure an authorized Gemini API key, Vertex credentials or an existing supported organization login | `npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0`; that CLI runs as `gemini --acp` |
+
+Google retired consumer Google authentication for Gemini CLI on June 18, 2026,
+covering Code Assist for individuals and Google AI Pro/Ultra. The qualification
+account uses that retired path; reauthenticating it does not restore eligibility.
+The pinned CLI also supports API-key and Vertex authentication, so this refusal
+does not make every Gemini CLI mode unavailable. See Google's
+[consumer deprecation notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)
+and the CLI's [authentication setup](https://geminicli.com/docs/get-started/authentication/).
 
 The three ship as profiles in `kollabor.llm.profiles`. `/llm` lists them under
 "ACP agents", and one whose adapter is missing on this device shows its install
@@ -120,6 +127,9 @@ is resolved as configured; its executable is never replaced by a built-in one.
 `GOOGLE_API_KEY`): an exported `ANTHROPIC_API_KEY` silently switches Claude
 Code from your subscription to API billing. `pass_env` names the ones to keep.
 Kollab never passes a key it stores and never logs a value.
+For authorized Gemini API-key authentication, select `gemini-api-key` in the
+CLI and include `GEMINI_API_KEY` in that profile's `pass_env`. Exporting the key
+alone does not pass it through the default ACP profile.
 
 Start one: `kollab --as claude --llm claude-code --detached`. `--as` names it on
 the hub. No `--agent`: a kollab bundle's system prompt means nothing to another

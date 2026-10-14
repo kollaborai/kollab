@@ -1,11 +1,13 @@
 # ACP agents
 
 Kollab can run an ACP harness as an agent and expose a Kollab daemon to an ACP
-client. Real Codex model/tool/permission runs, CLI/SDK lifecycle checks and Web
-UI saved-card flows pass. Full qualification remains open: Claude is quota-
-blocked, Gemini rejects the pinned client for the test account, and actual Zed
-and remote ACP harness runs remain unverified. See the implementation checkpoint
-linked below for exact evidence and remaining gates.
+client. Real Codex model/tool/permission runs, CLI/SDK lifecycle checks, Web
+UI saved-card flows and an isolated cross-device real Codex request/reply and
+revocation run pass. Full qualification remains open: Claude is quota-blocked,
+Gemini needs supported authentication, the actual Zed client is unverified,
+and a fresh native sender failed before Hub delivery at its provider rate limit.
+See the implementation checkpoint linked below for exact evidence and remaining
+gates.
 
 ## Run a harness on the Hub
 
