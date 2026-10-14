@@ -201,7 +201,7 @@ function RuntimeShell({
         <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
         <span
           className="min-w-0 truncate text-sm font-semibold tracking-tight"
-          title={`${model || "model unavailable"} · ${session.profile || "default"}`}
+          title={`${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
         >
           {sessionLabel}
         </span>
