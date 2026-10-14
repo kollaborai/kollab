@@ -457,6 +457,44 @@ def _tool_completed_ms(started: int, event: Dict[str, Any]) -> int:
     return max(started, _now_ms())
 
 
+def _assistant_harness_tool_part(
+    update: Dict[str, Any], part: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Project one merged ACP card without treating its title as a native tool."""
+    if part is None:
+        part = {"type": "tool-call", "toolCallId": str(update["toolCallId"]),
+                "timing": {"startedAt": _now_ms()}}
+    result = part.get("result")
+    metadata = result.get("metadata") if isinstance(result, dict) else None
+    previous = metadata.get("acp") if isinstance(metadata, dict) else None
+    if not isinstance(previous, dict):
+        previous = {}
+    payload = {**previous, **{key: value for key, value in update.items() if value is not None}}
+    status = str(payload.get("status") or "pending")
+    preliminary = status not in {"completed", "failed"}
+    tool_input = payload.get("rawInput")
+    if tool_input is None:
+        tool_input = {}
+    output = payload.get("rawOutput")
+    if output is None:
+        output = payload.get("content") or ""
+    part.update({
+        "toolName": "harness_tool",
+        "args": tool_input,
+        "argsText": json.dumps(tool_input, ensure_ascii=False),
+        "result": {"success": status != "failed", "output": output, "error": "",
+                   "metadata": {"acp": copy.deepcopy(payload)}},
+        "isError": status == "failed",
+        "isPreliminary": preliminary,
+    })
+    timing = part.setdefault("timing", {"startedAt": _now_ms()})
+    if preliminary:
+        timing.pop("completedAt", None)
+    elif timing.get("completedAt") is None:
+        timing["completedAt"] = _tool_completed_ms(timing["startedAt"], update)
+    return part
+
+
 def _assistant_protocol_chunk(
     chunk_type: str, *, path: Optional[List[int]] = None, **fields: Any
 ) -> SimpleNamespace:
@@ -856,7 +894,31 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     thinking = str(event.get("text") or "")
                     controller.append_reasoning(thinking)
                     add_streamed_text("reasoning", thinking)
+                elif event_type == "acp_update":
+                    update = event.get("update") or {}
+                    if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                        continue
+                    tool_id = str(update.get("toolCallId") or "")
+                    if not tool_id:
+                        continue
+                    tool_part = assistant_tool_parts.get(tool_id)
+                    if tool_part is None:
+                        tool_part = _assistant_harness_tool_part(update)
+                        assistant_tool_parts[tool_id] = tool_part
+                        assistant_parts.append(tool_part)
+                        tool_controller = await controller.add_tool_call("harness_tool", tool_id)
+                        tool_controllers[tool_id] = tool_controller
+                        tool_controller.append_args_text(tool_part["argsText"])
+                    else:
+                        _assistant_harness_tool_part(update, tool_part)
+                    if not tool_part["isPreliminary"]:
+                        tool_controller = tool_controllers.pop(tool_id, None)
+                        if tool_controller is not None:
+                            _assistant_set_tool_result(tool_controller, tool_part["result"])
+                    publish_progress()
                 elif event_type == "tool_start":
+                    if event.get("acp_passthrough"):
+                        continue
                     tool_id = str(event.get("tool_id") or "")
                     if not tool_id:
                         continue
@@ -921,6 +983,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     # keeping this stream open would deadlock that follow-up.
                     return
                 elif event_type == "tool_result":
+                    if event.get("acp_passthrough"):
+                        continue
                     tool_id = str(event.get("tool_id") or "")
                     tool_controller = tool_controllers.pop(tool_id, None)
                     result = {
@@ -950,7 +1014,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     # else: adopted from the prior run; this run's wire stream
                     # never opened that call, so the state publish carries it.
                     publish_progress()
-                elif event_type in ("permission_granted", "permission_denied"):
+                elif event_type in ("permission_granted", "permission_denied", "permission_cancelled"):
                     source_tool_id = str(event.get("tool_id") or "")
                     permission_result = _permission_result_from_event(event)
                     permission_part = assistant_tool_parts.get(
