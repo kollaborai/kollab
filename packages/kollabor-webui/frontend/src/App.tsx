@@ -348,6 +348,7 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  const [creationError, setCreationError] = useState<string | null>(null);
   // The sidebar row being opened, and why it could not be: a failed open keeps
   // the chat that was open, so the reason shows under the row clicked.
   const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
@@ -585,6 +586,7 @@ export default function App() {
       "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
+    setCreationError(null);
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
@@ -611,6 +613,7 @@ export default function App() {
     } catch (reason) {
       if (operation === operationRef.current) {
         setError(errorText(reason));
+        setCreationError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -831,6 +834,7 @@ export default function App() {
           activeActivity={activeActivity}
           opening={opening}
           busy={busy}
+          creationError={creationError}
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
@@ -844,7 +848,7 @@ export default function App() {
           onSelectSession={selectSession}
           onSelectRemote={selectRemote}
           onStartOffline={startOffline}
-          onCreate={() => void createSession()}
+          onCreate={() => createSession()}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}
         />

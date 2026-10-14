@@ -123,6 +123,7 @@ export function AppSidebar({
   activeActivity,
   opening,
   busy,
+  creationError,
   onProfileChange,
   onIdentityChange,
   onBundleChange,
@@ -161,6 +162,7 @@ export function AppSidebar({
   /** The row being opened, and why it could not be. */
   opening?: { id: string; error?: string } | null;
   busy: boolean;
+  creationError?: string | null;
   onProfileChange: (profile: string) => void;
   onIdentityChange: (identity: string) => void;
   onBundleChange: (bundle: string) => void;
@@ -176,7 +178,7 @@ export function AppSidebar({
   onSelectRemote: (handle: string) => Promise<boolean>;
   /** Starts an offline agent as itself; resolves true once its chat is open. */
   onStartOffline: (identity: string, workspace: string) => Promise<boolean>;
-  onCreate: () => void;
+  onCreate: () => Promise<boolean>;
   onDelete: (id: string) => void;
   /** A session's Properties: right-click (long press) its row for the Chat tab, or double-click its gem. */
   onProperties: (id: string, tab?: "chat") => void;
@@ -245,10 +247,13 @@ export function AppSidebar({
     selectedProfile ||
     "default";
   // On a phone the sidebar is a sheet over the chat: close it when the chat changes.
-  const create = () => {
-    setOptionsOpen(false);
-    setOpenMobile(false);
-    onCreate();
+  const create = async () => {
+    if (await onCreate()) {
+      setOptionsOpen(false);
+      setOpenMobile(false);
+    } else {
+      setOptionsOpen(true);
+    }
   };
 
   return (
@@ -390,6 +395,11 @@ export function AppSidebar({
                 </Label>
                 <WorkspacePicker api={api} value={workspacePath} onChange={onWorkspaceChange} />
               </div>
+              {creationError ? (
+                <div role="alert" className="text-destructive border-t px-4 py-3 text-xs leading-relaxed break-words whitespace-pre-wrap">
+                  {creationError}
+                </div>
+              ) : null}
               <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
                 <Button
                   type="button"
