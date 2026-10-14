@@ -749,19 +749,19 @@ class ProfileManager:
             "provider": "acp",
             "command": ["claude-agent-acp"],
             "description": "Claude Code over ACP",
-            "install_guidance": "Install with: npm install -g @agentclientprotocol/claude-agent-acp@0.89.0",
+            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0",
         },
         "codex-cli": {
             "provider": "acp",
             "command": ["codex-acp"],
             "description": "Codex over ACP",
-            "install_guidance": "Install with: npm install -g @agentclientprotocol/codex-acp@2.1.1",
+            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
         },
         "gemini-cli": {
             "provider": "acp",
             "command": ["gemini", "--acp"],
             "description": "Gemini CLI over ACP",
-            "install_guidance": "Install with: npm install -g @google/gemini-cli@0.63.0",
+            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
         },
     }
 

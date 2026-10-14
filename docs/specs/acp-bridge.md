@@ -79,14 +79,16 @@ brain, and ACP is the only wire between them.
 
 Each device that runs a harness agent needs the harness's own CLI, to log in,
 and its ACP adapter. These pinned versions are the qualification targets. The
-current source pass has not run them; qualification requires section 9's live
-runs for these versions and for any later update.
+current qualification pass has run all three: Codex model/tool gates pass,
+Claude is quota-blocked, and Gemini rejects this pinned client for the test
+account. Full qualification requires section 9's live runs for these versions
+and for any later update.
 
 | Profile | Log in with | ACP adapter |
 |---|---|---|
-| `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install -g @agentclientprotocol/claude-agent-acp@0.89.0` |
-| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install -g @agentclientprotocol/codex-acp@2.1.1` |
-| `gemini-cli` | `npm install -g @google/gemini-cli@0.63.0`, then `gemini` and sign in | the same CLI, run as `gemini --acp` |
+| `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0` |
+| `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1` |
+| `gemini-cli` | use the installed Gemini CLI and sign in | `npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0`; that CLI runs as `gemini --acp` |
 
 The three ship as profiles in `kollabor.llm.profiles`. `/llm` lists them under
 "ACP agents", and one whose adapter is missing on this device shows its install
@@ -105,6 +107,11 @@ it was found in (a symlink keeps its own directory), and, for a
 starts with those directories, so the adapter also starts under `kollab
 service`. A resolved path that disappears is resolved again; a command that
 can't be found fails the turn naming it.
+
+The three canonical profiles also check the managed adapter directories above
+when shell resolution fails. This lets a Web UI or service launch find a pinned
+adapter without changing the user's global npm installation. A custom command
+is resolved as configured; its executable is never replaced by a built-in one.
 
 **Environment.** The child gets your environment minus provider keys
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
@@ -188,10 +195,14 @@ tools. Then it opens a session with the folder as `cwd` and `kollab mcp hub` in
 - **`/clear`** closes the session with `session/close` when the agent
   advertises it, and otherwise restarts the process, so no old session keeps its
   MCP servers running.
-- **Shutdown** closes the session and stdin. After 5 s it lists the adapter's
-  whole process tree with `psutil`, which also finds children that left the
-  process group with `setsid` (Claude Code's background shells do), sends each
-  SIGTERM, and SIGKILL after 5 more. `kollab mcp hub` is in that tree.
+- **Shutdown** closes the session and stdin. The runner retains observed
+  descendants by PID and birth identity, including children that later use
+  `setsid`. A fresh inherited process marker also recovers same-user children
+  that detach between observations. After 5 s it sends those owned processes
+  SIGTERM, and SIGKILL after 5 more; cleanup fails explicitly if an owned
+  identity survives. `kollab mcp hub` is in that tree. This is process ownership
+  tracking, not OS containment: an unseen child that removes the marker or
+  changes user identity can escape recovery.
 
 ### Turns: one at a time, each with one owner
 
