@@ -28,7 +28,7 @@ from kollabor_tui.terminal_renderer import TerminalRenderer
 from kollabor_tui.visual_effects import VisualEffects
 
 from .llm import LLMService
-from .llm.permissions.attach_bridge import AttachPermissionBridge, resolution_event
+from .llm.permissions.attach_bridge import AttachPermissionBridge
 from .logging import setup_from_config
 from .state.widget_state import WidgetState
 from .updates import AutoUpdateResult, VersionCheckService, run_auto_update
@@ -2618,8 +2618,12 @@ class TerminalLLMChat:
         rpc_server = self.event_bus.get_service("rpc_server")
         if not display_tap or not rpc_server:
             return None
-        local_layout = self.renderer.layout_manager if is_acp and not detached else None
-        if local_layout is None and not await self._attach_permission_bridge.wait_for_visible_attach_client(display_tap):
+        local_layout = (
+            self.renderer.layout_manager if is_acp and not detached else None
+        )
+        if local_layout is None and not await self._attach_permission_bridge.wait_for_visible_attach_client(
+            display_tap
+        ):
             return None
         return await self._attach_permission_bridge.request_confirmation(
             display_tap=display_tap,
