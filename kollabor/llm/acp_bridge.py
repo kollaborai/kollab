@@ -730,13 +730,19 @@ class ACPRunner:
             tool_indexes.append(index)
             active_tool_id = tool_id
         if tool_indexes:
-            last_tool = tool_indexes[-1]
-            tail = [item for item in updates[last_tool + 1:] if item.get("kind") == "text"]
-            if tail:
-                return "".join(str(item.get("text", "")) for item in tail)
-            previous_tool = tool_indexes[-2] if len(tool_indexes) > 1 else -1
-            segment = [item for item in updates[previous_tool + 1:last_tool] if item.get("kind") == "text"]
-            return "".join(str(item.get("text", "")) for item in segment)
+            boundaries = [-1, *tool_indexes, len(updates)]
+            # Consecutive tools can leave empty text segments. Walk back to
+            # the last assistant segment without merging separate messages.
+            for index in range(len(boundaries) - 1, 0, -1):
+                segment = updates[boundaries[index - 1] + 1:boundaries[index]]
+                answer = "".join(
+                    str(item.get("text", ""))
+                    for item in segment
+                    if item.get("kind") == "text"
+                )
+                if answer:
+                    return answer
+            return ""
         return "".join(str(item.get("text", "")) for item in text_updates)
 
     async def _session_update(self, session_id: str, update: Any) -> None:
