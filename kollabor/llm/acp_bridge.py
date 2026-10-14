@@ -693,8 +693,15 @@ class ACPRunner:
 
     def cancel_queued(self, request_id: str) -> bool:
         for admission in tuple(self._queue._queue):
-            if admission is not None and admission.request_id == request_id and not admission.future.done():
-                admission.future.cancel()
+            if admission is not None and admission.request_id == request_id:
+                # This synchronous removal cannot race the queue consumer.
+                # Release capacity before settling the future, preserving
+                # every remaining item's order and the active owner's RPC.
+                self._queue._queue.remove(admission)
+                self._queue.task_done()
+                self._queue._wakeup_next(self._queue._putters)
+                if not admission.future.done():
+                    admission.future.cancel()
                 return True
         return False
 
