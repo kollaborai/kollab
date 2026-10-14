@@ -7,7 +7,6 @@ import json
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar
 
 import acp
+import psutil
 from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, Implementation, McpServerStdio, TextContentBlock
 
 from .acp_state import ACPBinding
@@ -369,6 +369,10 @@ class ACPRunner:
         self._process: Any = None
         self._client = _Client(self)
         self._stderr_task: asyncio.Task[None] | None = None
+        self._process_tracker: asyncio.Task[None] | None = None
+        self._owned_processes: dict[int, psutil.Process] = {}
+        self._adapter_pid: int | None = None
+        self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
@@ -398,6 +402,9 @@ class ACPRunner:
         )
 
     async def _start_process(self) -> str:
+        if self._live_owned_processes():
+            raise ACPError("previous ACP processes still require cleanup")
+        self._owned_processes.clear()
         self.state = "starting"
         if self.lifecycle_callback is not None:
             await self.lifecycle_callback("starting", self)
@@ -413,6 +420,14 @@ class ACPRunner:
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        self._adapter_pid = self._process.pid
+        with contextlib.suppress(psutil.NoSuchProcess):
+            owner = psutil.Process(self._process.pid)
+            owner.create_time()
+            if owner.ppid() == os.getpid() and self._process.returncode is None:
+                self._owned_processes[owner.pid] = owner
+        self._refresh_process_tree()
+        self._process_tracker = asyncio.create_task(self._track_process_tree())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._connection = acp.connect_to_agent(self._client, self._process.stdin, self._process.stdout)
         initialized = await asyncio.wait_for(
@@ -492,6 +507,47 @@ class ACPRunner:
             self.last_stderr = chunk.decode(errors="replace").strip()[-1000:]
             sys.stderr.buffer.write(b"[acp] " + chunk)
             sys.stderr.buffer.flush()
+
+    def _refresh_process_tree(self) -> None:
+        """Retain birth-checked descendants, including detached/orphaned roots."""
+        for owner in tuple(self._owned_processes.values()):
+            with contextlib.suppress(psutil.Error):
+                if not owner.is_running():
+                    self._owned_processes.pop(owner.pid, None)
+        for owner in tuple(self._owned_processes.values()):
+            with contextlib.suppress(psutil.Error):
+                if owner.ppid() in self._owned_processes:
+                    continue
+                for child in owner.children(recursive=True):
+                    child.create_time()
+                    self._owned_processes[child.pid] = child
+
+    async def _track_process_tree(self) -> None:
+        while self._owned_processes:
+            self._refresh_process_tree()
+            await asyncio.sleep(0.1)
+
+    def _live_owned_processes(self) -> list[psutil.Process]:
+        self._refresh_process_tree()
+        alive: list[psutil.Process] = []
+        for owner in tuple(self._owned_processes.values()):
+            try:
+                if not owner.is_running():
+                    continue
+                if owner.status() == psutil.STATUS_ZOMBIE:
+                    # asyncio owns the adapter's waitpid. Reap a descendant
+                    # only when it is still the recorded process identity.
+                    if owner.pid != self._adapter_pid:
+                        with contextlib.suppress(psutil.Error):
+                            owner.wait(timeout=0)
+                    continue
+                alive.append(owner)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                # An unreadable recorded process is not proof of exit.
+                alive.append(owner)
+        return alive
 
     def admit(
         self,
@@ -1015,45 +1071,98 @@ class ACPRunner:
                 self._queue_release.set()
 
     async def _terminate_process(self) -> None:
-        connection, process, stderr_task = self._connection, self._process, self._stderr_task
-        self._connection = None
-        self._process = None
-        self._stderr_task = None
-        descendants = []
-        if process is not None and process.returncode is None:
-            import psutil
-            with contextlib.suppress(psutil.Error):
-                descendants = psutil.Process(process.pid).children(recursive=True)
-        if connection is not None:
-            if self.session_id and (self.capabilities.get("sessionCapabilities") or {}).get("close") is not None:
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await asyncio.wait_for(connection.close_session(session_id=self.session_id), timeout=5)
+        async with self._teardown_lock:
+            connection, process, stderr_task = self._connection, self._process, self._stderr_task
+            tracker = self._process_tracker
+            self._connection = None
+            self._process = None
+            self._stderr_task = None
+            self._process_tracker = None
+            close_task = None
+            session_id = self.session_id
+            session_caps = self.capabilities.get("sessionCapabilities") or {}
+
+            async def close_connection() -> None:
+                try:
+                    if session_id and session_caps.get("close") is not None:
+                        with contextlib.suppress(Exception):
+                            await connection.close_session(session_id=session_id)
+                finally:
+                    if process is not None and process.stdin is not None:
+                        process.stdin.close()
+                    await connection.close()
+
             try:
-                await asyncio.wait_for(connection.close(), timeout=2)
-            except (Exception, asyncio.CancelledError):
-                pass
-        # Adapter children can escape the parent's process group with setsid.
-        for child in reversed(descendants):
-            with contextlib.suppress(Exception):
-                child.terminate()
-        if process is not None and process.returncode is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                await asyncio.wait_for(process.wait(), timeout=2)
-            except (AttributeError, PermissionError, ProcessLookupError, asyncio.TimeoutError):
-                if process.returncode is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except (AttributeError, PermissionError, ProcessLookupError):
-                        pass
-                    await process.wait()
-        for child in reversed(descendants):
-            with contextlib.suppress(Exception):
-                if child.is_running():
-                    child.kill()
-        if stderr_task is not None:
-            stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
+                if connection is not None:
+                    close_task = asyncio.create_task(close_connection())
+                    close_task.add_done_callback(
+                        lambda task: None if task.cancelled() else task.exception()
+                    )
+                elif process is not None and process.stdin is not None:
+                    process.stdin.close()
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 5
+                # Keep discovering children during session/SDK close. An
+                # observed child remains owned after setsid or parent death.
+                while self._live_owned_processes() and loop.time() < deadline:
+                    await asyncio.sleep(min(0.1, max(0, deadline - loop.time())))
+                if close_task is not None and not close_task.done():
+                    close_task.cancel()
+                if process is not None and process.stdin is not None:
+                    process.stdin.close()
+                deadline = loop.time() + 5
+                terminated: set[psutil.Process] = set()
+                while alive := self._live_owned_processes():
+                    for owner in reversed(alive):
+                        if owner not in terminated:
+                            with contextlib.suppress(psutil.Error):
+                                owner.terminate()
+                            terminated.add(owner)
+                    if loop.time() >= deadline:
+                        break
+                    await asyncio.sleep(min(0.1, max(0, deadline - loop.time())))
+            finally:
+                # All exit paths, including cancellation of teardown, signal
+                # only retained PID/birth identities. Never signal by PGID:
+                # the dead adapter's PID may now name an unrelated group.
+                for owner in reversed(self._live_owned_processes()):
+                    with contextlib.suppress(psutil.Error):
+                        owner.kill()
+                if close_task is not None and not close_task.done():
+                    close_task.cancel()
+                if process is not None and process.stdin is not None:
+                    process.stdin.close()
+                if process is not None:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(process.wait(), timeout=1)
+                deadline = asyncio.get_running_loop().time() + 1
+                while alive := self._live_owned_processes():
+                    for owner in reversed(alive):
+                        with contextlib.suppress(psutil.Error):
+                            owner.kill()
+                    if asyncio.get_running_loop().time() >= deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                if tracker is not None:
+                    tracker.cancel()
+                    await asyncio.gather(tracker, return_exceptions=True)
+                if stderr_task is not None:
+                    stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+                if close_task is not None:
+                    await asyncio.wait({close_task}, timeout=0.1)
+                survivors = self._live_owned_processes()
+                unreaped_adapter = process is not None and process.returncode is None
+                if not survivors and not unreaped_adapter:
+                    self._owned_processes.clear()
+                    self._adapter_pid = None
+                else:
+                    detail = ", ".join(str(owner.pid) for owner in survivors)
+                    if unreaped_adapter:
+                        detail += f" (adapter {process.pid} not reaped)"
+                    raise ACPError(
+                        "ACP owned process cleanup incomplete: " + detail
+                    )
 
     async def close(self) -> None:
         self._closing = True
