@@ -372,6 +372,73 @@ def test_a_prompt_another_window_answered_closes_without_an_answer_from_here():
     asyncio.run(run_bridge())
 
 
+def test_local_and_attach_prompts_share_first_answer_and_reject_late_answer():
+    async def run_bridge():
+        daemon = AttachPermissionBridge()
+        local = AttachPermissionBridge()
+        remote = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        local_rpc = FakeRpcClient()
+        remote_rpc = FakeRpcClient()
+        local_layout = WaitingLayoutManager()
+        remote_layout = WaitingLayoutManager()
+        details = {
+            "tool_id": "acp-shared",
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "owned-first", "kind": "allow_once", "name": "Allow"},
+                {"optionId": "owned-deny", "kind": "reject_once", "name": "Deny"},
+            ],
+        }
+        daemon_task = asyncio.create_task(
+            daemon.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details=details,
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        event = {"type": "permission_request", "details": details}
+        local_task = asyncio.create_task(
+            local.handle_client_event(
+                rpc_client=local_rpc,
+                layout_manager=local_layout,
+                event=event,
+            )
+        )
+        remote_task = asyncio.create_task(
+            remote.handle_client_event(
+                rpc_client=remote_rpc,
+                layout_manager=remote_layout,
+                event=event,
+            )
+        )
+        await asyncio.sleep(0)
+        local_layout.press("owned-first")
+        await local_task
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-shared", "option_id": "owned-first"}
+        )
+        assert result == {"ok": True}
+        assert await daemon_task == "owned-first"
+        resolution = resolution_event("acp-shared", "owned-first", details)
+        local.handle_client_resolution(layout_manager=local_layout, event=resolution)
+        remote.handle_client_resolution(layout_manager=remote_layout, event=resolution)
+        await asyncio.wait_for(remote_task, 1)
+        late = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-shared", "option_id": "owned-deny"}
+        )
+        assert late["ok"] is False
+        assert remote_rpc.calls == []
+        assert local_rpc.calls == [(PERMISSION_RESPONSE_RPC_METHOD, {
+            "tool_id": "acp-shared", "option_id": "owned-first"
+        }, 10)]
+
+    asyncio.run(run_bridge())
+
+
 def test_attach_bridge_accepts_offered_opaque_acp_option_id():
     async def run_bridge():
         bridge = AttachPermissionBridge()
