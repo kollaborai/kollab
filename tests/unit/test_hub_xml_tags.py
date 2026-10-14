@@ -86,7 +86,7 @@ CONVERTED = {
     "hub_spawn": (
         "<hub_spawn {attrs}>do it</hub_spawn>",
         {"name": "lapis", "type": "research"},
-        {"name": "lapis", "agent_type_override": "research", "task": "do it"},
+        {"name": "lapis", "agent_type_override": "research", "task": "do it", "llm": ""},
     ),
     "hub_capture": (
         "<hub_capture {attrs}/>",
