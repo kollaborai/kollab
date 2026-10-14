@@ -344,6 +344,8 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
         "online": True,
         "is_coordinator": False,
         "workspace_id": right.commands.client.state.workspace_id,
+        "harness": "",
+        "acp_waiting": False,
     }
 
     # An older peer sends no "device" field at all; the caller falls back to

@@ -1530,3 +1530,41 @@ async def test_ordinary_acp_hub_request_does_not_require_external_bridge():
     assert llm.submit_human_input.await_args.kwargs["request_id"] == W1
     assert llm.submit_human_input.await_args.kwargs["thread_id"] == T1
     assert plugin._acp_network_turns[W1].handle == ASKER
+
+
+@pytest.mark.asyncio
+async def test_busy_acp_accepts_each_distinct_ordinary_request_into_its_fifo():
+    plugin, llm = _responder([])
+    controller = SimpleNamespace(active=True)
+    llm.is_processing = True
+    llm.profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp"))
+    llm.submit_human_input = AsyncMock(return_value={"status": "queued"})
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        llm if name == "llm_service" else controller if name == "acp_orchestrator" else None
+    )
+    for thread, request in ((T1, W1), (T2, W2), (T3, W3)):
+        await plugin._on_message_received(_request(thread, request, f"Return the answer for {request}"))
+    assert [call.kwargs["request_id"] for call in llm.submit_human_input.await_args_list] == [W1, W2, W3]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_acp_returns_admission_failure_without_native_turn():
+    sent = []
+    plugin, llm = _responder(sent)
+    controller = SimpleNamespace(active=False)
+    llm.profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp"))
+    llm.submit_human_input = AsyncMock(return_value={
+        "status": "rejected", "reason": "acp_unavailable",
+        "message": "claude-agent-acp was not found; select another profile.",
+    })
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        llm if name == "llm_service" else controller if name == "acp_orchestrator" else None
+    )
+    await plugin._on_message_received(_request(T1, W1))
+    llm.submit_human_input.assert_awaited_once()
+    assert len(sent) == 2
+    assert all((item["thread_id"], item["reply_to"]) == (T1, W1) for item in sent)
+    assert "claude-agent-acp was not found" in sent[0]["content"]
+    assert _ends(sent)[0]["turn_end"]["outcome"] == "error"
+    assert llm.conversation_history == []
+    assert not any(call.args[0] is EventType.TRIGGER_LLM_CONTINUE for call in plugin.event_bus.emit_with_hooks.await_args_list)

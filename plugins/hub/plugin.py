@@ -7218,6 +7218,10 @@ class HubPlugin(BasePlugin):
     def _wake_or_buffer(
         self, message: HubMessage, llm_service: Any, wake_reason: str
     ) -> HubWakeDecision:
+        if self._agent_profile_provider(llm_service) == "acp":
+            # ACP owns a bounded FIFO (or an immediate correlated failure).
+            # Native's single queued retry cannot replace distinct requests.
+            return HubWakeDecision("wake", True, wake_reason)
         is_busy = bool(getattr(llm_service, "is_processing", False))
         if not is_busy:
             self._hub_buffer_retry_queued = False
@@ -7392,17 +7396,27 @@ class HubPlugin(BasePlugin):
         )
         return True
 
-    def _agent_dispatch_mode(self, llm_service: Any) -> str:
-        """Classify authenticated peer input without native fallback on ACP faults."""
+    @staticmethod
+    def _agent_profile_provider(llm_service: Any) -> str | None:
         try:
             profile_manager = getattr(llm_service, "profile_manager", None)
             if profile_manager is None:
-                return "unavailable"
+                return None
             profile = profile_manager.get_active_profile()
             if profile is None:
-                return "unavailable"
-            if profile.get_provider() != "acp":
-                return "native"
+                return None
+            return profile.get_provider()
+        except Exception:
+            return None
+
+    def _agent_dispatch_mode(self, llm_service: Any) -> str:
+        """Classify authenticated peer input without native fallback on ACP faults."""
+        provider = self._agent_profile_provider(llm_service)
+        if provider is None:
+            return "unavailable"
+        if provider != "acp":
+            return "native"
+        try:
             event_bus = getattr(self, "event_bus", None)
             acp = event_bus.get_service("acp_orchestrator") if event_bus else None
             return "acp" if getattr(acp, "active", False) is True else "unavailable"
@@ -7893,7 +7907,10 @@ class HubPlugin(BasePlugin):
                 llm_service=llm_service,
             )
             dispatch_mode = self._agent_dispatch_mode(llm_service)
-            if dispatch_mode == "acp":
+            if dispatch_mode == "acp" or (
+                dispatch_mode == "unavailable"
+                and self._agent_profile_provider(llm_service) == "acp"
+            ):
                 # ACP owns a request FIFO and its transcript. Keep native HUD,
                 # compaction and continuation injections out of this path.
                 if is_departure or is_human_elsewhere or not is_intended:
@@ -7907,7 +7924,8 @@ class HubPlugin(BasePlugin):
                             origin_context={"operator": True},
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
-                    acp.observe_notification(message)
+                    if dispatch_mode == "acp":
+                        acp.observe_notification(message)
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
