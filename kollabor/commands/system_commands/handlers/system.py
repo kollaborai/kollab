@@ -930,6 +930,7 @@ class SystemCommandHandler(BaseCommandHandler):
                 # state_service isn't wired for any reason.
                 mode_str = ""
                 stats = {}
+                acp_grants = []
                 state_service = None
                 if self.event_bus and hasattr(self.event_bus, "get_service"):
                     state_service = self.event_bus.get_service("state_service")
@@ -942,6 +943,7 @@ class SystemCommandHandler(BaseCommandHandler):
                         # so the description lookup below keeps matching.
                         mode_str = f"ApprovalMode.{perm_snapshot.approval_mode}"
                         stats = dict(perm_snapshot.stats)
+                        acp_grants = list(getattr(perm_snapshot, "acp_grants", []) or [])
                     except Exception as e:
                         self.logger.warning(
                             f"state_service.get_permission_state failed, "
@@ -953,6 +955,8 @@ class SystemCommandHandler(BaseCommandHandler):
                     mode = permission_manager.approval_mode
                     stats = permission_manager.get_stats()
                     mode_str = str(mode)
+                    inventory_fn = getattr(permission_manager, "get_acp_grant_inventory", None)
+                    acp_grants = inventory_fn() if callable(inventory_fn) else []
 
                 mode_descriptions = {
                     "ApprovalMode.DEFAULT": "DEFAULT - Confirm HIGH risk only",
@@ -989,6 +993,12 @@ Commands:
   /permissions project - Show project approvals
   /permissions clear - Clear session approvals
   /permissions clear-project - Clear project approvals"""
+                if acp_grants:
+                    message += "\n\nACP Grants (Kollab-managed):\n" + "\n".join(
+                        f"  - [{grant.get('scope', 'unknown')}] profile={grant.get('profile') or 'unknown'} "
+                        f"workspace={grant.get('workspace') or 'unknown'} operation={grant.get('operation')!r}"
+                        for grant in acp_grants
+                    )
 
                 return CommandResult(success=True, message=message, display_type="info")
 
@@ -1150,6 +1160,11 @@ Blocked: {stats['blocked']}"""
                     project_approvals: List[str] = (
                         await state_service.list_project_approvals()
                     )
+                    perm_snapshot = await state_service.get_permission_state()
+                    project_acp_grants = [
+                        grant for grant in getattr(perm_snapshot, "acp_grants", [])
+                        if grant.get("scope") == "project"
+                    ]
                 except Exception as e:
                     self.logger.error(
                         f"state_service.list_project_approvals failed: {e}"
@@ -1160,16 +1175,19 @@ Blocked: {stats['blocked']}"""
                         display_type="error",
                     )
 
+                lines = []
                 if project_approvals:
-                    approvals_list = "\n".join(
-                        f"  - {key}" for key in project_approvals
+                    lines.append(f"[info] Project Approvals ({len(project_approvals)}):")
+                    lines.extend(f"  - {key}" for key in project_approvals)
+                if project_acp_grants:
+                    lines.append(f"ACP Grants ({len(project_acp_grants)}):")
+                    lines.extend(
+                        f"  - profile={grant.get('profile') or 'unknown'} "
+                        f"workspace={grant.get('workspace') or 'unknown'} "
+                        f"operation={grant.get('operation')!r}"
+                        for grant in project_acp_grants
                     )
-                    message = (
-                        f"[info] Project Approvals ({len(project_approvals)}):"
-                        f"\n{approvals_list}"
-                    )
-                else:
-                    message = "[info] No project approvals recorded"
+                message = "\n".join(lines) if lines else "[info] No project approvals recorded"
                 return CommandResult(success=True, message=message, display_type="info")
 
             elif subcommand in ("clear-project", "clearproject"):

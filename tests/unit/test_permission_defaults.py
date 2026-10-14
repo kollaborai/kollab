@@ -59,3 +59,14 @@ def test_acp_project_grant_persists_without_native_keys(tmp_path, monkeypatch):
         event_bus=_EventBus(),
     )
     assert restored.has_acp_grant(operation, str(tmp_path), "claude-code")
+    inventory = restored.get_acp_grant_inventory()
+    assert inventory == [{
+        "grant_key": restored.acp_grant_key(operation, str(tmp_path), "claude-code"),
+        "operation": operation,
+        "workspace": str(tmp_path.resolve()),
+        "profile": "claude-code",
+        "scope": "project",
+        "source": "kollab",
+    }]
+    restored.clear_project_approvals()
+    assert restored.get_acp_grant_inventory() == []
