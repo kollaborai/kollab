@@ -1,11 +1,20 @@
 # ACP agents
 
 Kollab can run an ACP harness as an agent and expose a Kollab daemon to an ACP
-client. Real Codex model/tool/permission runs, CLI/SDK lifecycle checks, Web
-UI saved-card flows and an isolated cross-device real Codex request/reply and
-revocation run pass. Full qualification remains open: Claude is quota-blocked,
-Gemini needs supported authentication, the actual Zed client is unverified,
-and a fresh native sender failed before Hub delivery at its provider rate limit.
+client. Real Claude Code and Codex model/tool/permission/cancel/steering/resume
+runs, CLI/SDK lifecycle checks, Web UI saved-card flows and an isolated
+cross-device real Codex request/reply and revocation run pass. Gemini's
+missing-auth startup and clean runner-close checks
+also pass. Claude's full 300-second permission timeout and missing-login
+`-32000` checks pass; its normal empty-store session opens before the first
+controlled prompt rejects authentication. Full qualification remains open:
+Gemini's successful model run needs supported authentication. Actual Zed Preview
+client checks pass with a controlled local SDK backend: normal/approval/absolute
+diff, partial UI Stop, attached denial/retention and reconnect, then owned
+physical shutdown after `4d4ceff1`. The earlier orphaned-daemon failure remains
+recorded separately. Native tool wire IDs are session-unique in `79e13257`.
+A fresh short-context native sender hit a Z.AI usage limit before Hub delivery;
+no native peer completion was proved and its reset window is unknown.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 
@@ -60,6 +69,9 @@ stops that daemon. An attached session requires one matching local agent and
 folder; EOF detaches and leaves that agent running. A client's cancel targets
 its own request, including while queued, rather than whichever turn the mesh
 happens to be running.
+Attached handles belong to one connection: a fresh connection opens a new
+attached session instead of resuming the old handle. Attached sessions advertise
+close only; load and resume remain available for owned sessions.
 
 Owned sessions accept client stdio MCP servers and process-scoped approval
 modes. Attached sessions ignore those MCP servers and refuse mode changes.

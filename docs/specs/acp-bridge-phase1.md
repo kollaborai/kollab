@@ -59,12 +59,88 @@ Verified fixes and boundaries:
   eligible option tables. `f77d3734` journals observed partial output by owned
   request/turn and saves it once on cancellation/error without inventing vendor
   tool status. The latest six-file outbound run passed 87 tests in 35.35 seconds.
+- Claude Code: after the reported reset, adapter 0.89.0/native SDK 0.3.293
+  completed an actual `TerminalLLMChat` → ordinary owned Hub request →
+  `hub_status`/`hub_agents` → visible `ACP LIVE CLAUDE OK` and hidden end frame,
+  on request `2379939468cf43a1ba4e840c54e9ed6a` and its original thread.
+  Exact one-shot approval created the owned Write sentinel; denial left its
+  sentinel absent. The corrected lifecycle run used session
+  `61bef795-e057-4d8c-abc5-9d95f8d1917d`: a birth-checked condition worker was
+  running with an active pending admission before cancel and steering. The
+  vendor card stayed `pending`; no `in_progress` status was invented.
+  Connection 1 prompt `2` returned `cancelled` after `session/cancel` in
+  0.012 seconds, preserving the session/adapter. Prompt `3` and
+  `_session/steering` request `4` returned `ACP CLAUDE STEERING OK`/`end_turn`.
+  Connection 2 `session/resume` request `1` restored the same session with
+  zero replay wire/display updates; its prompt `2` recalled the same phrase.
+  Those numeric IDs belong to separate connection namespaces. Evidence:
+  `/tmp/kacp-claude-postreset-o0ehk6wg/qualification_summary.json` and
+  `/tmp/kacp-claude-control-dn6pbyvi/aggregate-checkpoint.json`.
+  The initial standalone-sleep fixture was rejected before execution; a
+  subsequent observer incorrectly waited for an `in_progress` frame while the
+  supported condition command ran to its owned deadline. Both mistakes remain
+  separate from product failures and successful cancellation proof, with
+  cleanup checks under `/tmp/kacp-claude-lifecycle-7f50mjhw` and the first root.
+  The actual production permission timeout then waited 300.001213 seconds on
+  tool `toolu_018jAE1LYMvHrXwtSED84TTb`. Agent permission RPC `0` was answered
+  with its exact offered `reject` option. The sentinel stayed absent; original
+  request `630dab3eeed04ca984adce3c6f442a07`/thread
+  `owned-timeout-claude-thread` received one waiting notice, then
+  `ACP CLAUDE TIMEOUT DENIED` and its hidden `end_turn` frame. Pending
+  permissions/cancel tasks drained. Evidence:
+  `/tmp/kacp-claude-timeout-tw3kjdn1/independent-postcheck.json`.
+  Missing login passes at this pin's normal validation point: an empty-store
+  `session/new` succeeds, then the single controlled prompt `2` returns
+  `-32000 Authentication required`; the runner preserves the code and adds
+  local login guidance. No model answer, tools or `authenticate` RPC occurs.
+  Evidence: `/tmp/kacp-claude-auth-rejection-opiw06zd/independent-postcheck.json`.
+  The new-session-only probe at `/tmp/kacp-claude-missing-auth-r0i56ool` is not
+  an auth-rejection pass, and the old empty summary's SyntaxError remains a
+  setup failure. Positive runs copied the existing valid keychain OAuth
+  subtree into private storage; missing-auth runs copied no credentials.
+  Child-only command guards used the vendor's existing file fallback; every
+  observed guard refusal was a nonprivate read, with zero observed mutation
+  attempts/delegations. Earlier summary counter names combined refused reads
+  and writes; `guard-operation-classification.json` separates them without
+  rewriting frozen evidence. Original auth stores stayed byte-identical,
+  private namespaces stayed absent and private auth directories were removed.
+  All observed owned PID/birth identities are gone; closed runners have queue
+  zero, processing false and no process/worker. Manifest/source hashes and
+  protocol/process evidence do not imply packet capture or a zero HTTP count.
 - Cleanup: `52fb41d1` recovers same-user, marked descendants orphaned before
   observation, including double-fork/`setsid` children born during prompt and
   close. Wrong-nonce outsiders survive. The real Codex run removed its four
   observed process identities. Its login shell discarded the inherited marker:
   cleanup is not OS containment, and unseen children that strip the marker or
   change user identity remain outside this proof.
+- Missing auth and close: `741e1a8d` wakes only a live queue consumer and
+  settles remaining owners after teardown, including an unread shutdown
+  sentinel, deadline cancellation and admissions racing close. The processing
+  predicate is unchanged. The runner/profile/orchestrator/application lifecycle
+  run passed 85 tests; five controlled SDK Hub/application integrations passed;
+  root independently reran 11 overlapping lifecycle cases. Real Gemini CLI
+  0.63.0, on the exact bridge bytes now committed in `741e1a8d`, answered
+  `initialize` id `0`, then rejected `session/new` id `1` with `-32000` and
+  `Gemini API key is missing or not configured.` The runner preserved that code
+  and reason, then closed with queue size zero, processing false, no worker,
+  connection or process, and no surviving owned PID/birth identities or signals.
+  No credentials were copied, and no `authenticate` or model prompt was sent.
+  No auth selection was configured and provider/Google/Vertex credential
+  variables were absent. The supported file-storage flag kept lookup out of the
+  OS keychain. A private user settings file disabled usage statistics, telemetry
+  and automatic Node
+  heap configuration, leaving one local `data:` fetch visible to passive Node
+  hooks. Those hooks are not packet capture. Evidence:
+  `/tmp/kacp-gemini-close-fixed-8ejufjbt/close-repair-checkpoint.json`,
+  `qualification_summary.json`, `protocol.jsonl` and `independent-postcheck.json`.
+  The earlier unsupported `--ignore-env` helper setup stopped before an
+  initialize response and is neither a product failure nor an auth pass:
+  `/tmp/kacp-gemini-missing-login-kttdsy1n/setup_failure_summary.json`.
+  The corrected empty-home run reproduced the close bug and observed two
+  anonymous Clearcut HTTPS initiations to `play.googleapis.com`; those nonzero
+  observations remain in
+  `/tmp/kacp-gemini-missing-login-corrected-osk2_bxu/qualification_summary.json`.
+  The successful Gemini model/tool/permission/cancel gates remain open.
 - Inbound: `f2e293e1`, `362aea82`, `9715049c` and `14364d69` cover SDK variants,
   request-specific cancellation, attach ownership, saved replay, protocol-only
   stdout and complete handle cleanup. The full 17-case real CLI/daemon/stdio
@@ -77,6 +153,81 @@ Verified fixes and boundaries:
   `/tmp/kacp-inbound-final.33P2UP` and
   `/tmp/kacp-inbound-sdk-stop-fixed.nhBMfF`. The earlier full run predates the
   stopped-history source fix; it is not a claim that all 18 cases were rerun.
+- Actual client: corrected private fixture traces from Zed Preview
+  1.24.2 now show session `b2bf547d357341f296bda2837a7a7210`, normal prompt
+  `37acb491-2ddd-4a8f-8a86-db2c17eaf25b`, opaque `vendor-once` approval,
+  a completed tool card with an absolute owned diff path, `OWNED SDK ANSWER`
+  and `end_turn`. Prompt `169ce732-1c03-47a1-9836-022c518df30a` used a distinct
+  tool ID, streamed partial output and retained vendor status `in_progress`
+  with raw output `0`. Actual UI Stop sent `session/cancel`; that prompt
+  returned `cancelled` and the controlled SDK recorded its cancel marker.
+  No completed/failed vendor tool status was invented for the stopped card.
+  A genuine attached client offered no `allow_always`; UI Deny Once selected
+  `vendor-deny` and returned `OWNED SDK DENIED`/`end_turn`. Reload dropped the
+  old attached stdio/proxy while owner PID `90737` (birth
+  `1791978428.887375`) and SDK PID `90782` (birth `1791978429.754991`) remained
+  alive. That proves disconnect retention, not a clean old-proxy exit code or
+  an EOF cleanup summary. These are actual client checks with a controlled SDK
+  harness, not a native vendor-model turn. Evidence root:
+  `/tmp/kacp-zed-preview-yyb8lco4/evidence`; owned trace
+  `1791978427816980000-90605-*`, attached trace
+  `1791978554330411000-2641-*`.
+  The next connection sent `session/resume` and received `-32602`, reason
+  `attached session is not owned by this connection`, because resume had been
+  advertised unconditionally. Trace `1791978687875237000-16204-*` retains that
+  rejection. `c7b6b740` now advertises only close for attached sessions, with
+  load disabled; owned resume/load remain supported. Two direct regressions
+  went from one failing/one passing to two passing; those and the existing
+  real-stdio attached queued-cancel/EOF case passed together (three cases).
+  This changes capability advertisement, not session ownership. Actual Preview
+  trace `1791979136744185000-56715-*` now advertises `loadSession: false` and
+  close only, sends no resume/load request, and opens attached session
+  `ba44f79e99e6403aa68cac54fe7ea7b7`. Prompt
+  `99d8d0f8-5206-4471-bf6d-120abedd7138` selects `vendor-deny` and returns
+  `OWNED SDK DENIED`/`end_turn`, without `allow_always`.
+  The actual owned shutdown gate failed: private Preview Quit removed its GUI,
+  CLI, proxies and stdio, but owner `90737` and SDK `90782` remained alive under
+  PID 1 after more than two minutes, with those same births. The CLI exited zero
+  while reporting an app-quit timeout; it does not prove daemon cleanup.
+  `root-owned-quit-postcheck.json` records the survivors at 12:08:39 UTC.
+  Ownership repair `4d4ceff1` now opts owned ACP callers into
+  `stop_on_owner_exit` and tracks daemon/engine parent lifetime. The lane ran
+  59 focused cases, two actual parent-drop cases and ten startup cases; an
+  independent rerun of five affected actual inbound-stdio cases passed in
+  66.51 seconds. Counts overlap other runs. A fresh actual Preview run on
+  `4d4ceff1` now passes normal approval/diff, actual partial UI Stop, attached
+  denial without `allow_always`, and retained ownership when a borrowed client
+  reloads/drops. One genuine Cmd-Q removed the GUI, crash helper, CLI, owned
+  proxy/stdio, daemon, SDK and remaining attached proxy/stdio: all nine frozen
+  PID/birth identities are gone. Original stable Zed PID `95659` retained its
+  original birth. No post-quit GUI read, signal or cleanup RPC was used. The
+  independent postcheck observed the owned processes gone at 13:10:21 UTC;
+  later samples remain observations, not exact exit times. CLI exit zero
+  coexists with its vendor app-quit-timeout log; missing proxy summaries do not
+  prove graceful proxy exit codes. Source hashes were frozen before the new
+  ACP run and stayed unchanged through quit. Evidence:
+  `/tmp/kacp-zed-preview-yyb8lco4/evidence/root-ownership-rerun-postquit.json` and
+  `/tmp/kacp-zed-preview-yyb8lco4/observer-owned-drop-success-frozen.json`.
+  The frozen proof's appended `exact_private_socket_cleanup` confirms the
+  registered owned socket and actual presence file are absent, using the
+  private DNS PID/workspace/registration record and read-only stat. Its earlier
+  incomplete socket-observation string remains historical; process exit alone
+  was not treated as socket cleanup.
+  This qualifies actual Zed Preview 1.24.2 with the controlled local SDK backend,
+  not a native vendor-model turn. The malformed fixture, orphan failure and
+  manual cleanup of earlier fixtures remain separate from this fresh shutdown
+  proof. Existing stable Zed and user projects/settings were preserved.
+- Native tool identity: `79e13257` assigns a new session-unique wire ID to each
+  native invocation, even when an engine/provider reuses its input tool ID.
+  Starts, completions and permission cards resolve through that invocation's
+  mapping; repeated tool names are not identities. Repeated replay of unchanged
+  saved history uses stable wire IDs in a separate scope from live invocations.
+  Stored source IDs remain intact; history clearing or replacement has no
+  durable ID promise. The 53-case run
+  passed: 33 unit cases and 20 actual CLI/stdio cases in 173.81 seconds. The
+  older 17/18-case checkpoints retain their own dates/coverage; counts overlap.
+  These source/protocol checks do not supply the still-open successful native
+  peer/model request below.
 - Persistence: `d475fef2`, `168dfe07`, `008fecfa` and `25cdde92` repair native
   argument decoding, exact parent/tool-result matching, resumed base durability,
   typed ACP history producers and sparse card merges. Existing ACP logs lacking
@@ -130,6 +281,24 @@ Verified fixes and boundaries:
   Only the native sender was subsequently restarted on the new Hub source with
   its saved base restored; other user agents were preserved. Backup and restore
   evidence: `/tmp/kacp-native-restart-Sjsq0d`.
+  A later isolated sender on `0a13b04d`, with no resumed conversation and one
+  user message, sent exactly one 9,555-byte POST to the existing Z.AI
+  Anthropic-compatible `/api/anthropic/v1/messages` endpoint at 04:13
+  America/Phoenix on October 14. It returned HTTP 429, `rate_limit_error`, code
+  `1308`; Z.AI's [error reference](https://docs.z.ai/api-reference/api-code)
+  identifies a usage-limit reset window. The actual window/reset and
+  authoritative token usage were not captured. The selected model alias does
+  not establish the underlying model or a direct Anthropic service. Actual
+  native operation `4546d2be96444733a14f3f058a1f70ad`, generation `1`, ended
+  `provider_failed` with processing false. Its public controller input ID is a
+  different namespace. There was no Hub send, network request/thread, receiver
+  ACP admission or attributable Zircon final/end frame. The preexisting
+  receiver's source revision was unattested. This fresh short context rules out
+  restored oversized history as the sole cause, and does not qualify or
+  vindicate B/B2. All owned processes, HTTP client, sockets and presence records
+  were cleaned up; the user receiver and config were preserved. Evidence:
+  `/tmp/kacp-fresh-native.KE50i8/summary.json`, `qualification-metadata.json`
+  and `owned-process-audit.json`.
 - Network: `99f4e9de` rechecks durable request authority after transport awaits
   and during remote ACP/CLI waits. Seven regressions reproduced hangs before
   the fix and pass afterward; 313 adjacent tests and two manual-grant/fast-final
@@ -161,11 +330,9 @@ Verified fixes and boundaries:
 
 Required open gates:
 
-1. Claude Code adapter 0.89.0: the fresh user Web session reports the weekly limit
-   (reset reported as 5am America/Phoenix). Real streamed tool, permission,
-   cancel and steering gates remain open. An isolated copied-auth probe also
-   reported expired OAuth; neither result counts as a successful model turn.
-2. Gemini CLI 0.63.0: initialize passes, but session creation rejects the test
+1. Gemini CLI 0.63.0: the empty-auth `-32000` and clean runner-close gate passes
+   against `741e1a8d`; successful model/tool/permission/cancel runs still need
+   supported authentication. Earlier session creation rejected the test
    account's consumer Google authentication and reports an Antigravity migration.
    Google retired this consumer path on June 18, 2026. The pinned CLI advertises
    API-key, Vertex and gateway alternatives; none is configured in the checked
@@ -174,22 +341,17 @@ Required open gates:
    Diagnosis: `/tmp/kacp-live-xVqw6o/gemini-qualification-diagnosis.md`;
    primary source: Google's
    [consumer deprecation notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals).
-3. Actual Zed initialize/prompt/permission/cancel/attach remains unverified.
-   The initial launch reused Zed's singleton and did not read its intended
-   settings. Corrected private `user-data-dir/config/settings.json` and upstream
-   `ZED_STATELESS=1` now launch a distinct owned Zed 1.23.3 process. Computer
-   control still selects the older user app; manual interaction in the owned
-   window is pending. Seven preparation checks pass, but no actual ACP client
-   trace exists. User projects/settings and the existing Zed app were preserved.
-   Corrected config, proxy and launch evidence: `/tmp/kacp-zed-owned-nhvlcy_n`.
-4. Repeat the separate native Koordinator → Zircon request B after sender capacity
+2. Repeat the separate native Koordinator → Zircon request B after sender capacity
    returns, checking a new request's original reply and terminal IDs. The actual
-   sender failed before Hub admission; the earlier A reply-chain result and C
-   operator result are recorded separately.
+   sender failed before Hub admission, including the later fresh short-context
+   Z.AI code `1308` run with an unknown reset window. The earlier A reply-chain
+   result and C operator result are recorded separately; no native peer
+   completion was proved.
 
 Counts above overlap and are not a combined distinct-test total. Private
-artifacts and the owned Zed test folder are retained until qualification evidence
-is reviewed and the open client gate is resolved. No push, release, installation
+artifacts and the owned Zed test folders are retained until the qualification
+evidence is reviewed and the remaining model gates are resolved; cleanup then
+requires explicit scoped authorization. No push, release, installation
 of a Kollab release binary or production deployment occurred. The current
 qualification goal is not complete.
 

@@ -4,11 +4,14 @@ Status: **qualification in progress**, 2026-10-14.
 Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
 The source repairs and runtime fixes are committed. Focused suites, actual CLI/
-SDK boundaries, Codex model/tool/permission gates, Web UI persistence and an
-isolated two-host real Codex request/reply/revocation run pass. The full matrix
-remains open: Claude is quota-blocked, Gemini needs supported authentication,
-Zed is unverified, and a separate fresh native sender probe hit its provider
-rate limit before Hub delivery. No release or deployment has been performed.
+SDK boundaries, Claude Code and Codex model/tool/permission gates, Web UI
+persistence and an isolated two-host real Codex request/reply/revocation run
+pass. The full matrix
+remains open: Gemini's successful model run needs supported authentication,
+and a fresh short-context native sender hit a Z.AI usage limit before Hub
+delivery. Actual Zed Preview client checks now pass with a controlled local SDK
+backend after the ownership repair; Gemini's missing-auth startup and clean-close
+checks pass. No release or deployment has been performed.
 Current evidence and the implementation inventory are in
 [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 
@@ -80,10 +83,13 @@ brain, and ACP is the only wire between them.
 
 Each device that runs a harness agent needs the harness's own CLI, to log in,
 and its ACP adapter. These pinned versions are the qualification targets. The
-current qualification pass has run all three: Codex model/tool gates pass,
-Claude is quota-blocked, and Gemini rejects the configured consumer Google
-authentication. Full qualification requires section 9's live runs for these
-versions and for any later update.
+current qualification pass has run all three: Claude Code and Codex's model,
+tool, permission, cancel, steering, resume and missing-login gates pass;
+Gemini rejects the configured consumer Google
+authentication. Gemini's empty-auth startup preserves `-32000` and its
+missing-API-key reason, and the runner closes cleanly; the positive
+supported-auth model gates remain open. Full qualification requires section 9's
+live runs for these versions and for any later update.
 
 | Profile | Log in with | ACP adapter |
 |---|---|---|
@@ -223,6 +229,10 @@ tools. Then it opens a session with the folder as `cwd` and `kollab mcp hub` in
   identity survives. `kollab mcp hub` is in that tree. This is process ownership
   tracking, not OS containment: an unseen child that removes the marker or
   changes user identity can escape recovery.
+  Closing before worker creation, after startup failure or more than once
+  leaves no unused queue sentinel. Active and queued owners, including an
+  admission racing teardown, are settled before close finishes; a completed
+  cleanup leaves the queue empty and processing false.
 
 ### Turns: one at a time, each with one owner
 
@@ -514,6 +524,11 @@ follows the same rules for MCP.
 | `session/set_mode` | sets that session's approval mode, not saved | refused: lapis's mode changes in kollab (`/permissions`), where every window sees it |
 | End of stdin | stops everything it started | detaches; lapis keeps running |
 
+Attached session handles belong to one connection. A new connection cannot
+resume the previous attached handle; it opens a new attached session instead.
+Attached `initialize` advertises only `session/close`, with load disabled and
+no resume capability. Owned sessions continue to advertise load and resume.
+
 **Turns.** `session/prompt` submits a turn and gets that turn's id from the
 daemon. The bridge streams only that turn's updates (`agent_message_chunk`,
 `agent_thought_chunk`, `tool_call` and `tool_call_update` from kollab's tool
@@ -521,6 +536,12 @@ cards, with file edits as `diff` content, and `usage_update`) and answers the
 prompt when that turn ends. Behind a turn the mesh started, the client's turn
 waits in lapis's queue. `session/cancel` removes the client's own turn while it
 is queued and stops it while it runs; it never touches another turn.
+Every distinct tool invocation needs a session-unique `toolCallId`, including
+across prompts. Its updates and permission requests retain that same ID;
+repeated tool names do not identify an invocation.
+Repeated replay of unchanged saved history uses stable wire IDs in a separate
+scope from live invocations. Stored source IDs remain intact; history clearing
+or replacement has no durable ID promise.
 
 **Permissions.** Kollab offers `allow_once` and `reject_once`. Without
 `--attach` it also offers `allow_always`, named after what it grants ("Allow git
@@ -580,7 +601,49 @@ actionable message through direct input and Hub reply/end correlation.
 | resume or load | when advertised | when advertised | when advertised |
 | missing login (`-32000`) | required | required | required |
 
+Claude Code adapter 0.89.0 with native SDK 0.3.293 passes these rows on an
+isolated application/Hub request and real model runs. Approval writes its owned
+sentinel; denial and the unmodified 300-second permission timeout leave theirs
+absent. The timeout selects the exact offered one-shot `reject` option and
+returns the final answer/end frame on the original request/thread. Active
+condition workers prove cancel and negotiated steering even though this pin's
+tool card stays `pending` during execution. A fresh adapter resumes the same
+session and recalls its completed answer without replayed updates.
+For missing login, normal `session/new` accepts an empty private auth store;
+the single controlled `session/prompt` then returns `-32000 Authentication
+required`. No model answer, tools or authentication request occurs. Private
+child credential storage and a read-only keychain command guard preserve the
+original stores; refused guard commands were nonprivate reads, with no observed
+mutation attempts. Protocol/process observations do not count every upstream
+HTTP call. Exact traces, source hashes, setup mistakes and cleanup checks remain
+separate in the checkpoint.
+
+Gemini CLI 0.63.0's missing-login row passes on the exact runner bytes committed
+in `741e1a8d`: `initialize` succeeds, `session/new` returns `-32000` with
+`Gemini API key is missing or not configured.`, and close leaves an empty queue,
+processing false and no owned process/connection/worker. The positive Gemini
+model rows still require supported authentication. The checkpoint retains the
+initial unsupported-flag setup, the later anonymous statistics traffic and the
+final private statistics-off run's passive-observer limits separately.
+
 Clients: Zed first (initialize, a prompt, a permission, a cancel, attach).
+Actual Zed Preview 1.24.2's corrected private SDK fixture passes normal prompt,
+approval, absolute diff and owned UI Stop; attached Deny Once offers no
+`allow_always` and disconnect preserves the daemon. An incorrect attached
+resume advertisement was fixed in `c7b6b740`; actual Preview reconnect now
+advertises close only, makes no resume/load request, and completes a new attached
+denial turn. Attached handles remain bound to one connection. Actual owned
+shutdown previously left the owned daemon and SDK alive after more than two
+minutes. After ownership repair `4d4ceff1`, a fresh actual Preview run passes
+normal/approval/diff, partial UI Stop, attached denial/retention and physical
+shutdown: all nine recorded owned process identities are gone, while the
+original stable Zed remains. This qualifies the client with a controlled local
+SDK backend; it does not infer proxy exit codes or an exact quit duration.
+Native wire tool IDs are session-unique in `79e13257`; the fresh
+native-to-harness gate also remains open after one short-context request
+returned Z.AI HTTP 429/code `1308` before Hub delivery;
+the account's reset window is unknown. Exact source, traces and remaining gates
+are recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 JetBrains, Buzz and T3 Code are claimed only after the same run. T3 Code
 opens with one `initialize` that carries both v1 and v2 fields and reads the
 generation from the answer's shape, so `kollab acp` answers version 1 in the v1
