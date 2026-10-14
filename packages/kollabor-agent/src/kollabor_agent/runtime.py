@@ -24,6 +24,18 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, cast
 
 
+def _presence_tags(tags: Any) -> Dict[str, Any]:
+    """Only public harness and wait state belong in peer presence records."""
+    if not isinstance(tags, dict):
+        return {}
+    return {
+        key: value
+        for key, value in tags.items()
+        if (key in {"harness", "provider"} and isinstance(value, str))
+        or (key in {"acp_waiting", "acp_ask_waiting"} and type(value) is bool)
+    }
+
+
 class AgentLifecycle(Enum):
     """Full lifecycle states for an agent.
 
@@ -639,6 +651,7 @@ class AgentRuntime:
             "waiting_since": self.waiting_since,
             "cooldown_until": self.cooldown_until,
             "waiting_reason": self.waiting_reason,
+            "tags": _presence_tags(self.tags),
         }
 
     @classmethod
@@ -687,6 +700,7 @@ class AgentRuntime:
             mapped["name"] = data["agent_name"]
         if "profile_name" in data:
             mapped["profile"] = data["profile_name"] or None
+        mapped["tags"] = _presence_tags(data.get("tags"))
 
         return cls(**mapped)
 

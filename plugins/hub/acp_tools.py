@@ -268,7 +268,7 @@ class ACPHubTools:
             if question is not None:
                 # Answering a question back finishes the other agent's wait;
                 # then continue waiting for the original thread's final turn.
-                from .messenger import HubMessage, MessageScope
+                from .models import HubMessage, MessageScope
                 rejected = await self.hub._route_message(HubMessage(
                     action="turn_end", from_agent=self.hub._identity.agent_id,
                     from_identity=self.hub._identity.identity, to=target,
