@@ -11,9 +11,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from kollabor.application import TerminalLLMChat
+from kollabor.llm.permissions.attach_bridge import PERMISSION_RESPONSE_RPC_METHOD, AttachPermissionBridge
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_ai.profile_manager import ProfileManager
 from kollabor_config import config_utils
+from kollabor_events.permissions_models import ApprovalMode, ConfirmationResponse
 from plugins.hub import presence
 from plugins.hub.messenger import AgentMessenger, AgentSocketServer, HubMessage
 from plugins.hub.plugin import HubPlugin
@@ -40,8 +42,137 @@ asyncio.run(acp.run_agent(Agent()))
 """
 
 
+PERMISSION_AGENT = r"""
+import asyncio, acp
+from acp.schema import (
+    AgentMessageChunk,
+    InitializeResponse,
+    NewSessionResponse,
+    PromptResponse,
+    TextContentBlock,
+    ToolCallStart,
+    ToolCallUpdate,
+    PermissionOption,
+)
+
+
+class Agent:
+    def on_connect(self, conn):
+        self.conn = conn
+
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocolVersion=1)
+
+    async def new_session(self, cwd, mcp_servers=None, **kwargs):
+        return NewSessionResponse(sessionId="owned-deferred-session")
+
+    async def prompt(self, session_id, prompt, **kwargs):
+        await self.conn.session_update(
+            session_id,
+            ToolCallStart(
+                sessionUpdate="tool_call",
+                toolCallId="owned-permission",
+                title="Owned echo tool",
+                kind="execute",
+                status="pending",
+                rawInput={"command": ["echo", "owned"]},
+            ),
+        )
+        answer = await self.conn.request_permission(
+            session_id=session_id,
+            tool_call=ToolCallUpdate(toolCallId="owned-permission"),
+            options=[
+                PermissionOption(optionId="owned-once", name="Allow once", kind="allow_once"),
+                PermissionOption(optionId="owned-deny", name="Deny once", kind="reject_once"),
+            ],
+        )
+        selected = getattr(answer.outcome, "optionId", None)
+        if selected is None:
+            return PromptResponse(stopReason="cancelled")
+        text = "OWNED SDK ANSWER" if selected == "owned-once" else "OWNED SDK DENIED"
+        await self.conn.session_update(
+            session_id,
+            AgentMessageChunk(sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text=text)),
+        )
+        return PromptResponse(stopReason="end_turn")
+
+    async def cancel(self, session_id, **kwargs):
+        return None
+
+
+asyncio.run(acp.run_agent(Agent()))
+"""
+
+
+class OwnedRpcServer:
+    def __init__(self):
+        self.handlers = {}
+
+    def register(self, name, handler):
+        self.handlers[name] = handler
+
+
+class OwnedRpcClient:
+    def __init__(self, server):
+        self.server = server
+        self.calls = []
+
+    async def call(self, name, params, timeout=None):
+        self.calls.append(params)
+        return await self.server.handlers[name](params)
+
+
+class OwnedPermissionView:
+    def __init__(self):
+        self.opened = asyncio.Event()
+        self.future = None
+        self.calls = 0
+        self.closed = 0
+
+    async def show_permission_prompt(self, details):
+        self.calls += 1
+        self.future = asyncio.get_running_loop().create_future()
+        self.opened.set()
+        try:
+            return await self.future
+        finally:
+            self.closed += 1
+
+    def cancel_permission_prompt(self):
+        if self.future is not None and not self.future.done():
+            self.future.set_result(ConfirmationResponse.CANCEL)
+
+    def answer(self, response):
+        self.future.set_result(response)
+
+
+class OwnedDisplayTap:
+    subscriber_count = 1
+
+    def __init__(self, bridge, client, view):
+        self.bridge = bridge
+        self.client = client
+        self.view = view
+        self.events = []
+        self.tasks = []
+
+    def publish(self, event):
+        if event.get("type") == "permission_request" and event.get("details", {}).get("source") != "acp":
+            return
+        self.events.append(event)
+        if event.get("type") == "permission_request":
+            self.tasks.append(
+                asyncio.create_task(
+                    self.bridge.handle_client_event(rpc_client=self.client, layout_manager=self.view, event=event)
+                )
+            )
+        elif event.get("type") in ("permission_granted", "permission_denied"):
+            self.bridge.handle_client_resolution(layout_manager=self.view, event=event)
+
+
 @pytest.mark.asyncio
-async def test_real_terminal_deferred_acp_hub_lifecycle():
+@pytest.mark.parametrize("scenario", ["lifecycle", "local-first", "attach-first", "outer-cancel", "simultaneous"])
+async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
     """Real constructor + local Hub + SDK fake; no Ed25519, real adapter, or CLI detach."""
     with tempfile.TemporaryDirectory(prefix="kacp-", dir="/tmp") as task_dir:
         root = Path(task_dir)
@@ -50,7 +181,11 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
         project = root / "project"
         for path in (global_root, home, project):
             path.mkdir()
-        profile = {"provider": "acp", "command": [sys.executable, "-c", AGENT], "workspace": str(project)}
+        profile = {
+            "provider": "acp",
+            "command": [sys.executable, "-c", AGENT if scenario == "lifecycle" else PERMISSION_AGENT],
+            "workspace": str(project),
+        }
         config = {
             "kollabor": {"llm": {"default_profile": "owned-acp", "profiles": {"owned-acp": profile}}},
             "plugins": {"hub": {"enabled": True, "project_scoped": True}, "mcp": {"enabled": False}},
@@ -79,6 +214,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
         requester_presence = None
         sdk_process = None
         hub_socket_path = None
+        tap = None
         with (
             contextlib.chdir(project),
             patch.object(config_utils, "get_config_directory", return_value=global_root),
@@ -106,6 +242,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                     profile_name="owned-acp",
                     plugin_registry=registry,
                 )
+                app.permission_manager.set_approval_mode(ApprovalMode.CONFIRM_ALL, persist=False)
                 app.running = True
                 app.render_loop = None
                 for name in (
@@ -118,6 +255,17 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                 app._process_cli_command = AsyncMock(return_value=None)
                 await app.llm_service.register_hooks()
                 await asyncio.wait_for(app._deferred_startup(), timeout=12)
+                if scenario != "lifecycle":
+                    rpc_server = OwnedRpcServer()
+                    rpc_client = OwnedRpcClient(rpc_server)
+                    remote_bridge = AttachPermissionBridge()
+                    local_view = OwnedPermissionView()
+                    remote_view = OwnedPermissionView()
+                    tap = OwnedDisplayTap(remote_bridge, rpc_client, remote_view)
+                    app.event_bus.register_service("display_tap", tap)
+                    app.event_bus.register_service("rpc_server", rpc_server)
+                    app.renderer.layout_manager.show_permission_prompt = local_view.show_permission_prompt
+                    app.renderer.layout_manager.cancel_permission_prompt = local_view.cancel_permission_prompt
                 owner = app.acp_orchestrator
                 sdk_process = owner.runner._process
                 hub = instances["hub"]
@@ -155,11 +303,59 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                 )
                 accepted = await AgentMessenger.send_to_agent(str(hub._socket_server.socket_path), message)
 
+                if scenario != "lifecycle":
+                    await asyncio.wait_for(
+                        asyncio.gather(local_view.opened.wait(), remote_view.opened.wait()), timeout=2
+                    )
+                    if scenario == "local-first":
+                        local_view.answer(ConfirmationResponse.APPROVE_SESSION)
+                    elif scenario == "attach-first":
+                        remote_view.answer("owned-once")
+                    elif scenario == "outer-cancel":
+                        await asyncio.wait_for(owner.cancel(), timeout=5)
+                    else:
+                        # Both answers arrive before the local responder gets another turn.
+                        local_view.answer(ConfirmationResponse.APPROVE_SESSION)
+                        reply = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+                            {"tool_id": "owned-permission", "control": "DENY"}
+                        )
+                        assert reply == {"ok": True}
+
                 async def completion():
                     while len([item for item in received if item.reply_to == message.id]) < 2:
                         await asyncio.sleep(0.01)
 
                 await asyncio.wait_for(completion(), timeout=6)
+                if scenario != "lifecycle":
+                    await asyncio.wait_for(asyncio.gather(*tap.tasks), timeout=2)
+                    assert local_view.calls == remote_view.calls == 1
+                    assert local_view.closed == remote_view.closed == 1
+                    resolution = [
+                        e
+                        for e in tap.events
+                        if e.get("type") in ("permission_granted", "permission_denied")
+                        and e.get("tool_id") == "owned-permission"
+                    ]
+                    assert len(resolution) == 1, resolution
+                    expected_type = (
+                        "permission_denied" if scenario in ("outer-cancel", "simultaneous") else "permission_granted"
+                    )
+                    assert resolution[0]["type"] == expected_type, resolution
+                    if scenario == "outer-cancel":
+                        assert resolution[0].get("outcome") == "cancelled"
+                    late = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+                        {"tool_id": "owned-permission", "option_id": "owned-once"}
+                    )
+                    assert late.get("ok") is False, late
+                    assert app._attach_permission_bridge._pending == {}
+                    assert app._attach_permission_bridge._pending_option_ids == {}
+                    assert app._attach_permission_bridge._pending_details == {}
+                    assert remote_bridge._queued == set()
+                    assert remote_bridge._answered_elsewhere == set()
+                    assert remote_bridge._showing is None
+                    assert all(t.done() for t in tap.tasks)
+                    assert len(app.permission_manager._session_approvals) == 0
+                    assert len(app.permission_manager._acp_session_grants) == (1 if scenario == "local-first" else 0)
                 matching = [item for item in received if item.reply_to == message.id]
                 result = {
                     "ordinary_socket_request_acked": accepted,
@@ -176,8 +372,12 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                     and result["reply_actions"] == ["message", "turn_end"]
                     and result["same_thread"]
                     and result["reply_to_request"]
-                    and result["visible_answer"] == "OWNED SDK ANSWER"
-                    and result["outcome"] == "end_turn"
+                    and (
+                        scenario == "outer-cancel"
+                        or result["visible_answer"]
+                        == ("OWNED SDK DENIED" if scenario == "simultaneous" else "OWNED SDK ANSWER")
+                    )
+                    and result["outcome"] == ("cancelled" if scenario == "outer-cancel" else "end_turn")
                 ), result
             finally:
                 cleanup_error = None
@@ -197,6 +397,11 @@ async def test_real_terminal_deferred_acp_hub_lifecycle():
                         cleanup_error = exc
                     assert cleanup_error is None, cleanup_error
                     assert hub_socket_path is None or not hub_socket_path.exists()
+                if tap is not None:
+                    for task in tap.tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tap.tasks, return_exceptions=True)
                 if sdk_process is not None:
                     await asyncio.wait_for(sdk_process.wait(), timeout=5)
                     assert sdk_process.returncode is not None
