@@ -7478,10 +7478,6 @@ class HubPlugin(BasePlugin):
                 "solo agent dropped hub message from %s", message.from_identity
             )
             return
-        tools = self._acp_tools()
-        tools.observe(message)
-        if tools.consume(message):
-            return
         relay = getattr(self, "_relay_agent", None)
         if relay and await relay.defer_local(message):
             return
@@ -7502,18 +7498,22 @@ class HubPlugin(BasePlugin):
         )
         if not relay and (message.from_identity or "").startswith("relay:"):
             return
-        # Dedup check
+        # The transport/relay has authorized the sender before this point.
+        # Deduplicate before receipts or ask waits can mutate, including hidden
+        # terminal frames and messages delivered by both socket and mailbox.
         msg_id = getattr(message, "id", "") or ""
-        if message.action != "turn_end":
-            if msg_id and msg_id in self._seen_messages:
-                logger.debug(f"Dedup: skipping already-seen message {msg_id}")
-                return
-            if msg_id:
-                self._seen_messages[msg_id] = None
-                while len(self._seen_messages) > 1000:
-                    self._seen_messages.popitem(last=False)
-        elif msg_id and msg_id in self._seen_messages:
-            logger.debug(f"Dedup: skipping already-seen turn_end {msg_id}")
+        msg_key = (msg_id, message.action)
+        if msg_id and msg_key in self._seen_messages:
+            logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
+            return
+        if msg_id:
+            self._seen_messages[msg_key] = None
+            while len(self._seen_messages) > 1000:
+                self._seen_messages.popitem(last=False)
+
+        tools = self._acp_tools()
+        tools.observe(message)
+        if tools.consume(message):
             return
 
         llm_owner = self.event_bus.get_service("llm_service") if self.event_bus else None
@@ -7560,10 +7560,6 @@ class HubPlugin(BasePlugin):
                 and message.reply_to == expected_ids.get(message.thread_id)
                 and sender_ok
             ):
-                if msg_id:
-                    self._seen_messages[msg_id] = None
-                    while len(self._seen_messages) > 1000:
-                        self._seen_messages.popitem(last=False)
                 self.on_network_turn_end(message.thread_id, frame, message.content)
                 return
 

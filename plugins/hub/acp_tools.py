@@ -29,13 +29,14 @@ class ACPHubTools:
         self.waits: dict[str, AskWait] = {}
         self.expired: OrderedDict[tuple[str, str], float] = OrderedDict()
         self.questions: dict[tuple[str, str], AskWait] = {}
+        self._consumed_returns: OrderedDict[tuple[str, str, str], None] = OrderedDict()
 
     @property
     def waiting(self) -> bool:
         return bool(self.waits)
 
     def observe(self, message: Any) -> None:
-        if not message.thread_id:
+        if not message.thread_id or self._return_key(message) in self._consumed_returns:
             return
         peers = self.threads.setdefault(message.thread_id, {})
         peers[message.from_identity or message.from_agent] = message.id
@@ -43,8 +44,28 @@ class ACPHubTools:
         while len(self.threads) > 1000:
             self.threads.popitem(last=False)
 
+    def _return_key(self, message: Any) -> tuple[str, str, str] | None:
+        message_id = getattr(message, "id", "")
+        if not message_id:
+            return None
+        action = "turn_end" if (message.metadata or {}).get("turn_end") else message.action
+        return (message.from_identity or message.from_agent, message_id, action)
+
+    def _remember_return(self, message: Any) -> None:
+        key = self._return_key(message)
+        if key is not None:
+            self._consumed_returns[key] = None
+            while len(self._consumed_returns) > 1000:
+                self._consumed_returns.popitem(last=False)
+
     def consume(self, message: Any) -> bool:
+        # A store write can fail after consumption, or a leased relay event can
+        # be delivered again. Reply and end projections of one result are
+        # separate actions even when they share the source event's ID.
+        if self._return_key(message) in self._consumed_returns:
+            return True
         if (message.metadata or {}).get("acp_waiting"):
+            self._remember_return(message)
             llm = self.hub.event_bus.get_service("llm_service")
             display = getattr(llm, "message_display_service", None)
             if display is not None:
@@ -59,6 +80,7 @@ class ACPHubTools:
                 continue
             matching = message.thread_id == wait.thread and message.reply_to == wait.request_id
             if matching and frame:
+                self._remember_return(message)
                 outcome = frame.get("outcome") or ("error" if frame.get("failed") else "end_turn")
                 status = "answered" if outcome == "end_turn" else "busy" if outcome == "busy" else "ended"
                 text = wait.earlier[-1] if wait.earlier and status == "answered" else message.content
@@ -66,9 +88,11 @@ class ACPHubTools:
                              wait.earlier[:-1] if status == "answered" else wait.earlier)
                 return True
             if matching:
+                self._remember_return(message)
                 wait.earlier.append(message.content)
                 return True
             if (not message.reply_to or (message.metadata or {}).get("acp_question")) and message.action == "message" and message.to not in {"all", "*", "everyone"}:
+                self._remember_return(message)
                 self.questions[(sender, message.thread_id)] = wait
                 self._settle(wait, "question", message.content, message.thread_id, wait.earlier)
                 return True

@@ -2013,6 +2013,8 @@ class RelayAgentBridge:
                 self._display_correlated_event(payload, interrupted=True)
                 self.store.mark_event_presented(record["id"])
             return {"id": record["id"], "state": "queued"}
+        if record["presented"] == 1:
+            return {"id": record["id"], "state": record["state"]}
         tools = getattr(self.plugin, "_acp_hub_tools", None)
         if tools is not None and self._verified_return_event(record):
             message = self._acp_return_message(record)
@@ -2024,8 +2026,6 @@ class RelayAgentBridge:
                     tools.consume(message)
                 self.store.mark_event_presented(record["id"])
                 return {"id": record["id"], "state": record["state"]}
-        if record["presented"] == 1:
-            return {"id": record["id"], "state": record["state"]}
         if not self._verified_return_event(record):
             raise RelayError("conversation event authority changed")
         if self._terminal_event_supersedes(record):
