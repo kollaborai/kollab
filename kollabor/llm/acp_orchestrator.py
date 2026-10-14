@@ -333,6 +333,13 @@ class ACPOrchestrator:
                 "stopReason": stop_reason, "error": str(exc) or type(exc).__name__,
                 "outcome": "failed",
             }
+            if stop_reason == "error":
+                publish_semantic(
+                    self.event_bus, "error", message=end_frame["error"],
+                    request_id=admission.request_id, turn_id=admission.turn_id,
+                    session_id=session_id, generation=generation,
+                    input_source=admission.source, thread_id=admission.thread_id,
+                )
             publish_semantic(
                 self.event_bus, "turn_complete", request_id=admission.request_id,
                 session_id=session_id, generation=generation,
