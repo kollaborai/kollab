@@ -2979,8 +2979,6 @@ class LocalStateService(StateService):
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
         acp = self._event_bus.get_service("acp_orchestrator")
-        if acp is not None and acp.active:
-            await acp.restore(session_id)
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):
@@ -3059,6 +3057,11 @@ class LocalStateService(StateService):
                 llm.session_stats["messages"] = len(loaded_messages)
             except Exception as e:
                 logger.debug(f"resume: session_stats update error: {e}")
+
+        if acp is not None and acp.active:
+            # Read the original harness binding, but open/save the continued
+            # session only after all native conversation owners have its new ID.
+            await acp.restore(session_id)
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."
