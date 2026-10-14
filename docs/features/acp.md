@@ -22,9 +22,12 @@ observer assertion remains recorded as failed. The earlier user B/B2 and
 restored histories were untouched. Fresh actual Claude browser approval/denial
 and Codex browser/attached-terminal permissions, typed reply and active Esc also
 pass. Terminal answer ownership and diagnostic overwrites were fixed in
-`917a434d` and `ad53626e`. The complete UI matrix remains open: Stop disappears
-while a permission is pending, and long vendor choice labels overflow their
-cards. Those consumers and actual Stop/reload still need qualification.
+`917a434d` and `ad53626e`. Long permission choices now wrap in `d048763e`;
+`2b81ebf6` and `f128b4d0` keep Stop available for owned pending permissions and
+send the exact parent request to the daemon. Controlled browser Stop/reload,
+partial retention, a normal follow-up and 390px/820px layouts pass. The complete
+UI matrix still needs actual-provider Stop/reload and the remaining Claude
+terminal checks.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

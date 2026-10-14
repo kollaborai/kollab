@@ -336,12 +336,39 @@ Verified fixes and boundaries:
   Controller limits: the shared denial took 197 seconds instead of the intended
   90-second turn bound; a duplicate operator key left an unsent draft which was
   cleared before the next input. No extra model admission occurred.
-- These fresh flows are partial qualification. Actual pending permissions in
-  both harness windows hide the Web Stop button: the transport ends at a prompt,
-  but the composer derives Stop solely from its sending state. Long vendor
-  permission labels also exceed their cards. The current frontend needs Stop
-  while awaiting approval and wrapped choices, followed by controlled and
-  actual-provider Stop/reload checks. The private model window expired normally
+- These fresh flows exposed two Web defects: Stop disappeared when the HTTP
+  transport ended at a pending permission, and long vendor choice labels
+  exceeded their cards. `d048763e` wraps those choices and their generic dynamic
+  option sibling. `2b81ebf6` adds required-body `/cancel-owned`, forwarding only
+  the exact parent request ID to the existing daemon owner/generation fence;
+  `f128b4d0` binds the rendered owner, rechecks current and daemon prompts, and
+  retains Stop while permission is pending. Permissions without a parent owner
+  expose no new Stop control; generic native approval/denial and streaming Cancel
+  retain their existing behavior. An old running engine returns 404 instead of
+  silently using unscoped cancellation. Its real controlled browser test left
+  the prompt and both turns intact with zero SDK cancel. A separate fresh
+  engine/browser test stopped restored owner `4968a504a4954075a0b98598e046fa45`:
+  one actual SDK `session/cancel` and `cancelled` completion, 34 saved text
+  characters and the original `in_progress` card, no fabricated tool completion.
+  Reload retained that partial; follow-up `32f514a7eb2d45b58bb55ad0927be9ae`
+  approved the exact opaque choice, completed normally and survived reload.
+  Pending count was zero and processing false. Actual CSS viewports 390 and 820
+  had no document overflow; the long choice fit within its card in both. The
+  820 screenshot API failed once; geometry was saved, and no missing image is
+  claimed. Evidence: `/private/tmp/kpc-9fboht4i` and
+  `/private/tmp/kpco-m5slc_ys`, including `frontend-final-checkpoint.json`,
+  `actual-owner-stop-observation.json` and root browser captures. This is
+  controlled installed-SDK proof, not a real-provider replay. Frontend 49 tests,
+  typecheck and build pass; 48 engine/client-turn checks cover invalid bodies,
+  exact and stale owners, replacement during RPC, native broker/no-body paths,
+  malformed RPC results and a held cancellation lock. Counts overlap. The
+  existing daemon boolean can acknowledge an initially matched owner even when
+  its later generation check safely does nothing; physical cancellation is
+  proved separately by SDK frames and saved completion. Actual-provider
+  Stop/reload and the remaining Claude terminal checks are still open. Both
+  controlled process families and owned sockets were independently checked gone;
+  no provider auth copies or real model calls were used in those two fixtures.
+- Fresh real-provider test cleanup: the private model window expired normally
   after four Codex and one Claude admissions; all 202 recorded owned process
   birth entries were independently checked gone, and daemon sockets and copied
   auth were removed. The borrowed terminal exited on disconnect and its private
@@ -459,10 +486,11 @@ Required open gates:
    window. Actual CLI/SDK/daemon model runs and the private native feedback run
    are separate evidence. Fresh `ad53626e` checks now prove real Claude browser
    approval/denial/reply and Codex browser approval, attached-terminal denial,
-   typed reply and active Esc. They exposed the missing Web Stop control while
-   awaiting permission and overflowing vendor choice labels. Fix those current
-   consumers, verify controlled and actual Stop/reload, and finish the remaining
-   per-provider terminal surfaces before calling the entire UI matrix complete.
+   typed reply and active Esc. The discovered Web Stop and long-label defects
+   are fixed in `d048763e`, `2b81ebf6` and `f128b4d0`; controlled restored Stop,
+   partial history, old-engine refusal, normal follow-up and narrow layouts pass.
+   Verify actual-provider Stop/reload and finish the remaining Claude terminal
+   surfaces before calling the entire UI matrix complete.
    The earlier summary that only Gemini remained was too broad for complete
    user-facing acceptance.
 
