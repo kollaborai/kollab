@@ -299,6 +299,61 @@ Verified fixes and boundaries:
   were cleaned up; the user receiver and config were preserved. Evidence:
   `/tmp/kacp-fresh-native.KE50i8/summary.json`, `qualification-metadata.json`
   and `owned-process-audit.json`.
+- Fresh terminal and browser checks: a real foreground Codex turn exposed ACP
+  text being written into the footer without coordinator ownership. `917a434d`
+  now previews per-request buffered text and prints one coordinated final
+  response; `ad53626e` keeps adapter diagnostics in the file log while a TUI
+  owns raw input, retaining bounded failure diagnostics and standalone/pipe
+  stderr. Four projection regressions failed before the first repair; 45 focused
+  native/display checks passed afterward. Controlled SDK PTYs also verified
+  opaque approval, active Esc, partial history and visible refusal. The separate
+  stderr repair has 21 projection/orchestrator checks plus four startup/restart
+  and five refusal/exit checks; 28 actual assistant-stream reducer checks show
+  no duplicated Web assistant or error. Counts overlap.
+- Fresh actual-provider UI evidence at clean `ad53626e`: the real browser
+  Session Options picker launched private `web-smoke` Claude and Codex sessions.
+  Claude request `2979001630884d8ab005b86238394a45` passed browser approval and
+  denial, two completed/failed saved cards, one parent-linked `end_turn` answer,
+  an exact `approved\n` sentinel and no denied sentinel. Codex's first read-only
+  turn attempted shell writes without requesting escalation; native shell
+  redirections failed and no ACP permission/card was emitted. That failed
+  permission probe remains recorded. A distinct explicit-escalation turn
+  `b4a0b67559534afe84128809fc1c4bfb` then passed browser approval and genuine
+  attached-terminal denial, with two saved completed/failed cards and a
+  `cancelled` parent. The vendor's denial stopped that turn; no final-answer
+  marker is inferred. Raw outgoing permission option IDs were not recorded.
+  A real typed terminal reply passed afterward. All four Codex turns match their
+  durable snapshots by exact request/update IDs, retaining the exact typed
+  answer, tool status and cancelled partial text. Active terminal Esc on request
+  `f45b9f1dac244ec39451e9a81e8962fc`, turn 4, followed six observed text chunks;
+  actual `session/cancel` and `cancelled` completion arrived 36 ms and 44 ms
+  after the key. This qualifies active inference cancellation, not a running
+  shell-worker cancellation. Evidence: `/tmp/kwui-wu3zplht`, including
+  `positive-permission-flow-summary.json`, `root-codex-esc-result.json` and
+  `browser/`; attached PTY evidence is in `/private/tmp/kacp-attached-tui-6y2nux7q`.
+  The earlier foreground Claude auth rejection remains separate; the fresh
+  browser's current private copy worked without login or credential changes.
+  Controller limits: the shared denial took 197 seconds instead of the intended
+  90-second turn bound; a duplicate operator key left an unsent draft which was
+  cleared before the next input. No extra model admission occurred.
+- These fresh flows are partial qualification. Actual pending permissions in
+  both harness windows hide the Web Stop button: the transport ends at a prompt,
+  but the composer derives Stop solely from its sending state. Long vendor
+  permission labels also exceed their cards. The current frontend needs Stop
+  while awaiting approval and wrapped choices, followed by controlled and
+  actual-provider Stop/reload checks. The private model window expired normally
+  after four Codex and one Claude admissions; all 202 recorded owned process
+  birth entries were independently checked gone, and daemon sockets and copied
+  auth were removed. The borrowed terminal exited on disconnect and its private
+  tmux server closed normally; its retained inactive socket inode refuses
+  connections. Cleanup and persistence ledgers are under the attached PTY root.
+  Original files and Claude keychain bytes matched this run's baseline, and all
+  12 preexisting process births survived.
+  This does not resolve the older, unattributed keychain drift. The long-path
+  setup failure was a fixture preflight omission: its derived 124-byte socket
+  path failed Darwin bind before any SDK prompt; the corrected short-root run
+  retained identical helper bytes. No user runtime was restarted for these
+  source commits, and no push, release or installation occurred.
 - New native → ACP feedback: a new private Koordinator/Codex Zircon pair on
   the recorded clean `d6b2d3cc` runtime boundary passes, using actual pinned
   Codex adapter 2.1.1/CLI 0.159.3 and the same configured Z.AI
@@ -398,16 +453,18 @@ Required open gates:
    only; no secret values were recorded and no account, login, billing or
    credential settings were changed. Evidence:
    `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/auth-prerequisite.json`.
-2. Fresh real-provider Web UI and interactive terminal walkthroughs. Existing
+2. Complete real-provider Web UI and interactive terminal walkthroughs. Existing
    controlled SDK browser evidence covers cards, permissions, Stop/reload and
    narrow layouts, and real Codex output was observed in Zircon's earlier
    window. Actual CLI/SDK/daemon model runs and the private native feedback run
-   are separate evidence. They do not establish a fresh interactive TUI run or
-   the complete latest Claude/Codex launch/input/tool/permission/cancel flow in
-   both user interfaces. Private sessions are being prepared for these checks;
-   no new pass is claimed until actual input/render, persistence and cleanup
-   evidence is recorded. The earlier summary that only Gemini remained was too
-   broad for complete user-facing acceptance.
+   are separate evidence. Fresh `ad53626e` checks now prove real Claude browser
+   approval/denial/reply and Codex browser approval, attached-terminal denial,
+   typed reply and active Esc. They exposed the missing Web Stop control while
+   awaiting permission and overflowing vendor choice labels. Fix those current
+   consumers, verify controlled and actual Stop/reload, and finish the remaining
+   per-provider terminal surfaces before calling the entire UI matrix complete.
+   The earlier summary that only Gemini remained was too broad for complete
+   user-facing acceptance.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folders are retained until the qualification

@@ -19,8 +19,12 @@ waited-message delivery, correlated final/end and native model feedback. The
 same configured Z.AI route returned two actual HTTP 200 responses. Independent
 offline validation qualifies that frozen runtime evidence; the controller's
 observer assertion remains recorded as failed. The earlier user B/B2 and
-restored histories were untouched. The browser checks used a controlled SDK;
-CLI/daemon proof does not establish a fresh interactive terminal walkthrough.
+restored histories were untouched. Fresh actual Claude browser approval/denial
+and Codex browser/attached-terminal permissions, typed reply and active Esc also
+pass. Terminal answer ownership and diagnostic overwrites were fixed in
+`917a434d` and `ad53626e`. The complete UI matrix remains open: Stop disappears
+while a permission is pending, and long vendor choice labels overflow their
+cards. Those consumers and actual Stop/reload still need qualification.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

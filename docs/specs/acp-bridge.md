@@ -650,6 +650,12 @@ without another model call. Earlier user B/B2 and restored histories were not
 rerun or vindicated. Gemini's supported-auth positive rows and fresh real-provider
 Web UI/interactive terminal walkthroughs remain open. Existing CLI/backend and
 controlled SDK browser evidence do not establish those complete user-facing runs.
+Fresh actual `ad53626e` browser and attached-terminal checks now pass Claude
+approval/denial/reply and Codex shared permissions, typed reply and active Esc.
+Terminal response ownership and diagnostic overwrites were repaired in
+`917a434d` and `ad53626e`. The current Web composer still hides Stop while
+awaiting permission, and vendor choice labels overflow their cards; repair and
+qualify those consumers before closing the complete UI matrix.
 Exact source, fixture limits, diagnostics, traces and remaining gates are
 recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 JetBrains, Buzz and T3 Code are claimed only after the same run. T3 Code
