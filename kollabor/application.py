@@ -752,79 +752,13 @@ class TerminalLLMChat:
                 # daemon's hidden stdin.
                 is_acp_prompt = str(details.get("source") or "").lower() == "acp"
                 if is_acp_prompt:
-                    # ACP prompts are shared across every attached surface. Race
-                    # the local terminal and attach clients against one decision;
-                    # the first non-None answer wins and all losing views close.
-                    local_task = asyncio.create_task(
-                        self.renderer.layout_manager.show_permission_prompt(details)
-                    )
-                    attach_task = asyncio.create_task(
-                        self._try_attach_permission_prompt(details)
-                    )
-                    tasks = {local_task, attach_task}
-                    response = None
-                    winner_task = None
-                    outer_cancelled = False
-                    try:
-                        while tasks and response is None:
-                            done, tasks = await asyncio.wait(
-                                tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for completed in done:
-                                candidate = completed.result()
-                                if candidate is not None and response is None:
-                                    response = candidate
-                                    winner_task = completed
-                        if response is None:
-                            response = await local_task
-                            winner_task = local_task
-                        # Publish the local winner before canceling the attach
-                        # waiter so remote views close from the truthful event.
-                        if winner_task is local_task:
-                            tap = self.event_bus.get_service("display_tap")
-                            if tap is not None:
-                                # Mark the shared resolution before publishing so
-                                # the attach waiter does not echo a second event
-                                # when its future is released by this broadcast.
-                                details["_acp_resolution_published"] = True
-                                tap.publish(
-                                    resolution_event(
-                                        str(details.get("tool_id") or ""),
-                                        response,
-                                        details,
-                                    )
-                                )
-                        # If attach won, dismiss the local prompt while it is
-                        # still registered, before canceling the local task.
-                        if winner_task is attach_task:
-                            self.renderer.layout_manager.cancel_permission_prompt()
-                    except asyncio.CancelledError:
-                        outer_cancelled = True
-                        raise
-                    finally:
-                        if outer_cancelled and response is None:
-                            tap = self.event_bus.get_service("display_tap")
-                            if tap is not None:
-                                tap.publish(
-                                    resolution_event(
-                                        str(details.get("tool_id") or ""),
-                                        ConfirmationResponse.CANCEL,
-                                        details,
-                                    )
-                                )
-                            self.renderer.layout_manager.cancel_permission_prompt()
-                        for pending in tasks:
-                            pending.cancel()
-                        if tasks:
-                            await asyncio.gather(*tasks, return_exceptions=True)
+                    response = await self._try_attach_permission_prompt(details)
+                    if response is None:
+                        response = await self.renderer.layout_manager.show_permission_prompt(details)
                 else:
                     response = await self._try_attach_permission_prompt(details)
                     if response is None:
-                        response = (
-                            await self.renderer.layout_manager.show_permission_prompt(
-                                details
-                            )
-                        )
+                        response = await self.renderer.layout_manager.show_permission_prompt(details)
                 # Convert to PermissionDecision using response handler. ACP
                 # attach clients return an opaque option ID; map it back to
                 # the enum kind only for the native decision machinery.
@@ -2673,31 +2607,26 @@ class TerminalLLMChat:
         self._startup_ready.set()
 
     async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
-        """Route daemon permission prompts to the visible attach client.
-
-        Only a --detached daemon: a session with its own terminal answers its
-        prompts there, even while the web UI or another window is attached.
-        """
+        """Share ACP prompts with attached clients and the local terminal."""
         if not self.event_bus:
             return None
-        if not getattr(self.args, "detached", False) and str(details.get("source") or "").lower() != "acp":
+        is_acp = str(details.get("source") or "").lower() == "acp"
+        detached = bool(getattr(self.args, "detached", False))
+        if not detached and not is_acp:
             return None
-
         display_tap = self.event_bus.get_service("display_tap")
         rpc_server = self.event_bus.get_service("rpc_server")
         if not display_tap or not rpc_server:
             return None
-
-        if not await self._attach_permission_bridge.wait_for_visible_attach_client(
-            display_tap
-        ):
+        local_layout = self.renderer.layout_manager if is_acp and not detached else None
+        if local_layout is None and not await self._attach_permission_bridge.wait_for_visible_attach_client(display_tap):
             return None
-
         return await self._attach_permission_bridge.request_confirmation(
             display_tap=display_tap,
             rpc_server=rpc_server,
             details=dict(details),
             timeout=300,
+            local_layout_manager=local_layout,
         )
 
     async def _drain_attach_pending_flags(self) -> None:

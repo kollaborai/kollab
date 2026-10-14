@@ -132,7 +132,8 @@ class AttachPermissionBridge:
                     return {"ok": False, "error": f"unoffered control for {tool_id}"}
             if future is None or future.done():
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
-            future.set_result(response)
+            if not self.try_settle_response(tool_id, response):
+                return {"ok": False, "error": f"no pending prompt for {tool_id}"}
             return {"ok": True}
 
         try:
@@ -141,6 +142,23 @@ class AttachPermissionBridge:
         except ValueError:
             self._registered_rpc_servers.add(server_id)
 
+    def try_settle_response(self, tool_id: str, response: Any) -> bool:
+        """Atomically settle one offered response from any surface."""
+        future = self._pending.get(tool_id)
+        if future is None or future.done():
+            return False
+        details = self._pending_details.get(tool_id, {})
+        if isinstance(response, str):
+            if response not in self._pending_option_ids.get(tool_id, set()):
+                return False
+        elif isinstance(response, ConfirmationResponse):
+            if not self._native_response_allowed(details, response, response.name):
+                return False
+        else:
+            return False
+        future.set_result(response)
+        return True
+
     async def request_confirmation(
         self,
         *,
@@ -148,15 +166,13 @@ class AttachPermissionBridge:
         rpc_server: Any,
         details: dict[str, Any],
         timeout: float,
+        local_layout_manager: Any = None,
     ) -> ConfirmationResponse | str:
-        """Publish a prompt to attach clients and wait for a response."""
+        """Share one pending decision between local and attached surfaces."""
         self.register_response_handler(rpc_server)
-
         tool_id = str(details.get("tool_id") or uuid.uuid4().hex)
         details["tool_id"] = tool_id
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ConfirmationResponse] = loop.create_future()
+        future = asyncio.get_running_loop().create_future()
         self._pending[tool_id] = future
         self._pending_details[tool_id] = details
         self._pending_option_ids[tool_id] = {
@@ -164,27 +180,37 @@ class AttachPermissionBridge:
             for option in details.get("acp_options", ())
             if isinstance(option, dict) and option.get("optionId")
         }
-
-        display_tap.publish({"type": "permission_request", "details": details})
-
-        response = ConfirmationResponse.DENY
-        settled = False
+        local_task = None
+        response: ConfirmationResponse | str = ConfirmationResponse.CANCEL
         try:
-            response = await asyncio.wait_for(future, timeout=timeout)
-            settled = True
-        except asyncio.TimeoutError:
-            logger.warning("attach permission prompt timed out for %s", tool_id)
-            settled = True
+            if local_layout_manager is not None:
+                async def local_answer() -> None:
+                    try:
+                        candidate = await local_layout_manager.show_permission_prompt(details)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("local ACP permission prompt failed for %s", tool_id)
+                        self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+                        return
+                    self.try_settle_response(tool_id, candidate)
+                local_task = asyncio.create_task(local_answer())
+            display_tap.publish({"type": "permission_request", "details": details})
+            try:
+                response = await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                response = ConfirmationResponse.DENY
         finally:
             self._pending.pop(tool_id, None)
             self._pending_option_ids.pop(tool_id, None)
             self._pending_details.pop(tool_id, None)
-            # Every attached window shows this prompt (a terminal and the web UI
-            # can watch one daemon): tell them all it is closed, so the ones that
-            # did not answer stop showing it. Cancellation by a local winning
-            # surface is not a decision and must not broadcast a denial.
-            if settled and not details.pop("_acp_resolution_published", False):
+            if not details.pop("_acp_resolution_published", False):
                 display_tap.publish(resolution_event(tool_id, response, details))
+            if local_task is not None:
+                if not local_task.done():
+                    local_layout_manager.cancel_permission_prompt()
+                    local_task.cancel()
+                await asyncio.gather(local_task, return_exceptions=True)
         return response
 
     async def handle_client_event(
