@@ -474,8 +474,11 @@ def _assistant_harness_tool_part(
 ) -> Dict[str, Any]:
     """Project one merged ACP card without treating its title as a native tool."""
     if part is None:
-        part = {"type": "tool-call", "toolCallId": str(update["toolCallId"]),
-                "timing": {"startedAt": _now_ms()}}
+        part = {"type": "tool-call", "toolCallId": str(update["toolCallId"])}
+        # A reconnect may first observe a finished card. Its arrival time
+        # cannot establish a duration for work that happened before it.
+        if update.get("status") not in {"completed", "failed"}:
+            part["timing"] = {"startedAt": _now_ms()}
     result = part.get("result")
     metadata = result.get("metadata") if isinstance(result, dict) else None
     previous = metadata.get("acp") if isinstance(metadata, dict) else None
@@ -499,7 +502,9 @@ def _assistant_harness_tool_part(
         "isError": status == "failed",
         "isPreliminary": preliminary,
     })
-    timing = part.setdefault("timing", {"startedAt": _now_ms()})
+    timing = part.get("timing")
+    if timing is None:
+        return part
     if preliminary:
         timing.pop("completedAt", None)
     elif timing.get("completedAt") is None:

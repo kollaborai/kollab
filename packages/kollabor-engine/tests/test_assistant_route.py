@@ -1115,6 +1115,31 @@ async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
     assert captured["controller"].errors == []
 
 
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_first_observed_harness_completion_has_no_invented_duration(status):
+    part = messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call_update", "toolCallId": "reconnected-card",
+        "title": "Saved result", "kind": "edit", "status": status,
+        "rawOutput": 0,
+    })
+    assert "timing" not in part
+    assert part["result"]["output"] == 0
+    assert part["result"]["metadata"]["acp"]["status"] == status
+    assert part["isPreliminary"] is False
+
+
+def test_harness_completion_keeps_observed_start_time(monkeypatch):
+    times = iter([1000, 2500])
+    monkeypatch.setattr(messages, "_now_ms", lambda: next(times))
+    part = messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call", "toolCallId": "observed-card", "status": "pending",
+    })
+    messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call_update", "toolCallId": "observed-card", "status": "completed",
+    }, part)
+    assert part["timing"] == {"startedAt": 1000, "completedAt": 2500}
+
+
 def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
     granted = messages._permission_result_from_event(
         {
