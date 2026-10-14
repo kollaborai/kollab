@@ -8,6 +8,11 @@ from kollabor_ai.profile_manager import LLMProfile
 from kollabor_tui.display_tap import DisplayTap
 
 
+@pytest.fixture(autouse=True)
+def isolated_bindings(tmp_path, monkeypatch):
+    monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+
+
 @pytest.mark.asyncio
 async def test_real_runner_start_failure_keeps_actionable_admission_error(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
@@ -38,6 +43,8 @@ class Tap:
 class Hub:
     def __init__(self):
         self.rotations = 0
+        self._identity = None
+        self._presence = None
         self._socket_server = type("Socket", (), {"socket_path": "/tmp/hub.sock"})()
 
     def rotate_acp_hub_binding(self):
@@ -57,17 +64,28 @@ class Bus:
 
 
 class FakeRunner:
-    def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None):
+    def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None, lifecycle_callback=None):
         self.profile = profile
         self.update_callback = update_callback
+        self.lifecycle_callback = lifecycle_callback
         self.started = False
         self.closed = False
         self._updates = []
+        self.session_id = "s1"
+        self.generation = 1
+        self.binding = None
+        self.state = "stopped"
+        self.resume_mode = "fresh"
 
-    async def start(self):
+    async def start(self, binding=None):
+        if self.lifecycle_callback is not None:
+            await self.lifecycle_callback("starting", self)
         self.started = True
+        self.state = "ready"
+        if self.lifecycle_callback is not None:
+            await self.lifecycle_callback("ready", self)
 
-    def admit(self, text, *, request_id, source, thread_id=None):
+    def admit(self, text, *, request_id, source, thread_id=None, origin=None):
         future = asyncio.get_running_loop().create_future()
         update = {"kind": "text", "text": text, "request_id": request_id}
         self._updates.append(update)
@@ -79,7 +97,7 @@ class FakeRunner:
                 {"type": "turn_end"}, 1, request_id, source, thread_id,
             )
         )
-        return SimpleNamespace(request_id=request_id, future=future)
+        return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
 
     async def prompt(self, text):
         return (await self.admit(text, request_id="legacy", source="rpc").future)
@@ -178,14 +196,14 @@ async def test_restart_start_failure_closes_replacement_and_clears_state(monkeyp
     created = []
 
     class RestartRunner(FakeRunner):
-        def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None):
-            super().__init__(profile, update_callback)
+        def __init__(self, profile, update_callback=None, permission_decider=None, permission_bridge=None, lifecycle_callback=None):
+            super().__init__(profile, update_callback, permission_bridge=permission_bridge, lifecycle_callback=lifecycle_callback)
             self.start_count = 0
             created.append(self)
 
-        async def start(self):
+        async def start(self, binding=None):
             self.start_count += 1
-            self.started = True
+            await super().start(binding=binding)
             if len(created) > 1:
                 raise RuntimeError("replacement child failed")
 

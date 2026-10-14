@@ -1158,6 +1158,9 @@ class ACPRunner:
                     close_task.add_done_callback(
                         lambda task: None if task.cancelled() else task.exception()
                     )
+                    # A dead root can leave no live tree to wait on. Still
+                    # let SDK close run and reject its pending callbacks.
+                    await asyncio.sleep(0)
                 elif process is not None and process.stdin is not None:
                     process.stdin.close()
                 loop = asyncio.get_running_loop()

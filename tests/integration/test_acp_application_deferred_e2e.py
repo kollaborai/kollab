@@ -322,7 +322,7 @@ async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
                         assert reply == {"ok": True}
 
                 async def completion():
-                    while len([item for item in received if item.reply_to == message.id]) < 2:
+                    while not any(item.reply_to == message.id and item.action == "turn_end" for item in received):
                         await asyncio.sleep(0.01)
 
                 await asyncio.wait_for(completion(), timeout=6)
@@ -356,7 +356,13 @@ async def test_real_terminal_deferred_acp_hub_lifecycle(scenario):
                     assert all(t.done() for t in tap.tasks)
                     assert len(app.permission_manager._session_approvals) == 0
                     assert len(app.permission_manager._acp_session_grants) == (1 if scenario == "local-first" else 0)
-                matching = [item for item in received if item.reply_to == message.id]
+                notices = [item for item in received if item.reply_to == message.id and item.metadata.get("acp_waiting")]
+                assert len(notices) == (0 if scenario == "lifecycle" else 1)
+                assert all(item.action == "message" and item.thread_id == message.thread_id for item in notices)
+                matching = [
+                    item for item in received
+                    if item.reply_to == message.id and not item.metadata.get("acp_waiting")
+                ]
                 result = {
                     "ordinary_socket_request_acked": accepted,
                     "reply_actions": [item.action for item in matching],

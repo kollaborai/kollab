@@ -10,6 +10,17 @@ from kollabor_events.permissions_models import (
 )
 
 
+class FixtureBus:
+    def __init__(self, hub=None):
+        self.services = {"hub_plugin": hub} if hub is not None else {}
+
+    def get_service(self, name):
+        return self.services.get(name)
+
+    def register_service(self, name, service):
+        self.services[name] = service
+
+
 class FakeRunner:
     instances = []
 
@@ -38,7 +49,7 @@ async def test_application_starts_one_acp_runner_for_selected_profile(monkeypatc
     monkeypatch.setattr(module, "ACPOrchestrator", FakeRunner)
     profile = SimpleNamespace(name="claude-code", provider="acp")
     hub = object()
-    event_bus = SimpleNamespace(get_service=lambda name: hub if name == "hub_plugin" else None)
+    event_bus = FixtureBus(hub)
     app = TerminalLLMChat.__new__(TerminalLLMChat)
     app._attach_to = None
     app.acp_orchestrator = None
@@ -75,7 +86,7 @@ async def test_application_does_not_publish_runner_after_start_failure(monkeypat
     app.profile_manager = SimpleNamespace(
         get_active_profile=lambda: SimpleNamespace(name="claude-code", provider="acp")
     )
-    app.event_bus = SimpleNamespace(get_service=lambda _name: None)
+    app.event_bus = FixtureBus()
     app.args = SimpleNamespace(as_identity="daemon-proof")
 
     with pytest.raises(RuntimeError, match="adapter unavailable"):
@@ -99,7 +110,7 @@ async def test_application_start_failure_closes_partial_runner(monkeypatch):
     app.profile_manager = SimpleNamespace(
         get_active_profile=lambda: SimpleNamespace(name="claude-code", provider="acp")
     )
-    app.event_bus = SimpleNamespace(get_service=lambda _name: None)
+    app.event_bus = FixtureBus()
     app.args = SimpleNamespace(as_identity="daemon-proof")
 
     with pytest.raises(RuntimeError, match="child failed"):
@@ -126,7 +137,7 @@ async def test_application_cancelled_start_closes_partial_runner(monkeypatch):
     app.profile_manager = SimpleNamespace(
         get_active_profile=lambda: SimpleNamespace(name="claude-code", provider="acp")
     )
-    app.event_bus = SimpleNamespace(get_service=lambda _name: None)
+    app.event_bus = FixtureBus()
     app.args = SimpleNamespace(as_identity="daemon-proof")
 
     with pytest.raises(asyncio.CancelledError):
@@ -150,9 +161,12 @@ async def test_acp_decider_maps_native_reusable_approval_to_once(scope):
         )
 
     app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.acp_orchestrator = None
     app.permission_manager = SimpleNamespace(_confirmation_callback=callback)
     request = SimpleNamespace(
         request_id="perm-1",
+        session_id="s1",
+        generation=1,
         kind="file_edit",
         operation={"kind": "edit", "path": "/tmp/work/a.txt"},
         workspace="/tmp/work",
@@ -251,6 +265,7 @@ async def test_acp_decider_mode_policy_uses_only_unique_once_offer(
         )
 
     app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.acp_orchestrator = None
     app.permission_manager = SimpleNamespace(
         approval_mode=mode,
         _confirmation_callback=callback,
@@ -296,12 +311,15 @@ async def test_acp_decider_does_not_store_grant_without_valid_operation_or_uniqu
         )
 
     app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.acp_orchestrator = None
     app.permission_manager = SimpleNamespace(
         _confirmation_callback=callback,
         grant_acp=lambda *args, **kwargs: grants.append((args, kwargs)),
     )
     base = dict(
         request_id="perm-invalid",
+        session_id="s1",
+        generation=1,
         kind="file_edit",
         workspace="/tmp/work",
         profile="claude-code",

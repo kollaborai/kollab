@@ -295,6 +295,7 @@ async def test_permission_response_is_nested_and_option_bound(tmp_path):
 
     runner = ACPRunner(ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)), ACPPermissionBridge(decide))
     runner.session_id = "s1"
+    runner.generation = 1
     runner._active_generation = 1
     runner.permission_bridge.bind("s1", 1)
     response = await runner._request_permission(
@@ -474,18 +475,23 @@ async def test_restart_failure_cleans_connection_process_and_stderr(tmp_path, mo
     runner = ACPRunner(ACPProfile("fake", (sys.executable,), cwd=str(tmp_path)))
 
     class Connection:
+        closed = False
+
         async def close(self):
+            self.closed = True
             raise RuntimeError("close failed")
 
     class Process:
         pid = 4242
         returncode = None
+        stdin = None
 
         async def wait(self):
             self.returncode = 0
 
     process = Process()
-    runner._connection = Connection()
+    connection = Connection()
+    runner._connection = connection
     runner._process = process
     runner._stderr_task = asyncio.create_task(asyncio.sleep(60))
     monkeypatch.setattr(bridge_mod.os, "killpg", lambda *_args: None)
@@ -501,6 +507,7 @@ async def test_restart_failure_cleans_connection_process_and_stderr(tmp_path, mo
     assert runner._process is None
     assert runner._stderr_task is None
     assert process.returncode == 0
+    assert connection.closed is True
 
 
 def test_final_answer_uses_last_message_id_and_preserves_stream():
