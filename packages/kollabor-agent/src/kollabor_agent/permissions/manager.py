@@ -1,6 +1,7 @@
 """Permission manager for tool execution."""
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -58,6 +59,13 @@ class PermissionManager:
 
         # Project-scoped approvals (persistent, loaded from project data dir)
         self._project_approvals: Set[str] = set()
+        # ACP grants are namespaced separately from native approval keys.
+        self._acp_project_grants: Set[str] = set()
+        self._acp_session_grants: Set[str] = set()
+        # Display-only metadata for ACP grants. Authorization always uses the
+        # opaque hash sets above; metadata is never consulted by has_acp_grant.
+        self._acp_project_grant_metadata: Dict[str, Dict[str, Any]] = {}
+        self._acp_session_grant_metadata: Dict[str, Dict[str, Any]] = {}
         self._load_project_approvals()
 
         # Approval mode (can change during session)
@@ -565,15 +573,34 @@ class PermissionManager:
 
             if approvals_file.exists():
                 data = json.loads(approvals_file.read_text(encoding="utf-8"))
-                self._project_approvals = set(data.get("approved_keys", []))
+                # Authorization sets are independent from display metadata:
+                # malformed metadata must never discard valid grant keys.
+                raw_native = data.get("approved_keys", [])
+                self._project_approvals = {
+                    str(key) for key in raw_native if isinstance(key, (str, int, float))
+                } if isinstance(raw_native, (list, tuple, set)) else set()
+                raw_acp = data.get("acp_grants", [])
+                self._acp_project_grants = {
+                    str(key) for key in raw_acp if isinstance(key, str) and key.startswith("acp:")
+                } if isinstance(raw_acp, (list, tuple, set)) else set()
+                raw_metadata = data.get("acp_grant_metadata", {})
+                self._acp_project_grant_metadata = {
+                    str(key): dict(value)
+                    for key, value in raw_metadata.items()
+                    if isinstance(value, dict)
+                } if isinstance(raw_metadata, dict) else {}
                 logger.info(
                     f"Loaded {len(self._project_approvals)} project approvals from {approvals_file}"
                 )
             else:
                 self._project_approvals = set()
+                self._acp_project_grants = set()
+                self._acp_project_grant_metadata = {}
         except Exception as e:
             logger.warning(f"Failed to load project approvals: {e}")
             self._project_approvals = set()
+            self._acp_project_grants = set()
+            self._acp_project_grant_metadata = {}
 
     def _save_project_approvals(self) -> None:
         """Save project approvals to persistent storage."""
@@ -584,6 +611,8 @@ class PermissionManager:
 
             data = {
                 "approved_keys": list(self._project_approvals),
+                "acp_grants": sorted(self._acp_project_grants),
+                "acp_grant_metadata": self._acp_project_grant_metadata,
                 "updated_at": datetime.now().isoformat(),
             }
             approvals_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -621,14 +650,124 @@ class PermissionManager:
         logger.info(f"Recorded project approval: {key}")
 
     def clear_project_approvals(self) -> None:
-        """Clear all project approvals."""
+        """Clear all project approvals, including ACP grants."""
         self._project_approvals.clear()
+        self._acp_project_grants.clear()
+        self._acp_project_grant_metadata.clear()
         self._save_project_approvals()
         logger.info("Cleared all project approvals")
 
     def get_project_approvals(self) -> List[str]:
         """Get list of project approvals."""
         return sorted(self._project_approvals)
+
+
+    @staticmethod
+    def acp_grant_key(operation: Any, workspace: str, profile: str) -> str:
+        """Build a stable ACP-only grant key without changing native keys."""
+        payload = json.dumps(
+            {
+                "operation": operation,
+                "workspace": str(Path(workspace).expanduser().resolve()),
+                "profile": str(profile),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"acp:{digest}"
+
+    def grant_acp(self, operation: Any, workspace: str, profile: str, *, scope: str = "session") -> str:
+        """Store an ACP grant and display metadata in separate namespaces.
+
+        The opaque key remains the sole authorization primitive. Metadata is
+        persisted only to make the grant inventory auditable and revocable.
+        """
+        if scope not in ("session", "project"):
+            raise ValueError(f"invalid ACP grant scope: {scope}")
+        key = self.acp_grant_key(operation, workspace, profile)
+        # Capture a JSON-safe value at grant creation; callers may mutate their
+        # request object after approval, but the audit record must remain exact.
+        operation_snapshot = json.loads(json.dumps(operation, sort_keys=True))
+        target = self._acp_project_grants if scope == "project" else self._acp_session_grants
+        metadata_target = (
+            self._acp_project_grant_metadata
+            if scope == "project"
+            else self._acp_session_grant_metadata
+        )
+        target.add(key)
+        metadata_target[key] = {
+            "grant_key": key,
+            "operation": operation_snapshot,
+            "workspace": str(Path(workspace).expanduser().resolve()),
+            "profile": str(profile),
+            "scope": scope,
+            "source": "kollab",
+        }
+        if scope == "project":
+            self._save_project_approvals()
+        return key
+
+    def has_acp_grant(self, operation: Any, workspace: str, profile: str) -> bool:
+        key = self.acp_grant_key(operation, workspace, profile)
+        return key in self._acp_session_grants or key in self._acp_project_grants
+
+    def get_acp_grants(self) -> List[str]:
+        """Return opaque ACP keys for compatibility with existing callers."""
+        return sorted(self._acp_session_grants | self._acp_project_grants)
+
+    def get_acp_grant_inventory(self) -> List[Dict[str, Any]]:
+        """Return display-only metadata for Kollab-owned ACP grants.
+
+        Old hash-only records are retained with explicit unknown metadata rather
+        than guessed values. Vendor-saved ACP choices never enter these sets.
+        """
+        records: list[Dict[str, Any]] = []
+        for scope, keys, metadata in (
+            ("session", self._acp_session_grants, self._acp_session_grant_metadata),
+            ("project", self._acp_project_grants, self._acp_project_grant_metadata),
+        ):
+            for key in sorted(keys):
+                stored = metadata.get(key)
+                operation = workspace = profile = None
+                if isinstance(stored, dict):
+                    candidate_operation = stored.get("operation")
+                    candidate_workspace = stored.get("workspace")
+                    candidate_profile = stored.get("profile")
+                    try:
+                        candidate_workspace = str(Path(candidate_workspace).expanduser().resolve())
+                        candidate_profile = str(candidate_profile)
+                        expected = self.acp_grant_key(
+                            candidate_operation, candidate_workspace, candidate_profile
+                        )
+                        if expected == key:
+                            # JSON round-trip prevents exposing mutable/internal aliases.
+                            operation = json.loads(json.dumps(candidate_operation, sort_keys=True))
+                            workspace = candidate_workspace
+                            profile = candidate_profile
+                    except (TypeError, ValueError, OSError, json.JSONDecodeError):
+                        pass
+                # Identity, scope, and source derive from the authoritative set.
+                records.append({
+                    "grant_key": key,
+                    "operation": operation,
+                    "workspace": workspace,
+                    "profile": profile,
+                    "scope": scope,
+                    "source": "kollab",
+                })
+        return records
+
+    def clear_acp_grants(self, *, scope: str | None = None) -> None:
+        if scope not in (None, "session", "project"):
+            raise ValueError(f"invalid ACP grant scope: {scope}")
+        if scope in (None, "session"):
+            self._acp_session_grants.clear()
+            self._acp_session_grant_metadata.clear()
+        if scope in (None, "project"):
+            self._acp_project_grants.clear()
+            self._acp_project_grant_metadata.clear()
+            self._save_project_approvals()
 
     def _build_confirmation_details(
         self,
@@ -688,8 +827,10 @@ class PermissionManager:
         return self._stats.copy()
 
     def clear_session_approvals(self) -> None:
-        """Clear all session-scoped approvals."""
+        """Clear all session-scoped approvals, including ACP grants."""
         self._session_approvals.clear()
+        self._acp_session_grants.clear()
+        self._acp_session_grant_metadata.clear()
         logger.info("Session approvals cleared")
 
     async def _emit_permission_granted(

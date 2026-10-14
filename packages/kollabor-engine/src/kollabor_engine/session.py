@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
+from kollabor.state.snapshots import ProfileSnapshot
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_xml_tools import web_history
@@ -44,6 +45,7 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+ACP_STARTUP_TIMEOUT_SECONDS = 45.0
 
 
 def inline_profile_env(profile: Any) -> Dict[str, str]:
@@ -137,14 +139,17 @@ class EngineSession:
         agent: Optional[str] = None,
         identity: Optional[str] = None,
         solo: bool = False,
+        stop_on_owner_exit: bool = False,
     ):
         self.session_id = session_id
         self.solo = solo
+        self.stop_on_owner_exit = stop_on_owner_exit
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
         self.created_at = datetime.utcnow()
         self.profile = profile
+        self._profile_revision = 0
         self.agent = agent
         self.requested_identity = identity
         self.approval_mode = approval_mode
@@ -159,6 +164,7 @@ class EngineSession:
         self.device = ""
 
         self.daemon: Optional[DaemonHandle] = None
+        self._borrowed_daemon = False
 
         # Mirror of the daemon's conversation. The daemon is the source of
         # truth; this is refreshed on demand so synchronous readers (to_dict,
@@ -178,6 +184,9 @@ class EngineSession:
         # but the conversation keeps no trace, so a reloaded page asks here.
         # ``history_length`` places it after that turn's messages.
         self.last_turn_error: Optional[Dict[str, Any]] = None
+        self.acp_waiting = False
+        self.acp_plan: Dict[str, Any] = {}
+        self.acp_usage: Dict[str, Any] = {}
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -202,6 +211,17 @@ class EngineSession:
     async def initialize(self) -> None:
         """Spawn the daemon and start tracking its event stream."""
         profile_name = getattr(self.profile, "name", None) or str(self.profile or "")
+        is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
+        if is_acp:
+            from kollabor.llm.acp_bridge import ACPProfile
+
+            # Fail with installation guidance before creating a Hub identity.
+            ACPProfile.from_dict(profile_name, {
+                "command": getattr(self.profile, "command", None) or None,
+                "cwd": getattr(self.profile, "cwd", None) or self.workspace,
+                "env": getattr(self.profile, "env", None) or {},
+                "pass_env": getattr(self.profile, "pass_env", None) or (),
+            }).resolve()
         self.daemon = await get_daemon_pool().spawn(
             self.session_id,
             profile=profile_name or None,
@@ -212,7 +232,16 @@ class EngineSession:
             user_token=self.user_token,
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
+            stop_on_owner_exit=self.stop_on_owner_exit,
         )
+        if isinstance(self.profile, str):
+            # Inbound clients pass a portable profile name. The daemon loads
+            # it in the requested workspace, whose config can differ from the
+            # engine's cwd; read that authoritative provider before admission.
+            self.profile = await self.state.get_active_profile()
+            is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
+        if is_acp:
+            await self._await_acp_startup()
 
         if self.approval_mode:
             try:
@@ -245,6 +274,30 @@ class EngineSession:
         )
         await self.refresh_history()
 
+    async def _await_acp_startup(self) -> None:
+        """A connected daemon is usable only after its adapter has started."""
+        try:
+            async with asyncio.timeout(ACP_STARTUP_TIMEOUT_SECONDS):
+                while True:
+                    if not self.alive:
+                        raise RuntimeError("ACP daemon closed before startup completed")
+                    info = await self.state.get_system_info()
+                    status = getattr(info, "startup_state", "")
+                    if status == "failed":
+                        raise RuntimeError(info.startup_error or "ACP startup failed")
+                    if status == "ready":
+                        return
+                    await asyncio.sleep(0.05)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"ACP adapter did not become ready within {ACP_STARTUP_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
+        except Exception as exc:
+            startup_error = getattr(self.daemon, "startup_error", "")
+            if startup_error:
+                raise RuntimeError(startup_error) from exc
+            raise
+
     @classmethod
     async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":
         """Open a live agent this engine did not start (a discover_sessions row).
@@ -267,23 +320,36 @@ class EngineSession:
         if found.get("created_at"):
             started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
             session.created_at = started.replace(tzinfo=None)
-        session.daemon = await get_daemon_pool().adopt(session_id, found)
-        # Read in the background: a busy agent, or one on another computer whose
-        # replies queue behind its live events, answers late, and opening it must
-        # not wait on that. Its row fills in once it does.
-        session._facts_task = asyncio.create_task(
-            session._read_agent_facts(), name=f"session-facts-{session_id}"
-        )
-        session._event_task = asyncio.create_task(
-            session._track_events(), name=f"session-track-{session_id}"
-        )
-        await session.refresh_history()
+        try:
+            session.daemon = await get_daemon_pool().adopt(session_id, found)
+            # An existing pool-owned handle belongs to its original session;
+            # this attached view only owns its own subscriptions/tasks.
+            session._borrowed_daemon = session.daemon.launcher is not None
+            # Read in the background so opening a busy agent stays prompt.
+            session._facts_task = asyncio.create_task(
+                session._read_agent_facts(), name=f"session-facts-{session_id}"
+            )
+            session._event_task = asyncio.create_task(
+                session._track_events(), name=f"session-track-{session_id}"
+            )
+            await session.refresh_history()
+        except BaseException:
+            if session.daemon is not None:
+                try:
+                    await session.shutdown()
+                except BaseException as cleanup_error:
+                    logger.warning("adopted session cleanup failed (%s)", type(cleanup_error).__name__)
+            raise
         return session
 
     async def _read_agent_facts(self) -> None:
         """An adopted agent's profile, approval mode and, on another computer, folder."""
         try:
-            self.profile = await self.state.get_active_profile()
+            revision = self._profile_revision
+            profile = await self.state.get_active_profile()
+            # A profile-change event can arrive while this initial RPC waits.
+            if revision == self._profile_revision:
+                self.profile = profile
             mode = (await self.state.get_permission_state()).approval_mode
             self.approval_mode = str(mode or "").lower()
             if self.device:
@@ -301,7 +367,8 @@ class EngineSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-        await get_daemon_pool().stop(self.session_id)
+        if not self._borrowed_daemon:
+            await get_daemon_pool().stop(self.session_id)
         self.daemon = None
 
     # === daemon access ===
@@ -414,9 +481,21 @@ class EngineSession:
             self.history = web_history(self._raw_history)
             return self.history
 
-    async def send_message(self, content: Any) -> Dict[str, Any]:
+    async def send_message(
+        self,
+        content: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        origin_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        return await self.state.send_message(content)
+        return await self.state.send_message(
+            content,
+            request_id=request_id,
+            thread_id=thread_id,
+            origin_context=origin_context,
+        )
 
     def cancel_turn(self) -> None:
         """Ask the daemon to cancel the in-flight turn (fire and forget)."""
@@ -426,10 +505,25 @@ class EngineSession:
             self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
         )
 
+    async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
+        """Cancel only this admitted owner, without a current-turn fallback."""
+        if self.daemon is None or self.daemon.rpc is None:
+            return {"cancelled": False, "request_id": request_id}
+        result = await self.daemon.rpc.call(
+            "state.acp_cancel", {"request_id": request_id}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.acp_cancel expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if not isinstance(result.get("cancelled"), bool):
+            raise TypeError("state.acp_cancel expected a cancelled boolean")
+        return {**result, "request_id": request_id}
+
     # === permissions ===
 
     async def resolve_permission(
-        self, tool_id: str, decision: str, scope: str = "once"
+        self, tool_id: str, decision: str, scope: str = "once", option_id: str | None = None
     ) -> bool:
         """Answer a permission prompt the daemon is blocked on.
 
@@ -440,10 +534,13 @@ class EngineSession:
             return False
 
         response = _confirmation_response_name(decision, scope)
+        payload = {"tool_id": tool_id, "control": response}
+        if option_id is not None:
+            payload = {"tool_id": tool_id, "option_id": option_id}
         try:
             result = await self.daemon.rpc.call(
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": tool_id, "response": response, "scope": scope},
+                payload,
             )
         except Exception as e:
             logger.warning("permission response failed for %s: %s", tool_id, e)
@@ -471,6 +568,10 @@ class EngineSession:
                     turn_error = str(event.get("message") or "") or "engine error"
 
                 elif etype == "turn_complete":
+                    if event.get("input_source") == "acp_client" and event.get("queued") is True:
+                        # This admitted request was cancelled before a native
+                        # turn started; it has no history or usage to count.
+                        continue
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
@@ -489,9 +590,28 @@ class EngineSession:
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
                         self._pending_permissions[tool_id] = event
+                elif etype == "acp_waiting":
+                    self.acp_waiting = bool(event.get("waiting"))
+                elif etype == "plan":
+                    self.acp_plan = dict(event.get("payload") or {})
+                elif etype == "usage_update":
+                    self.acp_usage = dict(event.get("payload") or {})
 
-                elif etype in ("permission_granted", "permission_denied"):
+                elif etype in ("permission_granted", "permission_denied", "permission_cancelled"):
                     self._pending_permissions.pop(str(event.get("tool_id") or ""), None)
+                elif etype == "acp_session":
+                    self.acp_plan = {}
+                    self.acp_usage = {}
+                    self.acp_waiting = False
+                elif etype == "profile_changed":
+                    payload = event.get("profile")
+                    if isinstance(payload, dict) and payload.get("name"):
+                        self.profile = ProfileSnapshot.from_dict(payload)
+                        self._profile_revision += 1
+                        if self.profile.provider != "acp":
+                            self.acp_plan = {}
+                            self.acp_usage = {}
+                            self.acp_waiting = False
 
                 elif etype == "daemon_closed":
                     break
@@ -511,6 +631,11 @@ class EngineSession:
         )
         model = getattr(self.profile, "model", "")
         return {
+            "harness": (getattr(self.profile, "description", "") or getattr(self.profile, "name", "")) if getattr(self.profile, "provider", "") == "acp" else "",
+            "provider": getattr(self.profile, "provider", ""),
+            "acp_waiting": self.acp_waiting,
+            "acp_usage": self.acp_usage,
+            "acp_plan": self.acp_plan,
             "session_id": self.session_id,
             "name": self.display_name or session_display_name(self.session_id),
             "external": self.external,

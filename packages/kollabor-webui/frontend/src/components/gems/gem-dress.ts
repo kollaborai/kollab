@@ -429,14 +429,16 @@ function spider(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, 
 function drawSeasonAmbient(f: FaceFrame) {
   const { ctx, box, t } = f;
   const s = box.s;
+  const view = f.anchor.view;
   if (f.season === "halloween") {
-    // Bats looping overhead.
+    // Bats looping overhead, inside the layout box.
+    const reach = (view.x1 - view.x0) / 2 - 0.16;
     for (let i = 0; i < 2; i += 1) {
       const a = f.still ? f.seed + i * 2.1 : t * (0.9 + i * 0.25) + f.seed + i * 2.1;
       bat(
         ctx,
-        box.x + (0.5 + Math.cos(a) * 0.62) * s,
-        box.y + (-0.1 + Math.sin(a * 2) * 0.08) * s,
+        box.x + (0.5 + Math.cos(a) * reach) * s,
+        box.y + (view.y0 + 0.14 + Math.sin(a * 2) * 0.07) * s,
         s * (0.11 - i * 0.025),
         f.still ? 0.5 : Math.sin(t * 16 + i),
       );
@@ -446,7 +448,7 @@ function drawSeasonAmbient(f: FaceFrame) {
     if (cycle < 3.2) {
       const p = cycle < 0.8 ? cycle / 0.8 : cycle < 2.4 ? 1 : 1 - (cycle - 2.4) / 0.8;
       const x = box.x + 0.88 * s;
-      const top = box.y - 0.3 * s;
+      const top = box.y + (view.y0 + 0.01) * s;
       const y = top + p * 0.62 * s + Math.sin(t * 3) * 0.015 * s;
       ctx.strokeStyle = "rgba(220,220,230,0.6)";
       ctx.lineWidth = Math.max(0.5, s * 0.004);
@@ -456,16 +458,16 @@ function drawSeasonAmbient(f: FaceFrame) {
       ctx.stroke();
       spider(ctx, x, y, s * 0.05, t);
     }
-    // Low mist: a flattened glow that fades out well inside the canvas.
+    // Low mist: a flattened glow that fades out inside the layout box.
     ctx.save();
-    ctx.translate(box.x + (0.5 + (f.still ? 0 : Math.sin(t * 0.4 + f.seed) * 0.06)) * s, box.y + 1.02 * s);
-    ctx.scale(1, 0.32);
-    const mist = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 0.72);
+    ctx.translate(box.x + (0.5 + (f.still ? 0 : Math.sin(t * 0.4 + f.seed) * 0.06)) * s, box.y + (view.y1 - 0.1) * s);
+    ctx.scale(1, 0.17);
+    const mist = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 0.6);
     mist.addColorStop(0, "rgba(150,110,220,0.3)");
     mist.addColorStop(1, "rgba(150,110,220,0)");
     ctx.fillStyle = mist;
     ctx.beginPath();
-    ctx.arc(0, 0, s * 0.72, 0, TAU);
+    ctx.arc(0, 0, s * 0.6, 0, TAU);
     ctx.fill();
     ctx.restore();
   } else if (f.season === "xmas") {
@@ -475,8 +477,8 @@ function drawSeasonAmbient(f: FaceFrame) {
       ctx.globalAlpha = 0.85 * Math.sin(p * Math.PI);
       ctx.beginPath();
       ctx.arc(
-        box.x + (-0.25 + ((i * 0.377) % 1) * 1.5 + Math.sin(t * 0.9 + i) * 0.03) * s,
-        box.y + (-0.3 + p * 1.6) * s,
+        box.x + (view.x0 + 0.03 + ((i * 0.377) % 1) * (view.x1 - view.x0 - 0.06) + Math.sin(t * 0.9 + i) * 0.03) * s,
+        box.y + (view.y0 + p * (view.y1 - view.y0)) * s,
         Math.max(0.7, s * (0.008 + (i % 3) * 0.004)),
         0,
         TAU,

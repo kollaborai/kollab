@@ -40,9 +40,20 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
+def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """A cancelled pre-start client request cannot finish another active stream."""
+    return (event.get("type") == "turn_complete"
+            and event.get("input_source") == "acp_client"
+            and event.get("queued") is True
+            and str(event.get("request_id") or "") not in request_ids)
+
+
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
+    request_id: str | None = None
+    thread_id: str | None = None
+    origin_context: dict[str, Any] | None = None
 
 
 @router.post("/{session_id}/message")
@@ -58,7 +69,12 @@ async def send_message(session_id: str, body: MessageRequest):
     queue = session.subscribe()
 
     try:
-        accepted = await session.send_message(body.content)
+        accepted = await session.send_message(
+            body.content,
+            request_id=body.request_id,
+            thread_id=body.thread_id,
+            origin_context=body.origin_context,
+        )
     except Exception as e:
         session.unsubscribe(queue)
         logger.error("send_message failed for %s: %s", session_id, e)
@@ -68,7 +84,9 @@ async def send_message(session_id: str, body: MessageRequest):
         session.unsubscribe(queue)
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
-        raise HTTPException(status_code=status, detail=reason)
+        raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
+    request_id = accepted.get("request_id") or body.request_id
+    request_ids = {str(request_id)} if request_id else set()
 
     async def event_generator():
         try:
@@ -90,6 +108,8 @@ async def send_message(session_id: str, body: MessageRequest):
                     return
 
                 event.setdefault("session_id", session_id)
+                if _foreign_queued_client_completion(event, request_ids):
+                    continue
 
                 if event.get("type") == "daemon_closed":
                     yield {
@@ -268,6 +288,20 @@ def _assistant_set_tool_result(tool_controller, result: Any) -> None:
         tool_controller.set_result(result)
 
 
+def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Preserve ACP vendor metadata while keeping native defaults stable."""
+    event_type = str(event.get("type") or "")
+    result: Dict[str, Any] = {
+        "decision": "approve" if event_type == "permission_granted" else "deny",
+    }
+    if "scope" in event or not event.get("vendor_saved"):
+        result["scope"] = event.get("scope", "once")
+    for key in ("option_id", "vendor_saved", "warning"):
+        if key in event:
+            result[key] = event[key]
+    return result
+
+
 def _assistant_set_usage(controller: Any, usage: Dict[str, Any]) -> None:
     """Publish usage without assuming a plain dict state.
 
@@ -433,6 +467,49 @@ def _tool_completed_ms(started: int, event: Dict[str, Any]) -> int:
     if isinstance(elapsed, (int, float)) and elapsed > 0:
         return started + int(elapsed * 1000)
     return max(started, _now_ms())
+
+
+def _assistant_harness_tool_part(
+    update: Dict[str, Any], part: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Project one merged ACP card without treating its title as a native tool."""
+    if part is None:
+        part = {"type": "tool-call", "toolCallId": str(update["toolCallId"])}
+        # A reconnect may first observe a finished card. Its arrival time
+        # cannot establish a duration for work that happened before it.
+        if update.get("status") not in {"completed", "failed"}:
+            part["timing"] = {"startedAt": _now_ms()}
+    result = part.get("result")
+    metadata = result.get("metadata") if isinstance(result, dict) else None
+    previous = metadata.get("acp") if isinstance(metadata, dict) else None
+    if not isinstance(previous, dict):
+        previous = {}
+    payload = {**previous, **{key: value for key, value in update.items() if value is not None}}
+    status = str(payload.get("status") or "pending")
+    preliminary = status not in {"completed", "failed"}
+    tool_input = payload.get("rawInput")
+    if tool_input is None:
+        tool_input = {}
+    output = payload.get("rawOutput")
+    if output is None:
+        output = payload.get("content") or ""
+    part.update({
+        "toolName": "harness_tool",
+        "args": tool_input,
+        "argsText": json.dumps(tool_input, ensure_ascii=False),
+        "result": {"success": status != "failed", "output": output, "error": "",
+                   "metadata": {"acp": copy.deepcopy(payload)}},
+        "isError": status == "failed",
+        "isPreliminary": preliminary,
+    })
+    timing = part.get("timing")
+    if timing is None:
+        return part
+    if preliminary:
+        timing.pop("completedAt", None)
+    elif timing.get("completedAt") is None:
+        timing["completedAt"] = _tool_completed_ms(timing["startedAt"], update)
+    return part
 
 
 def _assistant_protocol_chunk(
@@ -671,6 +748,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             body.state.get("messages"), list
         )
         submitted_contents: List[MessageContent] = []
+        request_ids: set[str] = set()
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
@@ -747,9 +825,15 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
-                            str(accepted.get("reason", "message rejected"))
+                            str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
+                    if isinstance(body.state, dict) and body.state.get("error"):
+                        # Cancellation belongs to its previous turn. A new
+                        # admitted input must not keep that error as its status.
+                        controller.state["error"] = ""
+                    if accepted.get("request_id"):
+                        request_ids.add(str(accepted["request_id"]))
                     submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
@@ -772,9 +856,11 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             "permission decision must be approve or deny"
                         )
                         return
-                    resolved = await session.resolve_permission(
-                        source_tool_id, decision, scope
-                    )
+                    option_id = result.get("option_id") if isinstance(result, dict) else None
+                    if option_id is None:
+                        resolved = await session.resolve_permission(source_tool_id, decision, scope)
+                    else:
+                        resolved = await session.resolve_permission(source_tool_id, decision, scope, option_id=str(option_id))
                     saw_action = True
                     if not resolved:
                         controller.add_error(
@@ -812,6 +898,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
+                if _foreign_queued_client_completion(event, request_ids):
+                    continue
 
                 if event_type == "token":
                     token = str(event.get("text") or "")
@@ -832,7 +920,31 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     thinking = str(event.get("text") or "")
                     controller.append_reasoning(thinking)
                     add_streamed_text("reasoning", thinking)
+                elif event_type == "acp_update":
+                    update = event.get("update") or {}
+                    if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                        continue
+                    tool_id = str(update.get("toolCallId") or "")
+                    if not tool_id:
+                        continue
+                    tool_part = assistant_tool_parts.get(tool_id)
+                    if tool_part is None:
+                        tool_part = _assistant_harness_tool_part(update)
+                        assistant_tool_parts[tool_id] = tool_part
+                        assistant_parts.append(tool_part)
+                        tool_controller = await controller.add_tool_call("harness_tool", tool_id)
+                        tool_controllers[tool_id] = tool_controller
+                        tool_controller.append_args_text(tool_part["argsText"])
+                    else:
+                        _assistant_harness_tool_part(update, tool_part)
+                    if not tool_part["isPreliminary"]:
+                        tool_controller = tool_controllers.pop(tool_id, None)
+                        if tool_controller is not None:
+                            _assistant_set_tool_result(tool_controller, tool_part["result"])
+                    publish_progress()
                 elif event_type == "tool_start":
+                    if event.get("acp_passthrough"):
+                        continue
                     tool_id = str(event.get("tool_id") or "")
                     if not tool_id:
                         continue
@@ -873,6 +985,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             "risk_level": event.get("risk_level"),
                             "risk_reason": event.get("risk_reason"),
                             "input": event.get("input") or {},
+                            "details": event.get("details") or {},
+                            "acp_options": (event.get("details") or {}).get("acp_options", []),
                         },
                     }
                     permission_part["argsText"] = json.dumps(
@@ -895,6 +1009,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     # keeping this stream open would deadlock that follow-up.
                     return
                 elif event_type == "tool_result":
+                    if event.get("acp_passthrough"):
+                        continue
                     tool_id = str(event.get("tool_id") or "")
                     tool_controller = tool_controllers.pop(tool_id, None)
                     result = {
@@ -924,19 +1040,17 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     # else: adopted from the prior run; this run's wire stream
                     # never opened that call, so the state publish carries it.
                     publish_progress()
-                elif event_type == "permission_granted":
+                elif event_type in ("permission_granted", "permission_denied", "permission_cancelled"):
                     source_tool_id = str(event.get("tool_id") or "")
+                    permission_result = _permission_result_from_event(event)
                     permission_part = assistant_tool_parts.get(
                         f"permission_{source_tool_id}"
                     )
                     if permission_part is not None:
                         permission_part.update(
                             {
-                                "result": {
-                                    "decision": "approve",
-                                    "scope": event.get("scope", "once"),
-                                },
-                                "isError": False,
+                                "result": permission_result,
+                                "isError": permission_result["decision"] == "deny",
                             }
                         )
                     permission_controller = permission_controllers.pop(
@@ -945,31 +1059,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
-                            {
-                                "decision": "approve",
-                                "scope": event.get("scope", "once"),
-                            },
-                        )
-                    publish_progress()
-                elif event_type == "permission_denied":
-                    source_tool_id = str(event.get("tool_id") or "")
-                    permission_part = assistant_tool_parts.get(
-                        f"permission_{source_tool_id}"
-                    )
-                    if permission_part is not None:
-                        permission_part.update(
-                            {
-                                "result": {"decision": "deny"},
-                                "isError": True,
-                            }
-                        )
-                    permission_controller = permission_controllers.pop(
-                        source_tool_id, None
-                    )
-                    if permission_controller is not None:
-                        _assistant_set_tool_result(
-                            permission_controller,
-                            {"decision": "deny"},
+                            permission_result,
                         )
                     publish_progress()
                 elif event_type == "error":
@@ -1018,6 +1108,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
 
 
+class CancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, strict=True)
+
+
 @router.post("/{session_id}/cancel")
 async def cancel_turn(session_id: str):
     registry = get_session_registry()
@@ -1027,3 +1121,14 @@ async def cancel_turn(session_id: str):
 
     session.cancel_turn()
     return {"ok": True, "session_id": session_id}
+
+
+@router.post("/{session_id}/cancel-owned")
+async def cancel_owned_turn(session_id: str, body: CancelRequest):
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = await session.cancel_owned_turn(body.request_id)
+    return {**result, "ok": True, "session_id": session_id}

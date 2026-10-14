@@ -144,6 +144,16 @@ _prepend_dev_workspace_paths()
 
 def cli_main():
     """Run the interactive app, its headless account-free relay, or `kollab service`."""
+    if sys.argv[1:2] == ["acp"]:
+        from kollabor.acp_stdio import isolated_stdout
+        protocol = isolated_stdout()
+        from kollabor.acp_server import main as acp_main
+        return acp_main(sys.argv[2:], protocol=protocol)
+    if sys.argv[1:3] == ["mcp", "hub"]:
+        from kollabor.acp_stdio import isolated_stdout
+        protocol = isolated_stdout()
+        from kollabor.mcp_hub import main as mcp_hub_main
+        return mcp_hub_main(protocol=protocol)
     if sys.argv[1:2] == ["relay"]:
         if sys.argv[2:3] == ["run"]:
             from plugins.hub.relay_runtime import main

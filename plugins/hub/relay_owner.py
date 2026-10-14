@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
-import hashlib
 import json
 import math
 import os

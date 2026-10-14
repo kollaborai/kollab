@@ -9,7 +9,9 @@ real tool handler and the real router against a fake relay bridge.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -376,3 +378,228 @@ async def test_no_key_receipt_or_relay_address_in_any_remote_hub_msg_result():
 
     assert len([text for text in seen if text]) >= 12  # the scan saw real text
     assert [text for text in seen if LEAK.search(text)] == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_message_uses_nonhuman_acp_envelope():
+    from plugins.hub.models import HubMessage
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    llm = SimpleNamespace(submit_human_input=AsyncMock(return_value={
+        "status": "queued", "request_id": "req-agent", "turn_id": "turn-agent",
+    }))
+    message = HubMessage(
+        id="req-agent", action="message", from_identity=PEER,
+        from_agent=PEER, to="koordinator", content="agent task",
+        thread_id="thread-agent",
+    )
+    result = await plugin._submit_authenticated_agent_message(message, llm)
+    assert result["turn_id"] == "turn-agent"
+    llm.submit_human_input.assert_awaited_once_with(
+        "agent task", source="agent", request_id="req-agent",
+        thread_id="thread-agent",
+        origin_context={"sender": PEER, "sender_identity": PEER,
+                        "relay_turn_id": None, "correlated_relay_event": False,
+                        "authenticated": True, "operator": False},
+    )
+
+
+def test_authenticated_agent_route_requires_selected_active_acp():
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin.event_bus.get_service.return_value = SimpleNamespace(active=True)
+    llm = SimpleNamespace(
+        profile_manager=SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "native")
+        )
+    )
+    assert plugin._acp_agent_admission_enabled(llm) is False
+    plugin.event_bus.get_service.return_value = SimpleNamespace(active=False)
+    llm.profile_manager.get_active_profile = lambda: SimpleNamespace(
+        get_provider=lambda: "acp"
+    )
+    assert plugin._acp_agent_admission_enabled(llm) is False
+
+
+def test_authenticated_agent_route_falls_back_when_registry_lookup_fails():
+    event_bus = MagicMock()
+    event_bus.get_service.side_effect = RuntimeError("registry closed")
+    plugin = HubPlugin(event_bus=event_bus)
+    llm = SimpleNamespace(profile_manager=MagicMock())
+    assert plugin._acp_agent_admission_enabled(llm) is False
+
+
+def test_authenticated_agent_dispatch_is_tri_state_and_fail_closed_for_acp():
+    plugin = HubPlugin(event_bus=MagicMock())
+    llm = SimpleNamespace(
+        profile_manager=SimpleNamespace(
+            get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+        )
+    )
+    plugin.event_bus.get_service.return_value = None
+    assert plugin._agent_dispatch_mode(llm) == "unavailable"
+    plugin.event_bus.get_service.side_effect = RuntimeError("registry closed")
+    assert plugin._agent_dispatch_mode(llm) == "unavailable"
+    llm.profile_manager.get_active_profile = lambda: SimpleNamespace(
+        get_provider=lambda: "native"
+    )
+    assert plugin._agent_dispatch_mode(llm) == "native"
+
+
+@pytest.mark.asyncio
+async def test_acp_completion_forwards_one_reply_and_hidden_end_on_original_thread():
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._net_turn = _NetworkTurn(
+        handle=PEER, thread_id="thread-a", message_id="req-a",
+        opened_at=time.monotonic(), started=True,
+    )
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn.thread_id, turn.message_id, content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    await plugin.on_acp_completion(
+        request_id="req-a", turn_id=7, thread_id="thread-a", source="agent",
+        text="final answer", end_frame={"turnId": 7},
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert [item[2] for item in sent] == ["final answer", "The receiving agent finished this request."]
+    assert all(item[0:2] == ("thread-a", "req-a") for item in sent)
+    assert plugin._net_turn is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "answer", "error", "reply_marker", "frame_marker"),
+    [
+        ("end_turn", "", "", "without an answer", "finished"),
+        ("max_tokens", "Partial", "", "cut off", "cut off"),
+        ("refusal", "I cannot assist.", "", "I cannot assist", "refused"),
+        ("cancelled", "DRAFT", "", "stopped", "stopped"),
+        ("error", "", "ACPDisconnected", "ACPDisconnected", "ACPDisconnected"),
+    ],
+)
+async def test_acp_completion_normalizes_outcome_text(
+    outcome, answer, error, reply_marker, frame_marker
+):
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    turn = _NetworkTurn(
+        handle=PEER, thread_id="outcome-thread", message_id="outcome-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._acp_network_turns = {turn.message_id: turn}
+    sent = []
+
+    async def capture(bound, content, what, **metadata):
+        sent.append((content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    await plugin.on_acp_completion(
+        request_id=turn.message_id, turn_id=1, thread_id=turn.thread_id,
+        source="agent", text=answer,
+        end_frame={"stopReason": outcome, "error": error},
+        failed=outcome != "end_turn",
+    )
+
+    assert len(sent) == 2
+    assert reply_marker.lower() in sent[0][0].lower()
+    assert frame_marker.lower() in sent[1][0].lower()
+    assert sent[1][2]["turn_end"]["outcome"] == outcome
+    if outcome == "cancelled":
+        assert "DRAFT" not in sent[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "outcome", "marker", "detail"),
+    [
+        ("acp_queue_full", "busy", "busy", None),
+        ("acp_unavailable", "error", "harness failed", None),
+        ("acp_unavailable", "error", "harness failed",
+         "claude-agent-acp was not found. Install it or select another profile."),
+    ],
+)
+async def test_authenticated_acp_admission_rejection_settles_origin(
+    reason, outcome, marker, detail
+):
+    from plugins.hub.models import HubMessage
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn, content, what, metadata))
+        return True
+
+    plugin._send_on_thread = capture
+    admission = {"status": "rejected", "reason": reason}
+    if detail:
+        admission["message"] = detail
+    llm = SimpleNamespace(submit_human_input=AsyncMock(return_value=admission))
+    message = HubMessage(
+        id="rejected-request",
+        from_identity=PEER,
+        from_agent=PEER,
+        to="koordinator",
+        content="agent task",
+        thread_id="rejected-thread",
+    )
+
+    result = await plugin._submit_authenticated_agent_message(message, llm)
+
+    assert result == admission
+    assert len(sent) == 2
+    assert sent[0][2] == "reply" and marker in sent[0][1].lower()
+    assert sent[1][2] == "turn end"
+    assert sent[1][3]["turn_end"]["outcome"] == outcome
+    assert sent[1][3]["turn_end"]["failed"] is True
+    if detail:
+        assert detail in sent[0][1] and detail in sent[1][1]
+        assert sent[0][0].thread_id == sent[1][0].thread_id == message.thread_id
+        assert sent[0][0].message_id == sent[1][0].message_id == message.id
+    assert message.id not in plugin._acp_network_turns
+
+
+@pytest.mark.asyncio
+async def test_acp_origin_settlement_releases_matching_network_gate_only():
+    from plugins.hub.plugin import _NetworkTurn
+
+    plugin = HubPlugin(event_bus=MagicMock())
+    sent = []
+
+    async def capture(turn, content, what, **metadata):
+        sent.append((turn.message_id, what))
+        return True
+
+    plugin._send_on_thread = capture
+    current = _NetworkTurn(
+        handle=PEER, thread_id="same-thread", message_id="same-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    clone = _NetworkTurn(
+        handle=PEER, thread_id=current.thread_id, message_id=current.message_id,
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._net_turn = current
+    await plugin._end_network_turn(
+        clone, failed=True, acp=True, outcome="error", outcome_text="failed"
+    )
+    assert plugin._net_turn is None
+    assert sent == [("same-request", "reply"), ("same-request", "turn end")]
+
+    other = _NetworkTurn(
+        handle=PEER, thread_id="other-thread", message_id="other-request",
+        opened_at=time.monotonic(), started=True,
+    )
+    plugin._net_turn = other
+    await plugin._end_network_turn(
+        clone, failed=True, acp=True, outcome="error", outcome_text="failed"
+    )
+    assert plugin._net_turn is other

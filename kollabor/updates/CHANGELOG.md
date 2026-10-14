@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-14
+
+### Added
+- Expose Kollab to ACP clients with `kollab acp`, with owned and attached sessions, shared permissions, tool notifications and cancellation.
+- Add native macOS desktop-wrapper source with a window, menu-bar controls, launch at login and owned runtime startup/shutdown.
+
+### Fixed
+- ACP harnesses now finish startup before accepting work and preserve provider refusal details instead of reporting a generic unavailable error.
+- Hub requests to ACP agents retain authenticated ownership, queue independently and deliver correlated replies and final outcomes to their requester.
+- Permission choices retain the vendor's exact option IDs across terminal and web clients. Stop remains available while an owned permission is pending, including after reload.
+- Cancellation, timeout and shutdown settle their owned work without consuming another turn's output; attached sessions retain their external runtime.
+- Saved conversations retain merged tool cards, file changes, metadata and original timestamps through resume. Harness identity, usage and cost stay visible in the roster and session header.
+- Terminal ACP output no longer overwrites active input or diagnostic rows. Long permission choices wrap inside their cards.
+- Web gem hats and seasonal effects fit inside avatar rows, and harness costs use the terminal's currency formatting.
+
+### Qualification limits
+- Gemini's positive model/tool/permission/cancel checks still require supported authentication. Consumer Google OAuth is not a supported route; no Gemini API key or ready Vertex setup was configured in the checked environment.
+- The user-runtime restore retained local conversation data, but Claude vendor IDs rotated; exact vendor-session continuity remains unverified. See `docs/specs/acp-bridge-phase1.md` for the recorded provider and client evidence.
+
 ## [0.15.7] - 2026-10-13
 
 ### Added

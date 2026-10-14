@@ -42,3 +42,4 @@ async def test_deferred_startup_failure_stops_foreground_runtime():
     assert app.render_loop.stopped is True
     assert app._startup_complete is False
     assert app._startup_ready.is_set()
+    assert app._get_startup_status() == ("failed", "hook initialization exploded")

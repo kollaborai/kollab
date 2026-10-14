@@ -141,6 +141,7 @@ class SessionStats(Snapshot):
     cost_usd: float = 0.0
     total_cost_usd: float = 0.0
     session_id: str = ""
+    acp_usage: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SessionStats":
@@ -205,6 +206,8 @@ class PermissionSnapshot(Snapshot):
     approval_mode: str = "TRUST_ALL"
     session_approvals_count: int = 0
     project_approvals_count: int = 0
+    # Display-only Kollab ACP grants; never used for authorization.
+    acp_grants: list[dict[str, Any]] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
 
 
@@ -492,6 +495,9 @@ class SystemInfoSnapshot(Snapshot):
     # listening now. Both False when the voice plugin is not loaded.
     voice_requested: bool = False
     voice_running: bool = False
+    # A published Hub socket precedes deferred provider/adapter startup.
+    startup_state: str = ""
+    startup_error: str = ""
 
 
 # === Phase 4.5: agent / skill / system_prompt snapshots ===

@@ -350,7 +350,6 @@ class OpenAIProvider(LLMProvider):
     async def _cleanup(self) -> None:
         """Cleanup OpenAI client resources."""
         if self._client:
-            # Close the client (close() is synchronous in AsyncOpenAI)
-            self._client.close()
+            await self._client.close()
             self._client = None
             logger.debug("OpenAI client closed")

@@ -303,7 +303,9 @@ async def test_an_agent_on_another_computer_reports_its_own_folder(monkeypatch):
 
     async def adopt(self, session_id, found):
         return SimpleNamespace(
-            state=State(), alive=True, pid=0, identity="koordinator", agent_name="", subscribe=asyncio.Queue
+            state=State(), alive=True, pid=0, identity="koordinator", agent_name="", subscribe=asyncio.Queue,
+            launcher=None,
+            unsubscribe=lambda queue: None,
         )
 
     monkeypatch.setattr(daemon_pool.DaemonPool, "adopt", adopt)
@@ -320,4 +322,4 @@ async def test_an_agent_on_another_computer_reports_its_own_folder(monkeypatch):
         assert asked == ["system"]
     finally:
         for session in (remote, local):
-            session._event_task.cancel()
+            await session.shutdown()

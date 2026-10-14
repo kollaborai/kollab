@@ -1,4 +1,9 @@
 export type Session = {
+  harness?: string;
+  provider?: string;
+  acp_waiting?: boolean;
+  acp_usage?: { used?: number; size?: number; cost?: { amount?: string | number; currency?: string } };
+  acp_plan?: { entries?: Array<{ content: string; priority?: string; status?: string }> };
   session_id: string;
   name?: string;
   profile?: string;
@@ -95,6 +100,10 @@ export type PermissionPrompt = {
   input?: Record<string, unknown>;
   risk_level?: string;
   risk_reason?: string;
+  details?: Record<string, unknown> & {
+    source?: string;
+    acp_options?: Array<{ optionId: string; name: string; kind: string }>;
+  };
 };
 
 export type Profile = {
@@ -169,6 +178,8 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  harness?: string;
+  acp_waiting?: boolean;
   /** The workspace (folder label) the agent runs in, once memberships carry it (#158). */
   workspace?: string;
   /** The network the agent runs on, once memberships carry it (#158). */
@@ -877,6 +888,13 @@ export class EngineApi {
     return this.json<{ ok: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/cancel`,
       { method: "POST" },
+    );
+  }
+
+  cancelOwned(sessionId: string, requestId: string) {
+    return this.json<{ ok: boolean; cancelled: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/cancel-owned`,
+      { method: "POST", body: JSON.stringify({ request_id: requestId }) },
     );
   }
 

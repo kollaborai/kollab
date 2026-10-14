@@ -439,7 +439,9 @@ async def test_route_message_resolves_a_handle_and_sends_with_no_grant():
     assert sent["content"] == "check the tunnel"
     # The message's own thread rides along so an answer can name it.
     assert sent["kwargs"] == {"kind": "message", "thread_id": msg.thread_id, "reply_to": ""}
-    assert msg.metadata["network"] == {"to": "relay:resolved:infra@home-server"}
+    assert msg.metadata["network"] == {
+        "to": "relay:resolved:infra@home-server", "request_id": "x",
+    }
 
 
 @pytest.mark.asyncio
@@ -557,6 +559,38 @@ async def test_format_status_lists_remote_agents_with_device_online_state():
     assert "ops@home-server - working (device offline)" in status
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["status", "agents"])
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_native_roster_labels_each_harness_and_its_permission_state(surface, waiting):
+    def agent(name, **extra):
+        return SimpleNamespace(
+            identity=name, agent_id=name, is_coordinator=False, state="working",
+            current_task="", project="", cooldown_until=0, waiting_reason="", **extra,
+        )
+
+    native = agent("native")  # Native presence need not carry a tags field.
+    native.state = "idle"
+    native.is_coordinator = True
+    claude = agent("claude", tags={"harness": "Claude Code over ACP"})
+    codex = agent("codex", tags={"harness": "Codex over ACP", "acp_waiting": waiting})
+    hub = HubPlugin.__new__(HubPlugin)
+    hub._identity = native
+    hub._presence = SimpleNamespace(get_cached_agents=lambda: [native, claude, codex])
+    hub._work_queue = hub._task_ledger = None
+    hub._remote_agent_rows = lambda: []
+    hub._format_cockpit_lines = lambda: []
+
+    output = hub._format_status() if surface == "status" else await hub._handle_agents_command()
+
+    assert "native (coordinator) (you): idle" in output
+    assert "claude (Claude Code over ACP): working" in output
+    state = "waiting for your OK" if waiting else "working"
+    assert f"codex (Codex over ACP): {state}" in output
+    assert output.count("Claude Code over ACP") == output.count("Codex over ACP") == 1
+    assert "native (Codex" not in output and "native (Claude" not in output
+
+
 # --------------------------------------------------------------------- #
 # Hub context: network line, this device, remote rows, the two section 7
 # lines about agent@device.
@@ -660,6 +694,7 @@ async def test_route_message_awaits_resolve_handle():
 
     async def send(address, content, kind="message", thread_id="", reply_to=""):
         sent.append((address, content, kind))
+        return {"id": "owned-wire-id", "state": "delivered"}
 
     hub._relay_agent = SimpleNamespace(resolve_handle=resolve_handle, send=send, trust_level=lambda: "open")
     hub._trace_delivery = lambda *a, **k: None
@@ -669,7 +704,9 @@ async def test_route_message_awaits_resolve_handle():
 
     assert rejections == []
     assert sent == [(REMOTE_ROWS[0]["address"], "check the tunnel", "message")]
-    assert message.metadata["network"] == {"to": REMOTE_ROWS[0]["address"]}
+    assert message.metadata["network"] == {
+        "to": REMOTE_ROWS[0]["address"], "request_id": "owned-wire-id",
+    }
 
 
 @pytest.mark.asyncio

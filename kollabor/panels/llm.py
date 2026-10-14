@@ -121,6 +121,8 @@ def model_note(model: str, provider: str = "") -> str:
 def loadout_note(loadout: Any) -> str:
     """Right-aligned dim row note: ``model • 1M ctx • $5/$30 [• overrides]``."""
     parts = [loadout.model]
+    if getattr(loadout, "provider_profile", "") == loadout.name and getattr(loadout, "description", ""):
+        return loadout.description
     note = model_note(loadout.model)
     if note:
         parts.append(note)
@@ -230,13 +232,20 @@ def build_sections(manager: Any, profile_manager: Any) -> List[Tuple[str, List[A
         profiles = []
 
     claimed: set = set()
+    acp_rows: list = []
     for entry in profiles:
         name, provider = resolve_profile_entry(profile_manager, entry)
         if not name or name in claimed:
             continue
         claimed.add(name)
         rows = [m for m in implicit if m.provider_profile == name]
+        if (provider or "").lower() == "acp":
+            acp_rows.extend(rows)
+            continue
         sections.append((f"Models — {provider_display(provider or name)}", rows))
+
+    if acp_rows:
+        sections.append(("ACP Agents", acp_rows))
 
     # Keep any implicit loadout visible even if provider_profiles() missed its
     # profile, so a mismatch between the two manager methods never drops rows.
@@ -246,7 +255,15 @@ def build_sections(manager: Any, profile_manager: Any) -> List[Tuple[str, List[A
             by_profile.setdefault(entry.provider_profile, []).append(entry)
     for profile_name, rows in by_profile.items():
         provider = resolve_provider_type(profile_manager, profile_name)
-        sections.append((f"Models — {provider_display(provider or profile_name)}", rows))
+        if (provider or "").lower() == "acp":
+            for index, (title, existing_rows) in enumerate(sections):
+                if title == "ACP agents":
+                    existing_rows.extend(rows)
+                    break
+            else:
+                sections.append(("ACP agents", rows))
+        else:
+            sections.append((f"Models — {provider_display(provider or profile_name)}", rows))
     return sections
 
 

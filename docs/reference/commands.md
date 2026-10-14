@@ -1,7 +1,7 @@
 ---
 title: "Kollab Command Reference"
 created: 2026-04-06
-modified: 2026-09-26
+modified: 2026-10-13
 status: active
 ---
 # Kollab Command Reference
@@ -81,6 +81,33 @@ manage agents from CLI (no TUI needed):
 launch an organization:
   kollab --detached --org startup        start agent + spawn org team
 
+
+## ACP Harnesses and Clients
+
+The current ACP implementation is under review; real adapter and client runs
+are still required to qualify it.
+
+```sh
+kollab --as claude --llm claude-code --detached
+kollab --attach claude
+kollab acp
+kollab acp --llm my-profile
+kollab acp --attach lapis
+```
+
+The built-in harness profiles are `claude-code`, `codex-cli` and `gemini-cli`.
+Their model and effort are managed by the harness. `/llm` changes harnesses;
+`/clear` opens fresh context and `/resume` attempts the stored harness session.
+
+`kollab acp` reserves stdout for ACP v1 messages. An owned session stops its
+daemon when stdin closes; `--attach` detaches from the existing agent. Client
+prompts and cancels are scoped to their own queued or active requests.
+
+`kollab mcp hub` is the bound stdio MCP server supplied to a harness. It exposes
+`hub_status`, `hub_agents`, `hub_msg`, `hub_ask` and `hub_spawn`; its token and
+generation are supplied by its hosting daemon. It is not a standalone login.
+
+See [ACP agents](../features/acp.md) for setup, ownership and permission behavior.
 
 ## CLI Flags
 

@@ -45,6 +45,10 @@ async def test_mcp_sdk_live_parent_binding_revoke():
             async with stdio_client(params) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
+                    listed = await session.list_tools()
+                    assert {tool.name for tool in listed.tools} == {
+                        "hub_status", "hub_agents", "hub_msg", "hub_ask", "hub_spawn",
+                    }
                     result = await session.call_tool("hub_status", {})
                     assert "parent-agent" in result.content[0].text
                     current["valid"] = False

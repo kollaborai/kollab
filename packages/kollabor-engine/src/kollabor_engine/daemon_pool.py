@@ -99,7 +99,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "risk_reason": details.get("risk_reason", ""),
         "details": details,
     }
-    for key in ("ts", "session_id"):
+    for key in ("ts", "session_id", "request_id", "turn_id", "input_source", "generation"):
         if key in event:
             flat[key] = event[key]
     return flat
@@ -144,6 +144,7 @@ class DaemonHandle:
         self._read_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
+        self.startup_error: str = ""
 
         self.rpc: Any = None
         self.state: Any = None
@@ -219,6 +220,8 @@ class DaemonHandle:
                 if message.get("type") in _RENDERED_EVENT_TYPES:
                     continue
 
+                if message.get("type") == "error" and message.get("phase") == "startup":
+                    self.startup_error = str(message.get("message") or "ACP startup failed")
                 self._fan_out(_normalize_event(message))
         except asyncio.CancelledError:
             raise
@@ -455,6 +458,7 @@ class DaemonPool:
         user_token: Optional[str] = None,
         solo: bool = False,
         profile_env: Optional[Dict[str, str]] = None,
+        stop_on_owner_exit: bool = False,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -493,6 +497,16 @@ class DaemonPool:
                 env.pop("KOLLAB_HUB_SOLO", None)
             # An inline profile (request credentials) exists only in these vars.
             env.update(profile_env or {})
+            if stop_on_owner_exit:
+                import psutil
+
+                # ACP's stdio process owns this daemon even when a client drops
+                # the process before its finally block can run. Ordinary
+                # detached/Web sessions keep their independent lifetime.
+                env["KOLLAB_PARENT_PID"] = str(os.getpid())
+                env["KOLLAB_PARENT_CREATE_TIME"] = str(
+                    psutil.Process(os.getpid()).create_time()
+                )
 
             cwd = workspace or os.getcwd()
             if not Path(cwd).is_dir():
@@ -526,8 +540,11 @@ class DaemonPool:
                             if time.monotonic() >= deadline:
                                 raise
                             await asyncio.sleep(0.25)
-                except Exception:
-                    await handle.close()
+                except BaseException:
+                    try:
+                        await handle.close()
+                    except BaseException as cleanup_error:
+                        logger.warning("failed daemon startup cleanup (%s)", type(cleanup_error).__name__)
                     raise
 
                 self._daemons[session_id] = handle
@@ -551,8 +568,11 @@ class DaemonPool:
             handle.agent_name = str(found.get("agent") or "")
             try:
                 await handle.connect(str(found.get("socket_path") or ""))
-            except Exception:
-                await handle.close()
+            except BaseException:
+                try:
+                    await handle.close()
+                except BaseException as cleanup_error:
+                    logger.warning("failed daemon attach cleanup (%s)", type(cleanup_error).__name__)
                 raise
             self._daemons[session_id] = handle
             return handle
@@ -615,11 +635,20 @@ class DaemonPool:
         )
 
     async def stop(self, session_id: str) -> bool:
-        handle = self._daemons.pop(session_id, None)
-        if handle is None:
-            return False
-        await handle.close()
-        return True
+        async with self._spawn_lock:
+            handle = self._daemons.get(session_id)
+            if handle is None:
+                return False
+            try:
+                await handle.close()
+            except BaseException:
+                # Keep the owner reachable for a later EOF/shutdown retry.
+                # close() reserves its closed flag before awaited cleanup.
+                handle._closed = False
+                raise
+            if self._daemons.get(session_id) is handle:
+                self._daemons.pop(session_id)
+            return True
 
     async def stop_all(self) -> None:
         for session_id in list(self._daemons):

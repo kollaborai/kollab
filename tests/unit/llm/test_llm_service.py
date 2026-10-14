@@ -10,6 +10,7 @@ import os
 # Import the components we're testing
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -689,6 +690,55 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         self.assertEqual(len(calls), 5)
 
 
+    def test_selected_acp_cancel_reaches_orchestrator(self):
+        async def scenario():
+            acp = SimpleNamespace(active=True, cancel=AsyncMock())
+            self.service.profile_manager = SimpleNamespace(
+                get_active_profile=lambda: SimpleNamespace(
+                get_provider=lambda: "acp"
+                )
+            )
+            self.service.event_bus.get_service.return_value = acp
+            generation = self.service.cancel_current_request()
+            await self.service.wait_for_tasks()
+            self.assertIsInstance(generation, int)
+            acp.cancel.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     # Run tests
     unittest.main(verbosity=2)
+
+
+class TestACPStartupSelection(unittest.TestCase):
+    def test_acp_profile_skips_native_api_and_provider_initialization(self):
+        service = LLMService(config=MagicMock(), event_bus=MagicMock(), renderer=MagicMock())
+        service.profile_manager = MagicMock()
+        service.profile_manager.get_active_profile.return_value = SimpleNamespace(provider="acp")
+        service.api_service.initialize = AsyncMock()
+        service._initialize_provider = AsyncMock()
+        service.hook_system.register_hooks = AsyncMock()
+        service._initialize_conversation = AsyncMock()
+        service.conversation_logger.log_conversation_start = AsyncMock()
+        service._set_conversation_context = MagicMock()
+        service.task_config.background_tasks.enable_monitoring = False
+        asyncio.run(service.initialize())
+        service.api_service.initialize.assert_not_awaited()
+        service._initialize_provider.assert_not_awaited()
+
+    def test_native_profile_keeps_api_and_provider_initialization(self):
+        service = LLMService(config=MagicMock(), event_bus=MagicMock(), renderer=MagicMock())
+        service.profile_manager = MagicMock()
+        service.profile_manager.get_active_profile.return_value = SimpleNamespace(provider="openai")
+        service.api_service.initialize = AsyncMock()
+        service._initialize_provider = AsyncMock()
+        service.hook_system.register_hooks = AsyncMock()
+        service._initialize_conversation = AsyncMock()
+        service.conversation_logger.log_conversation_start = AsyncMock()
+        service._set_conversation_context = MagicMock()
+        service.task_config.background_tasks.enable_monitoring = False
+        asyncio.run(service.initialize())
+        service.api_service.initialize.assert_awaited_once()
+        service._initialize_provider.assert_awaited_once()

@@ -514,6 +514,7 @@ class MCPIntegration:
             agent_manager: Optional agent manager for bundle-scoped built-in tools
         """
         self.mcp_servers: Dict[str, Dict[str, Any]] = {}
+        self.session_servers: Dict[str, Dict[str, Any]] = {}
         self.tool_registry: Dict[str, Dict[str, Any]] = {}
         self.server_connections: Dict[str, MCPServerConnection] = {}
         # Connections are tracked while they are being established as well as
@@ -841,6 +842,7 @@ class MCPIntegration:
         await self.shutdown()
         self.mcp_servers.clear()
         self._load_mcp_config()
+        self.mcp_servers.update(self.session_servers)
         try:
             discovered = await self.discover_mcp_servers()
         finally:

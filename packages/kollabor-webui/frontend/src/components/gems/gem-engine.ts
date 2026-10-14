@@ -28,8 +28,9 @@ import { gemMood, gemSpec, type GemMood, type GemSpec } from "./gem-specs";
  * would fall over with a busy hub. Instead a single offscreen renderer draws
  * each visible avatar in turn and blits the pixels into that avatar's own 2D
  * canvas, which then gets a 2D pass: halo, glints, and the personality layer
- * from gem-face.ts. The canvas is GEM_PAD times the layout box so hats,
- * laptops and flying keyboards have room around the stone.
+ * from gem-face.ts. The gem and its hat sit inside the layout box (FIT, SINK);
+ * the canvas is GEM_PAD times the box so laptops, thought bubbles and flying
+ * keyboards have room around the stone.
  * Idle gems repaint at 30fps, busy gems every frame, offline gems once.
  *
  * The body is a soft gem (gem-blob.ts) that is always moving: it breathes,
@@ -39,6 +40,15 @@ import { gemMood, gemSpec, type GemMood, type GemSpec } from "./gem-specs";
  */
 
 export const GEM_PAD = 1.6;
+
+/**
+ * The gem is drawn FIT of its layout box and SINK (a fraction of the box) lower
+ * in it, so the stone and its hat sit inside the box and never reach into the
+ * row above. The camera zooms and slides by the same amounts, and the 2D layers
+ * draw into the matching frame.
+ */
+const FIT = 0.84;
+const SINK = 0.13;
 
 /**
  * How a gem's body moves: "mood" takes a shape for what it is doing (a cloud
@@ -174,8 +184,20 @@ const MAX_PIXEL_RATIO = 2;
 const FRAME_BUDGET_MS = 8;
 const WHITE = new Color(1, 1, 1);
 const ANGRY = new Color("#ff2d20");
+// The layout box in frame fractions: the room a hat, bat or thread has.
+const FRAME_TOP = 0.5 + SINK - FIT / 2;
+const VIEW = {
+  x0: (FIT - 1) / (2 * FIT),
+  x1: (FIT + 1) / (2 * FIT),
+  y0: -FRAME_TOP / FIT,
+  y1: (1 - FRAME_TOP) / FIT,
+};
 /** Where the face, hat and props sit on the soft gem, as fractions of its box. */
-const ANCHOR: FaceAnchor = { x: 0.5, y: 0.5, gap: 1.15, hatY: 0.15, hatScale: 0.9 };
+const ANCHOR: FaceAnchor = { x: 0.5, y: 0.5, gap: 1.15, hatY: 0.15, hatScale: 0.66, view: VIEW };
+// The hat is seated this far toward the face from the crown (body-local, of its height), so a
+// turn, lean or hop carries it sideways the way it carries the face. 0 is the pole, which a turn
+// never moves; past about 0.9 the hat slides down onto the brow and tilts off the head.
+const HAT_FWD = 0.75;
 /** How big the face is drawn against the body. */
 const FACE_SCALE = 1.24;
 const BUSY: ReadonlySet<Activity> = new Set([
@@ -312,6 +334,9 @@ class GemEngine {
       });
       this.camera.position.set(0, 0, CAMERA_DISTANCE);
       this.camera.updateMatrixWorld();
+      // Zoom out to the gem's frame and slide it down, so the figure lands in the box.
+      this.camera.zoom = FIT;
+      this.camera.setViewOffset(1, 1, 0, -SINK / GEM_PAD, 1, 1);
       this.material = bodyMaterial();
       this.body = new Mesh(bodyGeometry(), this.material);
       this.body.frustumCulled = false;
@@ -759,9 +784,11 @@ class GemEngine {
     const glow = Math.min(1.1, avatar.glow + avatar.burst * 0.7);
     this.pose(avatar, activity, t, glow);
 
-    const g = avatar.gemPx;
+    // The gem's frame: FIT of the layout box and SINK lower, as the camera draws it.
+    const g = avatar.gemPx * FIT;
     const px = avatar.px;
     const o = Math.floor((px - g) / 2);
+    const oy = Math.floor((px - g) / 2 + SINK * avatar.gemPx);
     renderer.setViewport(0, 0, px, px);
     renderer.setScissor(0, 0, px, px);
     renderer.setScissorTest(true);
@@ -774,9 +801,10 @@ class GemEngine {
     const glowColor = activity === "error" ? ANGRY.clone() : avatar.base.clone().lerp(WHITE, 0.3);
     const lift = avatar.bob * g * WORLD_TO_FRAME;
     const slideX = avatar.slide * g * WORLD_TO_FRAME;
-    const center = o + g / 2;
+    const cx = o + g / 2;
+    const cy = oy + g / 2;
     if (glow > 0.03) {
-      const halo = ctx.createRadialGradient(center + slideX, center - lift, 0, center + slideX, center - lift, g * 0.58);
+      const halo = ctx.createRadialGradient(cx + slideX, cy - lift, 0, cx + slideX, cy - lift, g * 0.58);
       halo.addColorStop(0, rgbString(glowColor, Math.min(0.32, 0.3 * glow)));
       halo.addColorStop(0.5, rgbString(glowColor, Math.min(0.14, 0.12 * glow)));
       halo.addColorStop(1, rgbString(glowColor, 0));
@@ -793,7 +821,7 @@ class GemEngine {
       t,
       since: t - avatar.activitySince,
       prev: avatar.prev,
-      box: { x: o, y: o, s: g },
+      box: { x: o, y: oy, s: g },
       anchor: ANCHOR,
       shift: { x: 0, y: 0 },
       look: avatar.look,
@@ -820,7 +848,7 @@ class GemEngine {
     // WebGL's viewport origin is bottom-left; the canvas's render sits in the
     // buffer's bottom-left corner.
     ctx.drawImage(renderer.domElement, 0, this.bufferPx - px, px, px, 0, 0, px, px);
-    this.drawGlints(avatar, o + slideX, o - lift, g);
+    this.drawGlints(avatar, o + slideX, oy - lift, g);
     if (face === "none") return;
 
     // The face, hat and held tools are seated on the surface, so they ride the
@@ -836,13 +864,16 @@ class GemEngine {
     const vy = Math.abs(avatar.gaze[1].v);
     const sx = 1 + Math.min(vx * 0.04, 0.24) - Math.min(vy * 0.02, 0.12);
     const sy = 1 + Math.min(vy * 0.04, 0.24) - Math.min(vx * 0.02, 0.12);
-    // The hat sits on the crown and tilts with the body, but never turns flat.
+    // The hat sits on the crown, toward the face while the face shows (it settles back to the
+    // pole as the gem spins away), and tilts with the surface, but never turns flat. It keeps
+    // the pole's size, so seating it forward does not swell it.
     // It goes on first, so a face turned toward a headphone cup passes in front.
     bodyPoint(weights, 0, 1, 0, avatar.wob, t, avatar.shear, P);
-    this.project(P, px, c0);
-    this.project(U.set(0, 0.05, 0).add(P), px, c1);
-    const crown = Math.atan2(c1.x - c0.x, -(c1.y - c0.y));
     const near = CAMERA_DISTANCE / (CAMERA_DISTANCE - P.applyMatrix4(body.matrixWorld).z);
+    bodyPoint(weights, 0, 1, HAT_FWD * seat.vis, avatar.wob, t, avatar.shear, P);
+    this.project(P, px, c0);
+    this.project(U.copy(P).multiplyScalar(1.06), px, c1);
+    const crown = Math.atan2(c1.x - c0.x, -(c1.y - c0.y));
     ctx.save();
     ctx.setTransform(Math.cos(crown) * near, Math.sin(crown) * near, -Math.sin(crown) * near, Math.cos(crown) * near, c0.x, c0.y);
     drawHat({ ...frame, box: { x: -0.5 * g, y: -ANCHOR.hatY * g, s: g } });

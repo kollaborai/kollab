@@ -56,6 +56,14 @@ from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
 
+
+def _acp_unavailable_result(acp: Any) -> Dict[str, Any]:
+    result = {"status": "rejected", "reason": "acp_unavailable"}
+    error = getattr(acp, "startup_error", None)
+    if isinstance(error, str) and error:
+        result["message"] = f"ACP could not start: {error}"
+    return result
+
 _ACTIVE_OPERATION_PHASES = frozenset(
     {
         "provider_request",
@@ -967,7 +975,12 @@ class LLMService:
 
     @property
     def is_processing(self) -> bool:
-        return cast(bool, self._queue_processor.is_processing)
+        native = cast(bool, self._queue_processor.is_processing)
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+            return native or getattr(acp, "is_processing", False) is True
+        except Exception:
+            return native
 
     @is_processing.setter
     def is_processing(self, value: bool):
@@ -1021,13 +1034,31 @@ class LLMService:
         if hasattr(self, "_queue_processor"):
             self._queue_processor.processing_start_time = value
 
+    def _active_profile_is_acp(self) -> bool:
+        """Return whether the selected profile is handled by the ACP runner."""
+        try:
+            if self.profile_manager is None:
+                return False
+            profile = self.profile_manager.get_active_profile()
+            if isinstance(profile, dict):
+                provider = profile.get("provider", "")
+            elif hasattr(profile, "get_provider"):
+                provider = profile.get_provider()
+            else:
+                provider = getattr(profile, "provider", "")
+            return str(provider).lower() == "acp"
+        except Exception:
+            # Profile discovery failures preserve native startup behavior.
+            return False
+
     async def initialize(self) -> bool:
         """Initialize the LLM service components."""
-        # Initialize API communication service (KISS refactoring)
-        await self.api_service.initialize()
-
-        # Initialize provider system (wrapper pattern - transparent integration)
-        await self._initialize_provider()
+        # ACP profiles own their transport and must not initialize the native
+        # API/provider stack. Native profiles retain the historical startup
+        # order and behavior unchanged.
+        if not self._active_profile_is_acp():
+            await self.api_service.initialize()
+            await self._initialize_provider()
 
         # Register hooks
         await self.hook_system.register_hooks()
@@ -1725,6 +1756,7 @@ class LLMService:
         pre_displayed: bool = False,
         request_id: str | None = None,
         thread_id: str | None = None,
+        origin_context: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -1732,22 +1764,31 @@ class LLMService:
         same pre/main/post phases exactly once. Internal/model-origin callers
         cannot select an arbitrary source string here.
         """
-        if not isinstance(source, UserInputSource):
+        is_agent = source == "agent" and bool((origin_context or {}).get("authenticated"))
+        if not isinstance(source, UserInputSource) and not is_agent:
             return {"status": "rejected", "reason": "invalid_input_source"}
+        source_value = "agent" if is_agent else source.value
 
-        acp = self.event_bus.get_service("acp_orchestrator")
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+        except Exception:
+            acp = None
         acp_dispatch = acp is not None and getattr(acp, "active", False) is True
         selected_acp = False
+        profile_unknown = False
         profile_manager = getattr(self, "profile_manager", None)
         if profile_manager is not None:
             try:
                 profile = profile_manager.get_active_profile()
+                profile_unknown = profile is None
                 provider = profile.get_provider() if profile is not None else ""
                 selected_acp = provider == "acp"
             except Exception:
-                selected_acp = False
-        if selected_acp and not acp_dispatch:
-            return {"status": "rejected", "reason": "acp_unavailable"}
+                profile_unknown = True
+        else:
+            profile_unknown = True
+        if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
+            return _acp_unavailable_result(acp)
         if acp_dispatch and not isinstance(message, str):
             return {"status": "rejected", "reason": "acp_text_only"}
 
@@ -1763,8 +1804,9 @@ class LLMService:
                     "message_pre_displayed": pre_displayed,
                     "request_id": request_id,
                     "thread_id": thread_id,
+                    "origin_context": dict(origin_context or {}),
                 },
-                source.value,
+                source_value,
             )
         except Exception as exc:
             # Do not include user content or exception text in logs/results.
@@ -1821,19 +1863,24 @@ class LLMService:
             except Exception:
                 selected_acp = False
         if selected_acp and not (acp is not None and getattr(acp, "active", False) is True):
-            return {"status": "rejected", "reason": "acp_unavailable"}
+            return _acp_unavailable_result(acp)
         if acp is not None and getattr(acp, "active", False) is True:
             request_id = data.get("request_id") or uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
+            origin = dict(data.get("origin_context") or {})
+            origin.setdefault("operator", source != "agent")
+            if await acp.steer(str(data["message"]), origin=origin, thread_id=data.get("thread_id")):
+                return {"status": "injected", "request_id": request_id}
             try:
                 admission = acp.admit(
                     str(data["message"]), request_id=request_id, source=source,
                     thread_id=data.get("thread_id"),
+                    origin=origin,
                 )
             except (RuntimeError, ValueError) as exc:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}
-                return {"status": "rejected", "reason": "acp_unavailable"}
+                return _acp_unavailable_result(acp)
             except Exception as exc:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}
@@ -1887,6 +1934,21 @@ class LLMService:
             await self.event_bus.register_hook(cancel_hook)
             logger.info("Registered cancel hook for attach-mode client")
 
+    def _selected_active_acp_orchestrator(self):
+        """Return the live ACP transport only for an explicitly selected ACP profile."""
+        try:
+            profile = (
+                self.profile_manager.get_active_profile()
+                if self.profile_manager is not None
+                else None
+            )
+            if profile is None or profile.get_provider() != "acp":
+                return None
+            acp = self.event_bus.get_service("acp_orchestrator")
+            return acp if getattr(acp, "active", False) is True else None
+        except Exception:
+            return None
+
     def cancel_current_request(
         self,
         *,
@@ -1903,6 +1965,19 @@ class LLMService:
             raise ValueError("invalid cancellation origin")
 
         queue_processor = self._queue_processor
+        acp = self._selected_active_acp_orchestrator()
+        if acp is not None:
+            generation = queue_processor.request_cancellation(origin=origin)
+            async def cancel_acp() -> None:
+                try:
+                    await asyncio.wait_for(acp.cancel(), timeout=35.0)
+                except Exception:
+                    logger.exception("ACP cancellation failed")
+            task = self.create_background_task(
+                cancel_acp(), name=f"acp_cancel_{generation}"
+            )
+            self._cancellation_cleanup_tasks[generation] = task
+            return generation
         if not self.is_processing:
             # A human ESC can arrive after the provider stopped but while the
             # bridge is still holding its cancellation latch. Keep that pause

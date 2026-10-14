@@ -44,7 +44,7 @@ class BusyState:
 def _daemon(state):
     events: asyncio.Queue = asyncio.Queue()
     return SimpleNamespace(
-        alive=True, pid=0, identity="lapis", agent_name="", state=state,
+        alive=True, pid=0, identity="lapis", agent_name="", state=state, launcher=None,
         subscribe=lambda: events, unsubscribe=lambda queue: None,
     )
 

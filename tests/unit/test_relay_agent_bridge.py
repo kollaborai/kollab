@@ -2983,3 +2983,195 @@ async def test_an_agent_the_cached_roster_has_not_read_yet_still_resolves(bridge
     assert await left.resolve_handle(name) == address(right)
     with pytest.raises(RelayError, match="unknown agent@device"):
         await left.resolve_handle("nobody@" + name.split("@")[1])
+
+
+async def _until_network_request(predicate):
+    async with asyncio.timeout(2):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["sending", "reply"])
+@pytest.mark.parametrize("change", ["peer", "trust"])
+async def test_remote_hub_ask_ends_when_its_authority_changes(bridges, phase, change):
+    members, _ = bridges
+    (left, hub, _, _), (right, _, model, _) = members
+    left.set_trust_level("open")
+    right.set_trust_level("open")
+    target = await handle(left, right)
+    arrived, release = asyncio.Event(), asyncio.Event()
+    receive = right._receive_secure_application
+
+    async def hold(peer, method, payload):
+        if method == "message" and phase == "sending":
+            arrived.set()
+            await release.wait()
+        return await receive(peer, method, payload)
+
+    right._receive_secure_application = hold
+    tools = hub._acp_tools()
+    asking = asyncio.create_task(tools.call("hub_ask", {
+        "to": target, "question": "Owned authority-change request.", "timeout": 30,
+    }))
+    try:
+        await _until_network_request(lambda: tools.waits)
+        wait = next(iter(tools.waits.values()))
+        if phase == "sending":
+            await asyncio.wait_for(arrived.wait(), 2)
+        else:
+            await _until_network_request(lambda: (
+                left.store.outbound(wait.request_id) or {}
+            ).get("state") == "delivered")
+        assert not asking.done()
+        if change == "peer":
+            left.commands.client.revoke(right.commands.client.public_key)
+        else:
+            left.set_trust_level("manual")
+        release.set()
+
+        result = await asyncio.wait_for(asyncio.shield(asking), 1)
+
+        assert result["status"] == "ended"
+        assert "revoked" in result["text"]
+        assert result["thread"] == wait.thread
+        assert not tools.waiting
+        assert not left.commands.client._application_pending
+        assert model.contexts == []
+        if phase == "sending":
+            assert left.store.outbound(wait.request_id)["state"] == "revoked"
+    finally:
+        release.set()
+        if not asking.done():
+            asking.cancel()
+        await asyncio.gather(asking, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["peer", "trust"])
+async def test_remote_cli_wait_ends_when_its_authority_changes(bridges, change):
+    members, _ = bridges
+    (left, hub, _, _), (right, _, model, _) = members
+    left.set_trust_level("open")
+    right.set_trust_level("open")
+    target = await handle(left, right)
+
+    async def collect():
+        return [frame async for frame in hub._handle_network_send_request(
+            target, "Owned CLI authority-change request.", 30,
+        )]
+
+    sending = asyncio.create_task(collect())
+    try:
+        await _until_network_request(lambda: right.store.queued(right.identity.agent_id))
+        await _until_network_request(lambda: hub._cli_waiters)
+        assert not sending.done()
+        if change == "peer":
+            left.commands.client.revoke(right.commands.client.public_key)
+        else:
+            left.set_trust_level("manual")
+
+        frames = await asyncio.wait_for(asyncio.shield(sending), 1)
+
+        assert len(frames) == 1 and frames[0]["type"] == "error"
+        assert "revoked" in frames[0]["msg"]
+        assert hub._cli_waiters == {}
+        assert model.contexts == []
+    finally:
+        if not sending.done():
+            sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_ask_keeps_its_authorized_wait_after_a_transport_failure(bridges):
+    members, _ = bridges
+    (left, hub, _, _), (right, _, model, _) = members
+    left.set_trust_level("open")
+    right.set_trust_level("open")
+    target = await handle(left, right)
+    request = left.secure_transport.request
+    attempted = asyncio.Event()
+
+    async def disconnected(peer, method, payload, **kwargs):
+        if method == "message":
+            attempted.set()
+            raise RelayError("relay disconnected")
+        return await request(peer, method, payload, **kwargs)
+
+    left.secure_transport.request = disconnected
+    tools = hub._acp_tools()
+    asking = asyncio.create_task(tools.call("hub_ask", {
+        "to": target, "question": "Owned transient-disconnect request.", "timeout": 30,
+    }))
+    try:
+        await asyncio.wait_for(attempted.wait(), 2)
+        wait = next(iter(tools.waits.values()))
+        await asyncio.sleep(0.3)
+        assert not asking.done() and tools.waiting
+        assert left.store.outbound(wait.request_id)["state"] == "queued"
+
+        left.commands.client.revoke(right.commands.client.public_key)
+        result = await asyncio.wait_for(asyncio.shield(asking), 1)
+
+        assert result["status"] == "ended" and "revoked" in result["text"]
+        assert model.contexts == []
+    finally:
+        if not asking.done():
+            asking.cancel()
+        await asyncio.gather(asking, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_remote_wait_ends_when_the_original_manual_grant_is_withdrawn(bridges):
+    members, _ = bridges
+    (left, *_), (right, _, model, _) = members
+    allow(left, right)
+    grant = authorize(left, right, "Owned manual-grant request.")
+    receipt = await left.send(address(right), grant["purpose"], grant_id=grant["id"])
+    assert receipt["state"] == "queued"
+    returned = asyncio.get_running_loop().create_future()
+    waiting = asyncio.create_task(left.wait_for_return(returned, receipt["id"], timeout=30))
+    try:
+        await asyncio.sleep(0.02)
+        assert not waiting.done()
+        left.store.withdraw_contact(left.commands.client.state.room, grant["id"])
+
+        with pytest.raises(RelayError, match="revoked"):
+            await asyncio.wait_for(asyncio.shield(waiting), 1)
+
+        assert not returned.done()
+        assert model.contexts == []
+    finally:
+        if not waiting.done():
+            waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_manual_final_before_delivery_receipt_keeps_its_completed_grant(bridges):
+    members, _ = bridges
+    (left, _, model, _), (right, hub, right_model, _) = members
+    allow(left, right)
+    grant = authorize(left, right, "Owned fast-final request.")
+    receive = right._receive_secure_application
+
+    async def finish_before_receipt(peer, method, payload):
+        receipt = await receive(peer, method, payload)
+        if method == "message" and payload.get("kind") == "message":
+            await right._tick()
+            await in_turn(right_model, hub._parse_hub_messages({
+                "response_text": "Owned fast final.", "turn_completed": True,
+            }))
+        return receipt
+
+    right._receive_secure_application = finish_before_receipt
+
+    receipt = await left.send(address(right), grant["purpose"], grant_id=grant["id"])
+
+    assert receipt["state"] == "queued"
+    assert left.store.outbound(grant["id"])["state"] == "delivered"
+    assert next(item for item in left.store.contacts(left.commands.client.state.room)
+                if item["id"] == grant["id"])["state"] == "completed"
+    await left._tick()
+    assert "Owned fast final." in model.conversation_history[-1].content

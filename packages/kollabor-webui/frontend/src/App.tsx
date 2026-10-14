@@ -80,6 +80,14 @@ const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
+/** Harness cost, same rule as the terminal status bar (`_fmt_cost` in core_widgets.py). */
+function formatCost(cost: { amount?: string | number; currency?: string }): string {
+  const amount = Number(cost.amount);
+  if (cost.currency !== "USD" || !Number.isFinite(amount)) return `${cost.amount} ${cost.currency ?? ""}`.trim();
+  if (amount < 0.01) return "$0.00";
+  return amount < 100 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(0)}`;
+}
+
 /** True when the restored state still carries an unanswered permission prompt. */
 function hasPendingPermission(state: EngineState): boolean {
   return state.messages.some(
@@ -201,10 +209,26 @@ function RuntimeShell({
         <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
         <span
           className="min-w-0 truncate text-sm font-semibold tracking-tight"
-          title={`${model || "model unavailable"} · ${session.profile || "default"}`}
+          title={`${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
         >
           {sessionLabel}
         </span>
+        {session.harness && (
+          <span className="text-muted-foreground max-w-48 truncate rounded border px-1.5 py-0.5 text-xs" title={session.harness}>
+            {session.harness}
+          </span>
+        )}
+        {session.acp_waiting && (
+          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600" role="status">
+            Waiting for Approval
+          </span>
+        )}
+        {session.harness && session.acp_usage?.size !== undefined && (
+          <span className="text-muted-foreground text-xs" title="Current harness context usage">
+            {session.acp_usage.used ?? 0}/{session.acp_usage.size} Tokens
+            {session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}
+          </span>
+        )}
         <div
           className="bg-muted flex shrink-0 rounded-md p-0.5"
           role="group"
@@ -250,6 +274,19 @@ function RuntimeShell({
           onHistoryCleared={onHistoryCleared}
         />
       </header>
+      {session.harness && Boolean(session.acp_plan?.entries?.length) && (
+        <details className="border-b px-3 py-2 text-xs">
+          <summary className="cursor-pointer font-medium">Harness Plan</summary>
+          <ol className="mt-2 space-y-1">
+            {session.acp_plan?.entries?.map((entry, index) => (
+              <li key={index} className="flex gap-2">
+                <span className="text-muted-foreground shrink-0">{entry.status}</span>
+                <span className="min-w-0 break-words">{entry.content}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
           <Thread
@@ -319,6 +356,7 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  const [creationError, setCreationError] = useState<string | null>(null);
   // The sidebar row being opened, and why it could not be: a failed open keeps
   // the chat that was open, so the reason shows under the row clicked.
   const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
@@ -556,6 +594,7 @@ export default function App() {
       "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
+    setCreationError(null);
     try {
       const session = await api.createSession({
         profile: selectedProfile || "default",
@@ -582,6 +621,7 @@ export default function App() {
     } catch (reason) {
       if (operation === operationRef.current) {
         setError(errorText(reason));
+        setCreationError(errorText(reason));
       }
     } finally {
       if (operation === operationRef.current) {
@@ -802,6 +842,7 @@ export default function App() {
           activeActivity={activeActivity}
           opening={opening}
           busy={busy}
+          creationError={creationError}
           onProfileChange={setSelectedProfile}
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
@@ -815,7 +856,7 @@ export default function App() {
           onSelectSession={selectSession}
           onSelectRemote={selectRemote}
           onStartOffline={startOffline}
-          onCreate={() => void createSession()}
+          onCreate={() => createSession()}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}
         />

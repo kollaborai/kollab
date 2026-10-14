@@ -945,6 +945,15 @@ async def _run_acp_cli(args: Any) -> None:
             profile_data = json.loads(profile_path.read_text())
             profile_name = str(profile_data.get("name") or profile_path.stem)
             command = tuple(profile_data.get("command") or ())
+        else:
+            from kollabor_ai.profile_manager import ProfileManager
+            configured = ProfileManager().get_profile(profile_name)
+            if configured is not None and configured.provider == "acp":
+                profile_data = configured.to_dict()
+                command = tuple(configured.command)
+            elif profile_name in ACPProfile.BUILTIN_PROFILES:
+                profile_data = dict(ACPProfile.BUILTIN_PROFILES[profile_name])
+                command = tuple(profile_data["command"])
     if not command:
         raise SystemExit("--acp-command or a JSON --acp-profile is required")
     prompt = args.acp_prompt or args.query
@@ -964,7 +973,7 @@ async def _run_acp_cli(args: Any) -> None:
     try:
         await runner.start()
         result = await runner.prompt(prompt)
-        print(result.text, end="" if result.text.endswith("\\n") else "\\n")
+        print(result.text, end="" if result.text.endswith("\n") else "\n")
     finally:
         await runner.close()
 
@@ -1621,7 +1630,13 @@ async def _handle_cli_hub(hub_args: list) -> None:
             print(f"{len(agents)} agent(s) online:\n")
             for a in sorted(agents, key=lambda x: x.get("identity", "")):
                 desig = a.get("identity", "?")
+                tags = a.get("tags") or {}
+                harness = a.get("harness") or tags.get("harness")
+                if harness:
+                    desig += f" ({harness})"
                 state = a.get("state", "?")
+                if tags.get("acp_waiting"):
+                    state = "waiting for your OK"
                 pid = a.get("pid", "?")
                 coord = " *" if a.get("is_coordinator") else ""
                 task = a.get("current_task", "")
@@ -1653,6 +1668,10 @@ async def _handle_cli_hub(hub_args: list) -> None:
                     row.get("name", "?"), row.get("device", "?")
                 )
                 state = row.get("state", "?")
+                if row.get("harness"):
+                    handle += f" ({row['harness']})"
+                if row.get("acp_waiting"):
+                    state = "waiting for your OK"
                 task = row.get("task", "")
                 detail = f"{state}: {task}" if task else state
                 online = "online" if row.get("online") else "offline"
@@ -2368,6 +2387,31 @@ def _update_before_launch() -> None:
     os.execv(argv[0], argv)
 
 
+def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
+    """Run the app and route detached SIGTERM through normal cleanup."""
+    previous_sigterm = None
+    signal_module = None
+    if detached_runtime:
+        import signal as signal_module
+
+        def _on_detached_sigterm(signum, frame):
+            # Route SIGTERM through async_main's existing KeyboardInterrupt
+            # cleanup so ACP runner process groups and Hub sockets are closed.
+            raise KeyboardInterrupt()
+
+        previous_sigterm = signal_module.signal(
+            signal_module.SIGTERM, _on_detached_sigterm
+        )
+
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if detached_runtime and previous_sigterm is not None:
+            signal_module.signal(signal_module.SIGTERM, previous_sigterm)
+
+
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
     _update_before_launch()
@@ -2377,12 +2421,14 @@ def cli_main() -> None:
     # processes that touch the TTY (SIGTTOU). Instead, we fork,
     # create a new session (setsid), redirect all fds, and let
     # the parent exit immediately. The child runs headless.
+    detached_runtime = False
     if "--detached" in sys.argv or "-d" in sys.argv:
         import os
 
         from kollabor.daemon import SERVICE_ENV, SERVICE_PID_ENV
 
         if os.environ.pop(SERVICE_ENV, "") == "1":
+            detached_runtime = True
             # `kollab service`: systemd or launchd owns this process, so it
             # stays in the foreground (no fork, no setsid) and keeps stderr
             # for the manager's log.
@@ -2401,6 +2447,7 @@ def cli_main() -> None:
 
             # Child: new session, detach from terminal
             os.setsid()
+            detached_runtime = True
             devnull = os.open(os.devnull, os.O_RDWR)
             os.dup2(devnull, 0)  # stdin
             os.dup2(devnull, 1)  # stdout
@@ -2459,9 +2506,7 @@ def cli_main() -> None:
             return
 
     try:
-        asyncio.run(async_main())
-    except KeyboardInterrupt:
-        pass
+        _run_async_main_with_sigterm_cleanup(detached_runtime)
     except Exception as e:
         # Can't print if detached (stdout is /dev/null), but try anyway
         try:

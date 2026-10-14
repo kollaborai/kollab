@@ -1508,7 +1508,7 @@ class APICommunicationService:
 
             # Preserve tool_calls for assistant messages
             # (needed by Responses API to build function_call items)
-            if meta.get("tool_calls"):
+            if meta.get("tool_calls") and meta.get("provider") != "acp":
                 formatted["tool_calls"] = meta["tool_calls"]
 
             # Preserve tool_call_id for tool result messages

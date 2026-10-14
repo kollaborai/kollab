@@ -22,7 +22,7 @@ import logging
 import re
 from copy import deepcopy
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
@@ -203,6 +203,7 @@ class LocalStateService(StateService):
         started_at: float | None = None,
         context_registry: ContextRegistry | None = None,
         context_identity: str | None = None,
+        startup_status: Callable[[], tuple[str, str]] | None = None,
     ) -> None:
         import time as _time
 
@@ -223,6 +224,7 @@ class LocalStateService(StateService):
         # the daemon pid.
         self._context_registry: ContextRegistry | None = context_registry
         self._context_identity = context_identity
+        self._startup_status = startup_status
 
     def _mcp_enabled(self) -> bool:
         config = getattr(self._llm_service, "config", None)
@@ -502,6 +504,7 @@ class LocalStateService(StateService):
             cost_usd=float(stats.get("cost_usd", 0.0) or 0.0),
             total_cost_usd=float(stats.get("total_cost_usd", 0.0) or 0.0),
             session_id=_session_id,
+            acp_usage=dict(stats.get("acp_usage") or {}),
         )
 
     # === Profile ===
@@ -981,6 +984,9 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.debug(f"voice status error: {e}")
 
+        startup_state, startup_error = (
+            self._startup_status() if self._startup_status is not None else ("", "")
+        )
         return SystemInfoSnapshot(
             cwd=cwd,
             git_branch=git_branch,
@@ -996,6 +1002,8 @@ class LocalStateService(StateService):
             plugin_count=plugin_count,
             voice_requested=voice_requested,
             voice_running=voice_running,
+            startup_state=startup_state,
+            startup_error=startup_error,
         )
 
     # === Command catalog ===
@@ -1186,7 +1194,39 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.debug("OAuth profile reload before activation failed: %s", e)
 
-        ok = bool(self._profile_manager.set_active_profile(name))
+        target_profile = self._profile_manager.get_profile(name)
+        target_provider = (
+            target_profile.get_provider()
+            if hasattr(target_profile, "get_provider")
+            else getattr(target_profile, "provider", "")
+        )
+        current_profile = self._profile_manager.get_active_profile()
+        current_provider = (
+            current_profile.get_provider()
+            if hasattr(current_profile, "get_provider")
+            else getattr(current_profile, "provider", "")
+        ) if current_profile is not None else ""
+        event_bus = getattr(self, "_event_bus", None)
+        orchestrator = (
+            event_bus.get_service("acp_orchestrator")
+            if event_bus else None
+        )
+        if str(target_provider).lower() == "acp":
+            if model or effort:
+                raise ValueError("ACP profile owns model/effort settings")
+            if orchestrator is None:
+                raise ValueError("ACP profile unavailable: orchestrator is not running")
+            try:
+                await orchestrator.close()
+                await orchestrator.start(target_profile)
+                ok = bool(self._profile_manager.set_active_profile(name))
+            except Exception as exc:
+                logger.exception("ACP profile activation failed for %r", name)
+                raise ValueError(f"ACP profile activation failed: {exc}") from exc
+        else:
+            if str(current_provider).lower() == "acp" and orchestrator is not None:
+                await orchestrator.close()
+            ok = bool(self._profile_manager.set_active_profile(name))
         if not ok and hasattr(self._profile_manager, "reload"):
             # OAuth login stores tokens before it asks the daemon to activate
             # ``openai-oauth``.  In attach mode the daemon's ProfileManager
@@ -1261,7 +1301,7 @@ class LocalStateService(StateService):
         # native tools in the background because that work is independent of
         # provider selection.
         llm = self._llm_service
-        if llm is not None and hasattr(llm, "api_service"):
+        if str(target_provider).lower() != "acp" and llm is not None and hasattr(llm, "api_service"):
             try:
                 reinitialize = getattr(llm.api_service, "reinitialize_provider", None)
                 if callable(reinitialize):
@@ -1279,7 +1319,10 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
 
-        return self._profile_to_snapshot(profile, is_active=True)
+        snapshot = self._profile_to_snapshot(profile, is_active=True)
+        from kollabor_tui.display_tap import publish_semantic
+        publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
+        return snapshot
 
     async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
         """Change the tool permission approval mode and return the new snapshot.
@@ -1993,6 +2036,7 @@ class LocalStateService(StateService):
         llm = self._llm_service
         if llm is None:
             raise ValueError("llm service not available")
+        acp = self._event_bus.get_service("acp_orchestrator")
 
         # Best-effort: save current conversation before clearing.
         conv_mgr = getattr(llm, "conversation_manager", None)
@@ -2018,6 +2062,8 @@ class LocalStateService(StateService):
                 logger.warning(f"restart_session: _initialize_conversation failed: {e}")
 
         # Return a fresh conversation snapshot.
+        if acp is not None and acp.active:
+            await acp.restore()
         return await self.get_conversation()
 
     # === MCP writes (phase 4.5 step 7) ===
@@ -2492,7 +2538,68 @@ class LocalStateService(StateService):
         )
         return str(await definition.handler(command))
 
-    async def send_message(self, message: Any) -> dict[str, Any]:
+    async def set_client_approval_mode(self, mode: str) -> dict[str, Any]:
+        from kollabor_events.permissions_models import ApprovalMode
+        value = ApprovalMode[mode.upper()]
+        self._permission_manager.set_approval_mode(value, persist=False)
+        return {"mode": mode}
+
+    async def configure_client_mcp(self, servers: list[dict[str, Any]]) -> dict[str, Any]:
+        """Add client-requested MCP servers to this daemon's memory only."""
+        integration = self._llm_service.mcp_integration
+        for server in servers:
+            name = str(server.get("name") or "")
+            command = server.get("command")
+            if not name or not isinstance(command, str) or not command:
+                raise ValueError("client MCP servers must be named stdio commands")
+            env = server.get("env") or []
+            if isinstance(env, list):
+                env = {item["name"]: item["value"] for item in env}
+            integration.session_servers[name] = {"type": "stdio", "command": command,
+                "args": list(server.get("args") or []), "env": dict(env), "enabled": True}
+        integration.mcp_servers.update(integration.session_servers)
+        config = getattr(self._event_bus, "config", None)
+        if isinstance(config, dict):
+            config.setdefault("plugins", {}).setdefault("mcp", {})["enabled"] = True
+        discovered = await integration.discover_mcp_servers()
+        await integration._refresh_native_tools_after_reload()
+        return {"servers": list(integration.session_servers), "connected": list(discovered)}
+
+    async def submit_client_turn(self, message: str, request_id: str) -> dict[str, Any]:
+        """Admit an external client's turn with a cancellable owner identity."""
+        if not message.strip() or not request_id:
+            return {"accepted": False, "reason": "message and request id are required"}
+        bus = self._event_bus
+        acp = bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active:
+            admission = acp.admit(message, request_id=request_id, source="acp_client",
+                                  origin={"operator": True, "acp_client": True})
+            return {"accepted": True, "request_id": request_id, "turn_id": admission.turn_id}
+        if bus.get_service("display_tap") is None:
+            return {"accepted": False, "reason": "daemon event stream is unavailable"}
+        broker = bus.get_service("client_turn_broker")
+        if broker is None:
+            from kollabor.llm.client_turns import ClientTurnBroker
+            broker = ClientTurnBroker(self._llm_service, bus)
+            bus.register_service("client_turn_broker", broker)
+        return broker.submit(message, request_id)
+
+    async def cancel_client_turn(self, request_id: str) -> dict[str, Any]:
+        bus = self._event_bus
+        acp = bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active:
+            return await acp.cancel_request(request_id)
+        broker = bus.get_service("client_turn_broker")
+        return await broker.cancel(request_id) if broker else {"cancelled": False}
+
+    async def send_message(
+        self,
+        message: Any,
+        *,
+        request_id: str | None = None,
+        thread_id: str | None = None,
+        origin_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
         The input pipeline only acknowledges admission to the LLM queue; model
@@ -2570,10 +2677,13 @@ class LocalStateService(StateService):
 
         try:
             submit_kwargs = {"source": UserInputSource.STATE_RPC}
-            if metadata.get("request_id") is not None:
-                submit_kwargs["request_id"] = metadata["request_id"]
-            if metadata.get("thread_id") is not None:
-                submit_kwargs["thread_id"] = metadata["thread_id"]
+            if request_id is not None or metadata.get("request_id") is not None:
+                submit_kwargs["request_id"] = request_id or metadata["request_id"]
+            if thread_id is not None or metadata.get("thread_id") is not None:
+                submit_kwargs["thread_id"] = thread_id or metadata["thread_id"]
+            context = origin_context or metadata.get("origin_context")
+            if context is not None:
+                submit_kwargs["origin_context"] = dict(context)
             submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)
@@ -2583,12 +2693,23 @@ class LocalStateService(StateService):
             "queued",
             "submitted",
         }:
-            return {"accepted": True, "reason": ""}
+            accepted = {"accepted": True, "reason": ""}
+            for key in ("request_id", "turn_id"):
+                if submission.get(key) is not None:
+                    accepted[key] = submission[key]
+            return accepted
 
         reason = submission.get("reason") if isinstance(submission, dict) else None
         if not isinstance(reason, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", reason):
             reason = "input not accepted"
-        return {"accepted": False, "reason": reason}
+        rejected = {"accepted": False, "reason": reason}
+        if reason == "acp_unavailable" and isinstance(submission, dict):
+            message = submission.get("message")
+            if isinstance(message, str) and message:
+                rejected["message"] = "".join(
+                    char for char in message if char.isprintable() or char == "\n"
+                )[:4096]
+        return rejected
 
     def _goal_service(self):
         event_bus = getattr(self, "_event_bus", None)
@@ -2874,6 +2995,7 @@ class LocalStateService(StateService):
             raise ValueError(f"failed to load session {session_id!r}")
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
+        acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):
@@ -2902,8 +3024,7 @@ class LocalStateService(StateService):
             if api_service is not None and hasattr(api_service, "set_session_id"):
                 api_service.set_session_id(new_session_id)
         except Exception as e:
-            logger.debug(f"resume: session naming error: {e}")
-            new_session_id = session_id  # fall back to reused id
+            raise ValueError(f"failed to name resumed session: {e}") from e
 
         # Convert raw dicts to ConversationMessage objects.
         try:
@@ -2920,15 +3041,31 @@ class LocalStateService(StateService):
             role = str(msg.get("role", "user"))
             content = deepcopy(msg.get("content") or "")
             metadata = deepcopy(msg.get("metadata") or {})
+            if msg.get("tool_uses") and not metadata.get("tool_calls") and not metadata.get("xml_tool_calls"):
+                # JSONL loads text-only model history. Keep its logged calls
+                # for cards without fabricating provider-native tool calls.
+                metadata["xml_tool_calls"] = [
+                    {"id": tool.get("id"), "name": tool.get("name"),
+                     "input": deepcopy(tool.get("input", {}))}
+                    for tool in msg["tool_uses"] if isinstance(tool, dict)
+                ]
+            timestamp = msg.get("timestamp")
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp)
+                except ValueError:
+                    timestamp = None
+            timestamp_args = {"timestamp": timestamp} if isinstance(timestamp, datetime) else {}
             loaded_messages.append(
                 ConversationMessage(
                     role=role,
                     content=content,
                     metadata=metadata,
                     thinking=msg.get("thinking"),
+                    **timestamp_args,
                 )
             )
-            if role in ("user", "assistant") and shown != "":
+            if role in ("user", "assistant") and shown != "" and not metadata.get("tool_output_batch"):
                 visible = content if shown is None else shown
                 display_messages.append({"role": role, "content": visible})
 
@@ -2952,6 +3089,17 @@ class LocalStateService(StateService):
                 llm.session_stats["messages"] = len(loaded_messages)
             except Exception as e:
                 logger.debug(f"resume: session_stats update error: {e}")
+
+        # The ACP stable handle now points at this new native conversation ID.
+        # Persist its restored base before reporting success, so another
+        # process can reopen it even if no new prompt has run yet.
+        if not conv_mgr.save_session(new_session_id):
+            raise ValueError(f"failed to persist resumed session {new_session_id!r}")
+
+        if acp is not None and acp.active:
+            # Read the original harness binding, but open/save the continued
+            # session only after all native conversation owners have its new ID.
+            await acp.restore(session_id)
 
         header = f"--- Resumed: {session_id[:20]}... as {new_session_id} ---"
         success_message = f"[ok] Resumed: {new_session_id}. Continue below."

@@ -181,7 +181,15 @@ export function autoHat(caste: string | null | undefined, season: Season, seed: 
   return (caste && CASTE_HATS[caste.toLowerCase()]) || "none";
 }
 
-export type FaceAnchor = { x: number; y: number; gap: number; hatY: number; hatScale: number };
+/** `view` is the layout box in fractions of the frame: the room a hat, bat or thread has. */
+export type FaceAnchor = {
+  x: number;
+  y: number;
+  gap: number;
+  hatY: number;
+  hatScale: number;
+  view: { x0: number; x1: number; y0: number; y1: number };
+};
 
 export type FaceFrame = {
   ctx: CanvasRenderingContext2D;

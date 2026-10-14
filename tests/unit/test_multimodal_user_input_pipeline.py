@@ -268,7 +268,7 @@ async def test_attached_daemon_submission_preserves_mixed_content(
             event_type == EventType.USER_INPUT
             and source == UserInputSource.HUB_ATTACHMENT.value
         ):
-            received.append((data["message"], data.get("thread_id"), result))
+            received.append((data["message"], data.get("request_id"), data.get("thread_id"), result))
             delivered.set()
         return result
 
@@ -306,7 +306,12 @@ async def test_attached_daemon_submission_preserves_mixed_content(
         ack = json.loads((await asyncio.wait_for(reader.readline(), 2)).decode())
         assert ack["type"] == "attach_ack"
 
-        writer.write((json.dumps({"type": "input", "text": content}) + "\n").encode())
+        writer.write(
+            (json.dumps({
+                "type": "input", "request_id": "req-attach",
+                "thread_id": "thread-wire", "text": content,
+            }) + "\n").encode()
+        )
         await writer.drain()
         await asyncio.wait_for(delivered.wait(), 2)
     finally:
@@ -315,9 +320,10 @@ async def test_attached_daemon_submission_preserves_mixed_content(
         await server.stop()
 
     assert len(received) == 1
-    received_content, received_thread_id, result = received[0]
+    received_content, received_request_id, received_thread_id, result = received[0]
     assert received_content == content
-    assert received_thread_id == "thread-attach"
+    assert received_request_id == "req-attach"
+    assert received_thread_id == "thread-wire"
     assert result["post"]["final_data"]["message"] == content
     assert not result["cancelled"]
     _assert_hook_results_succeeded(result)
@@ -332,3 +338,37 @@ async def test_attached_daemon_submission_preserves_mixed_content(
     broadcast = hub._deliver_to_agent.await_args.args[1]
     assert broadcast.content == "Please inspect this\n[image1]"
     assert PNG_DATA_URL not in broadcast.content
+
+
+@pytest.mark.asyncio
+async def test_attach_legacy_text_callback_receives_no_context_kwargs():
+    received = asyncio.Event()
+    values = []
+
+    async def legacy_callback(text):
+        values.append(text)
+        received.set()
+
+    server = AgentSocketServer(
+        "legacy-callback",
+        on_message=lambda *_args: None,
+        on_input_inject=legacy_callback,
+        socket_name=f"legacy-{uuid.uuid4().hex}",
+    )
+    server._display_tap = DisplayTap(history_size=1)
+    socket_path = await server.start()
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        writer.write((json.dumps({
+            "action": "attach", "mode": "interactive", "client_id": "legacy",
+        }) + "\n").encode())
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), 2)
+        writer.write((json.dumps({"type": "input", "text": "hello"}) + "\n").encode())
+        await writer.drain()
+        await asyncio.wait_for(received.wait(), 2)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await server.stop()
+    assert values == ["hello"]

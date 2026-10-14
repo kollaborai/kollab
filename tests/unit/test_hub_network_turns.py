@@ -24,6 +24,7 @@ import pytest
 from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events import EventType
 from plugins.hub.device_names import default_device_name, format_handle
+from plugins.hub.messenger import AgentMessenger
 from plugins.hub.models import HubMessage
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.relay_conversations import (
@@ -244,8 +245,8 @@ async def test_two_requests_answered_in_reverse_order_never_cross():
         ("answer to first", T1, W1),
     ]
     assert [(e["thread_id"], e["turn_end"]) for e in _ends(sent)] == [
-        (T2, {"replies": 1, "failed": False}),
-        (T1, {"replies": 2, "failed": False}),
+        (T2, {"replies": 1, "failed": False, "outcome": "end_turn"}),
+        (T1, {"replies": 2, "failed": False, "outcome": "end_turn"}),
     ]
 
 
@@ -320,7 +321,7 @@ async def test_a_reply_the_network_refused_is_not_counted():
     await _settle(plugin, llm)
 
     assert not failed.success
-    assert _ends(sent)[0]["turn_end"] == {"replies": 0, "failed": False}
+    assert _ends(sent)[0]["turn_end"] == {"replies": 0, "failed": False, "outcome": "end_turn"}
 
 
 # --------------------------------------------------------------------- #
@@ -341,7 +342,7 @@ async def test_the_turn_end_frame_carries_the_reply_count_and_closes_the_request
 
     [end] = _ends(sent)
     assert (end["thread_id"], end["reply_to"]) == (T1, W1)
-    assert end["turn_end"] == {"replies": 2, "failed": False}
+    assert end["turn_end"] == {"replies": 2, "failed": False, "outcome": "end_turn"}
     assert end["content"] == DONE and end["address"] == f"relay:resolved:{ASKER}"
     assert not plugin.network_turn_open()
     # Nothing on this screen: the frame is the runtime's, not a message.
@@ -392,7 +393,7 @@ async def test_a_gap_with_the_model_idle_between_the_tool_and_the_answer_is_not_
 
     assert [s["content"] for s in _replies(sent)] == ["46G free on /"]
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert end["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
     assert sent[-1] is end and not plugin.network_turn_open()
 
 
@@ -415,7 +416,7 @@ async def test_a_plain_text_answer_after_a_gap_is_forwarded_then_the_turn_ends()
 
     assert [s["content"] for s in _replies(sent)] == ["46G free on /"]
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert end["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
     assert sent[-1] is end
 
 
@@ -433,7 +434,7 @@ async def test_a_turn_that_errors_after_a_gap_still_ends_failed():
     await plugin.settle_network_turn(llm, now=205.0)
 
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 0, "failed": True}
+    assert end["turn_end"] == {"replies": 0, "failed": True, "outcome": "error"}
     assert end["content"] == FAILED and _replies(sent) == []
 
 
@@ -458,8 +459,8 @@ async def test_two_queued_requests_each_end_on_their_own_chain_end():
 
     assert [(s["thread_id"], s["content"]) for s in _replies(sent)] == [(T1, "one"), (T2, "two")]
     assert [(s["thread_id"], s["turn_end"]) for s in _ends(sent)] == [
-        (T1, {"replies": 1, "failed": False}),
-        (T2, {"replies": 1, "failed": False}),
+        (T1, {"replies": 1, "failed": False, "outcome": "end_turn"}),
+        (T2, {"replies": 1, "failed": False, "outcome": "end_turn"}),
     ]
 
 
@@ -474,7 +475,7 @@ async def test_a_turn_that_errored_ends_with_a_failed_frame_that_names_no_error_
     await _settle(plugin, llm)
 
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 1, "failed": True}
+    assert end["turn_end"] == {"replies": 1, "failed": True, "outcome": "error"}
     assert end["content"] == FAILED
     assert "sk-secret" not in repr(end) and "example.com" not in repr(end)
 
@@ -496,7 +497,7 @@ async def test_an_acknowledgement_starts_no_turn_and_its_asker_is_released_at_on
     await plugin.settle_network_turn(llm, now=100.0)
 
     [end] = _ends(sent)
-    assert (end["thread_id"], end["turn_end"]) == (T1, {"replies": 0, "failed": False})
+    assert (end["thread_id"], end["turn_end"]) == (T1, {"replies": 0, "failed": False, "outcome": "end_turn"})
     assert not plugin.network_turn_open()
 
 
@@ -547,7 +548,7 @@ async def test_a_request_with_no_model_to_run_releases_its_asker_too():
     await plugin._on_message_received(_request(T1, W1))
     await plugin.settle_network_turn(llm, now=100.0)
 
-    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": False}]
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": False, "outcome": "end_turn"}]
 
 
 @pytest.mark.asyncio
@@ -575,7 +576,7 @@ async def test_a_request_that_finds_the_model_busy_waits_for_that_chain_to_finis
     await _settle(plugin, llm, start=200.0)
 
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert end["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
     assert _replies(sent)[0]["thread_id"] == T1
 
 
@@ -592,7 +593,7 @@ async def test_a_request_no_turn_ever_handled_ends_failed_at_the_wait_ceiling():
 
     # The relay does not stay closed to requests, and the requester is told.
     assert not plugin.network_turn_open()
-    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True, "outcome": "error"}]
     assert _replies(sent) == []
 
 
@@ -628,6 +629,8 @@ def _validate(payload: dict) -> dict:
 
 def test_a_well_formed_turn_end_is_accepted_and_a_plain_message_needs_none():
     assert _validate(_wire_payload())["turn_end"] == {"replies": 2, "failed": False}
+    acp = _wire_payload(turn_end={"replies": 2, "failed": True, "outcome": "cancelled"})
+    assert _validate(acp)["turn_end"]["outcome"] == "cancelled"
     plain = _wire_payload()
     del plain["turn_end"]
     assert "turn_end" not in _validate(plain)
@@ -917,7 +920,7 @@ async def test_a_plain_text_answer_is_sent_as_the_reply_before_the_end_frame():
         W1,
     )
     assert reply["address"] == f"relay:resolved:{ASKER}"
-    assert end["turn_end"] == {"replies": 1, "failed": False}
+    assert end["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
     assert sent.index(reply) < sent.index(end)
 
 
@@ -932,7 +935,7 @@ async def test_an_answer_sent_with_hub_msg_is_not_sent_again_as_plain_text():
     await _settle(plugin, llm)
 
     assert [r["content"] for r in _replies(sent)] == ["the answer"]
-    assert _ends(sent)[0]["turn_end"] == {"replies": 1, "failed": False}
+    assert _ends(sent)[0]["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
 
 
 @pytest.mark.asyncio
@@ -949,7 +952,7 @@ async def test_an_answer_with_no_text_left_sends_no_reply(text):
     await _settle(plugin, llm)
 
     assert _replies(sent) == []
-    assert _ends(sent)[0]["turn_end"] == {"replies": 0, "failed": False}
+    assert _ends(sent)[0]["turn_end"] == {"replies": 0, "failed": False, "outcome": "end_turn"}
 
 
 @pytest.mark.asyncio
@@ -983,7 +986,7 @@ async def test_a_failed_turn_sends_no_text_only_the_failed_frame():
 
     assert _replies(sent) == []
     [end] = _ends(sent)
-    assert end["turn_end"] == {"replies": 0, "failed": True} and end["content"] == FAILED
+    assert end["turn_end"] == {"replies": 0, "failed": True, "outcome": "error"} and end["content"] == FAILED
 
 
 @pytest.mark.asyncio
@@ -1154,6 +1157,212 @@ def _real_processor(hub) -> QueueProcessor:
     )
 
 
+def _roster_processor(sent=None, *, acp=None):
+    """Use the real coordinator's native/ACP activity view with a real queue."""
+    from kollabor.llm.llm_coordinator import LLMService
+
+    plugin, _ = _responder(sent if sent is not None else [])
+    qp = _real_processor(plugin)
+    llm = LLMService.__new__(LLMService)
+    llm._queue_processor = qp
+    llm.conversation_history = qp.conversation_history
+    llm.event_bus = plugin.event_bus = qp.event_bus
+    qp.event_bus.get_service.side_effect = lambda name: {
+        "hub_plugin": plugin,
+        "llm_service": llm,
+        "acp_orchestrator": acp,
+    }.get(name)
+    return plugin, llm, qp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_path", ["provider_error", "cancelled", "prehook_error", "prehook_denied"])
+async def test_a_plain_user_terminal_republishes_idle_without_a_success_response(exit_path):
+    """Provider errors and pre-request aborts bypass LLM_RESPONSE_POST."""
+    plugin, llm, qp = _roster_processor()
+    published = []
+    plugin._presence.publish.side_effect = lambda: published.append(plugin._identity.state)
+    qp.api_service = SimpleNamespace(model="owned-test-model", last_stop_reason="")
+    events = []
+
+    async def pre_request(event, data, source):
+        events.append(event)
+        if event == EventType.LLM_REQUEST_PRE:
+            await plugin._set_working({"messages": []})
+            if exit_path == "prehook_error":
+                raise RuntimeError("owned pre-request failure")
+            if exit_path == "prehook_denied":
+                return {"cancelled": True}
+        return {}
+
+    async def provider(**kwargs):
+        if exit_path == "cancelled":
+            qp.cancel_processing = True
+            raise asyncio.CancelledError("owned user stop")
+        raise RuntimeError("owned provider failure")
+
+    qp.event_bus.emit_with_hooks = AsyncMock(side_effect=pre_request)
+    qp._streaming_handler.call_llm = AsyncMock(side_effect=provider)
+
+    async def batch(messages):
+        await qp._execute_llm_turn(user_message_provided=True, current_parent_uuid="owned-parent")
+
+    async def continue_turn():
+        await qp._execute_llm_turn(user_message_provided=False, current_parent_uuid="owned-parent")
+
+    continuation = AsyncMock(side_effect=continue_turn)
+    qp.processing_queue.put_nowait("owned user input")
+    if exit_path == "prehook_denied":
+        with pytest.raises(asyncio.CancelledError):
+            await qp.process_queue(None, batch, continuation)
+    else:
+        await qp.process_queue(None, batch, continuation)
+
+    assert not llm.is_processing and not qp._turn_lock.locked() and qp.processing_queue.empty()
+    assert plugin._net_turn is None  # ordinary human turn; no received request owns it
+    assert plugin._identity.state == "idle"
+    assert published == (["working", "working", "idle"] if exit_path == "prehook_error" else ["working", "idle"])
+    assert EventType.LLM_RESPONSE_POST not in events
+    assert qp._streaming_handler.call_llm.await_count == (0 if exit_path.startswith("prehook") else 1)
+    assert continuation.await_count == (1 if exit_path == "prehook_error" else 0)
+    if exit_path == "cancelled":
+        assert qp.last_turn_error is None
+    else:
+        assert qp.last_turn_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["native", "queued", "locked", "acp_active", "acp_queued"])
+async def test_idle_publication_waits_for_every_actual_work_owner(owner):
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+
+    acp = ACPOrchestrator.__new__(ACPOrchestrator)
+    acp._runner = SimpleNamespace(is_processing=owner == "acp_active")
+    acp._completion_tasks = {object()} if owner == "acp_queued" else set()
+    plugin, llm, qp = _roster_processor(acp=acp)
+    qp.turn_completed = True
+    if owner == "native":
+        qp.is_processing = True
+    elif owner == "queued":
+        qp.processing_queue.put_nowait("a pending continuation")
+    elif owner == "locked":
+        await qp._turn_lock.acquire()
+    published = []
+    plugin._presence.publish.side_effect = lambda: published.append(plugin._identity.state)
+    await plugin._set_working({"messages": []})
+
+    try:
+        response = {"has_native_tools": True, "turn_completed": False}
+        assert await plugin._set_idle(response) is response
+        plugin.network_chain_ended()
+        assert plugin._identity.state == "working"
+        assert published == ["working"]
+    finally:
+        if qp._turn_lock.locked():
+            qp._turn_lock.release()
+
+    if owner == "queued":
+        qp.processing_queue.get_nowait()
+    acp._runner.is_processing = False
+    acp._completion_tasks.clear()
+    qp.is_processing = False
+    qp.note_chain_end()
+    await plugin._set_idle({})
+    assert not llm.is_processing
+    assert plugin._identity.state == "idle"
+    assert published == ["working", "idle"]  # repeated terminal hooks are idempotent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["waiting", "active", "booting", "connecting", "dead", "idle"])
+async def test_chain_completion_preserves_states_that_are_not_working(state):
+    plugin, _, qp = _roster_processor()
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})
+    plugin._identity.state = state
+    plugin._presence.publish.reset_mock()
+    qp.is_processing = False
+    await plugin._set_idle({})
+    assert plugin._identity.state == state
+    plugin._presence.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["wake", "buffer"])
+async def test_presence_settlement_does_not_claim_another_requests_turn(mode):
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})  # the previous request's chain
+    plugin._open_network_turn(_request(T2, W2), mode)
+    turn = plugin._net_turn
+    qp.is_processing = False
+    await plugin.settle_network_turn(llm)
+    assert plugin._identity.state == "idle"
+    assert plugin._net_turn is turn and not turn.started and not turn.ended
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_waiting_bound_ask_stays_open_at_the_chain_boundary():
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    request = _request(T1, W1)
+    request.metadata["acp_ask"] = True
+    plugin._open_network_turn(request, "wake")
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})
+    turn = plugin._net_turn
+    plugin._identity.state = "waiting"
+    plugin._presence.publish.reset_mock()
+    qp.is_processing = False
+    await plugin.settle_network_turn(llm)
+    assert plugin._identity.state == "waiting"
+    assert plugin._net_turn is turn and turn.started and not turn.ended
+    assert sent == []
+    plugin._presence.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_presence_write_failure_does_not_suppress_a_bound_terminal(failed):
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    request = _request(T1, W1)
+    request.metadata["acp_ask"] = True
+    plugin._open_network_turn(request, "wake")
+    qp.turn_completed = True
+
+    def publish():
+        if plugin._identity.state == "idle":
+            raise OSError("owned presence write failure")
+
+    plugin._presence.publish.side_effect = publish
+
+    async def batch(messages):
+        await plugin._set_working({"messages": []})
+        if failed:
+            raise RuntimeError("owned provider failure")
+        plugin._note_network_answer({"turn_completed": True}, "owned answer")
+
+    qp.processing_queue.put_nowait("owned user input")
+    await qp.process_queue(None, batch, AsyncMock())
+    turn = plugin._net_turn
+    assert plugin._identity.state == "idle"
+    assert turn.ended and turn.failed is failed
+    await plugin.settle_network_turn(llm)
+    await plugin.settle_network_turn(llm)
+    assert [(item["thread_id"], item["reply_to"]) for item in sent] == [(T1, W1), (T1, W1)]
+    assert [item["content"] for item in _replies(sent)] == [FAILED if failed else "owned answer"]
+    assert [item["turn_end"] for item in _ends(sent)] == [
+        {"replies": 1, "failed": failed, "outcome": "error" if failed else "end_turn"}
+    ]
+    assert not plugin.network_turn_open()
+
+
 @pytest.mark.asyncio
 async def test_a_queue_drain_cancelled_before_it_completes_ends_the_request_failed():
     """The pre-request hook denying a turn raises CancelledError out of the model call."""
@@ -1171,7 +1380,7 @@ async def test_a_queue_drain_cancelled_before_it_completes_ends_the_request_fail
         await qp.process_queue(None, denied, AsyncMock())
     await plugin.settle_network_turn(llm, now=100.0)
 
-    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True, "outcome": "error"}]
     assert not plugin.network_turn_open()
 
 
@@ -1211,7 +1420,7 @@ async def test_a_continuation_turn_that_raises_ends_the_hub_continue_chain_faile
     await plugin.settle_network_turn(llm, now=100.0)
 
     assert len(calls) == 2
-    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True}]
+    assert [e["turn_end"] for e in _ends(sent)] == [{"replies": 0, "failed": True, "outcome": "error"}]
     assert not plugin.network_turn_open()
 
 
@@ -1223,3 +1432,345 @@ def test_a_driver_that_only_lowers_is_processing_still_ends_the_chain(completed,
     hub.network_chain_ended.assert_not_called()
     qp.is_processing = False
     hub.network_chain_ended.assert_called_once_with(failed=failed)
+
+@pytest.mark.asyncio
+async def test_incoming_acp_origin_cannot_be_settled_by_turn_end():
+    """Only outbound waiters may consume correlated terminal frames."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {T1: waiter}
+    turn = SimpleNamespace(message_id=W1, thread_id=T1)
+    plugin._acp_network_turns = {W1: turn}
+    message = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        content="finished",
+        thread_id=T1,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False, "outcome": "end_turn"}},
+    )
+    await plugin._on_message_received(message)
+    assert waiter.empty()
+    assert plugin._acp_network_turns == {W1: turn}
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_turn_end_rejects_wrong_thread_or_schema_without_waking_model():
+    sent: list = []
+    plugin, llm = _responder(sent)
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {T1: waiter}
+    plugin._acp_network_turns = {W1: SimpleNamespace(message_id=W1, thread_id=T1)}
+    wrong_thread = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        thread_id=T2,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False, "outcome": "end_turn"}},
+    )
+    malformed = HubMessage(
+        id=W1,
+        action="turn_end",
+        from_agent="relay:peer",
+        from_identity=ASKER,
+        to="infra",
+        thread_id=T1,
+        reply_to=W1,
+        metadata={"turn_end": {"replies": 1, "failed": False}},
+    )
+    await plugin._on_message_received(wrong_thread)
+    await plugin._on_message_received(malformed)
+    assert plugin._acp_network_turns == {W1: plugin._acp_network_turns[W1]}
+    assert waiter.empty()
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_correlated_turn_end_settles_outbound_cli_waiter_before_inbound_map():
+    """An outbound requester waiter must not depend on inbound ACP origins."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    thread_id = "request-thread"
+    request_id = "request-id"
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {thread_id: waiter}
+    plugin._cli_waiter_request_ids = {thread_id: request_id}
+    plugin._acp_network_turns = {}
+    message = HubMessage(
+        id="turn-end-id",
+        action="turn_end",
+        from_agent="receiver-agent",
+        from_identity="receiver-agent",
+        to="infra",
+        thread_id=thread_id,
+        reply_to=request_id,
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert await asyncio.wait_for(waiter.get(), timeout=0.2) == (
+        "end",
+        1,
+        False,
+        "",
+    )
+    assert plugin._acp_network_turns == {}
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_local_acp_turn_end_uses_hidden_sender_not_normal_message():
+    """Local completion metadata must select the dedicated turn_end action."""
+    plugin, _ = _responder([])
+    agent = SimpleNamespace(
+        identity="receiver",
+        socket_path="/tmp/receiver.sock",
+        state="idle",
+        cooldown_until=None,
+    )
+    message = HubMessage(
+        id="completion",
+        action="message",
+        from_agent="sender",
+        from_identity="sender",
+        to="receiver",
+        thread_id="thread-1",
+        reply_to="request-1",
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    original = AgentMessenger.send_turn_end
+    calls: list[dict] = []
+
+    async def fake_send_turn_end(target, **kwargs):
+        calls.append({"target": target, **kwargs})
+        return True
+
+    AgentMessenger.send_turn_end = staticmethod(fake_send_turn_end)
+    try:
+        assert await plugin._deliver_to_agent(agent, message) is True
+    finally:
+        AgentMessenger.send_turn_end = original
+    assert len(calls) == 1
+    assert calls[0]["thread_id"] == "thread-1"
+    assert calls[0]["reply_to"] == "request-1"
+    assert calls[0]["outcome"] == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_turn_end_rejects_foreign_authenticated_sender_even_with_matching_ids():
+    """A foreign authenticated identity cannot settle another requester."""
+    plugin, llm = _responder([])
+    plugin._cli_waiters = {}
+    plugin._acp_network_turns = {
+        "request-id": SimpleNamespace(
+            message_id="request-id",
+            thread_id="thread-id",
+            handle="expected-agent",
+        )
+    }
+    message = HubMessage(
+        id="foreign-end",
+        action="turn_end",
+        from_agent="foreign-agent",
+        from_identity="foreign-agent",
+        to="infra",
+        thread_id="thread-id",
+        reply_to="request-id",
+        metadata={
+            "turn_end": {
+                "replies": 1,
+                "failed": False,
+                "outcome": "end_turn",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert "request-id" in plugin._acp_network_turns
+    assert llm.conversation_history == []
+
+
+@pytest.mark.asyncio
+async def test_correlated_turn_end_rejects_same_name_foreign_device():
+    """A requester waiter is bound to the full authenticated designation."""
+    sent: list = []
+    plugin, llm = _responder(sent)
+    thread_id = "sender-thread"
+    request_id = "sender-request"
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {thread_id: waiter}
+    plugin._cli_waiter_request_ids = {thread_id: request_id}
+    plugin._cli_waiter_senders = {thread_id: "receiver@device"}
+    message = HubMessage(
+        id="end-id",
+        action="turn_end",
+        from_agent="receiver",
+        from_identity="receiver@other-device",
+        to="infra",
+        content="stopped",
+        thread_id=thread_id,
+        reply_to=request_id,
+        metadata={
+            "turn_end": {
+                "replies": 0,
+                "failed": True,
+                "outcome": "cancelled",
+            }
+        },
+    )
+    await plugin._on_message_received(message)
+    assert waiter.empty()
+    assert llm.conversation_history == []
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_turn_end_cannot_poison_valid_completion_dedup():
+    """Sender validation must precede turn_end deduplication."""
+    plugin, _ = _responder([])
+    thread_id, request_id = "dedup-thread", "dedup-request"
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {thread_id: waiter}
+    plugin._cli_waiter_request_ids = {thread_id: request_id}
+    plugin._cli_waiter_senders = {thread_id: "receiver@device"}
+
+    def frame(sender: str) -> HubMessage:
+        return HubMessage(
+            id=request_id,
+            action="turn_end",
+            from_agent=sender,
+            from_identity=sender,
+            to="infra",
+            thread_id=thread_id,
+            reply_to=request_id,
+            metadata={"turn_end": {"replies": 0, "failed": False, "outcome": "end_turn"}},
+        )
+
+    await plugin._on_message_received(frame("intruder@device"))
+    await plugin._on_message_received(frame("receiver@device"))
+    await plugin._on_message_received(frame("receiver@device"))
+
+    assert await asyncio.wait_for(waiter.get(), timeout=0.2) == (
+        "end", 0, False, ""
+    )
+    assert waiter.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["wrong_thread", "wrong_request", "negative_replies", "boolean_replies", "malformed"])
+async def test_invalid_frame_from_owner_does_not_reserve_completion_id(invalid):
+    plugin, _ = _responder([])
+    waiter = asyncio.Queue()
+    plugin._cli_waiters = {T1: waiter}
+    plugin._cli_waiter_request_ids = {T1: W1}
+    plugin._cli_waiter_senders = {T1: ASKER}
+    message = HubMessage(id="terminal-id", action="turn_end", from_identity=ASKER,
+                         from_agent=ASKER, to="infra", thread_id=T1, reply_to=W1,
+                         metadata={"turn_end": {"replies": 0, "failed": False, "outcome": "end_turn"}})
+    if invalid == "wrong_thread":
+        message.thread_id = T2
+    elif invalid == "wrong_request":
+        message.reply_to = W2
+    elif invalid == "negative_replies":
+        message.metadata["turn_end"]["replies"] = -1
+    elif invalid == "boolean_replies":
+        message.metadata["turn_end"]["replies"] = True
+    else:
+        message.metadata["turn_end"].pop("outcome")
+    await plugin._on_message_received(message)
+    assert waiter.empty()
+    valid = HubMessage(id="terminal-id", action="turn_end", from_identity=ASKER,
+                       from_agent=ASKER, to="infra", thread_id=T1, reply_to=W1,
+                       metadata={"turn_end": {"replies": 0, "failed": False, "outcome": "end_turn"}})
+    await plugin._on_message_received(valid)
+    assert await asyncio.wait_for(waiter.get(), .2) == ("end", 0, False, "")
+
+
+@pytest.mark.asyncio
+async def test_native_bound_ask_without_text_reports_successful_empty_answer():
+    sent = []
+    plugin, llm = _responder(sent)
+    await plugin._on_message_received(_request(T1, W1))
+    plugin._net_turn.bound_ask = True
+    await _model_turn(plugin, llm)
+    await _settle(plugin, llm)
+    assert [reply["content"] for reply in _replies(sent)] == [
+        "The receiving agent finished this request without an answer."
+    ]
+    assert _ends(sent)[0]["turn_end"] == {"replies": 1, "failed": False, "outcome": "end_turn"}
+
+
+@pytest.mark.asyncio
+async def test_ordinary_acp_hub_request_does_not_require_external_bridge():
+    plugin, llm = _responder([])
+    controller = SimpleNamespace(active=True)
+    llm.profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp"))
+    llm.submit_human_input = AsyncMock(return_value={"status": "queued", "request_id": W1})
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        llm if name == "llm_service" else controller if name == "acp_orchestrator" else None
+    )
+    assert plugin._bridge is None
+    await plugin._on_message_received(_request(T1, W1))
+    llm.submit_human_input.assert_awaited_once()
+    assert llm.submit_human_input.await_args.kwargs["request_id"] == W1
+    assert llm.submit_human_input.await_args.kwargs["thread_id"] == T1
+    assert plugin._acp_network_turns[W1].handle == ASKER
+
+
+@pytest.mark.asyncio
+async def test_busy_acp_accepts_each_distinct_ordinary_request_into_its_fifo():
+    plugin, llm = _responder([])
+    controller = SimpleNamespace(active=True)
+    llm.is_processing = True
+    llm.profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp"))
+    llm.submit_human_input = AsyncMock(return_value={"status": "queued"})
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        llm if name == "llm_service" else controller if name == "acp_orchestrator" else None
+    )
+    for thread, request in ((T1, W1), (T2, W2), (T3, W3)):
+        await plugin._on_message_received(_request(thread, request, f"Return the answer for {request}"))
+    assert [call.kwargs["request_id"] for call in llm.submit_human_input.await_args_list] == [W1, W2, W3]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_acp_returns_admission_failure_without_native_turn():
+    sent = []
+    plugin, llm = _responder(sent)
+    controller = SimpleNamespace(active=False)
+    llm.profile_manager = SimpleNamespace(get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp"))
+    llm.submit_human_input = AsyncMock(return_value={
+        "status": "rejected", "reason": "acp_unavailable",
+        "message": "claude-agent-acp was not found; select another profile.",
+    })
+    plugin.event_bus.get_service.side_effect = lambda name: (
+        llm if name == "llm_service" else controller if name == "acp_orchestrator" else None
+    )
+    await plugin._on_message_received(_request(T1, W1))
+    llm.submit_human_input.assert_awaited_once()
+    assert len(sent) == 2
+    assert all((item["thread_id"], item["reply_to"]) == (T1, W1) for item in sent)
+    assert "claude-agent-acp was not found" in sent[0]["content"]
+    assert _ends(sent)[0]["turn_end"]["outcome"] == "error"
+    assert llm.conversation_history == []
+    assert not any(call.args[0] is EventType.TRIGGER_LLM_CONTINUE for call in plugin.event_bus.emit_with_hooks.await_args_list)

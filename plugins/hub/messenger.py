@@ -366,6 +366,7 @@ class AgentSocketServer:
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
         on_acp_hub_status: Optional[Callable] = None,
+        on_acp_hub_call: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -382,6 +383,7 @@ class AgentSocketServer:
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
         self._on_acp_hub_status = on_acp_hub_status
+        self._on_acp_hub_call = on_acp_hub_call
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1099,6 +1101,10 @@ class AgentSocketServer:
                 "socket type) — connection allowed"
             )
 
+        # Keep the sender identity defined for local same-UID connections as
+        # well; hidden local turn_end frames are authenticated by peer creds
+        # rather than the Ed25519 designation handshake.
+        authenticated_as = None
         # --- Ed25519 challenge-response auth ---
         if self._auth_enabled or require_auth:
             if self._dns_registry is None or self._dns_identity is None:
@@ -1354,6 +1360,18 @@ class AgentSocketServer:
                     writer.write(response_line)
                     await writer.drain()
 
+                elif action == "acp_hub_call":
+                    if require_auth:
+                        result = {"error": "ACP child calls require a local connection"}
+                    elif self._on_acp_hub_call is None:
+                        result = {"error": "ACP hub tools are unavailable"}
+                    else:
+                        result = await self._on_acp_hub_call(
+                            token=msg_data.get("token"), generation=msg_data.get("generation"),
+                            name=msg_data.get("name"), arguments=msg_data.get("arguments") or {},
+                        )
+                    writer.write((json.dumps({"type": "acp_hub_call", **result}) + "\n").encode())
+                    await writer.drain()
                 elif action == "acp_hub_status":
                     result = None
                     if self._on_acp_hub_status:
@@ -1366,6 +1384,37 @@ class AgentSocketServer:
                     if not isinstance(result, dict):
                         result = {"error": "stale or unavailable ACP hub binding"}
                     writer.write((json.dumps({"type": "acp_hub_status", **result}) + "\n").encode())
+                    await writer.drain()
+
+                elif action == "turn_end":
+                    required = {"action", "thread_id", "reply_to", "turn_end"}
+                    frame = msg_data.get("turn_end")
+                    sender = msg_data.get("from_identity", "")
+                    if (
+                        not required <= set(msg_data) <= required | {"from_identity"}
+                        or not isinstance(sender, str)
+                        or len(sender) > 128
+                        or (sender and not sender.isprintable())
+                        or not isinstance(frame, dict)
+                        or set(frame)
+                        not in (
+                            {"replies", "failed", "outcome"},
+                            {"replies", "failed", "outcome", "text"},
+                        )
+                    ):
+                        writer.write(b'{"type":"error","msg":"invalid turn_end"}\n')
+                        await writer.drain()
+                        return
+                    end_message = HubMessage(
+                        action="turn_end",
+                        content=str(frame.get("text", "")),
+                        from_identity=authenticated_as or sender or "local",
+                        from_agent=authenticated_as or sender or "local",
+                        thread_id=str(msg_data["thread_id"]),
+                        reply_to=str(msg_data["reply_to"]), metadata={"turn_end": frame},
+                    )
+                    await self._on_message(end_message)
+                    writer.write((json.dumps({"type": "ack", "id": end_message.id}) + "\n").encode())
                     await writer.drain()
 
                 elif action == "ping":
@@ -1510,6 +1559,8 @@ class AgentSocketServer:
                             client_id,
                             mode,
                             sub_queue=sub_queue,
+                            sender=(authenticated_as if require_auth else self._local_designation) or None,
+                            operator=not require_auth,
                         )
                         return  # Connection ends when attacher detaches
 
@@ -1760,6 +1811,8 @@ class AgentSocketServer:
         client_id: str,
         mode: str,
         sub_queue: Any | None = None,
+        sender: str | None = None,
+        operator: bool = False,
     ) -> None:
         """Persistent streaming loop for an attached client.
 
@@ -1878,7 +1931,47 @@ class AgentSocketServer:
                         text = msg.get("text", "")
                         if text and self._on_input_inject:
                             try:
-                                result = self._on_input_inject(text)
+                                callback = self._on_input_inject
+                                context = {
+                                    "request_id": msg.get("request_id"),
+                                    "thread_id": msg.get("thread_id"),
+                                    "sender": sender,
+                                    "operator": operator,
+                                }
+                                try:
+                                    signature = inspect.signature(callback)
+                                    context_names = {"request_id", "thread_id", "sender", "operator"}
+                                    accepts_context = any(
+                                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                                        or (
+                                            name in context_names
+                                            and parameter.kind
+                                            in {
+                                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                                inspect.Parameter.KEYWORD_ONLY,
+                                            }
+                                        )
+                                        for name, parameter in signature.parameters.items()
+                                    )
+                                except (TypeError, ValueError):
+                                    accepts_context = False
+                                if accepts_context:
+                                    has_var_kwargs = any(
+                                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                                        for parameter in signature.parameters.values()
+                                    )
+                                    callback_context = (
+                                        context
+                                        if has_var_kwargs
+                                        else {
+                                            name: value
+                                            for name, value in context.items()
+                                            if name in signature.parameters
+                                        }
+                                    )
+                                    result = callback(text, **callback_context)
+                                else:
+                                    result = callback(text)
                                 if asyncio.iscoroutine(result):
                                     await result
                             except Exception as e:
@@ -2310,6 +2403,69 @@ class AgentMessenger:
 
         except Exception as e:
             logger.debug(f"Send to {target_socket} failed: {e}")
+            return False
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def send_turn_end(
+        target_socket: str,
+        *,
+        thread_id: str,
+        reply_to: str,
+        replies: int,
+        failed: bool,
+        outcome: str,
+        text: str,
+        from_identity: str = "",
+        timeout: float = 5.0,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> bool:
+        """Send a correlated terminal frame on a fresh authenticated connection."""
+        if (
+            not isinstance(thread_id, str)
+            or not isinstance(reply_to, str)
+            or not isinstance(replies, int)
+            or isinstance(replies, bool)
+            or replies < 0
+            or not isinstance(failed, bool)
+            or not isinstance(text, str)
+            or not text.strip()
+            or outcome not in {
+                "end_turn", "cancelled", "refusal", "max_tokens",
+                "max_turn_requests", "busy", "skipped", "timeout", "error",
+            }
+        ):
+            return False
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                target_socket, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            payload = {
+                "action": "turn_end",
+                "thread_id": thread_id,
+                "reply_to": reply_to,
+                "from_identity": from_identity,
+                "turn_end": {
+                    "replies": replies,
+                    "failed": failed,
+                    "outcome": outcome,
+                    "text": text,
+                },
+            }
+            writer.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            response = json.loads(line.decode().strip()) if line else {}
+            return isinstance(response, dict) and response.get("type") == "ack"
+        except Exception:
             return False
         finally:
             if writer:

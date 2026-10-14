@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import re
 import sys
@@ -325,7 +326,18 @@ class TerminalLLMChat:
                         self.profile_manager, config=self.config
                     )
                     loadout, _ = loadout_manager.resolve(default_loadout)
-                    if loadout:
+                    loadout_profile = (
+                        self.profile_manager.get_profile(loadout.provider_profile)
+                        if loadout
+                        else None
+                    )
+                    if loadout and getattr(loadout_profile, "provider", "") == "acp":
+                        # ACP owns model/effort/temperature inside its harness;
+                        # do not synthesize native model settings at startup.
+                        applied = self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                    elif loadout:
                         update_kwargs = {
                             "model": loadout.model,
                             "save_to_config": False,
@@ -370,19 +382,31 @@ class TerminalLLMChat:
                 loadout, suggestions = loadout_manager.resolve(profile_name)
                 activated_via_loadout = False
                 if loadout is not None:
+                    loadout_profile = self.profile_manager.get_profile(
+                        loadout.provider_profile
+                    )
+                    is_acp_loadout = getattr(loadout_profile, "provider", "") == "acp"
                     update_kwargs = {"model": loadout.model, "save_to_config": False}
-                    if loadout.temperature is not None:
+                    if not is_acp_loadout and loadout.temperature is not None:
                         update_kwargs["temperature"] = loadout.temperature
-                    if loadout.effort:
+                    if not is_acp_loadout and loadout.effort:
                         update_kwargs["effort"] = loadout.effort
-                    if loadout.max_tokens is not None:
+                    if not is_acp_loadout and loadout.max_tokens is not None:
                         update_kwargs["max_tokens"] = loadout.max_tokens
 
-                    if self.profile_manager.update_profile(
-                        loadout.provider_profile, **update_kwargs
-                    ) and self.profile_manager.set_active_profile(
-                        loadout.provider_profile, persist=False
-                    ):
+                    activated = (
+                        self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                        if is_acp_loadout
+                        else self.profile_manager.update_profile(
+                            loadout.provider_profile, **update_kwargs
+                        )
+                        and self.profile_manager.set_active_profile(
+                            loadout.provider_profile, persist=False
+                        )
+                    )
+                    if activated:
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "
@@ -431,21 +455,28 @@ class TerminalLLMChat:
         # the user's saved profile (R3).
         if model_override or effort_override:
             target = self.profile_manager.active_profile_name
-            overrides: dict[str, Any] = {"save_to_config": False}
-            if model_override:
-                overrides["model"] = model_override
-            if effort_override:
-                overrides["effort"] = effort_override
-            if self.profile_manager.update_profile(target, **overrides):
-                logger.info(
-                    "Applied launch overrides to profile '%s': %s",
-                    target,
-                    {k: v for k, v in overrides.items() if k != "save_to_config"},
+            active_profile = self.profile_manager.get_profile(target)
+            if getattr(active_profile, "provider", "") == "acp":
+                raise ValueError(
+                    f"--model/--effort are not supported for ACP profile '{target}'; "
+                    "the ACP harness owns these settings"
                 )
             else:
-                logger.warning(
-                    "Failed to apply launch overrides to profile '%s'", target
-                )
+                overrides: dict[str, Any] = {"save_to_config": False}
+                if model_override:
+                    overrides["model"] = model_override
+                if effort_override:
+                    overrides["effort"] = effort_override
+                if self.profile_manager.update_profile(target, **overrides):
+                    logger.info(
+                        "Applied launch overrides to profile '%s': %s",
+                        target,
+                        {k: v for k, v in overrides.items() if k != "save_to_config"},
+                    )
+                else:
+                    logger.warning(
+                        "Failed to apply launch overrides to profile '%s'", target
+                    )
 
         # Initialize agent manager (for agent/skill system)
         self.agent_manager = AgentManager(self.config)
@@ -712,6 +743,7 @@ class TerminalLLMChat:
         ):
             # Import response handler
             from kollabor_agent.permissions import handle_confirmation_response
+            from kollabor_events.permissions_models import ConfirmationResponse
 
             # Create wrapper that converts ConfirmationResponse to PermissionDecision
             async def confirmation_callback_wrapper(details):
@@ -719,17 +751,61 @@ class TerminalLLMChat:
                 # the visible TUI lives in a separate client process, so route
                 # the prompt across the attach socket instead of waiting on the
                 # daemon's hidden stdin.
-                response = await self._try_attach_permission_prompt(details)
-                if response is None:
-                    response = (
-                        await self.renderer.layout_manager.show_permission_prompt(
-                            details
-                        )
+                is_acp_prompt = str(details.get("source") or "").lower() == "acp"
+                if is_acp_prompt:
+                    response = await self._try_attach_permission_prompt(details)
+                    if response is None:
+                        response = await self.renderer.layout_manager.show_permission_prompt(details)
+                else:
+                    response = await self._try_attach_permission_prompt(details)
+                    if response is None:
+                        response = await self.renderer.layout_manager.show_permission_prompt(details)
+                # Convert to PermissionDecision using response handler. ACP
+                # attach clients return an opaque option ID; map it back to
+                # the enum kind only for the native decision machinery.
+                selected_option = None
+                if details.get("source") == "acp" and isinstance(response, str):
+                    details["acp_selected_option_id"] = response
+                    selected_option = next(
+                        (item for item in details.get("options", ())
+                         if isinstance(item, dict) and str(item.get("optionId")) == response),
+                        None,
                     )
-                # Convert to PermissionDecision using response handler
-                return await handle_confirmation_response(
+                    if selected_option is None:
+                        return None
+                    kind_to_name = {
+                        "allow_once": "APPROVE_ONCE",
+                        "allow_always": "APPROVE_ALWAYS",
+                        "allow_tool_always": "APPROVE_TOOL_ALWAYS",
+                        "reject_once": "DENY",
+                        "reject_always": "DENY",
+                    }
+                    response = getattr(ConfirmationResponse, kind_to_name.get(
+                        str(selected_option.get("kind")), "DENY"
+                    ))
+                decision = await handle_confirmation_response(
                     self.permission_manager, details, response
                 )
+                if details.get("source") == "acp":
+                    selected = str(
+                        (selected_option or {}).get("kind")
+                        or getattr(response, "name", str(response))
+                    ).lower()
+                    choice_by_kind = {
+                        "allow_once": "approve_once",
+                        "allow_always": "approve_always",
+                        "allow_tool_always": "approve_tool_always",
+                        "reject_once": "reject_once",
+                        "reject_always": "reject_always",
+                    }
+                    selected = choice_by_kind.get(selected, selected)
+                    scope = {"approve_session": "session", "approve_project": "project"}.get(selected)
+                    decision.confirmation_details = {
+                        "acp_grant_scope": scope,
+                        "acp_choice": selected,
+                        "acp_selected_option_id": details.get("acp_selected_option_id"),
+                    }
+                return decision
 
             self.permission_manager.set_confirmation_callback(
                 confirmation_callback_wrapper
@@ -787,6 +863,7 @@ class TerminalLLMChat:
                     permission_manager=self.permission_manager,
                     agent_manager=self.agent_manager,
                     event_bus=self.event_bus,
+                    startup_status=self._get_startup_status,
                 )
                 self.event_bus.register_service(
                     "state_service", self._local_state_service
@@ -956,6 +1033,7 @@ class TerminalLLMChat:
         # Task tracking for race condition prevention
         self.running = False
         self._startup_complete = False
+        self._startup_error = ""
         self._startup_ready = asyncio.Event()
         self._background_tasks: list[asyncio.Task] = []
         self._pending_skill_display: list[tuple[str, str, dict[str, Any]]] = []
@@ -1144,13 +1222,186 @@ class TerminalLLMChat:
             logger.info("Executing guaranteed cleanup")
             await self.cleanup()
 
+    async def _acp_permission_decider(self, request: Any) -> str | None:
+        """Adapt ACP permission cards to the existing human confirmation owner.
+
+        ACP-originated agent requests must never auto-approve when no visible
+        human callback is installed. The callback chooses among the opaque
+        option IDs offered by the adapter; this adapter only maps its decision
+        back to that exact offered ID.
+        """
+        manager = getattr(self, "permission_manager", None)
+        options = list(request.options or ())
+
+        def offered(kind: str) -> str | None:
+            for option in options:
+                if str(option.get("kind")) == kind:
+                    return str(option.get("optionId"))
+            return None
+
+        # Reuse an exact ACP grant without opening a second native prompt.
+        valid_operation = isinstance(request.operation, dict) and bool(request.operation)
+        allow_once = [option for option in options if str(option.get("kind")) == "allow_once"]
+        has_grant = getattr(manager, "has_acp_grant", None)
+        if valid_operation and len(allow_once) == 1 and callable(has_grant) and has_grant(
+            request.operation, request.workspace, request.profile
+        ):
+            return str(allow_once[0].get("optionId"))
+
+
+        # Native automatic modes may approve only a single opaque one-shot
+        # option. Never synthesize a vendor option or choose an ``always``
+        # option, and let ambiguous/always-only cards reach the human owner.
+        approval_mode = getattr(manager, "approval_mode", None)
+        mode_name = getattr(
+            approval_mode, "name", str(approval_mode).rsplit(".", 1)[-1]
+        )
+        auto_once = mode_name == "TRUST_ALL" or (
+            mode_name == "AUTO_APPROVE_EDITS"
+            and valid_operation
+            and request.operation.get("kind") == "edit"
+        )
+        if auto_once and len(allow_once) == 1:
+            return str(allow_once[0].get("optionId"))
+
+        def schedule_cancel() -> None:
+            orchestrator = getattr(self, "acp_orchestrator", None)
+            schedule = getattr(orchestrator, "schedule_cancel", None)
+            if callable(schedule):
+                # The ACP request callback runs inside the active prompt RPC;
+                # awaiting cancellation here deadlocks that RPC. The
+                # orchestrator owns the tracked task and joins it during close.
+                schedule(
+                    session_id=request.session_id,
+                    generation=request.generation,
+                )
+            else:
+                cancel = getattr(orchestrator, "cancel", None)
+                if callable(cancel):
+                    prepare = getattr(orchestrator, "prepare_cancel", None)
+                    if callable(prepare):
+                        prepare(
+                            session_id=request.session_id,
+                            generation=request.generation,
+                        )
+                    asyncio.create_task(
+                        cancel(
+                            session_id=request.session_id,
+                            generation=request.generation,
+                        )
+                    )
+
+        if not options:
+            schedule_cancel()
+            return None
+        callback = getattr(manager, "_confirmation_callback", None)
+        if callback is None:
+            schedule_cancel()
+            return None
+        details = {
+            "tool_id": request.request_id,
+            "tool_type": request.kind or "acp",
+            "tool_name": request.kind or "acp_permission",
+            "operation": request.operation,
+            "workspace": request.workspace,
+            "profile": request.profile,
+            "options": options,
+            "acp_options": options,
+            "waiting": True,
+            "source": "acp",
+            "approval_scope": "once",
+            "generation": request.generation,
+        }
+        active = getattr(getattr(self.acp_orchestrator, "runner", None), "_active_context", None)
+        if active is not None:
+            details["request_id"] = active.request_id
+            details["turn_id"] = active.turn_id
+            details["input_source"] = active.source
+            details["thread_id"] = active.thread_id
+        if request.display:
+            details.update(request.display)
+        try:
+            decision = await callback(details)
+        except (asyncio.CancelledError, TimeoutError):
+            return None
+        except Exception:
+            logger.exception("ACP permission confirmation failed")
+            return None
+        decision_details = getattr(decision, "confirmation_details", None) or {}
+
+        if decision_details.get("acp_choice") == "cancel":
+            schedule_cancel()
+            return None
+        allowed = bool(getattr(decision, "allowed", False))
+        selected_id = (getattr(decision, "confirmation_details", None) or {}).get(
+            "acp_selected_option_id"
+        )
+        if selected_id is not None:
+            offered_ids = {
+                str(option.get("optionId")) for option in options
+            }
+            if str(selected_id) not in offered_ids:
+                return None
+            return str(selected_id)
+        # An ACP denial with no offered reject_once option cannot be
+        # represented as a valid permission outcome; cancel the active ACP
+        # turn instead of allowing the runner to synthesize a generic deny.
+        if not allowed and not any(
+            str(option.get("kind")) == "reject_once" for option in options
+        ):
+            schedule_cancel()
+            return None
+
+        # Native confirmation handling persists its own approvals. Mirror
+        # session/project choices into the ACP namespace while returning only
+        # the one-shot opaque outcome to the adapter.
+        metadata = getattr(decision, "confirmation_details", None) or {}
+        scope = metadata.get("acp_grant_scope")
+        choice = metadata.get("acp_choice")
+        grant_acp = getattr(manager, "grant_acp", None)
+        if (
+            allowed
+            and valid_operation
+            and len(allow_once) == 1
+            and callable(grant_acp)
+            and scope in ("session", "project")
+        ):
+            grant_acp(request.operation, request.workspace, request.profile, scope=scope)
+        if allowed and choice in ("approve_session", "approve_project"):
+            if len(allow_once) != 1:
+                return None
+            wanted = "allow_once"
+        elif allowed and choice == "approve_always":
+            # Native ``A`` is an edit-mode control for ACP edit operations,
+            # not permission to persist a vendor allow_always option. Keep the
+            # ACP result one-shot while enabling the native edit mode.
+            if isinstance(request.operation, dict) and request.operation.get("kind") == "edit":
+                try:
+                    from kollabor_agent.permissions.manager import ApprovalMode
+
+                    manager.set_approval_mode(ApprovalMode.AUTO_APPROVE_EDITS, persist=False)
+                except Exception:
+                    logger.debug("Unable to enable ACP edit approval mode", exc_info=True)
+                wanted = "allow_once"
+            else:
+                wanted = "allow_always"
+        elif allowed and choice == "approve_tool_always":
+            wanted = "allow_tool_always"
+        else:
+            wanted = "allow_once" if allowed else "reject_once"
+        for option in options:
+            if str(option.get("kind")) == wanted:
+                return str(option.get("optionId"))
+        # A human can explicitly choose always/reject-always only when that
+        # opaque option was actually offered; never synthesize an option.
+        return None
+
+
     async def _initialize_acp_orchestrator(self) -> None:
         """Start the daemon-owned ACP runner for an ACP-selected profile."""
         if self._attach_to or self.acp_orchestrator is not None:
             return
         profile = self.profile_manager.get_active_profile()
-        if profile.provider != "acp":
-            return
         from .llm.acp_orchestrator import ACPOrchestrator
 
         identity = getattr(self.args, "as_identity", None) or os.environ.get(
@@ -1158,9 +1409,26 @@ class TerminalLLMChat:
         )
         hub_plugin = self.event_bus.get_service("hub_plugin")
         orchestrator = ACPOrchestrator(
-            self.event_bus, identity=identity, hub_plugin=hub_plugin
+            self.event_bus,
+            identity=identity,
+            hub_plugin=hub_plugin,
+            permission_decider=self._acp_permission_decider,
         )
-        await orchestrator.start(profile)
+        self.event_bus.register_service("acp_orchestrator", orchestrator)
+        if profile.provider != "acp":
+            self.acp_orchestrator = orchestrator
+            return
+        try:
+            await orchestrator.start(profile)
+        except BaseException:
+            # Startup is transactional: a partially spawned child/session must
+            # be closed and its Hub binding revoked before the error escapes.
+            try:
+                await orchestrator.close()
+            except BaseException as cleanup_exc:
+                logger.warning("ACP startup cleanup failed: %s", cleanup_exc)
+            self.acp_orchestrator = None
+            raise
         self.acp_orchestrator = orchestrator
         logger.info("ACP runner started for identity=%s profile=%s", identity, profile.name)
 
@@ -1170,6 +1438,61 @@ class TerminalLLMChat:
             message, source=UserInputSource.CLI_INITIAL
         )
 
+    def _get_startup_status(self) -> tuple[str, str]:
+        error = getattr(self, "_startup_error", "")
+        if error:
+            return "failed", error
+        return ("ready" if getattr(self, "_startup_complete", False) else "starting"), ""
+
+    @staticmethod
+    def _parent_process_alive(parent_pid: int, create_time: float | None) -> bool:
+        import psutil
+
+        try:
+            parent = psutil.Process(parent_pid)
+            if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE:
+                return False
+            return create_time is None or parent.create_time() == create_time
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            # An unreadable identity is not evidence that a parent exited.
+            logger.debug("Parent process identity unavailable: %s", parent_pid)
+            return True
+
+    def _start_parent_watchdog(self) -> None:
+        # This identity belongs only to this app. Child orchestrators replace
+        # KOLLAB_PARENT_PID with their own PID and must not inherit its birth.
+        parent_birth = os.environ.pop("KOLLAB_PARENT_CREATE_TIME", None)
+        parent_pid = os.environ.get("KOLLAB_PARENT_PID", "")
+        if not parent_pid:
+            return
+        pid = int(parent_pid)
+        birth = float(parent_birth) if parent_birth is not None else None
+        if pid <= 0 or (birth is not None and (not math.isfinite(birth) or birth <= 0)):
+            raise ValueError("Invalid parent process identity")
+        self.create_background_task(
+            self._watch_parent_process(pid, birth), "parent_watchdog"
+        )
+        logger.info("Parent watchdog started (pid %s)", pid)
+
+    async def _watch_parent_process(
+        self, parent_pid: int, create_time: float | None
+    ) -> None:
+        while self.running:
+            if not self._parent_process_alive(parent_pid, create_time):
+                logger.warning("Parent process %s exited, shutting down", parent_pid)
+                self.running = False
+                # Both foreground loops have their own running flags. Stop
+                # through their lifecycle APIs so start() reaches its finally
+                # block and closes the ACP runner, tools and Hub resources.
+                render_loop = getattr(self, "render_loop", None)
+                if render_loop is not None:
+                    render_loop.stop()
+                await self.input_handler.stop()
+                return
+            await asyncio.sleep(1.0 if create_time is not None else 10.0)
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1177,29 +1500,12 @@ class TerminalLLMChat:
         and version check initialize in the background. User input is gated
         by _startup_ready event so messages typed during init are held, not lost.
         """
+        self._startup_error = ""
         try:
             # Fire-and-forget: version check (network, 5s timeout)
             self.create_background_task(self._check_for_updates(), "version_check")
 
-            # Parent watchdog -- self-terminate if parent dies
-            parent_pid_str = os.environ.get("KOLLAB_PARENT_PID", "")
-            if parent_pid_str:
-                parent_pid = int(parent_pid_str)
-
-                async def _parent_watchdog():
-                    while self.running:
-                        await asyncio.sleep(10)
-                        try:
-                            os.kill(parent_pid, 0)
-                        except (OSError, ProcessLookupError):
-                            logger.warning(
-                                f"Parent process {parent_pid} died, shutting down"
-                            )
-                            self.running = False
-                            break
-
-                self.create_background_task(_parent_watchdog(), "parent_watchdog")
-                logger.info(f"Parent watchdog started (pid {parent_pid})")
+            self._start_parent_watchdog()
 
             # Load config-based hooks EARLY (before LLM/MCP init so connect events fire)
             await self._load_config_hooks()
@@ -1222,6 +1528,24 @@ class TerminalLLMChat:
             # Initialize all plugins dynamically (always - attach mode needs /hub etc)
             await self._initialize_plugins()
             await asyncio.sleep(0)  # Yield after plugin init
+            active_profile = (
+                self.profile_manager.get_active_profile()
+                if hasattr(self, "profile_manager")
+                else None
+            )
+            needs_hub_ready = (
+                not self._attach_to and getattr(active_profile, "provider", "") == "acp"
+            )
+            if needs_hub_ready:
+                hub_plugins = [
+                    plugin
+                    for plugin in self.plugin_instances.values()
+                    if hasattr(plugin, "wait_until_ready")
+                ]
+                for hub_plugin in {
+                    id(plugin): plugin for plugin in hub_plugins
+                }.values():
+                    await hub_plugin.wait_until_ready(timeout=30.0)
             await self._initialize_acp_orchestrator()
 
             # Process CLI command if provided (after plugins so all commands are registered)
@@ -1377,9 +1701,14 @@ class TerminalLLMChat:
                 await self._submit_cli_initial_message(initial_message)
 
         except asyncio.CancelledError:
+            self._startup_error = "Startup cancelled"
             logger.info("Deferred startup cancelled")
             raise
         except Exception as e:
+            self._startup_error = str(e) or type(e).__name__
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(getattr(self, "event_bus", None), "error", message=self._startup_error, phase="startup")
             logger.exception("Error during deferred startup: %s", e)
             self._startup_complete = False
             self.running = False
@@ -2333,29 +2662,30 @@ class TerminalLLMChat:
         self._startup_ready.set()
 
     async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
-        """Route daemon permission prompts to the visible attach client.
-
-        Only a --detached daemon: a session with its own terminal answers its
-        prompts there, even while the web UI or another window is attached.
-        """
-        if not self.event_bus or not getattr(self.args, "detached", False):
+        """Share ACP prompts with attached clients and the local terminal."""
+        if not self.event_bus:
             return None
-
+        is_acp = str(details.get("source") or "").lower() == "acp"
+        detached = bool(getattr(self.args, "detached", False))
+        if not detached and not is_acp:
+            return None
         display_tap = self.event_bus.get_service("display_tap")
         rpc_server = self.event_bus.get_service("rpc_server")
         if not display_tap or not rpc_server:
             return None
-
-        if not await self._attach_permission_bridge.wait_for_visible_attach_client(
+        local_layout = (
+            self.renderer.layout_manager if is_acp and not detached else None
+        )
+        if local_layout is None and not await self._attach_permission_bridge.wait_for_visible_attach_client(
             display_tap
         ):
             return None
-
         return await self._attach_permission_bridge.request_confirmation(
             display_tap=display_tap,
             rpc_server=rpc_server,
             details=dict(details),
             timeout=300,
+            local_layout_manager=local_layout,
         )
 
     async def _drain_attach_pending_flags(self) -> None:
@@ -3346,10 +3676,13 @@ class TerminalLLMChat:
         """
         logger.info("Starting application cleanup...")
         acp_orchestrator = getattr(self, "acp_orchestrator", None)
+        client_turn_broker = self.event_bus.get_service("client_turn_broker") if self.event_bus else None
+        if client_turn_broker is not None:
+            await client_turn_broker.close()
         if acp_orchestrator is not None:
             try:
                 await acp_orchestrator.close()
-            except Exception as exc:
+            except BaseException as exc:
                 logger.warning("ACP runner cleanup failed: %s", exc)
             self.acp_orchestrator = None
         self.running = False

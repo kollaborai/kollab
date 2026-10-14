@@ -73,10 +73,14 @@ class _StateLLMProxy:
         self._processing_states = iter(processing_states)
         self.tasks = []
         self.config = MagicMock()
+        self.context_calls = []
 
-    async def submit_human_input(self, message, *, source, pre_displayed=False):
+    async def submit_human_input(
+        self, message, *, source, pre_displayed=False, **kwargs
+    ):
+        self.context_calls.append(kwargs)
         return await self._service.submit_human_input(
-            message, source=source, pre_displayed=pre_displayed
+            message, source=source, pre_displayed=pre_displayed, **kwargs
         )
 
     def create_background_task(self, coro, name=None):
@@ -114,6 +118,26 @@ async def test_state_rpc_uses_one_full_user_input_event_and_propagates_pre_data(
         ("main", "state_rpc", "ordinary request [normalized]"),
         ("post", "state_rpc", "ordinary request [normalized]"),
     ]
+    pending_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_rpc_preserves_separate_request_thread_context():
+    bus, llm, _, pending_tool = await _pipeline()
+    proxy = _StateLLMProxy(llm)
+    state = LocalStateService(
+        llm_service=proxy, profile_manager=MagicMock(), event_bus=bus
+    )
+    result = await state.send_message(
+        {"message": "ordinary request", "request_id": "req-state",
+         "thread_id": "thread-state", "origin_context": {"sender": "agent-a"}}
+    )
+    assert result["accepted"] is True
+    await asyncio.gather(*proxy.tasks)
+    assert proxy.context_calls[-1] == {
+        "request_id": "req-state", "thread_id": "thread-state",
+        "origin_context": {"sender": "agent-a"},
+    }
     pending_tool.assert_awaited_once()
 
 
@@ -388,6 +412,22 @@ async def test_selected_acp_profile_rejects_when_orchestrator_missing():
     assert result == {"status": "rejected", "reason": "acp_unavailable"}
 
 
+@pytest.mark.asyncio
+async def test_acp_startup_failure_keeps_code_and_actionable_detail():
+    service = object.__new__(LLMService)
+    service.event_bus = EventBus()
+    service.event_bus.register_service("acp_orchestrator", SimpleNamespace(
+        active=False, startup_error="claude-agent-acp not found. Install the pinned adapter."
+    ))
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+    assert result["reason"] == "acp_unavailable"
+    assert result["status"] == "rejected"
+    assert "Install the pinned adapter" in result["message"]
+
+
 
 @pytest.mark.asyncio
 async def test_acp_admission_emits_hooks_once_and_returns_immediately():
@@ -437,7 +477,10 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
     class ACP:
         active = True
 
-        def admit(self, message, *, request_id, source, thread_id=None):
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, message, *, request_id, source, thread_id=None, origin=None):
             calls.append((message, source))
             return SimpleNamespace(request_id=request_id, turn_id="turn-1")
 
@@ -462,9 +505,96 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     class ACP:
         active = True
 
+        async def steer(self, *args, **kwargs):
+            return False
+
         def admit(self, *args, **kwargs):
             raise RuntimeError("ACP prompt queue is full")
 
     bus.register_service("acp_orchestrator", ACP())
     result = await service._handle_user_input({"message": "hello"}, SimpleNamespace(source="state_rpc"))
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+
+
+@pytest.mark.asyncio
+async def test_public_submit_settles_acp_queue_full_rejection():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+
+    class ACP:
+        active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, *args, **kwargs):
+            raise RuntimeError("ACP prompt queue is full")
+
+    bus.register_service("acp_orchestrator", ACP())
+    await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=service._handle_user_input,
+        )
+    )
+
+    result = await service.submit_human_input(
+        "hello", source=UserInputSource.STATE_RPC
+    )
+
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_input_is_nonhuman_and_permission_pending_rejected():
+    bus = EventBus()
+    seen = []
+
+    async def reject_agent(data, event):
+        seen.append(event.source)
+        if event.source == "agent":
+            event.cancelled = True
+        return data
+
+    await bus.register_hook(Hook(
+        name="reject_agent_pending_permission", plugin_name="test",
+        event_type=EventType.USER_INPUT_PRE, priority=HookPriority.SECURITY.value,
+        callback=reject_agent,
+    ))
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    bus.register_service("acp_orchestrator", SimpleNamespace(active=True))
+    result = await service.submit_human_input(
+        "agent command", source="agent",
+        origin_context={"authenticated": True, "sender": "agent-a"},
+    )
+    assert result == {"status": "cancelled", "phase": "pre_user_input"}
+    assert seen == ["agent"]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_agent_rejects_acp_registry_lookup_failure():
+    service = object.__new__(LLMService)
+    service.event_bus = MagicMock()
+    service.event_bus.get_service.side_effect = RuntimeError("registry closed")
+    service.profile_manager = MagicMock()
+    service.profile_manager.get_active_profile.return_value = SimpleNamespace(
+        get_provider=lambda: "acp"
+    )
+    result = await service.submit_human_input(
+        "agent command", source="agent",
+        origin_context={"authenticated": True, "sender": "agent-a"},
+        request_id="req-fail", thread_id="thread-fail",
+    )
+    assert result == {"status": "rejected", "reason": "acp_unavailable"}

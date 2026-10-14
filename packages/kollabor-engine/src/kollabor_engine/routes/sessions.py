@@ -630,6 +630,7 @@ def apply_profile_mirror(
         selected = ProfileManager().get_profile(name)
         if selected is not None:
             session.profile = selected
+            session._profile_revision = getattr(session, "_profile_revision", 0) + 1
             if model:
                 selected.model = model
             if effort is not None:

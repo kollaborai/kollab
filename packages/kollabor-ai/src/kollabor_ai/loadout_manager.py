@@ -136,7 +136,7 @@ class LoadoutManager:
             is_local_with_endpoint = provider in _LOCAL_ENDPOINT_PROVIDERS and bool(
                 profile.get_endpoint()
             )
-            if has_key or is_oauth or is_local_with_endpoint:
+            if has_key or is_oauth or is_local_with_endpoint or provider == "acp":
                 result.append(profile)
         return result
 
@@ -194,6 +194,22 @@ class LoadoutManager:
 
         for profile in self.provider_profiles():
             provider = (profile.get_provider() or "").lower()
+            if provider == "acp":
+                command = tuple(getattr(profile, "command", ()) or ())
+                result.append(
+                    Loadout(
+                        name=profile.name,
+                        provider_profile=profile.name,
+                        model=command[0] if command else profile.name,
+                        description=(
+                            getattr(profile, "install_guidance", "")
+                            or getattr(profile, "description", "")
+                        ),
+                        implicit=True,
+                    )
+                )
+                seen.add(profile.name)
+                continue
             registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
             model_names = [
                 name for name, _info in list_models_for_provider(registry_provider)
@@ -497,6 +513,67 @@ class LoadoutManager:
 
         if loadout is None:
             return None
+
+        get_active_profile = getattr(self.profile_manager, "get_active_profile", None)
+        current_profile = get_active_profile() if callable(get_active_profile) else None
+        selected_profile = self.profile_manager.get_profile(loadout.provider_profile)
+        selected_provider = (
+            selected_profile.get_provider()
+            if hasattr(selected_profile, "get_provider")
+            else getattr(selected_profile, "provider", "")
+        )
+        orchestrator = None
+        if event_bus and hasattr(event_bus, "get_service"):
+            orchestrator = event_bus.get_service("acp_orchestrator")
+        current_provider = (
+            current_profile.get_provider()
+            if hasattr(current_profile, "get_provider")
+            else getattr(current_profile, "provider", "")
+        )
+        if str(selected_provider).lower() == "acp":
+            if (
+                loadout.temperature is not None
+                or loadout.effort
+                or loadout.max_tokens is not None
+            ):
+                logger.error(
+                    "ACP loadout '%s' cannot override native model parameters",
+                    loadout.name,
+                )
+                return None
+            if orchestrator is None:
+                state_service = (
+                    event_bus.get_service("state_service")
+                    if event_bus and hasattr(event_bus, "get_service")
+                    else None
+                )
+                if state_service is not None and hasattr(state_service, "set_active_profile"):
+                    try:
+                        await state_service.set_active_profile(loadout.provider_profile, reload_profile=True)
+                        return loadout
+                    except Exception:
+                        logger.exception("Remote ACP profile activation failed for '%s'", loadout.name)
+                logger.error("ACP loadout '%s' unavailable: no ACP orchestrator", loadout.name)
+                return None
+            try:
+                await orchestrator.close()
+                await orchestrator.start(selected_profile)
+                if not self.profile_manager.set_active_profile(loadout.provider_profile):
+                    await orchestrator.close()
+                    return None
+            except Exception:
+                logger.exception("ACP loadout '%s' failed to start", loadout.name)
+                return None
+            await self._announce_model_switch(event_bus, loadout, None)
+            return loadout
+
+        if str(current_provider).lower() == "acp" and orchestrator is not None:
+            try:
+                if getattr(orchestrator, "active", False):
+                    await orchestrator.close()
+            except Exception:
+                logger.exception("Failed to close ACP runner before native activation")
+                return None
 
         previous_model: Optional[str] = None
         get_profile = getattr(self.profile_manager, "get_profile", None)

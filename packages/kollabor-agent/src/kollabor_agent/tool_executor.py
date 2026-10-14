@@ -1265,6 +1265,8 @@ class ToolExecutor:
             metadata = {}
             if "diff_info" in result_dict:
                 metadata["diff_info"] = result_dict["diff_info"]
+            if "diffs" in result_dict:
+                metadata["diffs"] = result_dict["diffs"]
             if "tool_output_path" in result_dict:
                 metadata["tool_output_path"] = result_dict["tool_output_path"]
             if "file_content_hash" in result_dict:

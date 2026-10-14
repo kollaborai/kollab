@@ -4,6 +4,7 @@ import asyncio
 import time
 import unittest
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -665,6 +666,10 @@ class TestQueueProcessor(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(
+            self.conversation_logger.log_system_message.call_args.kwargs["tool_result"],
+            batch.metadata["xml_tool_results"][0],
+        )
 
         # The clean text also reaches non-terminal clients as a semantic
         # event, so the web live stream can drop the raw tags it streamed.
@@ -674,6 +679,59 @@ class TestQueueProcessor(unittest.TestCase):
             if call.args and call.args[0].get("type") == "response"
         ]
         self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
+
+    def test_native_and_xml_results_log_display_data_without_changing_model_calls(self):
+        native = SimpleNamespace(id="native-one", name="file_edit", input={"file": "owned.txt"})
+        diffs = [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]
+        self.streaming_handler.call_llm = AsyncMock(return_value="Checking\n<terminal>echo xml</terminal>")
+        self.native_tools_handler.tool_calling_enabled = True
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=True)
+        self.api_service.get_last_tool_calls = MagicMock(return_value=[native])
+        self.api_service.format_tool_result = MagicMock(return_value={"role": "tool", "content": "denied"})
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.native_tools_handler.execute_tool_calls = AsyncMock(return_value=[ToolExecutionResult(
+            "native-one", "file_edit", False, error="denied", execution_time=0.25, metadata={"diffs": diffs},
+        )])
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 2
+        self.tool_executor.format_result_for_conversation.return_value = "[terminal] xml"
+        self.tool_executor.execute_tool = AsyncMock(return_value=ToolExecutionResult(
+            "xml-one", "terminal", True, output="xml",
+        ))
+        self.response_parser.parse_response.return_value = {
+            "content": "Checking", "components": {}, "turn_completed": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "xml-one", "type": "terminal", "command": "echo xml"},
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant-uuid")
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("Checking", False, False))
+        self.loop.run_until_complete(self.processor._execute_llm_turn_inner(
+            user_message_provided=True, current_parent_uuid="parent-uuid",
+        ))
+        logged = self.conversation_logger.log_assistant_message.call_args.kwargs["tool_calls"]
+        self.assertEqual([call["id"] for call in logged], ["native-one", "xml-one"])
+        result_logs = self.conversation_logger.log_system_message.call_args_list
+        self.assertEqual(result_logs[0].args[0], "Executed file_edit (native-one): denied")
+        self.assertEqual(result_logs[0].kwargs["tool_result"], {
+            "id": "native-one", "content": "denied", "is_error": True,
+            "tool_execution_time": 0.25, "metadata": {"diffs": diffs},
+        })
+        self.assertEqual(result_logs[1].kwargs["tool_result"]["id"], "xml-one")
+        native_result = next(message for message in self.conversation_history if message.role == "tool")
+        self.assertEqual(native_result.metadata["diffs"], diffs)
+        self.assertTrue(native_result.metadata["is_error"])
+        self.assertEqual(self.add_message_fn.call_args.args[0].metadata["tool_calls"], [{
+            "id": "native-one", "type": "function",
+            "function": {"name": "file_edit", "arguments": '{"file": "owned.txt"}'},
+        }])
 
     def test_a_native_call_written_as_text_runs_as_that_tool(self):
         """A model can write its native call into the reply instead of making it.

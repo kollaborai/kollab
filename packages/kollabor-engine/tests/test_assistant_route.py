@@ -461,7 +461,15 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     )
 
     async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
-        session._events.put_nowait({"type": "permission_denied", "tool_id": tool_id})
+        session._events.put_nowait(
+            {
+                "type": "permission_denied",
+                "tool_id": tool_id,
+                "option_id": "vendor-denied",
+                "vendor_saved": True,
+                "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+            }
+        )
         session._events.put_nowait({"type": "turn_complete"})
         return True
 
@@ -1082,3 +1090,87 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
     state = captured["controller"].state
     assert len(state["messages"]) == 3
     assert state["synced"] == {"history": 4, "messages": 3}
+
+
+@pytest.mark.asyncio
+async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
+    session = _FakeSession([*_tokens("new answer"), {"type": "turn_complete"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    cancelled = {"id": "old", "role": "assistant", "content": "interrupted",
+                 "status": {"type": "incomplete", "reason": "cancelled"}}
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "try again"}],
+            state={"messages": [cancelled], "error": "Run cancelled"},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+    state = captured["controller"].state
+    assert state["error"] == ""
+    assert state["messages"][0] == cancelled
+    assert state["messages"][-1]["status"] == {"type": "complete", "reason": "stop"}
+    assert captured["controller"].errors == []
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_first_observed_harness_completion_has_no_invented_duration(status):
+    part = messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call_update", "toolCallId": "reconnected-card",
+        "title": "Saved result", "kind": "edit", "status": status,
+        "rawOutput": 0,
+    })
+    assert "timing" not in part
+    assert part["result"]["output"] == 0
+    assert part["result"]["metadata"]["acp"]["status"] == status
+    assert part["isPreliminary"] is False
+
+
+def test_harness_completion_keeps_observed_start_time(monkeypatch):
+    times = iter([1000, 2500])
+    monkeypatch.setattr(messages, "_now_ms", lambda: next(times))
+    part = messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call", "toolCallId": "observed-card", "status": "pending",
+    })
+    messages._assistant_harness_tool_part({
+        "sessionUpdate": "tool_call_update", "toolCallId": "observed-card", "status": "completed",
+    }, part)
+    assert part["timing"] == {"startedAt": 1000, "completedAt": 2500}
+
+
+def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
+    granted = messages._permission_result_from_event(
+        {
+            "type": "permission_granted",
+            "option_id": "allow-always",
+            "vendor_saved": True,
+            "warning": "Saved by [harness]; Kollab cannot undo it.",
+        }
+    )
+    denied = messages._permission_result_from_event(
+        {
+            "type": "permission_denied",
+            "option_id": "reject-always",
+            "vendor_saved": True,
+            "warning": "Saved by [harness]; Kollab cannot undo it.",
+        }
+    )
+    native = messages._permission_result_from_event(
+        {"type": "permission_granted"}
+    )
+
+    assert granted == {
+        "decision": "approve",
+        "option_id": "allow-always",
+        "vendor_saved": True,
+        "warning": "Saved by [harness]; Kollab cannot undo it.",
+    }
+    assert denied == {
+        "decision": "deny",
+        "option_id": "reject-always",
+        "vendor_saved": True,
+        "warning": "Saved by [harness]; Kollab cannot undo it.",
+    }
+    assert native == {"decision": "approve", "scope": "once"}

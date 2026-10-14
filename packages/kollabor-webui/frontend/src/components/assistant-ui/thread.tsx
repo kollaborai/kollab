@@ -29,6 +29,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useVoiceMode, type VoiceMode } from "@/voice-mode";
+import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -316,8 +317,9 @@ const Composer: FC<{
   const voiceAvailable = commands.some(
     (command) => command.name === "voice" && command.enabled !== false,
   );
+  const permissionStop = usePendingPermissionCancellation();
   const slotMode = useAuiState((s) =>
-    composerSlotMode(s, voiceAvailable ? voice : null),
+    composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
@@ -689,6 +691,7 @@ const Composer: FC<{
               <ComposerSlot
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
+                permissionStop={permissionStop}
                 onBeforeSend={openPanelFromComposer}
                 onSteer={submitBusyMessage}
               />
@@ -725,12 +728,13 @@ type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 const composerSlotMode = (
   s: AssistantState,
   voice: VoiceMode | null,
+  awaitingPermission = false,
 ): ComposerSlotMode => {
   // A /voice command is itself a chat run; hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
   if (!s.composer.isEmpty || !voice) return "send";
-  if (s.thread.isRunning) return "stop";
+  if (s.thread.isRunning || awaitingPermission) return "stop";
   return voice.on ? "listening" : "mic";
 };
 
@@ -749,9 +753,10 @@ const SLOT_SHOWS_LISTENING =
 const ComposerSlot: FC<{
   voice: VoiceMode | null;
   running: boolean;
+  permissionStop: { cancel: () => Promise<void>; cancelling: boolean } | null;
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
-}> = ({ voice, running, onBeforeSend, onSteer }) => {
+}> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
   return (
     <div className="aui-composer-slot relative size-9 shrink-0">
       {voice && (
@@ -824,6 +829,22 @@ const ComposerSlot: FC<{
             <SquareIcon className="size-3.5 fill-current" />
           </TooltipIconButton>
         </ComposerPrimitive.Cancel>
+      ) : permissionStop ? (
+        <TooltipIconButton
+          tooltip="Stop Generating"
+          side="top"
+          type="button"
+          variant="default"
+          disabled={permissionStop.cancelling}
+          onClick={() => { void permissionStop.cancel(); }}
+          className={cn(
+            SLOT_BUTTON,
+            "!left-auto !right-10 scale-100 opacity-100 visible",
+          )}
+          aria-label="Stop generating"
+        >
+          <SquareIcon className="size-3.5 fill-current" />
+        </TooltipIconButton>
       ) : null}
     </div>
   );

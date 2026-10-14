@@ -25,9 +25,73 @@ _GRANTED_SCOPES = {
 }
 
 
-def resolution_event(tool_id: str, response: Any) -> Dict[str, Any]:
-    """The event that tells every attached window a prompt is closed."""
-    scope = _GRANTED_SCOPES.get(getattr(response, "name", str(response)))
+def resolution_event(
+    tool_id: str,
+    response: Any,
+    details: dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Resolve the offered choice without losing its explicit turn owner."""
+    event = _permission_resolution(tool_id, response, details)
+    if details:
+        for key in ("request_id", "turn_id", "input_source", "generation", "thread_id"):
+            if details.get(key) is not None:
+                event[key] = details[key]
+    return event
+
+
+def _permission_resolution(
+    tool_id: str,
+    response: Any,
+    details: dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build the broadcast emitted when an attached prompt is resolved.
+
+    ACP option IDs are opaque strings and must be resolved before native enum
+    names.  An ACP provider is allowed to offer an ID such as
+    ``APPROVE_ONCE`` for a rejecting option; treating that ID as a native
+    control would incorrectly grant access to every attached window.
+    """
+    if isinstance(response, str) and details:
+        options = details.get("acp_options")
+        if isinstance(options, (list, tuple)):
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                if str(option.get("optionId") or "") != response:
+                    continue
+                kind = str(option.get("kind") or "").lower()
+                if kind == "allow_once":
+                    return {
+                        "type": "permission_granted",
+                        "tool_id": tool_id,
+                        "scope": "once",
+                        "option_id": response,
+                    }
+                if kind == "reject_once":
+                    return {"type": "permission_denied", "tool_id": tool_id}
+                if kind in {"allow_always", "reject_always"}:
+                    return {
+                        "type": "permission_granted"
+                        if kind == "allow_always"
+                        else "permission_denied",
+                        "tool_id": tool_id,
+                        "option_id": response,
+                        "vendor_saved": True,
+                        "warning": (
+                            "Saved by the ACP provider; Kollab cannot undo it."
+                        ),
+                    }
+                return {"type": "permission_denied", "tool_id": tool_id}
+
+    if response is ConfirmationResponse.CANCEL:
+        return {
+            "type": "permission_denied",
+            "tool_id": tool_id,
+            "outcome": "cancelled",
+        }
+
+    response_name = getattr(response, "name", None)
+    scope = _GRANTED_SCOPES.get(response_name or str(response))
     if scope:
         return {"type": "permission_granted", "tool_id": tool_id, "scope": scope}
     return {"type": "permission_denied", "tool_id": tool_id}
@@ -37,7 +101,9 @@ class AttachPermissionBridge:
     """Routes daemon permission prompts to the visible attach client."""
 
     def __init__(self) -> None:
-        self._pending: Dict[str, asyncio.Future[ConfirmationResponse]] = {}
+        self._pending: Dict[str, asyncio.Future[ConfirmationResponse | str]] = {}
+        self._pending_option_ids: Dict[str, set[str]] = {}
+        self._pending_details: Dict[str, dict[str, Any]] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
         # (shown or queued) that another window answered first.
@@ -54,12 +120,34 @@ class AttachPermissionBridge:
 
         async def _respond(params: dict[str, Any]) -> dict[str, Any]:
             tool_id = str(params.get("tool_id") or "")
-            response_name = str(params.get("response") or "")
-            response = self._parse_response(response_name)
+            option_id = params.get("option_id")
+            control_name = params.get("control")
+            response_field = params.get("response")
+            selector_count = sum(
+                value is not None
+                for value in (option_id, control_name, response_field)
+            )
+            if selector_count != 1:
+                return {"ok": False, "error": f"mixed permission response for {tool_id}"}
             future = self._pending.get(tool_id)
+            offered_ids = self._pending_option_ids.get(tool_id, set())
+            details = self._pending_details.get(tool_id, {})
+            if option_id is not None:
+                response_name = str(option_id)
+                if response_name not in offered_ids:
+                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
+                response: ConfirmationResponse | str = response_name
+            else:
+                response_name = str(control_name if control_name is not None else response_field or "")
+                if not self._is_native_response_name(response_name):
+                    return {"ok": False, "error": f"unsupported control for {tool_id}"}
+                response = self._parse_response(response_name)
+                if not self._native_response_allowed(details, response, response_name):
+                    return {"ok": False, "error": f"unoffered control for {tool_id}"}
             if future is None or future.done():
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
-            future.set_result(response)
+            if not self.try_settle_response(tool_id, response):
+                return {"ok": False, "error": f"no pending prompt for {tool_id}"}
             return {"ok": True}
 
         try:
@@ -68,6 +156,23 @@ class AttachPermissionBridge:
         except ValueError:
             self._registered_rpc_servers.add(server_id)
 
+    def try_settle_response(self, tool_id: str, response: Any) -> bool:
+        """Atomically settle one offered response from any surface."""
+        future = self._pending.get(tool_id)
+        if future is None or future.done():
+            return False
+        details = self._pending_details.get(tool_id, {})
+        if isinstance(response, str):
+            if response not in self._pending_option_ids.get(tool_id, set()):
+                return False
+        elif isinstance(response, ConfirmationResponse):
+            if not self._native_response_allowed(details, response, response.name):
+                return False
+        else:
+            return False
+        future.set_result(response)
+        return True
+
     async def request_confirmation(
         self,
         *,
@@ -75,30 +180,51 @@ class AttachPermissionBridge:
         rpc_server: Any,
         details: dict[str, Any],
         timeout: float,
-    ) -> ConfirmationResponse:
-        """Publish a prompt to attach clients and wait for a response."""
+        local_layout_manager: Any = None,
+    ) -> ConfirmationResponse | str:
+        """Share one pending decision between local and attached surfaces."""
         self.register_response_handler(rpc_server)
-
         tool_id = str(details.get("tool_id") or uuid.uuid4().hex)
         details["tool_id"] = tool_id
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ConfirmationResponse] = loop.create_future()
+        future = asyncio.get_running_loop().create_future()
         self._pending[tool_id] = future
-
-        display_tap.publish({"type": "permission_request", "details": details})
-
-        response = ConfirmationResponse.DENY
+        self._pending_details[tool_id] = details
+        self._pending_option_ids[tool_id] = {
+            str(option.get("optionId"))
+            for option in details.get("acp_options", ())
+            if isinstance(option, dict) and option.get("optionId")
+        }
+        local_task = None
+        response: ConfirmationResponse | str = ConfirmationResponse.CANCEL
         try:
-            response = await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning("attach permission prompt timed out for %s", tool_id)
+            if local_layout_manager is not None:
+                async def local_answer() -> None:
+                    try:
+                        candidate = await local_layout_manager.show_permission_prompt(details)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("local ACP permission prompt failed for %s", tool_id)
+                        self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+                        return
+                    self.try_settle_response(tool_id, candidate)
+                local_task = asyncio.create_task(local_answer())
+            display_tap.publish({"type": "permission_request", "details": details})
+            try:
+                response = await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                response = ConfirmationResponse.DENY
         finally:
             self._pending.pop(tool_id, None)
-            # Every attached window shows this prompt (a terminal and the web UI
-            # can watch one daemon): tell them all it is closed, so the ones that
-            # did not answer stop showing it.
-            display_tap.publish(resolution_event(tool_id, response))
+            self._pending_option_ids.pop(tool_id, None)
+            self._pending_details.pop(tool_id, None)
+            if not details.pop("_acp_resolution_published", False):
+                display_tap.publish(resolution_event(tool_id, response, details))
+            if local_task is not None:
+                if not local_task.done():
+                    local_layout_manager.cancel_permission_prompt()
+                    local_task.cancel()
+                await asyncio.gather(local_task, return_exceptions=True)
         return response
 
     async def handle_client_event(
@@ -136,14 +262,16 @@ class AttachPermissionBridge:
                     return
         finally:
             self._queued.discard(tool_id)
-        response_name = getattr(response, "name", str(response))
+        response_name = getattr(response, "name", None)
+        response_params = {"tool_id": details.get("tool_id")}
+        if response_name is not None:
+            response_params["control"] = response_name
+        else:
+            response_params["option_id"] = str(response)
 
         response_call = rpc_client.call(
             PERMISSION_RESPONSE_RPC_METHOD,
-            {
-                "tool_id": details.get("tool_id"),
-                "response": response_name,
-            },
+            response_params,
             timeout=10,
         )
         if wait_for_rpc_reply:
@@ -209,6 +337,52 @@ class AttachPermissionBridge:
                 return True
 
         return self.has_visible_attach_client(display_tap)
+
+    @staticmethod
+    def _is_native_response_name(value: str) -> bool:
+        return value.strip().upper() in ConfirmationResponse.__members__
+
+    @staticmethod
+    def _native_response_allowed(
+        details: dict[str, Any],
+        response: ConfirmationResponse,
+        response_name: str,
+    ) -> bool:
+        """Allow only explicitly eligible native controls for this prompt."""
+        if str(details.get("source") or "").lower() == "acp":
+            if response is ConfirmationResponse.CANCEL:
+                return True
+            options = details.get("acp_options") or []
+            once = [
+                item for item in options
+                if isinstance(item, dict) and item.get("kind") == "allow_once"
+            ]
+            operation = details.get("operation")
+            if response is ConfirmationResponse.APPROVE_ONCE:
+                return len(once) == 1
+            if response in (
+                ConfirmationResponse.APPROVE_SESSION,
+                ConfirmationResponse.APPROVE_PROJECT,
+            ):
+                return len(once) == 1 and bool(operation)
+            if response is ConfirmationResponse.APPROVE_ALWAYS:
+                return (
+                    len(once) == 1
+                    and bool(operation)
+                    and (
+                        (isinstance(operation, dict) and operation.get("kind") == "edit")
+                        or (isinstance(operation, str) and operation.split(":", 1)[0] == "edit")
+                    )
+                )
+            return response is ConfirmationResponse.DENY
+        if not details.get("acp_options"):
+            return True
+        return response in {
+            ConfirmationResponse.APPROVE_ONCE,
+            ConfirmationResponse.DENY,
+            ConfirmationResponse.CANCEL,
+        }
+
 
     def _parse_response(self, response_name: str) -> ConfirmationResponse:
         """Parse wire response names from the attach client."""

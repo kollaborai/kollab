@@ -632,7 +632,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     async def _send_message(params: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await state_service.send_message(params.get("message", ""))
+            return await state_service.send_message(
+                params.get("message", ""),
+                request_id=params.get("request_id"),
+                thread_id=params.get("thread_id"),
+                origin_context=params.get("origin_context"),
+            )
         except Exception as e:
             return {"error": str(e)}
 
@@ -759,6 +764,20 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.send_message": _send_message,
     }
 
+    async def _acp_submit(params):
+        return await state_service.submit_client_turn(str(params.get("message") or ""), str(params.get("request_id") or ""))
+
+    async def _acp_cancel(params):
+        return await state_service.cancel_client_turn(str(params.get("request_id") or ""))
+
+    handlers["state.acp_submit"] = _acp_submit
+    handlers["state.acp_cancel"] = _acp_cancel
+    async def _acp_configure_mcp(params):
+        return await state_service.configure_client_mcp(params.get("servers") or [])
+    handlers["state.acp_configure_mcp"] = _acp_configure_mcp
+    async def _acp_mode(params):
+        return await state_service.set_client_approval_mode(str(params.get("mode") or ""))
+    handlers["state.acp_mode"] = _acp_mode
     registered: list[str] = []
     for method_name, handler in handlers.items():
         try:

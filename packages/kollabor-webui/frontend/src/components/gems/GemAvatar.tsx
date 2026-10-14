@@ -21,8 +21,10 @@ export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
  * pulls out a laptop for long jobs, talks while it streams, fumes on errors,
  * dances when a turn lands, and goes dark and gray when nothing runs it.
  *
- * `size` is the layout box; the canvas overhangs it by GEM_PAD so hats and
- * props have room without pushing the layout around.
+ * `size` is the layout box. The gem and its hat are drawn inside it (FIT in
+ * gem-engine.ts), so a hat never reaches into the row above; the canvas
+ * overhangs the box by GEM_PAD only for the props that leave it (laptop,
+ * thought bubble, flying keyboards).
  */
 export function GemAvatar({ size = 32, className, label, where, ...own }: GemAvatarProps) {
   // The Gem Studio's saved look fills what the caller left open: an explicit

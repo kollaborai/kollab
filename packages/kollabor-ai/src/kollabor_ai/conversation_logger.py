@@ -12,6 +12,7 @@ import stat
 import subprocess
 import time
 import tomllib
+from copy import deepcopy
 from datetime import datetime, timezone
 from importlib.metadata import version as get_version
 from pathlib import Path
@@ -24,6 +25,19 @@ logger = logging.getLogger(__name__)
 
 # Bound for the one-time tighten walk over an existing conversations tree.
 _TIGHTEN_ENTRY_LIMIT = 4096
+
+
+def _acp_display_metadata(value: Any) -> Dict[str, Any]:
+    """Keep harness cards and replay updates separate from native model calls."""
+    if not isinstance(value, dict) or value.get("provider") != "acp":
+        return {}
+    result: Dict[str, Any] = {"provider": "acp"}
+    for key in ("acp_updates", "tool_calls"):
+        if isinstance(value.get(key), list):
+            result[key] = deepcopy([entry for entry in value[key] if isinstance(entry, dict)])
+    if isinstance(value.get("stop_reason"), str):
+        result["stop_reason"] = value["stop_reason"]
+    return result
 
 
 def _get_app_version() -> str:
@@ -565,6 +579,7 @@ class KollaborConversationLogger:
         thinking_content: Optional[List[str]] = None,
         tool_calls: Optional[List[Dict]] = None,
         provider_reasoning: Optional[Dict[str, Any]] = None,
+        display_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -577,6 +592,8 @@ class KollaborConversationLogger:
             tool_calls: Optional list of tool call dicts with id, name, input keys
             provider_reasoning: Provider-native reasoning artifacts, stored
                 verbatim so a resumed session can hand them back to the model
+            display_metadata: ACP cards, updates and stop reason for replay;
+                excluded from native provider tool-call reconstruction
         """
         message_uuid = str(uuid4())
 
@@ -642,6 +659,8 @@ class KollaborConversationLogger:
 
         if provider_reasoning:
             message["provider_reasoning"] = provider_reasoning
+        if replay_metadata := _acp_display_metadata(display_metadata):
+            message["display_metadata"] = replay_metadata
 
         await self._append_to_jsonl(message)
 
@@ -659,6 +678,7 @@ class KollaborConversationLogger:
         parent_uuid: str,
         subtype: str = "informational",
         tool_use_id: Optional[str] = None,
+        tool_result: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Log system messages including hook outputs and tool calls."""
         message_uuid = str(uuid4())
@@ -686,6 +706,10 @@ class KollaborConversationLogger:
 
         if tool_use_id:
             message["toolUseID"] = tool_use_id
+        if tool_result is not None:
+            # Display data travels beside the existing textual log. The
+            # parent UUID and toolUseID bind it to its assistant's call.
+            message["tool_result"] = tool_result
 
         await self._append_to_jsonl(message)
         return message_uuid

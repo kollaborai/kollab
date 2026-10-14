@@ -10,7 +10,22 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  cancelPendingPermission,
+  pendingPermissions,
+  permissionOwner,
+  samePendingPermission,
+  type PendingPermission,
+} from "@/utils/permission-cancel";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type {
   EngineApi,
   HistoryMessage,
@@ -51,6 +66,21 @@ export type EngineState = {
 
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
 const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
+
+const PermissionCancellationContext = createContext<{
+  cancel: (expected: readonly PendingPermission[]) => Promise<void>;
+  cancelling: boolean;
+} | null>(null);
+
+export function usePendingPermissionCancellation() {
+  const control = useContext(PermissionCancellationContext);
+  const messages = useAuiState((state) => state.thread.messages);
+  const expected = pendingPermissions(messages);
+  return control && expected.length ? {
+    cancel: () => control.cancel(expected),
+    cancelling: control.cancelling,
+  } : null;
+}
 
 function historyContentToThreadContent(content: unknown): ThreadMessageLike["content"] {
   if (typeof content === "string") return content;
@@ -124,6 +154,7 @@ function historyToMessages(
     argsText: string;
     result?: unknown;
     isError?: boolean;
+    isPreliminary?: boolean;
     timing?: { startedAt: number; completedAt: number };
   };
 
@@ -162,6 +193,21 @@ function historyToMessages(
     const metadata = asRecord(message.metadata);
     const rawCalls = metadata?.tool_calls;
     if (!Array.isArray(rawCalls)) return [];
+    const harnessCards = new Map<string, Record<string, unknown>>();
+    const updates = metadata?.acp_updates;
+    if (Array.isArray(updates)) {
+      for (const rawUpdate of updates) {
+        const update = asRecord(rawUpdate);
+        if (update?.kind !== "tool_call" && update?.kind !== "tool_call_update") continue;
+        const payload = asRecord(update.payload);
+        const id = asString(payload?.toolCallId) || asString(payload?.tool_call_id);
+        if (!id || !payload) continue;
+        harnessCards.set(id, {
+          ...harnessCards.get(id),
+          ...Object.fromEntries(Object.entries(payload).filter(([, value]) => value != null)),
+        });
+      }
+    }
 
     return rawCalls.flatMap((rawCall, callIndex) => {
       const call = asRecord(rawCall);
@@ -171,18 +217,38 @@ function historyToMessages(
         asString(call.id) ||
         asString(call.tool_call_id) ||
         `history-${sourceIndex}-tool-${callIndex}`;
-      const toolName =
+      const storedResult = asRecord(call.result);
+      const harness: Record<string, unknown> | null =
+        asRecord(asRecord(call.metadata)?.acp) ||
+        asRecord(asRecord(storedResult?.metadata)?.acp) ||
+        harnessCards.get(toolCallId) ||
+        (metadata?.provider === "acp" ? {
+          toolCallId,
+          title: call.name,
+          status: call.status,
+          rawInput: call.input,
+          rawOutput: call.result,
+        } : null);
+      // Vendor titles are display text, never native tool-UI routing names.
+      const toolName = harness ? "harness_tool" :
         asString(functionValue?.name) ||
         asString(call.name) ||
         asString(call.tool_name) ||
         "tool";
       const rawArguments =
         functionValue?.arguments ?? call.arguments ?? call.input ?? call.args;
-      const { args, argsText } = parseArguments(rawArguments ?? {});
+      const { args, argsText } = parseArguments(harness?.rawInput ?? rawArguments ?? {});
+      const result = harness ? {
+        success: harness.status !== "failed",
+        output: harness.rawOutput ?? storedResult?.output ?? call.result ?? harness.content ?? "",
+        metadata: { acp: harness },
+      } : call.result;
       return [{
         type: "tool-call",
         toolCallId,
         toolName,
+        ...(result !== undefined ? { result, isError: harness?.status === "failed" || Boolean(call.is_error) } : {}),
+        ...(harness ? { isPreliminary: harness.status !== "completed" && harness.status !== "failed" } : {}),
         args,
         argsText,
       }];
@@ -239,6 +305,18 @@ function historyToMessages(
 
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
+  const restoredStatus = (metadata: Record<string, unknown> | null): ThreadMessageLike["status"] => {
+    const reason = asString(metadata?.stop_reason);
+    if (metadata?.provider === "acp" && reason && reason !== "end_turn") {
+      return {
+        type: "incomplete",
+        reason: reason === "cancelled" ? "cancelled" :
+          reason === "max_tokens" || reason === "max_turn_requests" ? "length" :
+            reason === "error" || reason === "failed" ? "error" : "other",
+      };
+    }
+    return { type: "complete", reason: "stop" };
+  };
 
   // The reply time survives a reload: each turn is timed by the history's own
   // timestamps, from the user's message to the final reply. assistant-ui joins
@@ -264,8 +342,10 @@ function historyToMessages(
   // a reply of its own.
   const showTurnError = () => {
     if (!turnError) return;
-    const status = { type: "incomplete", reason: "error", error: turnError.message } as const;
     const reply = firstReply === undefined ? undefined : messages[firstReply];
+    const status = reply?.status?.type === "incomplete" && reply.status.reason === "cancelled"
+      ? { ...reply.status, error: turnError.message }
+      : { type: "incomplete", reason: "error", error: turnError.message } as const;
     if (firstReply !== undefined && reply) messages[firstReply] = { ...reply, status };
     else {
       messages.push({
@@ -332,7 +412,7 @@ function historyToMessages(
           id: `history-${sourceIndex}`,
           role: "assistant",
           content,
-          status: { type: "complete", reason: "stop" },
+          status: restoredStatus(metadata),
         });
         firstReply ??= messages.length - 1;
         finalReplyAt = message.timestamp;
@@ -365,7 +445,7 @@ function historyToMessages(
         id: `history-${sourceIndex}`,
         role: "assistant",
         content,
-        status: { type: "complete", reason: "stop" },
+        status: restoredStatus(metadata),
       });
       firstReply ??= messages.length - 1;
       return;
@@ -432,6 +512,8 @@ function historyToMessages(
             risk_level: prompt.risk_level || null,
             risk_reason: prompt.risk_reason || null,
             input: prompt.input || {},
+            details: prompt.details || {},
+            acp_options: prompt.details?.acp_options || [],
           })),
           argsText: JSON.stringify(prompt),
         },
@@ -553,6 +635,14 @@ export function EngineRuntimeProvider({
 }) {
   const turnRef = useRef<TurnClock>(newTurnClock());
   const runStartRef = useRef(0);
+  const cancellingPermission = useRef(false);
+  const mounted = useRef(true);
+  const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const runtime = useAssistantTransportRuntime({
     initialState,
@@ -613,6 +703,42 @@ export function EngineRuntimeProvider({
     },
   });
 
+  const cancelPermission = useCallback(async (expected: readonly PendingPermission[]) => {
+    const current = () => mounted.current && !runtime.thread.getState().isRunning
+      ? pendingPermissions(runtime.thread.getState().messages) : [];
+    if (cancellingPermission.current) return;
+    if (!samePendingPermission(expected, current())) {
+      if (mounted.current && !runtime.thread.getState().isRunning) onStale?.();
+      return;
+    }
+    cancellingPermission.current = true;
+    setPermissionCancellationPending(true);
+    try {
+      // A permission ends the HTTP transport but leaves the daemon waiting.
+      // Cancel that same session even after reload or an external client's turn.
+      await cancelPendingPermission({
+        expected, current,
+        readPending: async () => (await api.getPermissions(sessionId)).pending_prompts.flatMap((prompt) => {
+          const owner = permissionOwner(prompt);
+          return owner ? [owner] : [];
+        }),
+        cancel: (requestId) => api.cancelOwned(sessionId, requestId),
+      });
+      if (mounted.current && !runtime.thread.getState().isRunning) onStale?.();
+    } catch (error) {
+      if (samePendingPermission(expected, current())) {
+        const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+        if (shown) runtime.thread.importExternalState({
+          ...shown,
+          error: error instanceof Error ? error.message : "Unable to stop the turn",
+        });
+      }
+    } finally {
+      cancellingPermission.current = false;
+      if (mounted.current) setPermissionCancellationPending(false);
+    }
+  }, [api, sessionId, onStale, runtime]);
+
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
   // after them. Only the history past what the thread shows is appended:
@@ -652,15 +778,19 @@ export function EngineRuntimeProvider({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <InitialMessagesGate
-        runtime={runtime}
-        messages={initialState.messages}
+      <PermissionCancellationContext.Provider
+        value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
       >
-        <PermissionToolUI />
-        <VoiceModeProvider api={api} sessionId={sessionId}>
-          {children}
-        </VoiceModeProvider>
-      </InitialMessagesGate>
+        <InitialMessagesGate
+          runtime={runtime}
+          messages={initialState.messages}
+        >
+          <PermissionToolUI />
+          <VoiceModeProvider api={api} sessionId={sessionId}>
+            {children}
+          </VoiceModeProvider>
+        </InitialMessagesGate>
+      </PermissionCancellationContext.Provider>
     </AssistantRuntimeProvider>
   );
 }

@@ -5,6 +5,7 @@ import asyncio
 from kollabor.llm.permissions.attach_bridge import (
     PERMISSION_RESPONSE_RPC_METHOD,
     AttachPermissionBridge,
+    resolution_event,
 )
 from kollabor_events.permissions_models import ConfirmationResponse
 
@@ -90,7 +91,7 @@ def test_attach_bridge_publishes_prompt_and_waits_for_rpc_response():
         assert PERMISSION_RESPONSE_RPC_METHOD in rpc_server.handlers
 
         response = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "terminal_0", "response": "APPROVE_ONCE"}
+            {"tool_id": "terminal_0", "control": "APPROVE_ONCE"}
         )
 
         assert response == {"ok": True}
@@ -122,7 +123,7 @@ def test_attach_bridge_client_event_shows_prompt_and_replies_over_rpc():
         assert rpc_client.calls == [
             (
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": "terminal_0", "response": "APPROVE_ONCE"},
+                {"tool_id": "terminal_0", "control": "APPROVE_ONCE"},
                 10,
             )
         ]
@@ -154,7 +155,7 @@ def test_attach_bridge_client_event_can_send_response_without_waiting_for_reply(
         assert rpc_client.calls == [
             (
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": "terminal_0", "response": "APPROVE_ONCE"},
+                {"tool_id": "terminal_0", "control": "APPROVE_ONCE"},
                 10,
             )
         ]
@@ -246,6 +247,7 @@ def _prompting_app(detached):
     app = SimpleNamespace(
         args=SimpleNamespace(detached=detached),
         event_bus=SimpleNamespace(get_service=services.get),
+        renderer=SimpleNamespace(layout_manager=SimpleNamespace()),
         _attach_permission_bridge=Bridge(),
     )
     return app, asked
@@ -365,7 +367,344 @@ def test_a_prompt_another_window_answered_closes_without_an_answer_from_here():
         bridge.handle_client_resolution(
             layout_manager=layout, event={"type": "permission_granted", "tool_id": "terminal_2"}
         )
-        assert [call[1] for call in rpc_client.calls] == [{"tool_id": "terminal_2", "response": "APPROVE_ONCE"}]
+        assert [call[1] for call in rpc_client.calls] == [{"tool_id": "terminal_2", "control": "APPROVE_ONCE"}]
         assert bridge._answered_elsewhere == set()
+
+    asyncio.run(run_bridge())
+
+
+def test_local_and_attach_prompts_share_first_answer_and_reject_late_answer():
+    async def run_bridge():
+        daemon = AttachPermissionBridge()
+        local = AttachPermissionBridge()
+        remote = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        local_rpc = FakeRpcClient()
+        remote_rpc = FakeRpcClient()
+        local_layout = WaitingLayoutManager()
+        remote_layout = WaitingLayoutManager()
+        details = {
+            "tool_id": "acp-shared",
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "owned-first", "kind": "allow_once", "name": "Allow"},
+                {"optionId": "owned-deny", "kind": "reject_once", "name": "Deny"},
+            ],
+        }
+        daemon_task = asyncio.create_task(
+            daemon.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details=details,
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        event = {"type": "permission_request", "details": details}
+        local_task = asyncio.create_task(
+            local.handle_client_event(
+                rpc_client=local_rpc,
+                layout_manager=local_layout,
+                event=event,
+            )
+        )
+        remote_task = asyncio.create_task(
+            remote.handle_client_event(
+                rpc_client=remote_rpc,
+                layout_manager=remote_layout,
+                event=event,
+            )
+        )
+        await asyncio.sleep(0)
+        local_layout.press("owned-first")
+        await local_task
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-shared", "option_id": "owned-first"}
+        )
+        assert result == {"ok": True}
+        assert await daemon_task == "owned-first"
+        resolution = resolution_event("acp-shared", "owned-first", details)
+        local.handle_client_resolution(layout_manager=local_layout, event=resolution)
+        remote.handle_client_resolution(layout_manager=remote_layout, event=resolution)
+        await asyncio.wait_for(remote_task, 1)
+        late = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-shared", "option_id": "owned-deny"}
+        )
+        assert late["ok"] is False
+        assert remote_rpc.calls == []
+        assert local_rpc.calls == [(PERMISSION_RESPONSE_RPC_METHOD, {
+            "tool_id": "acp-shared", "option_id": "owned-first"
+        }, 10)]
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_accepts_offered_opaque_acp_option_id():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        details = {
+            "tool_id": "acp_0",
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "opaque-first", "kind": "allow_once", "name": "Allow"},
+                {"optionId": "opaque-second", "kind": "reject_always", "name": "Reject"},
+            ],
+        }
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details=details,
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        accepted = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp_0", "option_id": "opaque-second"}
+        )
+        assert accepted == {"ok": True}
+        assert await task == "opaque-second"
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_rejects_unoffered_acp_id_without_consuming_prompt():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-opaque",
+                    "source": "acp",
+                    "acp_options": [
+                        {"optionId": "owned-first", "kind": "allow_once", "name": "First"},
+                        {"optionId": "owned-second", "kind": "allow_once", "name": "Second"},
+                    ],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        handler = rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD]
+        assert (await handler({"tool_id": "acp-opaque", "option_id": "not-offered"}))["ok"] is False
+        assert not task.done()
+        assert await handler({"tool_id": "acp-opaque", "option_id": "owned-second"}) == {"ok": True}
+        assert await task == "owned-second"
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_rejects_duplicate_response_selectors_before_settling():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        rpc_server = FakeRpcServer()
+        display_tap = FakeDisplayTap()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={"tool_id": "selector-collision", "source": "acp", "acp_options": []},
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        handler = rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD]
+        result = await handler(
+            {"tool_id": "selector-collision", "control": "CANCEL", "response": "DENY"}
+        )
+        assert result["ok"] is False
+        assert not task.done()
+        valid = await handler({"tool_id": "selector-collision", "control": "CANCEL"})
+        assert valid == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_accepts_native_cancel_alongside_acp_options():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-cancel",
+                    "tool_type": "terminal",
+                    "acp_options": [{"optionId": "owned", "kind": "allow_once"}],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-cancel", "control": "CANCEL"}
+        )
+        assert result == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
+def test_attach_bridge_accepts_acp_cancel_for_nonterminal_kind():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-edit",
+                    "source": "acp",
+                    "tool_type": "file_edit",
+                    "operation": "edit:/tmp/work/file.py",
+                    "acp_options": [{"optionId": "owned", "kind": "allow_once"}],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-edit", "control": "CANCEL"}
+        )
+        assert result == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
+def test_acp_opaque_id_wins_over_native_enum_name_collision():
+    details = {
+        "source": "acp",
+        "acp_options": [
+            {"optionId": "APPROVE_ONCE", "kind": "reject_always", "name": "Never"},
+        ],
+    }
+    assert resolution_event("tool", "APPROVE_ONCE", details) == {
+        "type": "permission_denied",
+        "tool_id": "tool",
+        "option_id": "APPROVE_ONCE",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
+
+
+def test_acp_vendor_always_broadcast_is_truthful_without_edit_scope():
+    event = resolution_event(
+        "tool",
+        "vendor-saved",
+        {
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "vendor-saved", "kind": "allow_always"},
+            ],
+        },
+    )
+    assert event == {
+        "type": "permission_granted",
+        "tool_id": "tool",
+        "option_id": "vendor-saved",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
+
+
+def test_native_approve_always_scope_is_unchanged():
+    assert resolution_event("tool", ConfirmationResponse.APPROVE_ALWAYS) == {
+        "type": "permission_granted",
+        "tool_id": "tool",
+        "scope": "always_edits",
+    }
+
+
+def test_acp_vendor_reject_always_broadcast_is_truthful_without_scope():
+    event = resolution_event(
+        "tool",
+        "vendor-denied",
+        {
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "vendor-denied", "kind": "reject_always"},
+            ],
+        },
+    )
+    assert event == {
+        "type": "permission_denied",
+        "tool_id": "tool",
+        "option_id": "vendor-denied",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
+
+
+def test_attach_bridge_keeps_native_control_distinct_from_opaque_id_collision():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-collision",
+                    "source": "acp",
+                    "acp_options": [
+                        {"optionId": "DENY", "kind": "allow_always", "name": "Vendor"},
+                    ],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        # Native d/CANCEL is carried as a control; an opaque vendor option
+        # with the same spelling must not consume the prompt.
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-collision", "control": "CANCEL"}
+        )
+        assert result == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
+def test_an_attached_window_receives_acp_prompts_without_detached_mode():
+    from kollabor.application import TerminalLLMChat
+
+    app, asked = _prompting_app(detached=False)
+    response = asyncio.run(
+        TerminalLLMChat._try_attach_permission_prompt(
+            app, {"source": "acp", "tool_type": "acp", "acp_options": []}
+        )
+    )
+    assert response is ConfirmationResponse.APPROVE_ONCE
+    assert asked == [{"source": "acp", "tool_type": "acp", "acp_options": []}]
+
+
+def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        result = await bridge.request_confirmation(
+            display_tap=display_tap,
+            rpc_server=rpc_server,
+            details={"tool_id": "timeout", "source": "acp", "acp_options": []},
+            timeout=0.01,
+        )
+        assert result is ConfirmationResponse.DENY
+        assert "timeout" not in bridge._pending
+        assert display_tap.events[-1]["type"] == "permission_denied"
 
     asyncio.run(run_bridge())

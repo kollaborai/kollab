@@ -21,6 +21,7 @@ status: active
 
 - [Slash Commands](features/slash-commands.md) - All commands and how to add custom ones
 - [Agents](features/agents.md) - Agent system, bundles, custom agents
+- [ACP Agents](features/acp.md) - Harness agents and Kollab as an ACP client target; qualification pending
 - [Attach Mode](features/attach-mode.md) - Daemons, RPC state, contexts, and reattach
 - [Tools](features/tools.md) - Tool calling, built-in tools, custom tools
 - [Tasks](features/tasks.md) - Durable task ledger, checkpoints, snoozes, and QA

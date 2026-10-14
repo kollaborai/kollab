@@ -6,12 +6,16 @@ and message threading for LLM interactions.
 
 import json
 import logging
+import os
+from collections import Counter, defaultdict
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from kollabor_ai.session_naming import generate_branch_name, generate_session_name
+from kollabor_ai.conversation_logger import _acp_display_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -509,9 +513,13 @@ class ConversationManager:
                 "saved_at": datetime.now().isoformat(),
             }
 
-            with open(filepath, "w") as f:
+            fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                os.fchmod(f.fileno(), 0o600)
                 # Write as single-line JSON for JSONL compatibility
                 f.write(json.dumps(session_data) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
 
             logger.info(f"Saved session {session_id} to: {filepath}")
             return True
@@ -557,6 +565,7 @@ class ConversationManager:
             if not data:
                 logger.error(f"Session data empty for: {session_id}")
                 return False
+            self._restore_snapshot_acp_display(session_id, data.get("messages", []))
 
             # Restore session state
             self.current_session_id = session_id
@@ -593,8 +602,10 @@ class ConversationManager:
             # JSONL sessions store their counters in the matching saved snapshot.
             self._update_context_window()
             saved_stats = data.get("session_stats")
-            if saved_stats is None:
-                saved_stats = self._load_snapshot_session_stats(session_id)
+            if saved_stats is None or data.get("_has_streaming_tail"):
+                latest_stats = self._load_snapshot_session_stats(session_id)
+                if latest_stats is not None:
+                    saved_stats = latest_stats
             self._restore_session_stats(saved_stats)
 
             logger.info(f"Loaded session: {session_id} from: {session_file}")
@@ -603,6 +614,56 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Failed to load session: {e}")
             return False
+
+    def _restore_snapshot_acp_display(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Recover missing ACP cards from this session's existing rich snapshot.
+
+        Manager and logger UUIDs used to differ. Their assistant parent UUID
+        came from the same request, so it can match an unambiguous pair without
+        treating text/timestamps or a stale snapshot's whole history as truth.
+        """
+        snapshot_file = self.snapshots_dir / f"{session_id}_snapshot.json"
+        if not snapshot_file.exists():
+            return
+        try:
+            snapshot = json.loads(snapshot_file.read_text())
+        except (OSError, ValueError) as exc:
+            logger.warning("Cannot recover ACP display metadata (%s)", type(exc).__name__)
+            return
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("messages"), list):
+            return
+        by_uuid, by_parent = defaultdict(list), defaultdict(list)
+        for stored in snapshot["messages"]:
+            if not isinstance(stored, dict) or stored.get("role") != "assistant":
+                continue
+            for key, index in (("uuid", by_uuid), ("parent_uuid", by_parent)):
+                value = stored.get(key)
+                if isinstance(value, str) and value:
+                    index[value].append(stored)
+        parent_counts = Counter(
+            message.get("parent_uuid") for message in messages
+            if message.get("role") == "assistant" and isinstance(message.get("parent_uuid"), str)
+            and message["parent_uuid"]
+        )
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            metadata = message.get("metadata") or {}
+            if not isinstance(metadata, dict) or any(
+                key in metadata for key in ("acp_updates", "tool_calls", "xml_tool_calls", "provider_reasoning")
+            ) or metadata.get("provider") not in (None, "acp"):
+                continue
+            candidates = by_uuid.get(message.get("uuid"), [])
+            if not candidates:
+                parent = message.get("parent_uuid")
+                if not isinstance(parent, str) or not parent or parent_counts.get(parent, 0) != 1:
+                    continue
+                candidates = by_parent.get(parent, [])
+            if len(candidates) != 1:
+                continue
+            recovered = _acp_display_metadata(candidates[0].get("metadata"))
+            if any(key in recovered for key in ("acp_updates", "tool_calls", "stop_reason")):
+                message["metadata"] = {**recovered, **metadata}
 
     def get_available_sessions(self) -> List[Dict[str, Any]]:
         """Get list of available sessions.
@@ -753,8 +814,14 @@ class ConversationManager:
     def _load_from_jsonl(self, session_file: Path) -> Dict[str, Any]:
         """Load session data from JSONL session file."""
         messages: List[Dict[str, Any]] = []
+        tool_calls_by_message: Dict[str, set[str]] = {}
+        result_batches: Dict[str, Dict[str, Any]] = {}
         pending_compaction: Dict[str, Any] = {}  # last-round-wins
         last_compaction_timestamp: Optional[str] = None
+        current_parent_uuid: Optional[str] = None
+        session_stats: Optional[Dict[str, Any]] = None
+        has_saved_base = False
+        has_streaming_tail = False
         metadata: Dict[str, Any] = {
             "started_at": None,
             "working_directory": "unknown",
@@ -811,14 +878,21 @@ class ConversationManager:
                                 isinstance(saved_metadata, dict),
                             )
                             continue
-                        return {
-                            "messages": saved_messages,
-                            "metadata": saved_metadata,
-                            "message_index": saved_index,
-                            "context_window": saved_context,
-                            "current_parent_uuid": data.get("current_parent_uuid"),
-                            "session_stats": data.get("session_stats"),
-                        }
+                        # A resumed session starts with this durable base,
+                        # then the logger appends ordinary streaming turns.
+                        # Keep reading instead of discarding that later tail.
+                        messages = saved_messages
+                        metadata = saved_metadata
+                        current_parent_uuid = data.get("current_parent_uuid")
+                        session_stats = data.get("session_stats")
+                        has_saved_base = True
+                        has_streaming_tail = False
+                        pending_compaction = {}
+                        last_compaction_timestamp = None
+                        tool_calls_by_message.clear()
+                        result_batches.clear()
+                        recognized_record = True
+                        continue
 
                     # Handle conversation logger streaming format
                     msg_type = data.get("type")
@@ -841,6 +915,8 @@ class ConversationManager:
                         # user/assistant records AFTER its timestamp are
                         # appended on top by the loop below (they are newer).
                         recognized_record = True
+                        has_streaming_tail = has_saved_base
+                        tool_calls_by_message.clear()
                         content = data.get("content", "")
                         compaction_timestamp = data.get("timestamp")
                         if compaction_timestamp:
@@ -862,6 +938,35 @@ class ConversationManager:
                                     "session_", ""
                                 ),
                             }
+                    elif msg_type == "system" and data.get("subtype") == "tool_result":
+                        parent_uuid, tool_id = data.get("parentUuid"), data.get("toolUseID")
+                        if (
+                            not isinstance(parent_uuid, str) or not isinstance(tool_id, str)
+                            or tool_id not in tool_calls_by_message.get(parent_uuid, set())
+                        ):
+                            continue
+                        record_timestamp = data.get("timestamp")
+                        if (
+                            last_compaction_timestamp is not None and record_timestamp is not None
+                            and str(record_timestamp) <= last_compaction_timestamp
+                        ):
+                            continue
+                        structured = data.get("tool_result")
+                        entry = deepcopy(structured) if isinstance(structured, dict) else {"content": data.get("content", "")}
+                        entry["id"] = tool_id
+                        entry["content"] = str(entry.get("content") or "")
+                        batch = result_batches.setdefault(parent_uuid, {
+                            "uuid": data.get("uuid") or str(uuid4()), "role": "user", "content": "",
+                            "timestamp": record_timestamp, "parent_uuid": parent_uuid,
+                            "metadata": {"tool_output_batch": True, "xml_tool_results": []},
+                            "session_id": session_file.stem.replace("session_", ""),
+                        })
+                        entries = batch["metadata"]["xml_tool_results"]
+                        existing = next((i for i, result in enumerate(entries) if result["id"] == tool_id), None)
+                        if existing is None:
+                            entries.append(entry)
+                        else:
+                            entries[existing] = entry
                     elif msg_type in ("user", "assistant"):
                         recognized_record = True
                         record_timestamp = data.get("timestamp")
@@ -874,6 +979,7 @@ class ConversationManager:
                             # or before its timestamp; replay only the live tail.
                             continue
                         content = data.get("message", {}).get("content", "")
+                        has_streaming_tail = has_saved_base
                         tool_uses: List[Dict[str, Any]] = []
                         if isinstance(content, list):
                             blocks = [b for b in content if isinstance(b, dict)]
@@ -891,11 +997,11 @@ class ConversationManager:
                             "role": data.get("message", {}).get("role", msg_type),
                             "content": content,
                             "timestamp": data.get("timestamp"),
-                            "parent_uuid": None,
-                            # Resume rebuilds text-only history (tool_calls are
-                            # not restored), so only a turn without tool_use can
-                            # take its reasoning back in its original shape.
-                            "metadata": (
+                            "parent_uuid": data.get("parentUuid"),
+                            # Native calls are not reconstructed from streaming
+                            # logs. ACP display cards stay separate; only a text
+                            # turn can restore its provider-native reasoning.
+                            "metadata": _acp_display_metadata(data.get("display_metadata")) or (
                                 {"provider_reasoning": data["provider_reasoning"]}
                                 if data.get("provider_reasoning") and not tool_uses
                                 else {}
@@ -903,9 +1009,13 @@ class ConversationManager:
                             "session_id": session_file.stem.replace("session_", ""),
                         }
                         if tool_uses:
-                            # Display-only (conversation browsers): kept out of
-                            # content/metadata, which resume hands to the model.
+                            # Browsers read these directly; resume promotes them
+                            # to xml_tool_calls, which providers never receive.
                             message["tool_uses"] = tool_uses
+                            tool_calls_by_message[msg_uuid] = {
+                                block["id"] for block in tool_uses
+                                if isinstance(block.get("id"), str) and block["id"]
+                            }
                         messages.append(message)
                         if msg_type == "user":
                             metadata["turn_count"] = metadata.get("turn_count", 0) + 1
@@ -931,13 +1041,32 @@ class ConversationManager:
                     ]
                 messages = [pending_compaction] + messages
 
+            # Place each result batch after its owning assistant, even if log
+            # records arrived out of order or another turn reused a tool ID.
+            # Resume remains text-only for providers; the display projector
+            # alone converts these entries into native-looking tool rows.
+            with_results: List[Dict[str, Any]] = []
+            for message in messages:
+                with_results.append(message)
+                batch = result_batches.get(message["uuid"])
+                if batch is not None:
+                    batch["content"] = "\n".join(
+                        f"Tool result: {entry['content']}"
+                        for entry in batch["metadata"]["xml_tool_results"]
+                    )
+                    with_results.append(batch)
+            messages = with_results
+            metadata["message_count"] = len(messages)
+
             # Build summary-like shape to keep interface stable
             return {
                 "messages": messages,
                 "metadata": metadata,
                 "message_index": {m["uuid"]: m for m in messages},
                 "context_window": messages,
-                "current_parent_uuid": None,
+                "current_parent_uuid": current_parent_uuid,
+                "session_stats": session_stats,
+                "_has_streaming_tail": has_streaming_tail,
             }
         except Exception as e:
             logger.error(f"Failed to load JSONL session {session_file}: {e}")
