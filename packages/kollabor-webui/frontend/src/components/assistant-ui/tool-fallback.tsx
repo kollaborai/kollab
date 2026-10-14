@@ -191,7 +191,7 @@ function ToolFallbackTrigger({
   const isFailed = isError === true && statusType === "complete";
 
   const Icon = isFailed ? XCircleIcon : statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled: " : "";
+  const label = isCancelled && !displayTitle ? "Cancelled: " : "";
   const summary = displayTitle ?? summarizeToolCall(toolName, argsText);
 
   return (
@@ -224,7 +224,7 @@ function ToolFallbackTrigger({
           <span className="font-medium text-foreground/90">{summary}</span>
         </span>
         {detail && (
-          <span data-slot="tool-fallback-trigger-status" className="block truncate text-xs">
+          <span data-slot="tool-fallback-trigger-status" className="block truncate text-xs" title={detail}>
             {detail}
           </span>
         )}
@@ -659,14 +659,23 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const card = harnessCard(result);
   const kind = typeof card?.kind === "string" ? humanizeToolName(card.kind) : undefined;
   const cardStatus = typeof card?.status === "string" ? card.status : undefined;
+  const unfinished = cardStatus === "pending" || cardStatus === "in_progress";
+  const parentEnded = status?.type === "complete" || status?.type === "incomplete";
+  // A pending card is the last observed state, not live activity after its
+  // parent ends. Keep its payload without fabricating tool success/failure.
   const displayStatus: ToolCallMessagePartStatus | undefined =
     status?.type === "incomplete" ? status :
       cardStatus === "completed" || cardStatus === "failed" ? { type: "complete" } :
-        cardStatus === "pending" || cardStatus === "in_progress" ? { type: "running" } : status;
+        unfinished && parentEnded ? { type: "incomplete", reason: "other" } :
+          unfinished ? { type: "running" } : status;
   const displayTitle = card
     ? typeof card.title === "string" && card.title.trim() ? card.title : kind || "Tool"
     : undefined;
-  const detail = [kind, cardStatus ? harnessStatusLabels[cardStatus] : undefined].filter(Boolean).join(" · ");
+  const lastStatus = cardStatus ? harnessStatusLabels[cardStatus] : undefined;
+  const turnEnded = status?.type === "incomplete" && status.reason === "cancelled"
+    ? "Turn cancelled" : "Turn ended";
+  const detail = [kind, unfinished && parentEnded
+    ? `${turnEnded} · Last reported: ${lastStatus}` : lastStatus].filter(Boolean).join(" · ");
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
   // A gated tool row has no approval data of its own: the engine asks through a
@@ -711,7 +720,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {!isCancelled && <ToolFallbackResult result={result} isError={failed} />}
+        {(!isCancelled || card) && <ToolFallbackResult result={result} isError={failed} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

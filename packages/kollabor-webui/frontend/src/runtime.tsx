@@ -275,6 +275,18 @@ function historyToMessages(
 
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
+  const restoredStatus = (metadata: Record<string, unknown> | null): ThreadMessageLike["status"] => {
+    const reason = asString(metadata?.stop_reason);
+    if (metadata?.provider === "acp" && reason && reason !== "end_turn") {
+      return {
+        type: "incomplete",
+        reason: reason === "cancelled" ? "cancelled" :
+          reason === "max_tokens" || reason === "max_turn_requests" ? "length" :
+            reason === "error" || reason === "failed" ? "error" : "other",
+      };
+    }
+    return { type: "complete", reason: "stop" };
+  };
 
   // The reply time survives a reload: each turn is timed by the history's own
   // timestamps, from the user's message to the final reply. assistant-ui joins
@@ -300,8 +312,10 @@ function historyToMessages(
   // a reply of its own.
   const showTurnError = () => {
     if (!turnError) return;
-    const status = { type: "incomplete", reason: "error", error: turnError.message } as const;
     const reply = firstReply === undefined ? undefined : messages[firstReply];
+    const status = reply?.status?.type === "incomplete" && reply.status.reason === "cancelled"
+      ? { ...reply.status, error: turnError.message }
+      : { type: "incomplete", reason: "error", error: turnError.message } as const;
     if (firstReply !== undefined && reply) messages[firstReply] = { ...reply, status };
     else {
       messages.push({
@@ -368,7 +382,7 @@ function historyToMessages(
           id: `history-${sourceIndex}`,
           role: "assistant",
           content,
-          status: { type: "complete", reason: "stop" },
+          status: restoredStatus(metadata),
         });
         firstReply ??= messages.length - 1;
         finalReplyAt = message.timestamp;
@@ -401,7 +415,7 @@ function historyToMessages(
         id: `history-${sourceIndex}`,
         role: "assistant",
         content,
-        status: { type: "complete", reason: "stop" },
+        status: restoredStatus(metadata),
       });
       firstReply ??= messages.length - 1;
       return;
