@@ -403,7 +403,9 @@ def main(argv: list[str] | None = None, *, protocol: Any = None) -> None:
     async def run() -> None:
         reader, writer = await acp_streams(protocol)
         try:
-            await acp.run_agent(agent, input_stream=writer, output_stream=reader)
+            # SDK 0.12.1 gates the advertised resume/close routes behind this flag.
+            await acp.run_agent(agent, input_stream=writer, output_stream=reader,
+                                use_unstable_protocol=True)
         finally:
             await agent.shutdown()
             writer.close()
