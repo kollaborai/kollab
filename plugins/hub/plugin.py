@@ -2939,23 +2939,22 @@ class HubPlugin(BasePlugin):
         # ACP always emits an outcome/final message before its hidden end frame.
         answer = _network_answer_text(turn.answer, MAX_CONTENT)
         acp = acp or turn.bound_ask
+        outcome = outcome or ("error" if failed else "end_turn")
         if acp:
-            content = answer or self._acp_outcome_text(outcome or "error", failed)
+            content = answer or self._acp_outcome_text(outcome, failed)
             if await self._send_on_thread(turn, content, "reply"):
                 turn.replies += 1
-        elif answer and not failed:
+        elif answer and not failed and not turn.replies:
             if await self._send_on_thread(turn, answer, "reply"):
                 turn.replies += 1
         turn_end = {
             "replies": min(turn.replies, MAX_TURN_REPLIES),
             "failed": failed,
-            "outcome": outcome or ("error" if failed else "end_turn"),
+            "outcome": outcome,
         }
         if acp:
-            turn_end["outcome"] = outcome or ("error" if failed else "end_turn")
-        if acp:
             end_content = outcome_text or self._acp_outcome_text(
-                outcome or "error", failed
+                outcome, failed
             )
         else:
             end_content = _NET_TURN_DONE if (not failed or acp) else _NET_TURN_FAILED
@@ -7453,10 +7452,11 @@ class HubPlugin(BasePlugin):
         if isinstance(result, dict) and result.get("status") == "rejected":
             turn = turns.pop(message.id, None)
             reason = str(result.get("reason") or "acp_admission_failed")
+            detail = str(result.get("message") or reason)
             is_busy = "queue" in reason.lower() or "full" in reason.lower()
             outcome = "busy" if is_busy else "error"
             reply_text, outcome_text = self._normalize_acp_completion(
-                outcome, "", reason
+                outcome, "", detail
             )
             if turn is not None:
                 turn.answer = reply_text
@@ -7500,15 +7500,31 @@ class HubPlugin(BasePlugin):
         )
         if not relay and (message.from_identity or "").startswith("relay:"):
             return
+        frame = (message.metadata or {}).get("turn_end")
+        if message.action == "turn_end" and (
+            not isinstance(frame, dict)
+            or set(frame) not in (
+                {"replies", "failed", "outcome"},
+                {"replies", "failed", "outcome", "text"},
+            )
+            or type(frame.get("replies")) is not int
+            or frame.get("replies", 0) < 0
+            or not isinstance(frame.get("failed"), bool)
+            or not isinstance(frame.get("outcome"), str)
+            or not message.reply_to
+            or not message.thread_id
+        ):
+            logger.warning("ignoring malformed correlated turn_end from %s", message.from_identity)
+            return
         # The transport/relay has authorized the sender before this point.
         # Deduplicate before receipts or ask waits can mutate, including hidden
         # terminal frames and messages delivered by both socket and mailbox.
         msg_id = getattr(message, "id", "") or ""
-        msg_key = (msg_id, message.action)
+        msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
-        if msg_id:
+        if msg_id and message.action != "turn_end":
             self._seen_messages[msg_key] = None
             while len(self._seen_messages) > 1000:
                 self._seen_messages.popitem(last=False)
@@ -7516,6 +7532,10 @@ class HubPlugin(BasePlugin):
         tools = self._acp_tools()
         tools.observe(message)
         if tools.consume(message):
+            if msg_id and message.action == "turn_end":
+                self._seen_messages[msg_key] = None
+                while len(self._seen_messages) > 1000:
+                    self._seen_messages.popitem(last=False)
             return
 
         llm_owner = self.event_bus.get_service("llm_service") if self.event_bus else None
@@ -7531,22 +7551,6 @@ class HubPlugin(BasePlugin):
         # connection for the terminal frame).  Consume it before any display or
         # model-wake path; only the matching request/thread may settle a waiter.
         if message.action == "turn_end":
-            frame = (message.metadata or {}).get("turn_end")
-            if (
-                not isinstance(frame, dict)
-                or set(frame)
-                not in (
-                    {"replies", "failed", "outcome"},
-                    {"replies", "failed", "outcome", "text"},
-                )
-                or not isinstance(frame.get("replies"), int)
-                or not isinstance(frame.get("failed"), bool)
-                or not isinstance(frame.get("outcome"), str)
-                or not message.reply_to
-                or not message.thread_id
-            ):
-                logger.warning("ignoring malformed correlated turn_end from %s", message.from_identity)
-                return
             # Outbound /hub msg waiters are keyed by the request thread.  A
             # correlated terminal frame must settle that waiter directly;
             # _acp_network_turns contains only requests received by this agent.
@@ -7562,6 +7566,10 @@ class HubPlugin(BasePlugin):
                 and message.reply_to == expected_ids.get(message.thread_id)
                 and sender_ok
             ):
+                if msg_id:
+                    self._seen_messages[msg_key] = None
+                    while len(self._seen_messages) > 1000:
+                        self._seen_messages.popitem(last=False)
                 self.on_network_turn_end(message.thread_id, frame, message.content)
                 return
 
@@ -7773,6 +7781,8 @@ class HubPlugin(BasePlugin):
         # Display the message visually in the UI
         self._display_hub_message(message)
 
+        is_arrival = "just came online" in (message.content or "")
+        is_departure = "is going offline" in (message.content or "")
         # Forward to bridge (skip system/cron noise)
         if (
             self._bridge
@@ -7782,8 +7792,6 @@ class HubPlugin(BasePlugin):
         ):
             my_name = self._identity.identity if self._identity else "?"
             from_name = message.from_identity
-            is_arrival = "just came online" in message.content
-            is_departure = "is going offline" in message.content
             if is_arrival:
                 # Extract just the agent name from "agent 'X' just came online ..."
                 await self._bridge_forward(f"[hub] {from_name} came online")

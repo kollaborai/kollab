@@ -398,7 +398,9 @@ async def test_authenticated_agent_message_uses_nonhuman_acp_envelope():
     llm.submit_human_input.assert_awaited_once_with(
         "agent task", source="agent", request_id="req-agent",
         thread_id="thread-agent",
-        origin_context={"sender": PEER, "authenticated": True, "operator": False},
+        origin_context={"sender": PEER, "sender_identity": PEER,
+                        "relay_turn_id": None, "correlated_relay_event": False,
+                        "authenticated": True, "operator": False},
     )
 
 
@@ -516,14 +518,16 @@ async def test_acp_completion_normalizes_outcome_text(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reason", "outcome", "marker"),
+    ("reason", "outcome", "marker", "detail"),
     [
-        ("acp_queue_full", "busy", "busy"),
-        ("acp_unavailable", "error", "harness failed"),
+        ("acp_queue_full", "busy", "busy", None),
+        ("acp_unavailable", "error", "harness failed", None),
+        ("acp_unavailable", "error", "harness failed",
+         "claude-agent-acp was not found. Install it or select another profile."),
     ],
 )
 async def test_authenticated_acp_admission_rejection_settles_origin(
-    reason, outcome, marker
+    reason, outcome, marker, detail
 ):
     from plugins.hub.models import HubMessage
 
@@ -535,9 +539,10 @@ async def test_authenticated_acp_admission_rejection_settles_origin(
         return True
 
     plugin._send_on_thread = capture
-    llm = SimpleNamespace(
-        submit_human_input=AsyncMock(return_value={"status": "rejected", "reason": reason})
-    )
+    admission = {"status": "rejected", "reason": reason}
+    if detail:
+        admission["message"] = detail
+    llm = SimpleNamespace(submit_human_input=AsyncMock(return_value=admission))
     message = HubMessage(
         id="rejected-request",
         from_identity=PEER,
@@ -549,12 +554,16 @@ async def test_authenticated_acp_admission_rejection_settles_origin(
 
     result = await plugin._submit_authenticated_agent_message(message, llm)
 
-    assert result == {"status": "rejected", "reason": reason}
+    assert result == admission
     assert len(sent) == 2
     assert sent[0][2] == "reply" and marker in sent[0][1].lower()
     assert sent[1][2] == "turn end"
     assert sent[1][3]["turn_end"]["outcome"] == outcome
     assert sent[1][3]["turn_end"]["failed"] is True
+    if detail:
+        assert detail in sent[0][1] and detail in sent[1][1]
+        assert sent[0][0].thread_id == sent[1][0].thread_id == message.thread_id
+        assert sent[0][0].message_id == sent[1][0].message_id == message.id
     assert message.id not in plugin._acp_network_turns
 
 
