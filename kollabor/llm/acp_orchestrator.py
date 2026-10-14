@@ -404,7 +404,8 @@ class ACPOrchestrator:
             tools[tool_id] = {"id": tool_id, "name": payload.get("title") or payload.get("kind") or "Harness Tool",
                 "input": payload.get("rawInput") or {}, "status": payload.get("status"),
                 "result": payload.get("rawOutput") or payload.get("content"),
-                "is_error": payload.get("status") == "failed"}
+                "is_error": payload.get("status") == "failed",
+                "metadata": {"acp": dict(payload)}}
         metadata["tool_calls"] = list(tools.values())
         if manager is not None:
             manager.add_message("assistant", text or result.text,
