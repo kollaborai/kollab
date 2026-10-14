@@ -1096,7 +1096,6 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
     granted = messages._permission_result_from_event(
         {
             "type": "permission_granted",
-            "scope": "vendor_always",
             "option_id": "allow-always",
             "vendor_saved": True,
             "warning": "Saved by [harness]; Kollab cannot undo it.",
@@ -1105,24 +1104,25 @@ def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
     denied = messages._permission_result_from_event(
         {
             "type": "permission_denied",
-            "scope": "vendor_always",
             "option_id": "reject-always",
             "vendor_saved": True,
             "warning": "Saved by [harness]; Kollab cannot undo it.",
         }
     )
+    native = messages._permission_result_from_event(
+        {"type": "permission_granted"}
+    )
 
     assert granted == {
         "decision": "approve",
-        "scope": "vendor_always",
         "option_id": "allow-always",
         "vendor_saved": True,
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
     assert denied == {
         "decision": "deny",
-        "scope": "vendor_always",
         "option_id": "reject-always",
         "vendor_saved": True,
         "warning": "Saved by [harness]; Kollab cannot undo it.",
     }
+    assert native == {"decision": "approve", "scope": "once"}
