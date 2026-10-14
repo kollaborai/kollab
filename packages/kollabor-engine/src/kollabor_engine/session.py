@@ -505,6 +505,21 @@ class EngineSession:
             self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
         )
 
+    async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
+        """Cancel only this admitted owner, without a current-turn fallback."""
+        if self.daemon is None or self.daemon.rpc is None:
+            return {"cancelled": False, "request_id": request_id}
+        result = await self.daemon.rpc.call(
+            "state.acp_cancel", {"request_id": request_id}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.acp_cancel expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if not isinstance(result.get("cancelled"), bool):
+            raise TypeError("state.acp_cancel expected a cancelled boolean")
+        return {**result, "request_id": request_id}
+
     # === permissions ===
 
     async def resolve_permission(

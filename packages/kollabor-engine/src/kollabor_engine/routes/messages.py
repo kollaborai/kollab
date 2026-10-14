@@ -1108,6 +1108,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
     return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
 
 
+class CancelRequest(BaseModel):
+    request_id: str = Field(min_length=1, strict=True)
+
+
 @router.post("/{session_id}/cancel")
 async def cancel_turn(session_id: str):
     registry = get_session_registry()
@@ -1117,3 +1121,14 @@ async def cancel_turn(session_id: str):
 
     session.cancel_turn()
     return {"ok": True, "session_id": session_id}
+
+
+@router.post("/{session_id}/cancel-owned")
+async def cancel_owned_turn(session_id: str, body: CancelRequest):
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = await session.cancel_owned_turn(body.request_id)
+    return {**result, "ok": True, "session_id": session_id}
