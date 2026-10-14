@@ -891,6 +891,13 @@ export class EngineApi {
     );
   }
 
+  cancelOwned(sessionId: string, requestId: string) {
+    return this.json<{ ok: boolean; cancelled: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/cancel-owned`,
+      { method: "POST", body: JSON.stringify({ request_id: requestId }) },
+    );
+  }
+
   listProfiles() {
     return this.json<{
       profiles: Profile[];
