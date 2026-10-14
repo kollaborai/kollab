@@ -3049,12 +3049,20 @@ class LocalStateService(StateService):
                      "input": deepcopy(tool.get("input", {}))}
                     for tool in msg["tool_uses"] if isinstance(tool, dict)
                 ]
+            timestamp = msg.get("timestamp")
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp)
+                except ValueError:
+                    timestamp = None
+            timestamp_args = {"timestamp": timestamp} if isinstance(timestamp, datetime) else {}
             loaded_messages.append(
                 ConversationMessage(
                     role=role,
                     content=content,
                     metadata=metadata,
                     thinking=msg.get("thinking"),
+                    **timestamp_args,
                 )
             )
             if role in ("user", "assistant") and shown != "" and not metadata.get("tool_output_batch"):

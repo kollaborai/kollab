@@ -48,6 +48,53 @@ async def test_daemon_resume_preserves_tool_voice_and_structured_message_data():
     assert result["messages"][1]["content"] == "Code stays on screen."
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", [
+    "2022-03-04T05:06:07.123456",
+    "2022-03-04T05:06:07.123456+05:30",
+    "2022-03-04T05:06:07Z",
+    datetime.fromisoformat("2022-03-04T05:06:07-04:00"),
+])
+async def test_daemon_resume_preserves_saved_timestamp_and_timezone(saved):
+    from kollabor.state.local import LocalStateService
+
+    record = {"role": "assistant", "content": "saved answer", "timestamp": saved,
+              "metadata": {"request_id": "saved-owner"}, "thinking": "saved thought"}
+    manager = SimpleNamespace(messages=[record], current_session_id="before",
+                              load_session=lambda _: True, save_session=lambda _: True)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_history=[])
+    state = LocalStateService(llm, None)
+    await state.resume_conversation("saved")
+
+    expected = saved if isinstance(saved, datetime) else datetime.fromisoformat(saved)
+    restored = llm.conversation_history[0]
+    assert isinstance(restored.timestamp, datetime)
+    assert restored.timestamp == expected and restored.timestamp.tzinfo == expected.tzinfo
+    assert restored.content == record["content"] and restored.metadata == record["metadata"]
+    assert restored.thinking == record["thinking"]
+    assert (await state.get_conversation()).messages[0].timestamp == expected.isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", ["missing", None, "", "invalid-date", 7])
+async def test_daemon_resume_missing_or_invalid_timestamp_keeps_default(saved):
+    from kollabor.state.local import LocalStateService
+
+    record = {"role": "user", "content": "saved input", "metadata": {}}
+    if saved != "missing":
+        record["timestamp"] = saved
+    manager = SimpleNamespace(messages=[record], current_session_id="before",
+                              load_session=lambda _: True, save_session=lambda _: True)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_history=[])
+    before = datetime.now()
+    await LocalStateService(llm, None).resume_conversation("saved")
+    after = datetime.now()
+    restored = llm.conversation_history[0]
+    assert isinstance(restored.timestamp, datetime)
+    assert before <= restored.timestamp <= after
+    assert restored.content == record["content"] and restored.metadata == record["metadata"]
+
+
 def test_legacy_resume_preview_only_displays_the_screen_field():
     from plugins.resume_conversation_plugin import ResumeConversationPlugin
 
