@@ -783,6 +783,10 @@ class TerminalLLMChat:
                         if winner_task is local_task:
                             tap = self.event_bus.get_service("display_tap")
                             if tap is not None:
+                                # Mark the shared resolution before publishing so
+                                # the attach waiter does not echo a second event
+                                # when its future is released by this broadcast.
+                                details["_acp_resolution_published"] = True
                                 tap.publish(
                                     resolution_event(
                                         str(details.get("tool_id") or ""),

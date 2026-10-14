@@ -707,3 +707,35 @@ def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
         assert display_tap.events[-1]["type"] == "permission_denied"
 
     asyncio.run(run_bridge())
+
+
+def test_local_resolution_marker_suppresses_attach_echo():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        details = {
+            "tool_id": "shared-tool",
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "owned-once", "kind": "allow_once"},
+            ],
+            "_acp_resolution_published": True,
+        }
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details=details,
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert display_tap.events[0]["type"] == "permission_request"
+        future = bridge._pending["shared-tool"]
+        future.set_result("owned-once")
+        result = await task
+        assert result == "owned-once"
+        assert [e for e in display_tap.events if e["type"] != "permission_request"] == []
+
+    asyncio.run(run_bridge())

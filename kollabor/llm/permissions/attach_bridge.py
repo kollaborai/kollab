@@ -183,7 +183,7 @@ class AttachPermissionBridge:
             # can watch one daemon): tell them all it is closed, so the ones that
             # did not answer stop showing it. Cancellation by a local winning
             # surface is not a decision and must not broadcast a denial.
-            if settled:
+            if settled and not details.pop("_acp_resolution_published", False):
                 display_tap.publish(resolution_event(tool_id, response, details))
         return response
 
