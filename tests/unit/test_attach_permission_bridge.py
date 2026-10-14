@@ -5,6 +5,7 @@ import asyncio
 from kollabor.llm.permissions.attach_bridge import (
     PERMISSION_RESPONSE_RPC_METHOD,
     AttachPermissionBridge,
+    resolution_event,
 )
 from kollabor_events.permissions_models import ConfirmationResponse
 
@@ -486,3 +487,67 @@ def test_attach_bridge_accepts_acp_cancel_for_nonterminal_kind():
         assert await task is ConfirmationResponse.CANCEL
 
     asyncio.run(run_bridge())
+
+
+def test_acp_opaque_id_wins_over_native_enum_name_collision():
+    details = {
+        "source": "acp",
+        "acp_options": [
+            {"optionId": "APPROVE_ONCE", "kind": "reject_always", "name": "Never"},
+        ],
+    }
+    assert resolution_event("tool", "APPROVE_ONCE", details) == {
+        "type": "permission_denied",
+        "tool_id": "tool",
+        "option_id": "APPROVE_ONCE",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
+
+
+def test_acp_vendor_always_broadcast_is_truthful_without_edit_scope():
+    event = resolution_event(
+        "tool",
+        "vendor-saved",
+        {
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "vendor-saved", "kind": "allow_always"},
+            ],
+        },
+    )
+    assert event == {
+        "type": "permission_granted",
+        "tool_id": "tool",
+        "option_id": "vendor-saved",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
+
+
+def test_native_approve_always_scope_is_unchanged():
+    assert resolution_event("tool", ConfirmationResponse.APPROVE_ALWAYS) == {
+        "type": "permission_granted",
+        "tool_id": "tool",
+        "scope": "always_edits",
+    }
+
+
+def test_acp_vendor_reject_always_broadcast_is_truthful_without_scope():
+    event = resolution_event(
+        "tool",
+        "vendor-denied",
+        {
+            "source": "acp",
+            "acp_options": [
+                {"optionId": "vendor-denied", "kind": "reject_always"},
+            ],
+        },
+    )
+    assert event == {
+        "type": "permission_denied",
+        "tool_id": "tool",
+        "option_id": "vendor-denied",
+        "vendor_saved": True,
+        "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+    }
