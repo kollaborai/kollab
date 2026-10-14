@@ -48,6 +48,8 @@ class KollabACPAgent:
         self.connection: Any = None
         self.initialized = False
         self.saved = ACPClientSessionStore()
+        self.restoring: set[str] = set()
+        self.attaching = False
 
     def on_connect(self, connection: Any) -> None:
         self.connection = connection
@@ -64,6 +66,8 @@ class KollabACPAgent:
         )
 
     def _session(self, session_id: str) -> ClientSession:
+        if session_id in self.restoring:
+            raise RequestError.invalid_params({"reason": "session restoration is already in progress"})
         session = self.sessions.get(session_id)
         if session is None:
             raise RequestError.invalid_params({"sessionId": session_id})
@@ -79,6 +83,17 @@ class KollabACPAgent:
         ])
 
     async def new_session(self, cwd: str, mcp_servers: list[Any] | None = None, **kwargs: Any) -> NewSessionResponse:
+        session = await self._create_session(cwd, mcp_servers)
+        try:
+            await self._save(session)
+            return NewSessionResponse(sessionId=session.id,
+                                      modes=None if self.attach else self._modes())
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await self._shutdown_session(session)
+            raise
+
+    async def _create_session(self, cwd: str, mcp_servers: list[Any] | None) -> ClientSession:
         if not self.initialized:
             raise RequestError.invalid_params({"reason": "initialize is required"})
         workspace = os.path.realpath(cwd)
@@ -87,7 +102,7 @@ class KollabACPAgent:
         from kollabor_engine.session import EngineSession
         session_id = uuid.uuid4().hex
         if self.attach:
-            if self.sessions:
+            if self.sessions or self.attaching:
                 raise RequestError.invalid_params({"reason": "one attached session per connection"})
             from kollabor_engine.hub_bridge import HubBridge
             candidates = [row for row in HubBridge().discover_sessions(use_cache=False)
@@ -98,14 +113,22 @@ class KollabACPAgent:
                 raise RequestError.invalid_params({"reason": "attach needs one matching local agent",
                     "candidates": [{"identity": row.get("identity"), "workspace": row.get("workspace")}
                                    for row in HubBridge().discover_sessions()]})
-            engine = await EngineSession.adopt(candidates[0])
-            if mcp_servers:
-                print("kollab acp: client MCP servers are ignored for an attached daemon: " +
-                      ", ".join(str(getattr(server, "name", "server")) for server in mcp_servers), file=sys.stderr)
+            self.attaching = True
+            try:
+                engine = await EngineSession.adopt(candidates[0])
+            finally:
+                self.attaching = False
         else:
             engine = EngineSession(session_id, profile=self.profile, workspace=workspace,
                                    approval_mode="", identity=f"acp-{session_id[:8]}")
-            try:
+        session = ClientSession(session_id, engine, workspace, bool(self.attach))
+        self.sessions[session_id] = session
+        try:
+            if self.attach:
+                if mcp_servers:
+                    print("kollab acp: client MCP servers are ignored for an attached daemon: " +
+                          ", ".join(str(getattr(server, "name", "server")) for server in mcp_servers), file=sys.stderr)
+            else:
                 await engine.initialize()
                 await engine.daemon.rpc.call("state.acp_mode", {"mode": "confirm_all"})
                 engine.approval_mode = "confirm_all"
@@ -114,14 +137,11 @@ class KollabACPAgent:
                         server.model_dump(by_alias=True) if hasattr(server, "model_dump") else server
                         for server in mcp_servers
                     ]})
-            except BaseException:
-                await engine.shutdown()
-                raise
-        self.sessions[session_id] = ClientSession(session_id, engine, workspace, bool(self.attach))
-        if not self.attach:
-            await self._save(self.sessions[session_id])
-        return NewSessionResponse(sessionId=session_id,
-                                  modes=None if self.attach else self._modes())
+            return session
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await self._shutdown_session(session)
+            raise
 
     async def load_session(self, cwd: str, session_id: str, mcp_servers=None, **kwargs: Any) -> LoadSessionResponse:
         if self.attach:
@@ -134,21 +154,38 @@ class KollabACPAgent:
             return LoadSessionResponse(modes=self._modes(session.engine.approval_mode))
         # ACP IDs are stable opaque handles; private local state maps them to
         # native conversation IDs in this workspace.
-        opened = await self.new_session(cwd, mcp_servers=mcp_servers)
-        session = self.sessions.pop(str(opened.sessionId))
-        try:
-            conversation = self.saved.load(session_id, cwd)
-            if not conversation:
-                raise ValueError("no saved ACP session in this workspace")
-            await session.engine.state.resume_conversation(conversation)
-        except Exception:
-            await session.engine.shutdown()
+        session = await self._restore_session(cwd, session_id, mcp_servers, replay=True)
+        return LoadSessionResponse(modes=self._modes(session.engine.approval_mode))
+
+    async def _restore_session(self, cwd: str, session_id: str, mcp_servers,
+                               *, replay: bool = False) -> ClientSession:
+        if session_id in self.restoring:
+            raise RequestError.invalid_params({"reason": "session restoration is already in progress"})
+        conversation = self.saved.load(session_id, cwd)
+        if not conversation:
             raise RequestError.resource_not_found(session_id)
-        session.id = session_id
-        self.sessions[session_id] = session
-        await self._save(session)
-        await self._replay_history(session)
-        return LoadSessionResponse(modes=self._modes())
+        self.restoring.add(session_id)
+        session = None
+        try:
+            session = await self._create_session(cwd, mcp_servers)
+            try:
+                await session.engine.state.resume_conversation(conversation)
+            except Exception as exc:
+                raise RequestError.resource_not_found(session_id) from exc
+            self.sessions.pop(session.id, None)
+            session.id = session_id
+            self.sessions[session_id] = session
+            if replay:
+                await self._replay_history(session)
+            await self._save(session)
+            return session
+        except BaseException:
+            if session is not None:
+                with contextlib.suppress(BaseException):
+                    await self._shutdown_session(session)
+            raise
+        finally:
+            self.restoring.discard(session_id)
 
     async def _replay_history(self, session: ClientSession) -> None:
         for message in await session.engine.refresh_history():
@@ -203,20 +240,8 @@ class KollabACPAgent:
         # Resume suppresses replay; load is the explicit replaying operation.
         if self.attach:
             raise RequestError.invalid_params({"reason": "attached session is not owned by this connection"})
-        opened = await self.new_session(cwd, mcp_servers=mcp_servers)
-        session = self.sessions.pop(str(opened.sessionId))
-        try:
-            conversation = self.saved.load(session_id, cwd)
-            if not conversation:
-                raise ValueError("no saved ACP session in this workspace")
-            await session.engine.state.resume_conversation(conversation)
-        except Exception:
-            await session.engine.shutdown()
-            raise RequestError.resource_not_found(session_id)
-        session.id = session_id
-        self.sessions[session_id] = session
-        await self._save(session)
-        return ResumeSessionResponse(modes=self._modes())
+        session = await self._restore_session(cwd, session_id, mcp_servers)
+        return ResumeSessionResponse(modes=self._modes(session.engine.approval_mode))
 
     async def set_session_mode(self, session_id: str, mode_id: str, **kwargs: Any) -> SetSessionModeResponse:
         session = self._session(session_id)
@@ -373,12 +398,51 @@ class KollabACPAgent:
 
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
         session = self._session(session_id)
+        first_error = None
         for request_id in tuple(session.requests):
-            await session.engine.daemon.rpc.call("state.acp_cancel", {"request_id": request_id})
-        await self._save(session)
-        await session.engine.shutdown()
-        self.sessions.pop(session_id, None)
+            try:
+                await session.engine.daemon.rpc.call("state.acp_cancel", {"request_id": request_id})
+            except BaseException as exc:
+                first_error = first_error or exc
+        try:
+            await self._save(session)
+        except BaseException as exc:
+            first_error = first_error or exc
+        pending = list(session.permission_tasks.values())
+        session.permission_tasks.clear()
+        for task in pending:
+            task.cancel()
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        except BaseException as exc:
+            first_error = first_error or exc
+        try:
+            await self._shutdown_session(session)
+        except BaseException as exc:
+            first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
         return CloseSessionResponse()
+
+    async def _shutdown_session(self, session: ClientSession) -> None:
+        # Shield owned teardown from request cancellation, while retaining any
+        # interruption for the caller. Failed teardown remains registered for EOF.
+        task = asyncio.create_task(session.engine.shutdown())
+        first_error = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception) as exc:
+                first_error = first_error or exc
+        try:
+            task.result()
+        except BaseException as exc:
+            first_error = first_error or exc
+        else:
+            if self.sessions.get(session.id) is session:
+                self.sessions.pop(session.id, None)
+        if first_error is not None:
+            raise first_error
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         raise RequestError.method_not_found(method)
@@ -387,9 +451,17 @@ class KollabACPAgent:
         return None
 
     async def shutdown(self) -> None:
-        for session_id in tuple(self.sessions):
-            with contextlib.suppress(Exception):
-                await self.close_session(session_id)
+        first_error = None
+        for session in tuple(self.sessions.values()):
+            try:
+                if session.id in self.restoring:
+                    await self._shutdown_session(session)
+                else:
+                    await self.close_session(session.id)
+            except BaseException as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
 
 def main(argv: list[str] | None = None, *, protocol: Any = None) -> None:
@@ -402,13 +474,21 @@ def main(argv: list[str] | None = None, *, protocol: Any = None) -> None:
 
     async def run() -> None:
         reader, writer = await acp_streams(protocol)
+        first_error = None
         try:
             # SDK 0.12.1 gates the advertised resume/close routes behind this flag.
             await acp.run_agent(agent, input_stream=writer, output_stream=reader,
                                 use_unstable_protocol=True)
-        finally:
+        except BaseException as exc:
+            first_error = exc
+        try:
             await agent.shutdown()
+        except BaseException as exc:
+            first_error = first_error or exc
+        finally:
             writer.close()
+        if first_error is not None:
+            raise first_error
 
     try:
         asyncio.run(run())
