@@ -689,3 +689,21 @@ def test_an_attached_window_receives_acp_prompts_without_detached_mode():
     )
     assert response is ConfirmationResponse.APPROVE_ONCE
     assert asked == [{"source": "acp", "tool_type": "acp", "acp_options": []}]
+
+
+def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        result = await bridge.request_confirmation(
+            display_tap=display_tap,
+            rpc_server=rpc_server,
+            details={"tool_id": "timeout", "source": "acp", "acp_options": []},
+            timeout=0.01,
+        )
+        assert result is ConfirmationResponse.DENY
+        assert "timeout" not in bridge._pending
+        assert display_tap.events[-1]["type"] == "permission_denied"
+
+    asyncio.run(run_bridge())
