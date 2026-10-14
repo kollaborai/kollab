@@ -140,7 +140,7 @@ class ACPOrchestrator:
                 await self.close()
             except BaseException as cleanup_exc:
                 logger.warning("ACP runner restart cleanup failed: %s", cleanup_exc)
-            self._runner = None
+            # close retains a failed teardown owner for an explicit retry.
             self._binding = None
             self._profile_name = None
             self._closed = True
@@ -577,7 +577,7 @@ class ACPOrchestrator:
         return True
 
     async def close(self) -> None:
-        if self._closed:
+        if self._closed and self._runner is None:
             return
         self._closed = True
         close_error: BaseException | None = None
@@ -606,7 +606,7 @@ class ACPOrchestrator:
                     close_error = exc
                 else:
                     logger.warning("ACP runner teardown also failed (%s)", type(exc).__name__)
-            finally:
+            else:
                 self._runner = None
         if self._cancel_tasks:
             pending = tuple(self._cancel_tasks)
