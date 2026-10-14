@@ -202,9 +202,9 @@ def default_workspace_state_dir(workspace: Path) -> Path:
     from .device_record import migrate_legacy_network_state, workspace_dir
 
     try:
-        migrated = migrate_legacy_network_state(workspace)
+        migrate_legacy_network_state(workspace)
     except RelayError:
-        migrated = False  # unreadable legacy state: leave v1 alone, surface later
+        pass  # unreadable legacy state: leave v1 alone, surface later
     base = workspace_dir(workspace)
     networks = base / "networks"
     if networks.is_dir():
@@ -239,7 +239,6 @@ class RelayStateStore:
     """No state, seed or invitation is written inside the workspace."""
 
     def __init__(self, workspace: Path, state_dir: Path | None):
-        digest = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()
         self.path = state_dir or default_workspace_state_dir(workspace)
         if self.path.is_symlink():
             raise RelayError("relay state directory must not be a symbolic link")

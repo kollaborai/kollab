@@ -36,6 +36,7 @@ from .device_names import (
     validate_trust,
 )
 from .local_directory import LocalAgentDirectory
+from .membership_runtime import MembershipContext, Memberships
 from .models import HubMessage, MessageScope
 from .network_attach import ATTACH_METHODS, AttachRefused, NetworkAttach
 from .network_members import METHOD as MEMBERS_METHOD
@@ -50,7 +51,6 @@ from .relay_conversations import (
     RelayAddress,
     validate_message,
 )
-from .membership_runtime import MembershipContext, Memberships
 from .relay_owner import WorkspaceRelayOwner, local_relay_rpc
 from .relay_state import (
     ID,

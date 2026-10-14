@@ -27,7 +27,6 @@ from pathlib import Path
 from .device_record import DeviceRecord, origin_slug
 from .relay_state import (
     RelayError,
-    RelayStateStore,
     default_workspace_state_dir,
 )
 
