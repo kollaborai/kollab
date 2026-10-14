@@ -161,18 +161,23 @@ class AttachPermissionBridge:
         display_tap.publish({"type": "permission_request", "details": details})
 
         response = ConfirmationResponse.DENY
+        settled = False
         try:
             response = await asyncio.wait_for(future, timeout=timeout)
+            settled = True
         except asyncio.TimeoutError:
             logger.warning("attach permission prompt timed out for %s", tool_id)
+            settled = True
         finally:
             self._pending.pop(tool_id, None)
             self._pending_option_ids.pop(tool_id, None)
             self._pending_details.pop(tool_id, None)
             # Every attached window shows this prompt (a terminal and the web UI
             # can watch one daemon): tell them all it is closed, so the ones that
-            # did not answer stop showing it.
-            display_tap.publish(resolution_event(tool_id, response, details))
+            # did not answer stop showing it. Cancellation by a local winning
+            # surface is not a decision and must not broadcast a denial.
+            if settled:
+                display_tap.publish(resolution_event(tool_id, response, details))
         return response
 
     async def handle_client_event(

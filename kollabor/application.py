@@ -750,13 +750,47 @@ class TerminalLLMChat:
                 # the visible TUI lives in a separate client process, so route
                 # the prompt across the attach socket instead of waiting on the
                 # daemon's hidden stdin.
-                response = await self._try_attach_permission_prompt(details)
-                if response is None:
-                    response = (
-                        await self.renderer.layout_manager.show_permission_prompt(
-                            details
-                        )
+                is_acp_prompt = str(details.get("source") or "").lower() == "acp"
+                if is_acp_prompt:
+                    # ACP prompts are shared across every attached surface. Race
+                    # the local terminal and attach clients against one decision;
+                    # the first non-None answer wins and all losing views close.
+                    local_task = asyncio.create_task(
+                        self.renderer.layout_manager.show_permission_prompt(details)
                     )
+                    attach_task = asyncio.create_task(
+                        self._try_attach_permission_prompt(details)
+                    )
+                    tasks = {local_task, attach_task}
+                    response = None
+                    try:
+                        while tasks and response is None:
+                            done, tasks = await asyncio.wait(
+                                tasks, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            for completed in done:
+                                candidate = completed.result()
+                                if candidate is not None and response is None:
+                                    response = candidate
+                        if response is None:
+                            response = await local_task
+                    finally:
+                        for pending in tasks:
+                            pending.cancel()
+                        if tasks:
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                        # If attach won, dismiss the local prompt. Native prompt
+                        # handling remains on its original sequential path.
+                        if response is not None and not local_task.done():
+                            self.renderer.layout_manager.cancel_permission_prompt()
+                else:
+                    response = await self._try_attach_permission_prompt(details)
+                    if response is None:
+                        response = (
+                            await self.renderer.layout_manager.show_permission_prompt(
+                                details
+                            )
+                        )
                 # Convert to PermissionDecision using response handler. ACP
                 # attach clients return an opaque option ID; map it back to
                 # the enum kind only for the native decision machinery.
