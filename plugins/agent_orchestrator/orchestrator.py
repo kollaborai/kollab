@@ -91,6 +91,7 @@ class AgentOrchestrator:
         identity: str = "",
         initial_task: str = "",
         profile: str = "",
+        harness: bool = False,
     ) -> Optional[str]:
         """Create session and track agent.
 
@@ -125,6 +126,7 @@ class AgentOrchestrator:
             full_name, agent_name=name, agent_type=agent_type,
             skills=skills, identity=identity, initial_task=initial_task,
             profile=profile,
+            harness=harness,
         )
         if proc is None:
             logger.error(f"Failed to create subprocess for agent: {name}")
@@ -284,6 +286,7 @@ class AgentOrchestrator:
         skills: Optional[List[str]] = None,
         identity: str = "",
         profile: str = "",
+        harness: bool = False,
     ) -> bool:
         """Spawn a new agent session.
 
@@ -309,7 +312,7 @@ class AgentOrchestrator:
         message = self._build_task_message(task, files)
         full_name = await self._setup_session(
             name, agent_type=agent_type, skills=skills, identity=identity,
-            initial_task=message, profile=profile,
+            initial_task=message, profile=profile, harness=harness,
         )
         if not full_name:
             return False
@@ -574,6 +577,7 @@ class AgentOrchestrator:
         identity: str = "",
         initial_task: str = "",
         profile: str = "",
+        harness: bool = False,
     ) -> Tuple[Optional[subprocess.Popen], Optional[RingBuffer]]:
         """Spawn a new agent subprocess.
 
@@ -599,11 +603,13 @@ class AgentOrchestrator:
         env["KOLLAB_PARENT_PID"] = str(os.getpid())
 
         cmd = self._find_kollab_command()
-        cmd.extend(["--detached", "--permissions", "trust"])
+        cmd.append("--detached")
+        if not harness:
+            cmd.extend(["--permissions", "trust"])
 
         # Add agent bundle flag so the spawned agent joins the hub mesh
         agent_flag = agent_type or agent_name
-        if agent_flag:
+        if agent_flag and not harness:
             cmd.extend(["--agent", agent_flag])
 
         # Pass profile so spawned agent uses the correct LLM provider.
@@ -613,7 +619,7 @@ class AgentOrchestrator:
         if profile:
             cmd.extend(["--llm", profile])
 
-        for skill in skills or []:
+        for skill in ([] if harness else skills or []):
             cmd.extend(["--skill", skill])
 
         # Pass hub identity request via --as flag so the spawned agent

@@ -13,6 +13,11 @@ import {
 } from "@/components/ui/card";
 
 type PermissionArgs = {
+  acp_options?: Array<{ optionId: string; name: string; kind: string }>;
+  details?: {
+    acp_options?: Array<{ optionId: string; name: string; kind: string }>;
+    operation?: { kind?: string };
+  };
   tool_id?: string;
   tool_name?: string;
   tool_type?: string;
@@ -53,6 +58,7 @@ function PermissionPrompt({
   const decided = result ?? submitted;
   const answered = Boolean(decided);
   const riskLevel = (payload.risk_level || "unknown").toLowerCase();
+  const options = payload.acp_options ?? payload.details?.acp_options ?? [];
 
   const submit = (
     decision: PermissionResult["decision"],
@@ -100,6 +106,22 @@ function PermissionPrompt({
         ) : null}
       </CardContent>
       <CardFooter className="flex flex-wrap gap-2">
+        {options.length > 0 ? options.map((option) => (
+          <Button key={option.optionId} type="button" size="sm" disabled={answered}
+            variant={option.kind.startsWith("reject") ? "destructive" : "default"}
+            title={option.kind.endsWith("always") ? "Saved by the harness; Kollab cannot undo it" : option.name}
+            onClick={() => {
+              if (answered) return;
+              const selected: PermissionResult = {
+                decision: option.kind.startsWith("allow") ? "approve" : "deny",
+                scope: "once", option_id: option.optionId,
+                vendor_saved: option.kind.endsWith("always"),
+                warning: option.kind.endsWith("always") ? "Saved by the harness; Kollab cannot undo it" : undefined,
+              };
+              setSubmitted(selected);
+              addResult(selected);
+            }}>{option.name}</Button>
+        )) : <>
         <Button
           type="button"
           size="sm"
@@ -126,6 +148,12 @@ function PermissionPrompt({
         >
           Deny
         </Button>
+        </>}
+        {options.filter((option) => option.kind === "allow_once").length === 1 && payload.details?.operation?.kind && <>
+          <Button type="button" size="sm" variant="outline" disabled={answered} onClick={() => submit("approve", "session")}>Allow Session</Button>
+          <Button type="button" size="sm" variant="outline" disabled={answered} onClick={() => submit("approve", "project")}>Allow Project</Button>
+          {payload.details.operation.kind === "edit" && <Button type="button" size="sm" variant="outline" disabled={answered} onClick={() => submit("approve", "always_edits")}>Always Allow Edits</Button>}
+        </>}
       </CardFooter>
     </Card>
   );

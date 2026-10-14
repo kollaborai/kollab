@@ -487,6 +487,11 @@ export function AppSidebar({
                           <span className="truncate text-[0.8125rem] leading-tight font-medium">
                             {formatSessionName(session.name, session.session_id)}
                           </span>
+                          {session.harness && (
+                            <span className="text-muted-foreground truncate text-[0.6875rem]" title={session.harness}>
+                              {session.harness}{session.acp_waiting ? " · Waiting for Approval" : ""}
+                            </span>
+                          )}
                           <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                             {note && !note.error ? (
                               "Opening…"
@@ -661,6 +666,11 @@ export function AppSidebar({
                                           : "Online"}
                                 </span>
                                 {note?.error ? <OpenError text={note.error} /> : null}
+                                {agent.harness ? (
+                                  <span className="text-muted-foreground truncate text-[0.6875rem]" title={agent.harness}>
+                                    {agent.harness}{agent.acp_waiting && up ? " · Waiting for Approval" : ""}
+                                  </span>
+                                ) : null}
                               </div>
                             </SidebarMenuButton>
                           </SidebarMenuItem>

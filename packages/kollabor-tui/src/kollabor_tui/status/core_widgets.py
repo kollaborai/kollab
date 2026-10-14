@@ -412,6 +412,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
         cache_read = 0
         cost = 0.0
         tokens_estimated = False
+        acp_usage = {}
 
         # Prefer daemon-sourced state when available. In attach mode the
         # local llm_service is only a client-side shadow and can be partially
@@ -427,6 +428,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
             )
         ):
             rs = ctx.remote_state
+            acp_usage = rs.get("acp_usage") or {}
             msgs = rs.get("messages", 0)
             tokens = rs.get("input_tokens", 0) + rs.get("output_tokens", 0)
             tokens_estimated = bool(rs.get("input_tokens_estimated", False))
@@ -440,6 +442,7 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
 
         elif ctx and ctx.llm_service and hasattr(ctx.llm_service, "session_stats"):
             stats = ctx.llm_service.session_stats
+            acp_usage = stats.get("acp_usage") or {}
             msgs = stats.get("messages", 0)
             tokens = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
             tokens_estimated = bool(stats.get("input_tokens_estimated", False))
@@ -473,6 +476,19 @@ def render_stats(width: int, ctx: Optional[WidgetContext]) -> str:
             if c < 1:
                 return f"${c:.1f}"
             return f"${c:.0f}"
+
+        if acp_usage:
+            used = _fmt_short(int(acp_usage.get("used", 0) or 0))
+            size = _fmt_short(int(acp_usage.get("size", 0) or 0))
+            context = f"{used}/{size} ctx"
+            harness_cost = acp_usage.get("cost") or {}
+            amount = harness_cost.get("amount")
+            if amount is not None:
+                currency = str(harness_cost.get("currency") or "")
+                price = _fmt_cost(float(amount)) if currency == "USD" else f"{amount} {currency}".strip()
+                if len(context) + len(price) + 3 <= width:
+                    context += " | " + price
+            return _fg(context if len(context) <= width else f"{used} ctx", T().text_dim)
 
         token_prefix = "~" if tokens_estimated and tokens > 0 else ""
         token_full = token_prefix + _fmt(tokens)

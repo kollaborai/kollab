@@ -82,6 +82,14 @@ class DisplayTap:
         Uses stdlib queue.Queue which is safe across threads.
         """
         event = dict(event)
+        from .turn_context import current_turn
+        for key, value in current_turn.get().items():
+            event.setdefault(key, value)
+        details = event.get("details")
+        if isinstance(details, dict):
+            for key in ("request_id", "turn_id", "input_source", "generation"):
+                if details.get(key) is not None:
+                    event.setdefault(key, details[key])
         event.setdefault("ts", time.time())
         with self._lock:
             event["seq"] = self._next_seq

@@ -205,6 +205,22 @@ function RuntimeShell({
         >
           {sessionLabel}
         </span>
+        {session.harness && (
+          <span className="text-muted-foreground max-w-48 truncate rounded border px-1.5 py-0.5 text-xs" title={session.harness}>
+            {session.harness}
+          </span>
+        )}
+        {session.acp_waiting && (
+          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600" role="status">
+            Waiting for Approval
+          </span>
+        )}
+        {session.harness && session.acp_usage?.size !== undefined && (
+          <span className="text-muted-foreground text-xs" title="Current harness context usage">
+            {session.acp_usage.used ?? 0}/{session.acp_usage.size} Tokens
+            {session.acp_usage.cost?.amount !== undefined ? ` · ${session.acp_usage.cost.amount} ${session.acp_usage.cost.currency ?? ""}` : ""}
+          </span>
+        )}
         <div
           className="bg-muted flex shrink-0 rounded-md p-0.5"
           role="group"
@@ -250,6 +266,19 @@ function RuntimeShell({
           onHistoryCleared={onHistoryCleared}
         />
       </header>
+      {session.harness && Boolean(session.acp_plan?.entries?.length) && (
+        <details className="border-b px-3 py-2 text-xs">
+          <summary className="cursor-pointer font-medium">Harness Plan</summary>
+          <ol className="mt-2 space-y-1">
+            {session.acp_plan?.entries?.map((entry, index) => (
+              <li key={index} className="flex gap-2">
+                <span className="text-muted-foreground shrink-0">{entry.status}</span>
+                <span className="min-w-0 break-words">{entry.content}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       <div className="flex min-h-0 flex-1 flex-col">
         {view === "chat" ? (
           <Thread

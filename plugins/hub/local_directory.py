@@ -7,7 +7,8 @@ not deleted from another session's state. No second agent registry is created.
 
 ``publishable_agents(workspace, workspace_id)`` is the only remote export: it
 requires an explicit workspace, filters before export, and strips local paths,
-socket routes, PIDs, task text, logs, and profile information. A caller still
+socket routes, PIDs, task text, logs, and profile configuration. A short harness
+label and its approval-waiting state may accompany an ACP agent. A caller still
 must authorize the peer before transmitting that roster or accepting messages.
 """
 
@@ -116,6 +117,8 @@ class LocalAgent:
     socket_path: str
     pid: int
     last_heartbeat: float
+    harness: str = ""
+    acp_waiting: bool = False
 
     @property
     def global_id(self) -> str:
@@ -365,6 +368,10 @@ class LocalAgentDirectory:
             socket_path,
             pid,
             heartbeat,
+            harness=(str((data.get("tags") or {}).get("harness") or "")[:128]
+                     if isinstance(data.get("tags"), dict) else ""),
+            acp_waiting=bool((data.get("tags") or {}).get("acp_waiting"))
+                        if isinstance(data.get("tags"), dict) else False,
         )
 
     def agents(self, workspace: Path | None = None) -> list[LocalAgent]:
@@ -421,6 +428,7 @@ class LocalAgentDirectory:
                 "name": item.name,
                 "is_coordinator": item.is_coordinator,
                 "state": item.state,
+                **({"harness": item.harness, "acp_waiting": item.acp_waiting} if item.harness else {}),
                 "device": device,
             }
             for item in self.agents(workspace)

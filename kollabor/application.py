@@ -1308,6 +1308,10 @@ class TerminalLLMChat:
             "source": "acp",
             "approval_scope": "once",
         }
+        active = getattr(getattr(self.acp_orchestrator, "runner", None), "_active_context", None)
+        if active is not None:
+            details["request_id"] = active.request_id
+            details["turn_id"] = active.turn_id
         if request.display:
             details.update(request.display)
         try:
@@ -1392,8 +1396,6 @@ class TerminalLLMChat:
         if self._attach_to or self.acp_orchestrator is not None:
             return
         profile = self.profile_manager.get_active_profile()
-        if profile.provider != "acp":
-            return
         from .llm.acp_orchestrator import ACPOrchestrator
 
         identity = getattr(self.args, "as_identity", None) or os.environ.get(
@@ -1406,6 +1408,10 @@ class TerminalLLMChat:
             hub_plugin=hub_plugin,
             permission_decider=self._acp_permission_decider,
         )
+        self.event_bus.register_service("acp_orchestrator", orchestrator)
+        if profile.provider != "acp":
+            self.acp_orchestrator = orchestrator
+            return
         try:
             await orchestrator.start(profile)
         except BaseException:
@@ -3621,6 +3627,9 @@ class TerminalLLMChat:
         """
         logger.info("Starting application cleanup...")
         acp_orchestrator = getattr(self, "acp_orchestrator", None)
+        client_turn_broker = self.event_bus.get_service("client_turn_broker") if self.event_bus else None
+        if client_turn_broker is not None:
+            await client_turn_broker.close()
         if acp_orchestrator is not None:
             try:
                 await acp_orchestrator.close()

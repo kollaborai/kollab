@@ -642,14 +642,49 @@ class FileOperationsExecutor:
         if not handler:
             return {"success": False, "error": f"Unknown operation type: {op_type}"}
 
+        # Native ACP clients receive edits as real file snapshots, rather than
+        # attempting to reconstruct a whole file from find/replace fragments.
+        snapshots = []
+        if op_type in {"file_edit", "file_create", "file_create_overwrite", "file_append",
+                       "file_insert_after", "file_insert_before", "file_delete", "file_move",
+                       "file_copy", "file_copy_overwrite"}:
+            targets = ([operation.get("from"), operation.get("to")] if op_type == "file_move" else
+                       [operation.get("to")] if op_type in {"file_copy", "file_copy_overwrite"} else
+                       [operation.get("file")])
+            for target in targets:
+                valid, _, normalized = self.validate_file_path(target or "", allow_kollabor_config=True)
+                if valid:
+                    path = Path(normalized)
+                    snapshots.append((path, self._diff_text(path), not path.exists()))
         try:
-            return handler(operation)
+            result = handler(operation)
+            if result.get("success"):
+                diffs = []
+                for path, before, missing in snapshots:
+                    after = self._diff_text(path)
+                    if after is not None and (before is not None or missing):
+                        diffs.append({"path": str(path.resolve()), "old_text": before, "new_text": after})
+                    elif not path.exists() and before is not None:
+                        diffs.append({"path": str(path.resolve()), "old_text": before, "new_text": ""})
+                if diffs:
+                    result["diffs"] = diffs
+            return result
         except Exception as e:
             import traceback
 
             error_trace = traceback.format_exc()
             logger.error(f"Operation {op_type} failed: {error_trace}")
             return {"success": False, "error": f"Operation failed: {str(e)}"}
+
+    @staticmethod
+    def _diff_text(path: Path) -> str | None:
+        try:
+            if not path.is_file() or path.stat().st_size > 256 * 1024:
+                return None
+            content = path.read_text(encoding="utf-8")
+            return None if "\x00" in content else content
+        except (OSError, UnicodeError):
+            return None
 
     def _execute_edit(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute file edit operation (find/replace).

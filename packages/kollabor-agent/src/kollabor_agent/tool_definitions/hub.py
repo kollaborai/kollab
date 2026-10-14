@@ -251,9 +251,11 @@ hub_spawn = ToolDefinition(
     requires_permission=False,
     xml_tag="hub_spawn",
     xml_form="mixed",
-    xml_attributes=["name", "type"],
+    xml_attributes=["name", "type", "llm"],
     xml_body_param="task",
     parameters=[
+        ToolParameter(name="llm", type="string", required=False,
+                      description="LLM profile or loadout; ACP profiles include claude-code, codex-cli and gemini-cli."),
         ToolParameter(
             name="name",
             type="string",

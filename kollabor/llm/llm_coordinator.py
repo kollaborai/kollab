@@ -1859,10 +1859,15 @@ class LLMService:
         if acp is not None and getattr(acp, "active", False) is True:
             request_id = data.get("request_id") or uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
+            origin = dict(data.get("origin_context") or {})
+            origin.setdefault("operator", source != "agent")
+            if await acp.steer(str(data["message"]), origin=origin, thread_id=data.get("thread_id")):
+                return {"status": "injected", "request_id": request_id}
             try:
                 admission = acp.admit(
                     str(data["message"]), request_id=request_id, source=source,
                     thread_id=data.get("thread_id"),
+                    origin=origin,
                 )
             except (RuntimeError, ValueError) as exc:
                 if "full" in str(exc).lower():

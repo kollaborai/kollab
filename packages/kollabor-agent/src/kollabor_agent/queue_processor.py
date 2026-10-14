@@ -1990,6 +1990,17 @@ class QueueProcessor:
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
             self.active_voice = None
+            provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
+            context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
+            if context_size > 0:
+                publish_semantic(self.renderer, "usage_update", payload={
+                    "sessionUpdate": "usage_update",
+                    "used": int(self.session_stats.get("input_tokens", 0) or 0)
+                            + int(self.session_stats.get("output_tokens", 0) or 0),
+                    "size": context_size,
+                    "cost": {"amount": float(self.session_stats.get("total_cost_usd", 0.0) or 0.0), "currency": "USD"},
+                    "_meta": {"estimated": bool(self.session_stats.get("input_tokens_estimated", False))},
+                })
             publish_semantic(
                 self.renderer,
                 "turn_complete",

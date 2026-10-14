@@ -124,6 +124,7 @@ class LLMProfile:
     cwd: str = ""
     workspace: str = ""
     pass_env: tuple[str, ...] = ()
+    env: Dict[str, str] = field(default_factory=dict, repr=False)
     install_guidance: str = ""
     model: str = ""
     temperature: float = 0.7
@@ -513,6 +514,8 @@ class LLMProfile:
                 result["workspace"] = self.workspace
             if self.pass_env:
                 result["pass_env"] = list(self.pass_env)
+            if self.env:
+                result["env"] = dict(self.env)
             if self.install_guidance:
                 result["install_guidance"] = self.install_guidance
 
@@ -613,6 +616,7 @@ class LLMProfile:
             cwd=data.get("cwd", "") if provider == "acp" else "",
             workspace=data.get("workspace", "") if provider == "acp" else "",
             pass_env=tuple(pass_env),
+            env={str(key): str(value) for key, value in (data.get("env") or {}).items()} if provider == "acp" else {},
             install_guidance=data.get("install_guidance", "") if provider == "acp" else "",
             api_key=data.get("api_key", ""),
             model=data.get("model", ""),

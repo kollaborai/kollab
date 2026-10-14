@@ -794,9 +794,11 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             "permission decision must be approve or deny"
                         )
                         return
-                    resolved = await session.resolve_permission(
-                        source_tool_id, decision, scope
-                    )
+                    option_id = result.get("option_id") if isinstance(result, dict) else None
+                    if option_id is None:
+                        resolved = await session.resolve_permission(source_tool_id, decision, scope)
+                    else:
+                        resolved = await session.resolve_permission(source_tool_id, decision, scope, option_id=str(option_id))
                     saw_action = True
                     if not resolved:
                         controller.add_error(
@@ -895,6 +897,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             "risk_level": event.get("risk_level"),
                             "risk_reason": event.get("risk_reason"),
                             "input": event.get("input") or {},
+                            "details": event.get("details") or {},
+                            "acp_options": (event.get("details") or {}).get("acp_options", []),
                         },
                     }
                     permission_part["argsText"] = json.dumps(

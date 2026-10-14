@@ -177,6 +177,7 @@ class _NetworkTurn:
     failed: bool = False  # ... and that chain errored
     replies: int = 0  # hub_msgs already sent on its thread
     answer: str = ""  # text of the model's last response, if it ended the chain
+    bound_ask: bool = False
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -1573,6 +1574,7 @@ class HubPlugin(BasePlugin):
             return {
                 "name": attrs.get("name", "").strip(),
                 "agent_type_override": attrs.get("type", "").strip(),
+                "llm": attrs.get("llm", "").strip(),
                 "task": m.group(2).strip(),
             }
 
@@ -2789,6 +2791,7 @@ class HubPlugin(BasePlugin):
             opened_at=time.monotonic(),
             deferred=mode == "buffer",
             skipped=mode not in ("wake", "buffer"),
+            bound_ask=bool((message.metadata or {}).get("acp_ask")),
         )
     def _network_answering(self, handle: str) -> Optional["_NetworkTurn"]:
         """The open request from ``handle`` this turn is handling, if any."""
@@ -2844,6 +2847,8 @@ class HubPlugin(BasePlugin):
         every hub_msg reply and the forwarded plain-text answer.
         """
         turn = getattr(self, "_net_turn", None)
+        if turn is not None and turn.bound_ask and self._identity and self._identity.state == "waiting":
+            return
         if turn is not None and turn.started and not turn.deferred and not turn.skipped:
             turn.ended = True
             turn.failed = turn.failed or failed
@@ -2933,16 +2938,18 @@ class HubPlugin(BasePlugin):
             self._net_turn = None
         # ACP always emits an outcome/final message before its hidden end frame.
         answer = _network_answer_text(turn.answer, MAX_CONTENT)
+        acp = acp or turn.bound_ask
         if acp:
             content = answer or self._acp_outcome_text(outcome or "error", failed)
             if await self._send_on_thread(turn, content, "reply"):
                 turn.replies += 1
-        elif answer and not turn.replies and not failed:
+        elif answer and not failed:
             if await self._send_on_thread(turn, answer, "reply"):
                 turn.replies += 1
         turn_end = {
             "replies": min(turn.replies, MAX_TURN_REPLIES),
             "failed": failed,
+            "outcome": outcome or ("error" if failed else "end_turn"),
         }
         if acp:
             turn_end["outcome"] = outcome or ("error" if failed else "end_turn")
@@ -3216,7 +3223,9 @@ class HubPlugin(BasePlugin):
         # The wake header shows the model a short `[thread:xxxxxxxx]` tag and it
         # echoes that back as thread_id. A prefix is not the thread, so for the
         # agent whose request this turn handles the runtime's ids always win.
-        answering = self._network_answering(target) if handle else None
+        answering = self._network_answering(target)
+        if answering is not None and not handle and not answering.bound_ask:
+            answering = None
 
         # Dedup. The same words on another request's thread are another reply.
         dedup_window = 120
@@ -3232,7 +3241,7 @@ class HubPlugin(BasePlugin):
         # before authorization would turn a failed send into silent success on
         # retry, including after the human grants the requested contact. An
         # agent@device send is cached only once the network accepted it.
-        if not target.startswith("relay:") and msg_hash in self._recent_hub_msgs:
+        if not tool_data.get("_acp_hub") and not target.startswith("relay:") and msg_hash in self._recent_hub_msgs:
             logger.debug(f"hub_msg dedup: skipping duplicate to {target}")
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -3252,7 +3261,7 @@ class HubPlugin(BasePlugin):
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
-        if handle:
+        if handle or (answering is not None and answering.bound_ask):
             # A remote agent answers on the thread of the request its turn is
             # handling, so the asker (a CLI waiter, another agent) can tell
             # whose answer this is. The model never sees thread ids, so the
@@ -3276,6 +3285,10 @@ class HubPlugin(BasePlugin):
                 sender_has_task = False
 
         metadata = {"wait": any_wait}
+        if tool_data.get("_acp_ask"):
+            metadata["acp_ask"] = True
+        if tool_data.get("_acp_hub"):
+            metadata["acp_harness"] = True
         if relay_kind:
             metadata["relay_kind"] = relay_kind
         explicit_relay_grant = str(tool_data.get("thread_id", "") or "").strip()
@@ -3308,6 +3321,7 @@ class HubPlugin(BasePlugin):
         # Route the message
         msg = HubMessage(
             action="message",
+            id=tool_data.get("_message_id") or __import__("uuid").uuid4().hex,
             from_agent=(self._identity.agent_id if self._identity else ""),
             from_identity=(self._identity.identity if self._identity else ""),
             to=target,
@@ -4284,6 +4298,7 @@ class HubPlugin(BasePlugin):
             )
         ).strip()
         task = request.get("task", tool_data.get("task", ""))
+        requested_llm = str(request.get("llm", tool_data.get("llm", "")) or "").strip()
 
         if raw_name == my_ident or requested_identity == my_ident:
             return ToolExecutionResult(
@@ -4307,6 +4322,8 @@ class HubPlugin(BasePlugin):
         }
         if requested_identity:
             spawn_args["identity"] = requested_identity
+        if requested_llm:
+            spawn_args["llm"] = requested_llm
 
         result = await self._handle_spawn_command(spawn_args)
         return ToolExecutionResult(
@@ -4896,6 +4913,7 @@ class HubPlugin(BasePlugin):
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
                 on_acp_hub_status=self._handle_acp_hub_status,
+                on_acp_hub_call=self._handle_acp_hub_call,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -7125,6 +7143,8 @@ class HubPlugin(BasePlugin):
         llm_service: Any,
     ) -> HubWakeDecision:
         relay = getattr(self, "_relay_agent", None)
+        if (message.metadata or {}).get("acp_ask") and is_intended and not is_human_elsewhere:
+            return HubWakeDecision("wake", True, "addressed Hub ask")
         if relay and message is relay._injecting_message:
             # Durable relay admission already deduplicates IDs and checks the
             # recipient's grant. Content heuristics must not strand an admitted
@@ -7400,6 +7420,10 @@ class HubPlugin(BasePlugin):
         if turns is None:
             turns = self._acp_network_turns = {}
         sender = message.from_identity or message.from_agent or ""
+        acp = self.event_bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
+            acp.observe_notification(message)
+            return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
             thread_id=getattr(message, "thread_id", "") or message.id,
@@ -7413,10 +7437,17 @@ class HubPlugin(BasePlugin):
             thread_id=getattr(message, "thread_id", "") or message.id,
             origin_context={
                 "sender": message.from_agent,
+                "sender_identity": message.from_identity,
+                "relay_turn_id": getattr(getattr(self, "_relay_agent", None), "_turn", None).get() if getattr(getattr(self, "_relay_agent", None), "_turn", None) is not None else None,
+                "correlated_relay_event": bool((message.metadata or {}).get("relay_event")),
                 "authenticated": True,
                 "operator": False,
             },
         )
+        if isinstance(result, dict) and result.get("status") == "injected":
+            # Steering belongs to the already running request. It does not
+            # acquire a second completion owner.
+            turns.pop(message.id, None)
         if isinstance(result, dict) and result.get("status") == "rejected":
             turn = turns.pop(message.id, None)
             reason = str(result.get("reason") or "acp_admission_failed")
@@ -7446,6 +7477,10 @@ class HubPlugin(BasePlugin):
             logger.info(
                 "solo agent dropped hub message from %s", message.from_identity
             )
+            return
+        tools = self._acp_tools()
+        tools.observe(message)
+        if tools.consume(message):
             return
         relay = getattr(self, "_relay_agent", None)
         if relay and await relay.defer_local(message):
@@ -7479,6 +7514,14 @@ class HubPlugin(BasePlugin):
                     self._seen_messages.popitem(last=False)
         elif msg_id and msg_id in self._seen_messages:
             logger.debug(f"Dedup: skipping already-seen turn_end {msg_id}")
+            return
+
+        llm_owner = self.event_bus.get_service("llm_service") if self.event_bus else None
+        native_bound_request = (message.metadata or {}).get("acp_ask") or (
+            (message.metadata or {}).get("network") and not message.reply_to
+            and parse_handle(message.from_identity or "") is not None)
+        if native_bound_request and llm_owner is not None and self._agent_dispatch_mode(llm_owner) == "native":
+            self._enqueue_bound_ask(message, llm_owner)
             return
 
         # A correlated ACP completion arrives as a standalone turn_end message
@@ -7536,8 +7579,9 @@ class HubPlugin(BasePlugin):
         network_request = bool(
             message.action == "message"
             and not message.reply_to
-            and (message.metadata or {}).get("network")
-            and parse_handle(message.from_identity or "") is not None
+            and ((message.metadata or {}).get("acp_ask") or (
+                (message.metadata or {}).get("network")
+                and parse_handle(message.from_identity or "") is not None))
         )
 
         # `kollab --hub msg agent@device` waiter: hand it every message on its
@@ -7842,6 +7886,30 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            dispatch_mode = self._agent_dispatch_mode(llm_service)
+            if dispatch_mode == "acp":
+                # ACP owns a request FIFO and its transcript. Keep native HUD,
+                # compaction and continuation injections out of this path.
+                if is_departure or is_human_elsewhere or not is_intended:
+                    return
+                acp = self.event_bus.get_service("acp_orchestrator")
+                if is_operator_direct or message.from_agent == "human":
+                    if wake_decision.should_trigger:
+                        await llm_service.submit_human_input(
+                            message.content, source=UserInputSource.HUB_ATTACHMENT,
+                            request_id=message.id, thread_id=message.thread_id,
+                            origin_context={"operator": True},
+                        )
+                elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
+                    acp.observe_notification(message)
+                elif wake_decision.should_trigger:
+                    await self._submit_authenticated_agent_message(message, llm_service)
+                else:
+                    turn = _NetworkTurn(handle=message.from_identity or message.from_agent,
+                                        thread_id=message.thread_id or message.id,
+                                        message_id=message.id, opened_at=time.monotonic())
+                    await self._end_network_turn(turn, failed=False, acp=True, outcome="skipped")
+                return
             if network_request:
                 # Before the model can start: its turn is this request's turn.
                 self._open_network_turn(message, wake_decision.mode)
@@ -9151,6 +9219,9 @@ class HubPlugin(BasePlugin):
                         message.reply_to if ID.fullmatch(message.reply_to or "") else ""
                     ),
                     **({"turn_end": turn_end} if turn_end else {}),
+                    **({"message_id": message.id} if (message.metadata or {}).get("acp_harness") else {}),
+                    **({"ask": True} if (message.metadata or {}).get("acp_ask") else {}),
+                    **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
                 return [(message.to, str(exc))]
@@ -9473,6 +9544,7 @@ class HubPlugin(BasePlugin):
                     replies=int(turn_end.get("replies", 0)),
                     failed=bool(turn_end.get("failed", False)),
                     outcome=str(turn_end.get("outcome", "error")),
+                    from_identity=message.from_identity,
                     text=(
                         message.content
                         or (
@@ -11226,6 +11298,7 @@ class HubPlugin(BasePlugin):
 
         requested_identity = ""
         agent_type_override = ""
+        requested_llm = str(rest.get("llm") or "").strip() if isinstance(rest, dict) else ""
         if isinstance(rest, dict):
             agent_name = str(rest.get("name", "")).strip()
             task = str(rest.get("task", "")).strip()
@@ -11249,6 +11322,8 @@ class HubPlugin(BasePlugin):
                     requested_identity = token.split("=", 1)[1].strip().strip('"')
                 elif token.startswith("type="):
                     agent_type_override = token.split("=", 1)[1].strip().strip('"')
+                elif token.startswith("llm="):
+                    requested_llm = token.split("=", 1)[1].strip().strip('"')
                 elif not agent_name:
                     agent_name = token
                 else:
@@ -11257,11 +11332,24 @@ class HubPlugin(BasePlugin):
             if not agent_name or not task:
                 return "usage: /hub spawn <name> [identity=X] [type=X] <task>"
 
+        harness = False
+        if requested_llm and self.event_bus:
+            profile_mgr = self.event_bus.get_service("profile_manager")
+            if profile_mgr is not None:
+                from kollabor_ai.loadout_manager import LoadoutManager
+                loadout, _ = LoadoutManager(profile_mgr).resolve(requested_llm)
+                selected = profile_mgr.get_profile(loadout.provider_profile if loadout else requested_llm)
+                harness = selected is not None and selected.get_provider() == "acp"
+
         # --- Resolve what was requested ---
         # Is agent_name a pool identity? (e.g. "lapis")
         pool_match = POOL_BY_NAME.get(agent_name)
 
-        if pool_match:
+        if harness:
+            resolved_identity = requested_identity or agent_name
+            effective_agent_type = ""
+            effective_skills = []
+        elif pool_match:
             # MODE 1 or 3: spawning by identity
             resolved_identity = agent_name
             # Type override wins, then pool's agent_type, then fallback to "coder"
@@ -11385,12 +11473,12 @@ class HubPlugin(BasePlugin):
             profile = value.strip()
             return profile if profile and profile != "default" else ""
 
-        resolved_profile = ""
+        resolved_profile = _explicit_profile(requested_llm)
         try:
             agent_mgr = (
                 self.event_bus.get_service("agent_manager") if self.event_bus else None
             )
-            if agent_mgr:
+            if agent_mgr and not resolved_profile:
                 agent_def = agent_mgr.get_agent(effective_agent_type)
                 resolved_profile = _explicit_profile(
                     getattr(agent_def, "profile", "") if agent_def else ""
@@ -11443,14 +11531,14 @@ class HubPlugin(BasePlugin):
             skills=effective_skills,
             identity=resolved_identity,
             profile=resolved_profile,
+            **({"harness": True} if harness else {}),
         )
         if not result:
             return f"Failed to create agent (identity: {resolved_identity}, type: {effective_agent_type})"
 
         # --- Build response (identity is known upfront, no discovery needed) ---
-        msg = (
-            f"Created agent '{resolved_identity}' (agent type: {effective_agent_type})"
-        )
+        description = f"harness: {resolved_profile}" if harness else f"agent type: {effective_agent_type}"
+        msg = f"Created agent '{resolved_identity}' ({description})"
         msg += f"\nTask: {task}"
         if effective_skills:
             msg += f"\nSkills: {', '.join(effective_skills)}"
@@ -11893,6 +11981,8 @@ class HubPlugin(BasePlugin):
         for a in agents:
             role = " (coordinator)" if a.is_coordinator else ""
             me = " (you)" if a.agent_id == self._identity.agent_id else ""
+            harness = (getattr(a, "tags", None) or {}).get("harness")
+            label = f"{a.identity} ({harness})" if harness else a.identity
             lines.append(f"  {a.identity}{role}{me}: {a.state}")
         return "\n".join(lines)
 
@@ -12757,17 +12847,22 @@ class HubPlugin(BasePlugin):
                     state_str += f" - {a.waiting_reason}"
             else:
                 state_str = a.state
+            if (getattr(a, "tags", None) or {}).get("acp_waiting"):
+                state_str = "waiting for your OK"
 
             task = f" - {a.current_task[:50]}" if a.current_task else ""
             proj = f" [{a.project}]" if a.project else ""
-            lines.append(f"  {a.identity}{role}{me}: {state_str}{proj}{task}")
+            lines.append(f"  {label}{role}{me}: {state_str}{proj}{task}")
 
         for row in self._remote_agent_rows():
             handle = row.get("handle") or format_handle(
                 row.get("name", "?"), row.get("device", "?")
             )
+            if row.get("harness"):
+                handle += f" ({row['harness']})"
             online_str = "online" if row.get("online") else "offline"
-            lines.append(f"  {handle} - {row.get('state', 'unknown')} (device {online_str})")
+            state = "waiting for your OK" if row.get("acp_waiting") else row.get("state", "unknown")
+            lines.append(f"  {handle} - {state} (device {online_str})")
 
         pending = self._work_queue.get_pending() if self._work_queue else []
         if pending:
@@ -13616,6 +13711,9 @@ class HubPlugin(BasePlugin):
 
     def rotate_acp_hub_binding(self) -> tuple[str, int]:
         """Rotate the child-binding credential for each ACP session owner."""
+        runtime = getattr(self, "_acp_hub_tools", None)
+        if runtime is not None:
+            runtime.stop()
         self._acp_hub_generation += 1
         self._acp_hub_token = secrets.token_urlsafe(32)
         return self._acp_hub_token, self._acp_hub_generation
@@ -13623,10 +13721,121 @@ class HubPlugin(BasePlugin):
     async def _handle_acp_hub_status(self, *, token: str | None, generation: str | None) -> Dict[str, Any]:
         if token != self._acp_hub_token or str(generation) != str(self._acp_hub_generation):
             return {"error": "stale or invalid ACP hub binding"}
-        roster = list(self._roster)
-        if self._identity:
-            roster = [{"identity": self._identity.identity, "state": "online"}, *roster]
+        roster = self._acp_roster()
         return {"generation": self._acp_hub_generation, "roster": roster}
+
+    def _acp_roster(self) -> list[dict[str, Any]]:
+        rows = [agent.to_dict() for agent in self._presence.discover_agents()] if self._presence else []
+        rows.extend(row for row in getattr(self, "_roster", []) if isinstance(row, dict))
+        for remote in self._remote_agent_rows():
+            handle = remote.get("handle") or format_handle(remote.get("name", "?"), remote.get("device", "?"))
+            rows.append({"identity": handle, "state": remote.get("state"), "device": remote.get("device"),
+                         "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
+                                  "acp_waiting": bool(remote.get("acp_waiting"))}})
+        if self._identity:
+            rows.append(self._identity.to_dict())
+        return list({str(row.get("identity") or row.get("agent_id")): row for row in rows}.values())
+
+    def _acp_tools(self):
+        from .acp_tools import ACPHubTools
+        if not hasattr(self, "_acp_hub_tools"):
+            self._acp_hub_tools = ACPHubTools(self)
+        return self._acp_hub_tools
+
+    async def _handle_acp_hub_call(self, *, token, generation, name, arguments):
+        if not token or not secrets.compare_digest(str(token), self._acp_hub_token) or str(generation) != str(self._acp_hub_generation):
+            return {"error": "stale or invalid ACP hub binding"}
+        relay = getattr(self, "_relay_agent", None)
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        active = getattr(getattr(acp, "runner", None), "_active_context", None)
+        origin = getattr(active, "origin", None) or {}
+        relay_token = None
+        if relay is not None and origin.get("relay_turn_id"):
+            relay_token = relay._turn.set(origin["relay_turn_id"])
+        try:
+            if relay is not None and name in {"hub_msg", "hub_ask", "hub_spawn"}:
+                if origin.get("correlated_relay_event"):
+                    return {"error": "correlated relay events cannot authorize tools"}
+                guarded = await relay.guard_tool({"type": name, "input": dict(arguments)})
+                decision = guarded.get("permission_decision") or {}
+                if decision.get("allowed") is False:
+                    return {"error": decision.get("reason") or "network tool authority was refused"}
+            result = await self._acp_tools().call(str(name), dict(arguments))
+            return {"result": result}
+        except Exception as exc:
+            return {"error": str(exc)}
+        finally:
+            if relay_token is not None:
+                relay._turn.reset(relay_token)
+
+    def on_acp_waiting(self, request_id: str, waiting: bool, payload: dict[str, Any]) -> None:
+        from kollabor_tui.display_tap import publish_semantic
+        if self._identity:
+            self._identity.tags["acp_waiting"] = waiting
+            if self._presence:
+                self._presence.publish()
+        turn = getattr(self, "_acp_network_turns", {}).get(request_id)
+        if waiting and turn is not None:
+            line = f"{self._identity.identity} is waiting for your OK: {payload.get('title') or 'Tool permission'} · open it: kollab --attach {self._identity.identity}"
+            message = HubMessage(action="message", from_agent=self._identity.agent_id,
+                from_identity=self._identity.identity, to=turn.handle, content=line,
+                thread_id=turn.thread_id, reply_to=turn.message_id, metadata={"acp_waiting": True})
+            asyncio.create_task(self._route_message(message))
+        publish_semantic(self.event_bus, "acp_waiting", waiting=waiting,
+                         identity=self._identity.identity if self._identity else "")
+
+    def _enqueue_bound_ask(self, message: HubMessage, llm: Any) -> None:
+        from collections import deque
+        if not hasattr(self, "_bound_asks"):
+            self._bound_asks = deque()
+        relay = getattr(self, "_relay_agent", None)
+        if relay is not None:
+            message.metadata["_relay_turn_id"] = relay._turn.get()
+        self._bound_asks.append(message)
+        task = getattr(self, "_bound_ask_task", None)
+        if task is None or task.done():
+            self._bound_ask_task = asyncio.create_task(self._run_bound_asks(llm))
+
+    async def _run_bound_asks(self, llm: Any) -> None:
+        from kollabor_tui.turn_context import current_turn
+        while self._bound_asks:
+            while llm.is_processing or self.network_turn_open():
+                await self.settle_network_turn(llm)
+                await asyncio.sleep(0.05)
+            message = self._bound_asks.popleft()
+            self._open_network_turn(message, "wake")
+            turn = self._net_turn
+            turn.started = True
+            turn.bound_ask = True
+            relay = getattr(self, "_relay_agent", None)
+            relay_token = relay._turn.set(message.metadata["_relay_turn_id"]) if relay is not None and message.metadata.get("_relay_turn_id") else None
+            token = current_turn.set({"request_id": message.id, "thread_id": message.thread_id,
+                                      "input_source": "agent"})
+            try:
+                result = await llm.submit_human_input(
+                    f"Message from {message.from_identity} [thread:{message.thread_id}]\n{message.content}",
+                    source="agent", request_id=message.id, thread_id=message.thread_id,
+                    origin_context={"sender": message.from_agent, "authenticated": True, "operator": False},
+                )
+                if result.get("status") in {"rejected", "cancelled"}:
+                    await self._end_network_turn(turn, failed=True, acp=True, outcome="error")
+                else:
+                    deadline = time.monotonic() + 600
+                    while self._net_turn is turn:
+                        if time.monotonic() > deadline:
+                            await self._end_network_turn(turn, failed=True, acp=True, outcome="timeout")
+                            break
+                        await self.settle_network_turn(llm)
+                        await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                await self._end_network_turn(turn, failed=True, acp=True, outcome="cancelled")
+                raise
+            except Exception:
+                await self._end_network_turn(turn, failed=True, acp=True, outcome="error")
+            finally:
+                current_turn.reset(token)
+                if relay_token is not None:
+                    relay._turn.reset(relay_token)
 
     async def _handle_network_status_request(self) -> Dict[str, Any]:
         """Answer the CLI's `network_status` socket request.
@@ -13856,6 +14065,13 @@ class HubPlugin(BasePlugin):
         if getattr(self, "_shutdown_in_progress", False):
             return
         self._shutdown_in_progress = True
+        runtime = getattr(self, "_acp_hub_tools", None)
+        if runtime is not None:
+            runtime.stop()
+        bound_task = getattr(self, "_bound_ask_task", None)
+        if bound_task is not None and not bound_task.done():
+            bound_task.cancel()
+            await asyncio.gather(bound_task, return_exceptions=True)
 
         relay_start = getattr(self, "_relay_startup_task", None)
         if relay_start:

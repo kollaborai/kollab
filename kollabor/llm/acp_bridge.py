@@ -1,7 +1,8 @@
-"""Phase-one outbound ACP bridge using the pinned agent-client-protocol SDK."""
+"""Outbound ACP process, session, turn and permission ownership."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -14,7 +15,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar
 
 import acp
-from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, McpServerStdio, TextContentBlock
+from acp.schema import AllowedOutcome, DeniedOutcome, EnvVariable, Implementation, McpServerStdio, TextContentBlock
+
+from .acp_state import ACPBinding
+from kollabor.version import __version__
 
 
 class ACPError(RuntimeError):
@@ -49,6 +53,11 @@ class ACPProfile:
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY",
         "GEMINI_API_KEY", "GOOGLE_API_KEY",
     })
+    LOGIN_GUIDANCE: ClassVar[dict[str, str]] = {
+        "claude-code": "Run claude and /login on this device.",
+        "codex-cli": "Run codex login on this device.",
+        "gemini-cli": "Run gemini and sign in on this device.",
+    }
 
     @classmethod
     def from_dict(cls, name: str, value: dict[str, Any]) -> "ACPProfile":
@@ -296,6 +305,7 @@ class ACPAdmission:
     turn_id: int
     text: str
     future: asyncio.Future["ACPResult"]
+    origin: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -331,10 +341,12 @@ class ACPRunner:
         profile: ACPProfile,
         permission_bridge: ACPPermissionBridge | None = None,
         update_callback: Callable[[dict[str, Any]], None] | None = None,
+        lifecycle_callback: Callable[[str, "ACPRunner"], Awaitable[None]] | None = None,
     ):
         self.profile = profile
         self.permission_bridge = permission_bridge or ACPPermissionBridge()
         self.update_callback = update_callback
+        self.lifecycle_callback = lifecycle_callback
         self.generation = 0
         self._next_turn_id = 0
         self._active_turn_id = 0
@@ -361,6 +373,18 @@ class ACPRunner:
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
+        self.state = "stopped"
+        self.capabilities: dict[str, Any] = {}
+        self.initialize_metadata: dict[str, Any] = {}
+        self.resolved_command: tuple[str, ...] = ()
+        self.workspace = ""
+        self.resume_mode = "fresh"
+        self._resume_binding: ACPBinding | None = None
+        self._replaying = False
+        self._preface = ""
+        self._preface_pending = True
+        self._tool_cards: dict[str, dict[str, Any]] = {}
+        self.last_stderr = ""
 
     @property
     def is_processing(self) -> bool:
@@ -374,7 +398,12 @@ class ACPRunner:
         )
 
     async def _start_process(self) -> str:
+        self.state = "starting"
+        if self.lifecycle_callback is not None:
+            await self.lifecycle_callback("starting", self)
         command, env, cwd = self.profile.resolve()
+        self.resolved_command = tuple(command)
+        self.workspace = cwd
         self._process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
@@ -386,26 +415,81 @@ class ACPRunner:
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._connection = acp.connect_to_agent(self._client, self._process.stdin, self._process.stdout)
-        await self._connection.initialize(protocol_version=1)
-        result = await self._connection.new_session(
-            cwd=cwd,
-            mcp_servers=self.profile.sdk_mcp_servers(),
+        initialized = await asyncio.wait_for(
+            self._connection.initialize(
+                protocol_version=1, client_info=Implementation(name="kollab", version=__version__)
+            ), timeout=30,
         )
-        self.session_id = str(result.sessionId)
+        wire = initialized.model_dump(by_alias=True) if hasattr(initialized, "model_dump") else {}
+        if int(wire.get("protocolVersion", 1)) != 1:
+            raise ACPError("adapter did not negotiate ACP protocol version 1")
+        self.capabilities = dict(wire.get("agentCapabilities") or {})
+        self.initialize_metadata = dict(wire.get("_meta") or {})
+        self.state = "opening"
+        binding = self._resume_binding
+        self.resume_mode = "fresh"
+        session_caps = self.capabilities.get("sessionCapabilities") or {}
+        if binding is not None and binding.matches(cwd, self.profile.name, tuple(command)):
+            self.session_id = binding.session_id
+            self._replaying = True
+            try:
+                if session_caps.get("resume") is not None:
+                    await asyncio.wait_for(self._connection.resume_session(
+                        session_id=binding.session_id, cwd=cwd,
+                        mcp_servers=self.profile.sdk_mcp_servers(),
+                    ), timeout=60)
+                    self.resume_mode = "resumed"
+                elif self.capabilities.get("loadSession"):
+                    await asyncio.wait_for(self._connection.load_session(
+                        session_id=binding.session_id, cwd=cwd,
+                        mcp_servers=self.profile.sdk_mcp_servers(),
+                    ), timeout=60)
+                    self.resume_mode = "loaded"
+            except Exception:
+                # A vanished session or changed login is recoverable with new
+                # context. No prompt is replayed or retried.
+                self.resume_mode = "fresh"
+            finally:
+                self._replaying = False
+        if self.resume_mode == "fresh":
+            result = await asyncio.wait_for(self._connection.new_session(
+                cwd=cwd, mcp_servers=self.profile.sdk_mcp_servers(),
+            ), timeout=60)
+            self.session_id = str(result.sessionId)
+        self._resume_binding = None
+        self._preface_pending = self.resume_mode == "fresh"
         self.generation = self.generation + 1 if self.generation else 1
+        self.state = "ready"
+        if self.lifecycle_callback is not None:
+            await self.lifecycle_callback("ready", self)
         return self.session_id
 
-    async def start(self) -> str:
+    async def start(self, binding: ACPBinding | None = None) -> str:
         self._closing = False
-        session_id = await self._start_process()
+        self._resume_binding = binding
+        try:
+            session_id = await self._start_process()
+        except BaseException as exc:
+            self.state = "failed"
+            await self._terminate_process()
+            if getattr(exc, "code", None) == -32000:
+                raise ACPError(f"{self.profile.name}: authentication required. " + self.profile.LOGIN_GUIDANCE.get(self.profile.name, "Log in using this harness's CLI.")) from exc
+            raise
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._drain_queue())
         return session_id
+
+    async def clear(self) -> str:
+        """Replace the session and its MCP process tree without replay."""
+        await self.close()
+        self._preface_pending = True
+        return await self.start()
 
     async def _drain_stderr(self) -> None:
         if self._process is None or self._process.stderr is None:
             return
         while chunk := await self._process.stderr.readline():
+            self.last_stderr = chunk.decode(errors="replace").strip()[-1000:]
             sys.stderr.buffer.write(b"[acp] " + chunk)
             sys.stderr.buffer.flush()
 
@@ -416,6 +500,7 @@ class ACPRunner:
         request_id: str,
         source: str,
         thread_id: str | None = None,
+        origin: dict[str, Any] | None = None,
     ) -> ACPAdmission:
         if not self.session_id or self._connection is None:
             raise ACPError("ACP runner is not started")
@@ -425,7 +510,7 @@ class ACPRunner:
         self._next_turn_id += 1
         turn_id = self._next_turn_id
         future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
-        admission = ACPAdmission(request_id, source, thread_id, generation, turn_id, text, future)
+        admission = ACPAdmission(request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}))
         try:
             self._queue.put_nowait(admission)
         except asyncio.QueueFull as exc:
@@ -468,6 +553,8 @@ class ACPRunner:
                 if not future.done():
                     future.set_exception(ACPError("ACP turn cancelled"))
             except Exception as exc:
+                self.state = "failed"
+                self._restart_before_next = True
                 if not future.done():
                     future.set_exception(exc)
             finally:
@@ -519,8 +606,17 @@ class ACPRunner:
         turn_id, text = admission.turn_id, admission.text
         self._active_generation = generation
         self._active_turn_id = turn_id
+        self.state = "prompting"
         self._updates = []
+        self._tool_cards = {}
         self.permission_bridge.bind(self.session_id or "", generation)
+        if self._preface_pending and self._preface:
+            text = self._preface + "\n\n" + text
+            self._preface_pending = False
+        if self.update_callback is not None:
+            self.update_callback({"kind": "turn_start", "request_id": admission.request_id,
+                                  "turn_id": turn_id, "source": admission.source,
+                                  "thread_id": admission.thread_id, "generation": generation})
         try:
             response = await self._connection.prompt(
                 session_id=self.session_id,
@@ -548,10 +644,59 @@ class ACPRunner:
                 source=admission.source,
                 thread_id=admission.thread_id,
             )
+        except Exception as exc:
+            exit_code = getattr(self._process, "returncode", None)
+            line = f"{self.profile.name}: harness failed ({type(exc).__name__}, exit={exit_code}); it may have stopped mid-change"
+            if self.last_stderr:
+                line += ": " + self.last_stderr
+            raise ACPError(line) from exc
         finally:
+            if self.update_callback is not None:
+                self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,
+                                      "turn_id": turn_id, "source": admission.source})
             self.permission_bridge.cancel()
             self._active_generation = 0
             self._active_turn_id = 0
+            if self.state != "failed" and not self._closing:
+                self.state = "ready"
+
+    @property
+    def binding(self) -> ACPBinding | None:
+        if not self.session_id:
+            return None
+        return ACPBinding(self.session_id, self.workspace, self.profile.name,
+                          self.resolved_command, dict(self.capabilities))
+
+    @property
+    def supports_steering(self) -> bool:
+        return bool((self.initialize_metadata.get("steering") or {}).get("supported"))
+
+    async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
+        active = getattr(self, "_active_context", None)
+        if not self._active_turn_id or not active or not self.supports_steering:
+            return False
+        human = bool(origin.get("operator"))
+        same_requester = (
+            bool(thread_id) and thread_id == active.thread_id
+            and origin.get("sender") == active.origin.get("sender")
+        )
+        if not human and not same_requester:
+            return False
+        try:
+            await asyncio.wait_for(self._connection.ext_method("session/steering", {
+                "sessionId": self.session_id,
+                "prompt": [{"type": "text", "text": text}],
+            }), timeout=10)
+            return True
+        except Exception:
+            return False
+
+    def cancel_queued(self, request_id: str) -> bool:
+        for admission in tuple(self._queue._queue):
+            if admission is not None and admission.request_id == request_id and not admission.future.done():
+                admission.future.cancel()
+                return True
+        return False
 
     @staticmethod
     def _select_answer(updates: list[dict[str, Any]]) -> str:
@@ -595,9 +740,9 @@ class ACPRunner:
         return "".join(str(item.get("text", "")) for item in text_updates)
 
     async def _session_update(self, session_id: str, update: Any) -> None:
-        if session_id != self.session_id or self._active_generation != self.generation:
+        if self._replaying or session_id != self.session_id or self._active_generation != self.generation:
             return
-        payload = update.model_dump() if hasattr(update, "model_dump") else {}
+        payload = update.model_dump(by_alias=True) if hasattr(update, "model_dump") else {}
         kind = payload.get("sessionUpdate", payload.get("session_update", payload.get("type", "unknown")))
         if kind == "agent_message_chunk":
             content = payload.get("content") or {}
@@ -608,6 +753,11 @@ class ACPRunner:
                 update_data["message_id"] = str(message_id)
         else:
             update_data = {"kind": str(kind), "payload": payload}
+        if kind in {"tool_call", "tool_call_update"}:
+            tool_id = str(payload.get("toolCallId") or "")
+            merged = self._tool_cards.setdefault(tool_id, {})
+            merged.update({key: value for key, value in payload.items() if value is not None})
+            update_data["payload"] = dict(merged)
         update_data.update({
             "request_id": getattr(getattr(self, "_active_context", None), "request_id", ""),
             "turn_id": self._active_turn_id,
@@ -733,6 +883,7 @@ class ACPRunner:
             kind=str(raw_tool.get("kind") or "").lower(),
             display=display,
         )
+        self.state = "awaiting"
         if self.update_callback is not None:
             self.update_callback({
                 "kind": "permission_request",
@@ -751,6 +902,11 @@ class ACPRunner:
                 },
             })
         selected = await self.permission_bridge.request(request)
+        self.state = "prompting"
+        if self.update_callback is not None:
+            self.update_callback({"kind": "permission_resolved", "request_id": request.request_id,
+                                  "turn_id": self._active_turn_id,
+                                  "payload": {"waiting": False, "tool_id": request.request_id}})
         if selected is None:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
         return acp.RequestPermissionResponse(outcome=AllowedOutcome(optionId=selected, outcome="selected"))
@@ -792,6 +948,7 @@ class ACPRunner:
             elif target != (expected_session_id, expected_generation):
                 return
             self.permission_bridge.cancel()
+            self.state = "cancelling"
             active = self._cancel_active_task or self._active_rpc_task
             if active is None and self._cancel_target is None:
                 return
@@ -849,11 +1006,23 @@ class ACPRunner:
         self._connection = None
         self._process = None
         self._stderr_task = None
+        descendants = []
+        if process is not None and process.returncode is None:
+            import psutil
+            with contextlib.suppress(psutil.Error):
+                descendants = psutil.Process(process.pid).children(recursive=True)
         if connection is not None:
+            if self.session_id and (self.capabilities.get("sessionCapabilities") or {}).get("close") is not None:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.wait_for(connection.close_session(session_id=self.session_id), timeout=5)
             try:
                 await asyncio.wait_for(connection.close(), timeout=2)
             except (Exception, asyncio.CancelledError):
                 pass
+        # Adapter children can escape the parent's process group with setsid.
+        for child in reversed(descendants):
+            with contextlib.suppress(Exception):
+                child.terminate()
         if process is not None and process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -865,14 +1034,18 @@ class ACPRunner:
                     except (AttributeError, PermissionError, ProcessLookupError):
                         pass
                     await process.wait()
+        for child in reversed(descendants):
+            with contextlib.suppress(Exception):
+                if child.is_running():
+                    child.kill()
         if stderr_task is not None:
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
 
     async def close(self) -> None:
         self._closing = True
+        self.state = "closed"
         self.permission_bridge.cancel()
-        self.session_id = None
         self._queue_release.set()
         while True:
             try:
@@ -901,3 +1074,4 @@ class ACPRunner:
         finally:
             await self._terminate_process()
             self._worker = None
+            self.session_id = None

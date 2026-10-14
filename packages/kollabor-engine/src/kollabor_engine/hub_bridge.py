@@ -182,6 +182,9 @@ class HubBridge:
             # web UI drops the log's timestamp prefix.
             log_name = Path(str(agent.get("session_log") or "")).stem
             sessions.append({
+                "harness": (agent.get("tags") or {}).get("harness", ""),
+                "provider": (agent.get("tags") or {}).get("provider", ""),
+                "acp_waiting": bool((agent.get("tags") or {}).get("acp_waiting", False)),
                 "session_id": str(agent.get("agent_id") or identity),
                 "name": log_name or session_display_name(identity),
                 "identity": identity,

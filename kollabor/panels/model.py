@@ -130,6 +130,11 @@ class ModelPanel:
             base["row_actions"] = base["toolbar_actions"] = []
             return base
         provider = active.get_provider() or ""
+        if provider == "acp":
+            base["title"] = "Harness Models"
+            base["notice"] = "Model and effort are managed by the active harness. Use Loadouts to change harnesses."
+            base["row_actions"] = base["toolbar_actions"] = []
+            return base
         current = active.get_model() or ""
         handler = model_handler(ctx)
         known = handler._build_known_models(provider, current)
@@ -151,6 +156,10 @@ class ModelPanel:
         return base
 
     async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        pm = getattr(ctx, "_profile_manager", None)
+        active = pm.get_active_profile() if pm is not None else None
+        if active is not None and active.get_provider() == "acp":
+            return error_result("Model and effort are managed by the active harness.")
         if action == "refresh":
             return ok_result("Catalog refreshed.", panel=await self.describe(ctx, {}))
         if action == "select":

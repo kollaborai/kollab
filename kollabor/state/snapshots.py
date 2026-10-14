@@ -141,6 +141,7 @@ class SessionStats(Snapshot):
     cost_usd: float = 0.0
     total_cost_usd: float = 0.0
     session_id: str = ""
+    acp_usage: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SessionStats":

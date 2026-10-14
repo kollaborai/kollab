@@ -366,6 +366,7 @@ class AgentSocketServer:
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
         on_acp_hub_status: Optional[Callable] = None,
+        on_acp_hub_call: Optional[Callable] = None,
         socket_name: Optional[str] = None,
     ):
         self.agent_id = agent_id
@@ -382,6 +383,7 @@ class AgentSocketServer:
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
         self._on_acp_hub_status = on_acp_hub_status
+        self._on_acp_hub_call = on_acp_hub_call
         self._identity: Optional[Dict] = None
         self._started_at: float = time.time()
         self._shutdown_requested = False
@@ -1358,6 +1360,18 @@ class AgentSocketServer:
                     writer.write(response_line)
                     await writer.drain()
 
+                elif action == "acp_hub_call":
+                    if require_auth:
+                        result = {"error": "ACP child calls require a local connection"}
+                    elif self._on_acp_hub_call is None:
+                        result = {"error": "ACP hub tools are unavailable"}
+                    else:
+                        result = await self._on_acp_hub_call(
+                            token=msg_data.get("token"), generation=msg_data.get("generation"),
+                            name=msg_data.get("name"), arguments=msg_data.get("arguments") or {},
+                        )
+                    writer.write((json.dumps({"type": "acp_hub_call", **result}) + "\n").encode())
+                    await writer.drain()
                 elif action == "acp_hub_status":
                     result = None
                     if self._on_acp_hub_status:
@@ -1375,8 +1389,12 @@ class AgentSocketServer:
                 elif action == "turn_end":
                     required = {"action", "thread_id", "reply_to", "turn_end"}
                     frame = msg_data.get("turn_end")
+                    sender = msg_data.get("from_identity", "")
                     if (
-                        set(msg_data) != required
+                        not required <= set(msg_data) <= required | {"from_identity"}
+                        or not isinstance(sender, str)
+                        or len(sender) > 128
+                        or (sender and not sender.isprintable())
                         or not isinstance(frame, dict)
                         or set(frame)
                         not in (
@@ -1388,11 +1406,10 @@ class AgentSocketServer:
                         await writer.drain()
                         return
                     end_message = HubMessage(
-                        id=str(msg_data["reply_to"]),
                         action="turn_end",
                         content=str(frame.get("text", "")),
-                        from_identity=authenticated_as or "local",
-                        from_agent=authenticated_as or "local",
+                        from_identity=authenticated_as or sender or "local",
+                        from_agent=authenticated_as or sender or "local",
                         thread_id=str(msg_data["thread_id"]),
                         reply_to=str(msg_data["reply_to"]), metadata={"turn_end": frame},
                     )
@@ -2405,6 +2422,7 @@ class AgentMessenger:
         failed: bool,
         outcome: str,
         text: str,
+        from_identity: str = "",
         timeout: float = 5.0,
         auth: Optional[Dict[str, Any]] = None,
         ssl_ctx: Any = None,
@@ -2434,6 +2452,7 @@ class AgentMessenger:
                 "action": "turn_end",
                 "thread_id": thread_id,
                 "reply_to": reply_to,
+                "from_identity": from_identity,
                 "turn_end": {
                     "replies": replies,
                     "failed": failed,

@@ -1,7 +1,14 @@
 # Kollab speaks ACP
 
-Status: **draft**, 2026-10-09, revised the same day after an adversarial
-review. Not built. In Marco's words: "if all harness support acp and a kollab
+Status: **source pass ready for review, unqualified**, 2026-10-13.
+Outbound and inbound source, MCP Hub tools, correlated client turns, network
+return handling, and Web UI integration are present in the shared checkout.
+Tests, builds, real adapters, client qualification, and deployment are deferred
+by explicit instruction. The implementation inventory is in
+[`acp-bridge-phase1.md`](acp-bridge-phase1.md).
+
+Original direction, 2026-10-09, revised after an adversarial review:
+"if all harness support acp and a kollab
 agent needs to interact with a claude code agent or a codex agent, kollab agents
 need to be able to speak acp … we don't need to replace the kollab protocol … if
 we can bridge ACP with what kollab has, other non kollab agents can join the
@@ -67,8 +74,9 @@ brain, and ACP is the only wire between them.
 ## 3. Setup
 
 Each device that runs a harness agent needs the harness's own CLI, to log in,
-and its ACP adapter. These versions are the qualified baseline; a newer one is
-unqualified until its run passes (section 9).
+and its ACP adapter. These pinned versions are the qualification targets. The
+current source pass has not run them; qualification requires section 9's live
+runs for these versions and for any later update.
 
 | Profile | Log in with | ACP adapter |
 |---|---|---|

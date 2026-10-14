@@ -178,6 +178,9 @@ class EngineSession:
         # but the conversation keeps no trace, so a reloaded page asks here.
         # ``history_length`` places it after that turn's messages.
         self.last_turn_error: Optional[Dict[str, Any]] = None
+        self.acp_waiting = False
+        self.acp_plan: Dict[str, Any] = {}
+        self.acp_usage: Dict[str, Any] = {}
 
         self._pending_permissions: Dict[str, Dict[str, Any]] = {}
         self._active_turn_task: Optional[asyncio.Task] = None
@@ -441,7 +444,7 @@ class EngineSession:
     # === permissions ===
 
     async def resolve_permission(
-        self, tool_id: str, decision: str, scope: str = "once"
+        self, tool_id: str, decision: str, scope: str = "once", option_id: str | None = None
     ) -> bool:
         """Answer a permission prompt the daemon is blocked on.
 
@@ -452,10 +455,13 @@ class EngineSession:
             return False
 
         response = _confirmation_response_name(decision, scope)
+        payload = {"tool_id": tool_id, "control": response}
+        if option_id is not None:
+            payload = {"tool_id": tool_id, "option_id": option_id}
         try:
             result = await self.daemon.rpc.call(
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": tool_id, "response": response, "scope": scope},
+                payload,
             )
         except Exception as e:
             logger.warning("permission response failed for %s: %s", tool_id, e)
@@ -501,9 +507,19 @@ class EngineSession:
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
                         self._pending_permissions[tool_id] = event
+                elif etype == "acp_waiting":
+                    self.acp_waiting = bool(event.get("waiting"))
+                elif etype == "plan":
+                    self.acp_plan = dict(event.get("payload") or {})
+                elif etype == "usage_update":
+                    self.acp_usage = dict(event.get("payload") or {})
 
-                elif etype in ("permission_granted", "permission_denied"):
+                elif etype in ("permission_granted", "permission_denied", "permission_cancelled"):
                     self._pending_permissions.pop(str(event.get("tool_id") or ""), None)
+                elif etype == "acp_session":
+                    self.acp_plan = {}
+                    self.acp_usage = {}
+                    self.acp_waiting = False
 
                 elif etype == "daemon_closed":
                     break
@@ -523,6 +539,11 @@ class EngineSession:
         )
         model = getattr(self.profile, "model", "")
         return {
+            "harness": (getattr(self.profile, "description", "") or getattr(self.profile, "name", "")) if getattr(self.profile, "provider", "") == "acp" else "",
+            "provider": getattr(self.profile, "provider", ""),
+            "acp_waiting": self.acp_waiting,
+            "acp_usage": self.acp_usage,
+            "acp_plan": self.acp_plan,
             "session_id": self.session_id,
             "name": self.display_name or session_display_name(self.session_id),
             "external": self.external,

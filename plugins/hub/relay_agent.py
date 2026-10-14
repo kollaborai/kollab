@@ -552,6 +552,8 @@ class RelayAgentBridge:
                         "online": True,
                         "is_coordinator": row["is_coordinator"],
                         "workspace_id": row["workspace_id"],
+                        "harness": row.get("harness") or "",
+                        "acp_waiting": bool(row.get("acp_waiting")),
                     }
                 )
             except (KeyError, TypeError):
@@ -1313,7 +1315,7 @@ class RelayAgentBridge:
             "kind",
             "id",
         }
-        if not required <= set(params) <= required | {"turn_end"}:
+        if not required <= set(params) <= required | {"turn_end", "ask", "waiting"}:
             raise RelayError("invalid local relay send")
         if not isinstance(params["grant_id"], str) or (
             params["grant_id"] and not ID.fullmatch(params["grant_id"])
@@ -1461,6 +1463,10 @@ class RelayAgentBridge:
         }
         if params.get("turn_end") is not None:
             payload["turn_end"] = params["turn_end"]
+        if "ask" in params:
+            payload["ask"] = params["ask"]
+        if "waiting" in params:
+            payload["waiting"] = params["waiting"]
         if kind == "message" and not open_trust:
             # Sent under a human grant: the receiver runs it as a task, whatever
             # its own trust, and answers on this thread as the task's result.
@@ -1636,6 +1642,9 @@ class RelayAgentBridge:
         kind="message",
         source_agent=None,
         turn_end=None,
+        message_id=None,
+        ask=False,
+        waiting=False,
     ):
         active = self.active if self._turn.get() is not None else None
         if self._turn.get() is not None:
@@ -1678,7 +1687,7 @@ class RelayAgentBridge:
                 "relay answers carry a human-supplied answer only; "
                 "use /connect answer"
             )
-        message_id = secrets.token_hex(16)
+        message_id = message_id or secrets.token_hex(16)
         params = {
             "agent_id": source_agent or self.identity.agent_id,
             "to": target,
@@ -1693,6 +1702,10 @@ class RelayAgentBridge:
         }
         if turn_end is not None:
             params["turn_end"] = turn_end
+        if ask and kind == "message":
+            params["ask"] = True
+        if waiting and kind == "message":
+            params["waiting"] = True
         receipt = await self._owner_call("relay.send", params)
         if (
             active
@@ -2000,6 +2013,17 @@ class RelayAgentBridge:
                 self._display_correlated_event(payload, interrupted=True)
                 self.store.mark_event_presented(record["id"])
             return {"id": record["id"], "state": "queued"}
+        tools = getattr(self.plugin, "_acp_hub_tools", None)
+        if tools is not None and self._verified_return_event(record):
+            message = self._acp_return_message(record)
+            if tools.consume(message):
+                if payload["kind"] in {"result", "error"}:
+                    message.action = "turn_end"
+                    message.metadata["turn_end"] = {"replies": 1, "failed": payload["kind"] == "error",
+                                                    "outcome": "error" if payload["kind"] == "error" else "end_turn"}
+                    tools.consume(message)
+                self.store.mark_event_presented(record["id"])
+                return {"id": record["id"], "state": record["state"]}
         if record["presented"] == 1:
             return {"id": record["id"], "state": record["state"]}
         if not self._verified_return_event(record):
@@ -2492,7 +2516,7 @@ class RelayAgentBridge:
                         # A peer on this version always sends "device" too; an
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
-                        optional_fields = {"device"}
+                        optional_fields = {"device", "harness", "acp_waiting"}
                         if (
                             not isinstance(row, dict)
                             or not fields <= set(row)
@@ -2512,6 +2536,13 @@ class RelayAgentBridge:
                         ):
                             raise RelayError("invalid remote agent descriptor")
                         device = row.get("device")
+                        if "harness" in row and (
+                            not isinstance(row["harness"], str) or len(row["harness"]) > 128
+                            or (row["harness"] and not row["harness"].isprintable())
+                        ):
+                            raise RelayError("invalid remote harness descriptor")
+                        if "acp_waiting" in row and type(row["acp_waiting"]) is not bool:
+                            raise RelayError("invalid remote harness waiting state")
                         if device is not None and (
                             not isinstance(device, str) or not NAME_RE.fullmatch(device)
                         ):
@@ -2831,6 +2862,7 @@ class RelayAgentBridge:
 
     async def _tick(self):
         self._state()
+        await self._consume_acp_returns()
         await self._wake_pending_events()
         llm = self.llm
         if llm is None:
@@ -2969,9 +3001,10 @@ class RelayAgentBridge:
             # The far runtime's end-of-turn frame: it settles whoever waits on
             # this thread and is never shown or given to the model.
             try:
-                self.plugin.on_network_turn_end(
-                    payload["thread_id"], end, payload["content"]
-                )
+                tools = getattr(self.plugin, "_acp_hub_tools", None)
+                message = self._acp_return_message(record)
+                if tools is None or not tools.consume(message):
+                    self.plugin.on_network_turn_end(payload["thread_id"], end, payload["content"])
                 self.store.transition(record["id"], "delivered")
             except Exception:
                 self.store.transition(
@@ -2995,6 +3028,8 @@ class RelayAgentBridge:
             thread_id=payload["thread_id"],
             reply_to=payload["reply_to"],
             metadata={
+                "acp_ask": payload.get("ask") is True,
+                "acp_waiting": payload.get("waiting") is True,
                 "network": {
                     "from": payload["from"],
                     "from_device": from_device,
@@ -3010,6 +3045,38 @@ class RelayAgentBridge:
             self.store.transition(
                 record["id"], "failed", detail="could not enter the model pipeline"
             )
+
+    def _acp_return_message(self, record):
+        payload = record["payload"]
+        device = self._state().state.peer_devices.get(record["peer"]) or payload.get("from_device") or key_label(record["peer"])
+        metadata = {"network": {"from": payload["from"], "from_device": device}}
+        if payload.get("waiting"):
+            metadata["acp_waiting"] = True
+        if payload.get("turn_end") is not None:
+            metadata["turn_end"] = payload["turn_end"]
+        if payload.get("kind") == "question":
+            metadata["acp_question"] = True
+        return HubMessage(id=payload["id"], action="turn_end" if payload.get("turn_end") else "message",
+            from_agent=payload["from"], from_identity=format_handle(payload["from_identity"], device),
+            to=self.identity.identity, content=payload["content"], scope=MessageScope.DIRECT.value,
+            thread_id=payload["thread_id"], reply_to=payload.get("reply_to") or "", metadata=metadata)
+
+    async def _consume_acp_returns(self):
+        tools = getattr(self.plugin, "_acp_hub_tools", None)
+        if tools is None or not tools.waiting:
+            return
+        state = self._state().state
+        for queued in self.store.queued(self.identity.agent_id):
+            record = self.store.task(queued["id"])
+            if record is None or record["peer"] not in state.approvals:
+                continue
+            if not self.store.authorized(record["id"], room=state.room, approvals=state.approvals,
+                                         without_grant=self.effective_trust(record["peer"]) == "open"):
+                continue
+            message = self._acp_return_message(record)
+            tools.observe(message)
+            if tools.consume(message):
+                self.store.transition(record["id"], "delivered")
 
     def _release_remote_cancellation_if_idle(self, llm):
         pending = self._pending_remote_cancellation

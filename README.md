@@ -631,6 +631,7 @@ architecture guidance, see [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
 - [Reasoning Effort](docs/features/reasoning-effort.md)
 - [Setup Wizard](docs/features/setup-wizard.md)
 - [Agent System](docs/features/agents.md)
+- [ACP Agents](docs/features/acp.md) — harness agents and ACP clients; qualification pending
 - [Voice Mode](docs/features/voice-mode.md)
 - [Hub Quick Start](docs/guides/hub-quick-start.md)
 - [Tasks and Checkpoints](docs/features/tasks.md)

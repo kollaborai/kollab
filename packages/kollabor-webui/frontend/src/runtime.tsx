@@ -183,6 +183,7 @@ function historyToMessages(
         type: "tool-call",
         toolCallId,
         toolName,
+        ...(call.result !== undefined ? { result: call.result, isError: Boolean(call.is_error) } : {}),
         args,
         argsText,
       }];
@@ -432,6 +433,8 @@ function historyToMessages(
             risk_level: prompt.risk_level || null,
             risk_reason: prompt.risk_reason || null,
             input: prompt.input || {},
+            details: prompt.details || {},
+            acp_options: prompt.details?.acp_options || [],
           })),
           argsText: JSON.stringify(prompt),
         },

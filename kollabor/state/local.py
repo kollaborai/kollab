@@ -502,6 +502,7 @@ class LocalStateService(StateService):
             cost_usd=float(stats.get("cost_usd", 0.0) or 0.0),
             total_cost_usd=float(stats.get("total_cost_usd", 0.0) or 0.0),
             session_id=_session_id,
+            acp_usage=dict(stats.get("acp_usage") or {}),
         )
 
     # === Profile ===
@@ -2025,6 +2026,7 @@ class LocalStateService(StateService):
         llm = self._llm_service
         if llm is None:
             raise ValueError("llm service not available")
+        acp = self._event_bus.get_service("acp_orchestrator")
 
         # Best-effort: save current conversation before clearing.
         conv_mgr = getattr(llm, "conversation_manager", None)
@@ -2050,6 +2052,8 @@ class LocalStateService(StateService):
                 logger.warning(f"restart_session: _initialize_conversation failed: {e}")
 
         # Return a fresh conversation snapshot.
+        if acp is not None and acp.active:
+            await acp.restore()
         return await self.get_conversation()
 
     # === MCP writes (phase 4.5 step 7) ===
@@ -2524,6 +2528,60 @@ class LocalStateService(StateService):
         )
         return str(await definition.handler(command))
 
+    async def set_client_approval_mode(self, mode: str) -> dict[str, Any]:
+        from kollabor_events.permissions_models import ApprovalMode
+        value = ApprovalMode[mode.upper()]
+        self._permission_manager.set_approval_mode(value, persist=False)
+        return {"mode": mode}
+
+    async def configure_client_mcp(self, servers: list[dict[str, Any]]) -> dict[str, Any]:
+        """Add client-requested MCP servers to this daemon's memory only."""
+        integration = self._llm_service.mcp_integration
+        for server in servers:
+            name = str(server.get("name") or "")
+            command = server.get("command")
+            if not name or not isinstance(command, str) or not command:
+                raise ValueError("client MCP servers must be named stdio commands")
+            env = server.get("env") or []
+            if isinstance(env, list):
+                env = {item["name"]: item["value"] for item in env}
+            integration.session_servers[name] = {"type": "stdio", "command": command,
+                "args": list(server.get("args") or []), "env": dict(env), "enabled": True}
+        integration.mcp_servers.update(integration.session_servers)
+        config = getattr(self._event_bus, "config", None)
+        if isinstance(config, dict):
+            config.setdefault("plugins", {}).setdefault("mcp", {})["enabled"] = True
+        discovered = await integration.discover_mcp_servers()
+        await integration._refresh_native_tools_after_reload()
+        return {"servers": list(integration.session_servers), "connected": list(discovered)}
+
+    async def submit_client_turn(self, message: str, request_id: str) -> dict[str, Any]:
+        """Admit an external client's turn with a cancellable owner identity."""
+        if not message.strip() or not request_id:
+            return {"accepted": False, "reason": "message and request id are required"}
+        bus = self._event_bus
+        acp = bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active:
+            admission = acp.admit(message, request_id=request_id, source="acp_client",
+                                  origin={"operator": True, "acp_client": True})
+            return {"accepted": True, "request_id": request_id, "turn_id": admission.turn_id}
+        if bus.get_service("display_tap") is None:
+            return {"accepted": False, "reason": "daemon event stream is unavailable"}
+        broker = bus.get_service("client_turn_broker")
+        if broker is None:
+            from kollabor.llm.client_turns import ClientTurnBroker
+            broker = ClientTurnBroker(self._llm_service, bus)
+            bus.register_service("client_turn_broker", broker)
+        return broker.submit(message, request_id)
+
+    async def cancel_client_turn(self, request_id: str) -> dict[str, Any]:
+        bus = self._event_bus
+        acp = bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active:
+            return await acp.cancel_request(request_id)
+        broker = bus.get_service("client_turn_broker")
+        return await broker.cancel(request_id) if broker else {"cancelled": False}
+
     async def send_message(
         self,
         message: Any,
@@ -2920,6 +2978,9 @@ class LocalStateService(StateService):
             raise ValueError(f"failed to load session {session_id!r}")
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
+        acp = self._event_bus.get_service("acp_orchestrator")
+        if acp is not None and acp.active:
+            await acp.restore(session_id)
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):

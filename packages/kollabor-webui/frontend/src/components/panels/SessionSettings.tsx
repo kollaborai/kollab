@@ -44,6 +44,8 @@ export function SessionSettings({
   const workspace = String(
     settings?.system?.cwd || session.workspace || "current project",
   );
+  const selectedACP = profiles.find((profile) => profile.name === editProfile)?.provider === "acp"
+    || (editProfile === session.profile && session.provider === "acp");
 
   const loadSettings = useCallback(async () => {
     setSettingsBusy(true);
@@ -77,8 +79,8 @@ export function SessionSettings({
       const updated = await api.setSessionProfile(
         session.session_id,
         editProfile,
-        editModel.trim() || undefined,
-        editEffort.trim() || undefined,
+        selectedACP ? undefined : editModel.trim() || undefined,
+        selectedACP ? undefined : editEffort.trim() || undefined,
       );
       onSessionUpdated(updated);
       setEditModel(updated.model || "");
@@ -155,6 +157,11 @@ export function SessionSettings({
               )}
             </SelectContent>
           </Select>
+          {selectedACP ? (
+            <p className="text-muted-foreground text-xs">
+              Model and effort are managed in this harness. Choose another profile to use Kollab model overrides.
+            </p>
+          ) : null}
           <label
             className="text-muted-foreground text-xs font-medium"
             htmlFor="settings-model"
@@ -166,7 +173,7 @@ export function SessionSettings({
             value={editModel}
             onChange={(event) => setEditModel(event.target.value)}
             placeholder={session.model || "profile default"}
-            disabled={applyBusy}
+            disabled={applyBusy || selectedACP}
             className="font-mono text-xs"
           />
           <label
@@ -180,7 +187,7 @@ export function SessionSettings({
             value={editEffort}
             onChange={(event) => setEditEffort(event.target.value)}
             placeholder={session.effort || "profile default"}
-            disabled={applyBusy}
+            disabled={applyBusy || selectedACP}
             className="font-mono text-xs"
           />
         </div>

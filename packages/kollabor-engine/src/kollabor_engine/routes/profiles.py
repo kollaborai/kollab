@@ -83,6 +83,8 @@ def _redacted_profile_dict(profile: LLMProfile) -> Dict[str, Any]:
     result = profile.to_dict()
     result.pop("api_key", None)
     result.pop("api_token", None)
+    if "env" in result:
+        result["env_keys"] = sorted(result.pop("env"))
     return result
 
 

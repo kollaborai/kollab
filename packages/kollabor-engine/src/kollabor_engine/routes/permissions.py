@@ -14,6 +14,7 @@ router = APIRouter(prefix="/sessions", tags=["permissions"])
 class PermissionResponseRequest(BaseModel):
     tool_id: str
     decision: str  # "approve" | "deny"
+    option_id: str | None = None
     scope: str = (
         "once"  # "once" | "session" | "project" | "always_edits" | "trust_tool"
     )
@@ -35,6 +36,7 @@ async def respond_to_permission(session_id: str, body: PermissionResponseRequest
         tool_id=body.tool_id,
         decision=body.decision,
         scope=body.scope,
+        option_id=body.option_id,
     )
     if not resolved:
         raise HTTPException(

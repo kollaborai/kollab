@@ -245,7 +245,7 @@ def build_sections(manager: Any, profile_manager: Any) -> List[Tuple[str, List[A
         sections.append((f"Models — {provider_display(provider or name)}", rows))
 
     if acp_rows:
-        sections.append(("ACP agents", acp_rows))
+        sections.append(("ACP Agents", acp_rows))
 
     # Keep any implicit loadout visible even if provider_profiles() missed its
     # profile, so a mismatch between the two manager methods never drops rows.

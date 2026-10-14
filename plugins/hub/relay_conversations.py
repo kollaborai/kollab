@@ -126,7 +126,7 @@ def validate_message(
     # task marks a first message sent under a human grant (the sender is on
     # manual trust): the receiver runs it as a remote task and answers as its
     # result, whatever its own trust.
-    optional_fields = {"from_device", "turn_end", "task"}
+    optional_fields = {"from_device", "turn_end", "task", "ask", "waiting"}
     if (
         not isinstance(payload, dict)
         or not fields <= set(payload)
@@ -166,6 +166,16 @@ def validate_message(
         payload["task"] is not True or payload.get("kind") != "message"
     ):
         raise RelayError("invalid task marker")
+    if "ask" in payload and (
+        payload["ask"] is not True or payload.get("kind") != "message"
+        or payload.get("reply_to") or "turn_end" in payload
+    ):
+        raise RelayError("invalid ask marker")
+    if "waiting" in payload and (
+        payload["waiting"] is not True or payload.get("kind") != "message"
+        or "ask" in payload or "turn_end" in payload
+    ):
+        raise RelayError("invalid permission waiting marker")
     for name in ("id", "thread_id"):
         if not isinstance(payload[name], str) or not ID.fullmatch(payload[name]):
             raise RelayError("invalid conversation identifier")
