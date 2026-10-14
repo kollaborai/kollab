@@ -39,7 +39,9 @@ def _is_local(request: Request) -> bool:
 def _assistant_static_dir() -> Path | None:
     """Return the first available assistant-ui build directory."""
 
-    for directory in (ASSISTANT_STATIC_DIR, SOURCE_ASSISTANT_STATIC_DIR):
+    # An editable checkout can also contain an older packaged bundle. Its
+    # freshly built source output is the implementation being developed.
+    for directory in (SOURCE_ASSISTANT_STATIC_DIR, ASSISTANT_STATIC_DIR):
         if (directory / "index.html").is_file():
             return directory
     return None
