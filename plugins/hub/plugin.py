@@ -9258,7 +9258,7 @@ class HubPlugin(BasePlugin):
                     # roster this handle was resolved from is stale.
                     refusal = "that agent is not online: run /connect status to see who is"
                 return [(message.to, refusal)]
-            message.metadata["network"] = {"to": address}
+            message.metadata["network"] = {"to": address, "request_id": receipt.get("id")}
             self._trace_delivery(message, "remote_accepted", detail="network")
             return []
         if (message.to or "").startswith("relay:"):
@@ -14026,13 +14026,26 @@ class HubPlugin(BasePlugin):
             # Done only when the far turn has ended AND every reply it sent has
             # come: an end frame can overtake a reply that had to be retried.
             while end is None or replies < end[0]:
+                event_reader = None
                 try:
-                    event = await asyncio.wait_for(
-                        events.get(), timeout=max(0.0, deadline - loop.time())
-                    )
+                    timeout = max(0.0, deadline - loop.time())
+                    wait_for_return = getattr(relay, "wait_for_return", None)
+                    request_id = (msg.metadata.get("network") or {}).get("request_id")
+                    if request_id and callable(wait_for_return):
+                        event_reader = asyncio.create_task(events.get())
+                        event = await wait_for_return(event_reader, request_id, timeout=timeout)
+                    else:
+                        event = await asyncio.wait_for(events.get(), timeout=timeout)
+                except RelayError as exc:
+                    yield {"type": "error", "msg": str(exc)}
+                    return
                 except asyncio.TimeoutError:
                     yield {"type": "network_timeout", "replies": replies}
                     return
+                finally:
+                    if event_reader is not None and not event_reader.done():
+                        event_reader.cancel()
+                        await asyncio.gather(event_reader, return_exceptions=True)
                 if event[0] == "reply":
                     replies += 1
                     yield {

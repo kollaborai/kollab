@@ -1493,6 +1493,46 @@ class RelayAgentBridge:
             return {"id": payload["id"], "state": "queued", "duplicate": False}
         return await self._flush_outbound(payload["id"])
 
+    def _request_wait_authorized(self, event_id: str) -> bool:
+        """A queued or delivered initial request keeps its original authority.
+
+        A disconnected peer may reconnect. Revoked approval, a changed room or
+        a withdrawn send grant cannot be repaired by retrying or waiting longer.
+        Completed grants remain valid for a final already arriving on the wire.
+        """
+        if self.commands is None or self.store is None:
+            return False
+        item = self.store.outbound(event_id)
+        state = self._state().state
+        if (
+            item is None or item["kind"] != "message"
+            or item["state"] not in {"queued", "delivered"}
+            or item["room"] != state.room or item["peer"] not in state.approvals
+            or item["payload"].get("expires_at", 0) <= int(time.time())
+        ):
+            return False
+        payload = item["payload"]
+        if item["open"]:
+            return self.sends_without_grant(state.trust) or self.store.open_request(
+                state.room, item["peer"], payload["thread_id"], payload["from_identity"]
+            )
+        return any(
+            grant["id"] == event_id and grant["state"] in {"sent", "completed"}
+            and grant["recipient"] == payload["to"]
+            and grant["expires"] == payload["expires_at"]
+            for grant in self.store.contacts(state.room)
+        )
+
+    async def wait_for_return(self, future, event_id: str, *, timeout: float):
+        """Wait without extending authority or cancelling the caller's future."""
+        async with asyncio.timeout(timeout):
+            while not future.done():
+                if not self._request_wait_authorized(event_id):
+                    raise RelayError("The network request authority was revoked or changed.")
+                # Followers also observe changes persisted by another owner.
+                await asyncio.wait({future}, timeout=0.25)
+            return future.result()
+
     async def _flush_one(self, event_id, *, allow_retarget):
         item = self.store.outbound(event_id)
         if item is None:
@@ -1564,7 +1604,15 @@ class RelayAgentBridge:
                 timeout=3,
             )
         except (RelayError, OSError, TimeoutError, asyncio.TimeoutError):
+            if payload["kind"] == "message" and not self._request_wait_authorized(event_id):
+                self.store.mark_outbound(event_id, "revoked", detail="authorization changed")
+                self.store.forget_expectation(event_id, room=state.room)
+                return {"id": event_id, "state": "revoked", "duplicate": False}
             return {"id": event_id, "state": "queued", "duplicate": False}
+        if payload["kind"] == "message" and not self._request_wait_authorized(event_id):
+            self.store.mark_outbound(event_id, "revoked", detail="authorization changed")
+            self.store.forget_expectation(event_id, room=state.room)
+            return {"id": event_id, "state": "revoked", "duplicate": False}
         accepted = {
             "queued",
             "running",

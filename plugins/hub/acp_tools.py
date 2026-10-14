@@ -293,8 +293,16 @@ class ACPHubTools:
                 return {"status": "sent", "thread": thread}
             if question is not None:
                 timeout = min(timeout, max(0, question.expires_at - time.monotonic()))
+            from .relay_state import RelayError
             try:
+                relay = getattr(self.hub, "_relay_agent", None)
+                wait_for_return = getattr(relay, "wait_for_return", None)
+                if parse_handle(wait.target) is not None and callable(wait_for_return):
+                    return await wait_for_return(future, wait.request_id, timeout=timeout)
                 return await asyncio.wait_for(asyncio.shield(future), timeout)
+            except RelayError as exc:
+                self._settle(wait, "ended", str(exc), wait.thread, wait.earlier)
+                return future.result()
             except asyncio.TimeoutError:
                 return {"status": "timeout", "from": target, "thread": thread,
                         "text": "The agent did not finish before the deadline.", "earlier": wait.earlier}
