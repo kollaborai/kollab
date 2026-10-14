@@ -334,7 +334,7 @@ claude@home-server` and `hub_ask` settle on it.
 | `agent_thought_chunk` | thinking; history |
 | `tool_call`, `tool_call_update` | tool cards merged by tool call id: title, kind, status, diff or output; history |
 | `plan` | the current plan, replaced by each update; not history |
-| `usage_update` | context use and cost in the status bar, replaced by each update, never added up |
+| `usage_update` | context use and cost in the status bar, replaced by each update, never added up; Web UI counts use thousands with at most one decimal, truncated (`137657/475000` → `137.6k/475k Tokens`) |
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
 

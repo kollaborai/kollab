@@ -80,6 +80,11 @@ const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
+/** Keep context counts compact without rounding up the amount used. */
+function formatContextTokens(value: number): string {
+  return value < 1_000 ? String(Math.trunc(value)) : `${Math.trunc(value / 100) / 10}k`;
+}
+
 /** Harness cost, same rule as the terminal status bar (`_fmt_cost` in core_widgets.py). */
 function formatCost(cost: { amount?: string | number; currency?: string }): string {
   const amount = Number(cost.amount);
@@ -225,7 +230,7 @@ function RuntimeShell({
         )}
         {session.harness && session.acp_usage?.size !== undefined && (
           <span className="text-muted-foreground text-xs" title="Current harness context usage">
-            {session.acp_usage.used ?? 0}/{session.acp_usage.size} Tokens
+            {formatContextTokens(session.acp_usage.used ?? 0)}/{formatContextTokens(session.acp_usage.size)} Tokens
             {session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}
           </span>
         )}
