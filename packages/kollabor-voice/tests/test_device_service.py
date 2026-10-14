@@ -711,7 +711,9 @@ async def test_microphone_waits_for_silent_audio_warmup(root):
         assert Recorder.starts == 0
         release.set()
         await until(lambda: server.setup["state"] == "ready")
-        assert Recorder.starts == 1
+        # Capture start is async (start_capture hops to a thread), so wait for
+        # it instead of asserting in the same tick setup flips to ready.
+        await until(lambda: Recorder.starts == 1)
         assert server.audio_warmup_seconds is not None
         assert not server.transcript.read(
             stream_id=server.instance_id, after=0, epoch=server.owner["epoch"]
