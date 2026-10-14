@@ -26,8 +26,13 @@ from acp.schema import (
     TextContentBlock, ToolCallProgress, ToolCallStart, ToolCallUpdate,
 )
 Path("owned-adapter-pid.txt").write_text(str(os.getpid()))
+with Path("owned-adapter-pids.txt").open("a") as stream:
+    stream.write(str(os.getpid()) + "\n")
 
 class Agent:
+    def __init__(self):
+        self.cancelled = asyncio.Event()
+
     def on_connect(self, connection):
         self.connection = connection
 
@@ -73,6 +78,16 @@ class Agent:
         if selected is None:
             return PromptResponse(stopReason="cancelled")
         permitted = selected in {"vendor-once", "vendor-always"}
+        if permitted and os.environ.get("OWNED_ACP_SCENARIO") == "wait-cancel":
+            await self.connection.session_update(session_id, ToolCallProgress(
+                sessionUpdate="tool_call_update", toolCallId="owned-vendor-edit",
+                title="Owned vendor waiting", status="in_progress", rawOutput=0,
+                content=[{"type": "content", "content": {"type": "text", "text": "waiting"}},
+                         {"type": "diff", "path": "vendor.txt", "oldText": "before", "newText": "after"}]))
+            await self.connection.session_update(session_id, AgentMessageChunk(
+                sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text="OWNED SDK PARTIAL")))
+            await self.cancelled.wait()
+            return PromptResponse(stopReason="cancelled")
         if permitted:
             Path("vendor.txt").write_text("after")
         await self.connection.session_update(session_id, ToolCallProgress(
@@ -87,6 +102,8 @@ class Agent:
         return PromptResponse(stopReason="end_turn")
 
     async def cancel(self, session_id, **kwargs):
+        Path("owned-observed-sdk-cancel.txt").write_text("cancelled")
+        self.cancelled.set()
         return None
 
 asyncio.run(acp.run_agent(Agent(), use_unstable_protocol=True))
@@ -723,6 +740,68 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
     assert not process_alive(resumed_pid)
     assert "resume" in (workspace / "owned-session-methods.txt").read_text().splitlines()
     assert connection.bad_lines == [] and connection.process.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    configure_acp(home, workspace, "wait-cancel")
+    async with client(workspace, home, "owned-acp") as connection:
+        await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+        session_id = (await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
+        daemon_pid = owned_daemons(home)[0]["pid"]
+        adapter_pid = int((workspace / "owned-adapter-pid.txt").read_text())
+        prompt = asyncio.create_task(connection.rpc("session/prompt", {"sessionId": session_id,
+            "prompt": [{"type": "text", "text": "Start the owned SDK tool and wait for cancellation."}]}))
+
+        async def partial_visible():
+            while not any(entry["update"].get("content", {}).get("text") == "OWNED SDK PARTIAL"
+                          for entry in connection.updates if entry["update"]["sessionUpdate"] == "agent_message_chunk"):
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(partial_visible(), 10)
+        assert not prompt.done()
+        live_cards = [entry["update"] for entry in connection.updates
+                      if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+        assert [card["status"] for card in live_cards] == ["pending", "in_progress"]
+        assert live_cards[1]["rawOutput"] == 0
+        await connection._write({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}})
+        assert (await asyncio.wait_for(prompt, 15))["stopReason"] == "cancelled"
+        assert (workspace / "owned-observed-sdk-cancel.txt").read_text() == "cancelled"
+        assert not (workspace / "vendor.txt").exists()
+        await connection.rpc("session/close", {"sessionId": session_id})
+        await wait_no_daemons(home)
+        assert not process_alive(daemon_pid) and not process_alive(adapter_pid)
+        assert all(not process_alive(int(pid)) for pid in (workspace / "owned-adapter-pids.txt").read_text().splitlines())
+
+    async with client(workspace, home, "owned-acp") as restored:
+        await restored.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+        await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
+        restored_cards = [entry["update"] for entry in restored.updates
+                          if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+        assert restored_cards == live_cards
+        assert [entry["update"]["content"]["text"] for entry in restored.updates
+                if entry["update"]["sessionUpdate"] == "agent_message_chunk"] == ["OWNED SDK PARTIAL"]
+        record = owned_daemons(home)[0]
+        async with daemon_rpc(record, tmp_path / "stopped-rpc-events.json") as (rpc, _):
+            snapshot = await rpc.call("state.get_conversation")
+        stopped = [message for message in snapshot["messages"] if message["role"] == "assistant"
+                   and (message.get("metadata") or {}).get("stop_reason") == "cancelled"]
+        assert len(stopped) == 1 and stopped[0]["content"] == "OWNED SDK PARTIAL"
+        metadata = stopped[0]["metadata"]
+        assert metadata["provider"] == "acp"
+        saved_cards = [SessionNotification.model_validate({"sessionId": session_id, "update": update["payload"]})
+                       .update.model_dump(by_alias=True, exclude_none=True) for update in metadata["acp_updates"]
+                       if update.get("kind") in {"tool_call", "tool_call_update"}]
+        assert saved_cards == live_cards
+        assert metadata["tool_calls"][0]["metadata"]["acp"]["status"] == "in_progress"
+        (tmp_path / "stopped-parent.json").write_text(json.dumps(metadata, indent=2))
+    await wait_no_daemons(home)
+    assert not process_alive(record["pid"])
+    assert all(not process_alive(int(pid)) for pid in (workspace / "owned-adapter-pids.txt").read_text().splitlines())
+    assert connection.bad_lines == [] and restored.bad_lines == []
+    assert connection.process.returncode == 0 and restored.process.returncode == 0
 
 
 @pytest.mark.asyncio
