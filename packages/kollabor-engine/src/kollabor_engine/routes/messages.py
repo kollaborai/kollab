@@ -281,8 +281,9 @@ def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     event_type = str(event.get("type") or "")
     result: Dict[str, Any] = {
         "decision": "approve" if event_type == "permission_granted" else "deny",
-        "scope": event.get("scope", "once"),
     }
+    if "scope" in event or not event.get("vendor_saved"):
+        result["scope"] = event.get("scope", "once")
     for key in ("option_id", "vendor_saved", "warning"):
         if key in event:
             result[key] = event[key]
