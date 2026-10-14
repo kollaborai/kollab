@@ -28,7 +28,7 @@ from kollabor_tui.terminal_renderer import TerminalRenderer
 from kollabor_tui.visual_effects import VisualEffects
 
 from .llm import LLMService
-from .llm.permissions.attach_bridge import AttachPermissionBridge
+from .llm.permissions.attach_bridge import AttachPermissionBridge, resolution_event
 from .logging import setup_from_config
 from .state.widget_state import WidgetState
 from .updates import AutoUpdateResult, VersionCheckService, run_auto_update
@@ -763,6 +763,7 @@ class TerminalLLMChat:
                     )
                     tasks = {local_task, attach_task}
                     response = None
+                    winner_task = None
                     try:
                         while tasks and response is None:
                             done, tasks = await asyncio.wait(
@@ -772,17 +773,31 @@ class TerminalLLMChat:
                                 candidate = completed.result()
                                 if candidate is not None and response is None:
                                     response = candidate
+                                    winner_task = completed
                         if response is None:
                             response = await local_task
+                            winner_task = local_task
+                        # Publish the local winner before canceling the attach
+                        # waiter so remote views close from the truthful event.
+                        if winner_task is local_task:
+                            tap = self.event_bus.get_service("display_tap")
+                            if tap is not None:
+                                tap.publish(
+                                    resolution_event(
+                                        str(details.get("tool_id") or ""),
+                                        response,
+                                        details,
+                                    )
+                                )
+                        # If attach won, dismiss the local prompt while it is
+                        # still registered, before canceling the local task.
+                        if winner_task is attach_task:
+                            self.renderer.layout_manager.cancel_permission_prompt()
                     finally:
                         for pending in tasks:
                             pending.cancel()
                         if tasks:
                             await asyncio.gather(*tasks, return_exceptions=True)
-                        # If attach won, dismiss the local prompt. Native prompt
-                        # handling remains on its original sequential path.
-                        if response is not None and not local_task.done():
-                            self.renderer.layout_manager.cancel_permission_prompt()
                 else:
                     response = await self._try_attach_permission_prompt(details)
                     if response is None:
