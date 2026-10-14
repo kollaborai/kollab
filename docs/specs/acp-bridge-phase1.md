@@ -3,10 +3,140 @@
 2026-10-13: the initial implementation was committed as `9a123150`. The
 subsequent source audit identified 13 concrete repair items before a replacement
 goal was created. Those source repairs are now implemented in separate scoped
-commits, recorded below. The source remains unqualified. No tests, builds, lint,
+commits, recorded below. No tests, builds, lint,
 adapter/client runs, browser runs or deployment were performed during this pass,
 by explicit instruction. Earlier results below describe an earlier checkpoint
 and do not qualify these changes.
+
+## Current qualification pass (2026-10-14)
+
+Executable qualification was subsequently authorized. Full section 9 remains
+open; the evidence below distinguishes source checks, controlled SDK runs, real
+models, rendered UI and the off-box network boundary.
+
+Verified fixes and boundaries:
+
+- Startup: `ea95af7f`, `d003ee71`, `94511e2f`, `359912ce` and `f1136882`
+  resolve pinned managed adapters, preflight before spawning, wait for actual
+  daemon readiness and retain actionable errors in the launcher. Claude's quota
+  text survives opaque request errors. Missing executables leave no candidate
+  daemon or ready engine session. Named profile strings use authoritative daemon
+  profile state. The engine/startup suite passed 232 tests; a focused input/state/
+  assistant/startup run passed 96. Counts overlap with later focused runs.
+- Hub: `8dc42998`, `09cce6ab` and `29f1c38c` repair ordinary request admission,
+  distinct request FIFO, completion-owner validation, question-back imports and
+  public wait-state tags. Local collaboration, MCP stdio/socket, native reply and
+  permission regressions pass. Real Codex adapter 2.1.1 handled an ordinary local
+  Hub request, called `hub_status` and `hub_agents`, streamed `ACP LIVE CODEX OK`
+  and returned one final message plus one hidden end frame on its original
+  request/thread. The corrected application probe exited zero with no owned root
+  PIDs. Trace: `/tmp/kacp-live-xVqw6o/codex-application.jsonl`; summary:
+  `/tmp/kacp-live-xVqw6o/codex-live-summary.log`.
+- Outbound: real Codex cancel, negotiated steering, resume and missing-login
+  failure gates pass. Actual permission approve, deny and the complete 300-second
+  timeout pass; only approval creates the owned sentinel. Evidence is in
+  `codex-protocol.jsonl`, `codex-permissions.jsonl` and their summaries under
+  `/tmp/kacp-live-xVqw6o`. `453ca014` rejects non-offered option IDs and empty
+  eligible option tables. `f77d3734` journals observed partial output by owned
+  request/turn and saves it once on cancellation/error without inventing vendor
+  tool status. The latest six-file outbound run passed 87 tests in 35.35 seconds.
+- Cleanup: `52fb41d1` recovers same-user, marked descendants orphaned before
+  observation, including double-fork/`setsid` children born during prompt and
+  close. Wrong-nonce outsiders survive. The real Codex run removed its four
+  observed process identities. Its login shell discarded the inherited marker:
+  cleanup is not OS containment, and unseen children that strip the marker or
+  change user identity remain outside this proof.
+- Inbound: `f2e293e1`, `362aea82`, `9715049c` and `14364d69` cover SDK variants,
+  request-specific cancellation, attach ownership, saved replay, protocol-only
+  stdout and complete handle cleanup. The full 17-case real CLI/daemon/stdio
+  matrix passed in 189.52 seconds, with 24 protocol traces and no stray stdout
+  lines. After the stopped-history fix, `61504527` added a real active cancel →
+  close → fresh load check: partial text, pending/in-progress cards, typed diff,
+  falsey output and cancelled parent metadata survive; initial, replacement and
+  restored adapter PIDs exit. This new case and the directly affected normal
+  restore case passed in 34.89 seconds. Artifacts:
+  `/tmp/kacp-inbound-final.33P2UP` and
+  `/tmp/kacp-inbound-sdk-stop-fixed.nhBMfF`. The earlier full run predates the
+  stopped-history source fix; it is not a claim that all 18 cases were rerun.
+- Persistence: `d475fef2`, `168dfe07`, `008fecfa` and `25cdde92` repair native
+  argument decoding, exact parent/tool-result matching, resumed base durability,
+  typed ACP history producers and sparse card merges. Existing ACP logs lacking
+  display metadata can recover it from a matching snapshot by exact UUID or
+  unique shared parent UUID; original text/order/tail stay authoritative and old
+  files are not rewritten. The replay regression run passed 150 tests plus five
+  subtests; later typed history checks passed 20 tests. A copied version of the
+  actual old Zircon data recovered five ACP assistant rows and eight cards with
+  source bytes unchanged: `/tmp/kacp-olddata-recovery-4f0ez6ss/summary.json`.
+- Web UI: `decf3a83` serves the current source bundle; `d54ad450` clears the
+  previous cancel header on admitted input; `95eaf915` omits unobserved durations
+  instead of displaying 0 ms. `d39c99c3` uses the authoritative harness label for
+  intentionally empty harness-managed model fields; actual Claude, Codex and
+  native header titles were checked. Typecheck and build pass. Real controlled
+  SDK/browser checks pass for startup errors, completed text/diff cards, pending
+  permission reload and exact opaque approvals, Stop → reload partial history,
+  and a subsequent normal turn. Cancelled cards retain the last vendor status.
+  Actual 390px and 820px renders have no horizontal document overflow. Private
+  screenshots and DOM evidence are under `/tmp/kacp-web-4xxf6eaj`, including
+  `stopped-and-completed-390.jpg` and `stopped-and-completed-820.jpg`. This is
+  controlled SDK UI evidence, not a Claude or Gemini model run.
+- User runtime: the source engine/Web UI was restarted and the six engine-owned
+  sessions were recreated with their previous profiles/identities and saved
+  conversation bases. Unrelated external agents were preserved. Backups and the
+  verified restore map are under `/tmp/kacp-live-restart-_swfzhr6`. Fresh Codex
+  probe `ACP-UI-261014-A` called `hub_agents` and replied in Zircon's real window;
+  it was an observation on a still-owned native reply chain, not a new peer
+  request. The separate B probe failed at its native sender's rate limit before
+  any Hub delivery. Direct CLI operator probe C passed: request/thread
+  `0f403e9982d445538d8cd1a11f806ee3`, turn `7`, source `hub_attachment`, one
+  parent-linked assistant with `end_turn`, 77 saved updates and a completed real
+  roster tool card. Snapshot, HTTP history and JSONL display metadata agree.
+  Metadata-only proof is in
+  `/tmp/kacp-live-restart-_swfzhr6/live-qualification-summary.json`; the saved
+  parent UUID matches the manager's user UUID. Logger-generated message/request
+  IDs use a separate namespace and were not used as runtime request authority.
+  Neither operator C nor observation A substitutes for the blocked native B gate.
+- Network: `99f4e9de` rechecks durable request authority after transport awaits
+  and during remote ACP/CLI waits. Seven regressions reproduced hangs before
+  the fix and pass afterward; 313 adjacent tests and two manual-grant/fast-final
+  safeguards pass. An actual isolated two-host mutual-TLS run, 10.0.0.6 ↔
+  10.0.0.7, passed correlated trust denial with zero model admission, in-flight
+  revocation in 0.0044 seconds, accepted ask trust change in 0.2458 seconds and
+  accepted CLI peer revocation in 0.2479 seconds. Owned probes exited and pending/
+  dispatch maps were empty. Existing remote agents, installed source and real
+  membership state were unchanged. Evidence:
+  `/tmp/kacp-cross-device-wb6byW/qualification_summary.json`, `events.jsonl` and
+  `source_sha256.json`. Its remote application handler is controlled; this does
+  not qualify a remote ACP provider/harness.
+
+Required open gates:
+
+1. Claude Code adapter 0.89.0: the fresh user Web session reports the weekly limit
+   (reset reported as 5am America/Phoenix). Real streamed tool, permission,
+   cancel and steering gates remain open. An isolated copied-auth probe also
+   reported expired OAuth; neither result counts as a successful model turn.
+2. Gemini CLI 0.63.0: initialize passes, but session creation rejects the test
+   account's Code Assist individual client and reports an Antigravity migration.
+   The model/tool/permission/cancel matrix remains open; this is not treated as
+   a generic missing-login success or a reason to change account/billing settings.
+3. Actual Zed initialize/prompt/permission/cancel/attach remains unverified.
+   Isolated config/proxy artifacts are prepared; Zed's singleton reused its
+   existing process, and computer control cannot operate the owned restricted
+   test window. No successful ACP client trace exists. User project settings
+   and the existing Zed application were preserved.
+4. Repeat the separate native Koordinator → Zircon request B after sender capacity
+   returns, checking a new request's original reply and terminal IDs. The actual
+   sender failed before Hub admission; the earlier A reply-chain result and C
+   operator result are recorded separately.
+5. Actual cross-device ACP harness collaboration needs a scoped remote runtime
+   preparation. Inspected remote installs are 0.14.2 and 0.15.5; current ACP
+   modules, SDK/MCP dependencies and pinned adapters are absent. The passing
+   isolated network boundary is not remote model proof.
+
+Counts above overlap and are not a combined distinct-test total. Private
+artifacts and the owned Zed test folder are retained until qualification evidence
+is reviewed and the open client gate is resolved. No push, release, installation
+of a Kollab release binary or production deployment occurred. The current
+qualification goal is not complete.
 
 ## Audited repair goal after 9a123150
 

@@ -1,14 +1,16 @@
 # Kollab speaks ACP
 
-Status: **qualification in progress**, 2026-10-13.
+Status: **qualification in progress**, 2026-10-14.
 Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
-The source-only repair pass is committed. The subsequent qualification pass is
-authorized: focused suites and the frontend build pass, and a fresh real Codex
-ordinary Hub request returns its answer and correlated end frame. Claude starts
-but the user's account reports a weekly limit; its remaining live gates are open.
-The full adapter/client/network matrix is not yet qualified. No release or
-deployment has been performed. Current evidence and the implementation inventory are in
+The source repairs and runtime fixes are committed. Focused suites, actual CLI/
+SDK boundaries, Codex model/tool/permission gates, Web UI persistence and an
+isolated two-host trust/revocation run pass. The full adapter/client/network
+matrix remains open: Claude is quota-blocked, Gemini rejects the pinned client
+for the test account, Zed is unverified, and remote ACP runtime prerequisites
+are absent. A separate fresh native sender probe hit its provider rate limit
+before Hub delivery. No release or deployment has been performed.
+Current evidence and the implementation inventory are in
 [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 
 Original direction, 2026-10-09, revised after an adversarial review:

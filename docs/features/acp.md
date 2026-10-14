@@ -1,8 +1,11 @@
 # ACP agents
 
 Kollab can run an ACP harness as an agent and expose a Kollab daemon to an ACP
-client. This implementation is under review; real adapter/client qualification
-has not been performed for the current source changes.
+client. Real Codex model/tool/permission runs, CLI/SDK lifecycle checks and Web
+UI saved-card flows pass. Full qualification remains open: Claude is quota-
+blocked, Gemini rejects the pinned client for the test account, and actual Zed
+and remote ACP harness runs remain unverified. See the implementation checkpoint
+linked below for exact evidence and remaining gates.
 
 ## Run a harness on the Hub
 
@@ -67,3 +70,5 @@ text files up to 256 KiB; larger and binary files show their tool result.
 
 For the implementation contract and qualification gates, see
 [`../specs/acp-bridge.md`](../specs/acp-bridge.md).
+The current evidence and open checks are recorded in
+[`../specs/acp-bridge-phase1.md`](../specs/acp-bridge-phase1.md).
