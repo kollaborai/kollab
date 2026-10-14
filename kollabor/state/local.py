@@ -1312,7 +1312,10 @@ class LocalStateService(StateService):
                 except Exception as e:
                     logger.debug(f"reload_native_tools background task error: {e}")
 
-        return self._profile_to_snapshot(profile, is_active=True)
+        snapshot = self._profile_to_snapshot(profile, is_active=True)
+        from kollabor_tui.display_tap import publish_semantic
+        publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
+        return snapshot
 
     async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
         """Change the tool permission approval mode and return the new snapshot.

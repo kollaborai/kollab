@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
 from kollabor_events.permissions_models import ApprovalMode
+from kollabor.state.snapshots import ProfileSnapshot
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_xml_tools import web_history
@@ -145,6 +146,7 @@ class EngineSession:
         self.system_prompt = system_prompt or ""
         self.created_at = datetime.utcnow()
         self.profile = profile
+        self._profile_revision = 0
         self.agent = agent
         self.requested_identity = identity
         self.approval_mode = approval_mode
@@ -286,7 +288,11 @@ class EngineSession:
     async def _read_agent_facts(self) -> None:
         """An adopted agent's profile, approval mode and, on another computer, folder."""
         try:
-            self.profile = await self.state.get_active_profile()
+            revision = self._profile_revision
+            profile = await self.state.get_active_profile()
+            # A profile-change event can arrive while this initial RPC waits.
+            if revision == self._profile_revision:
+                self.profile = profile
             mode = (await self.state.get_permission_state()).approval_mode
             self.approval_mode = str(mode or "").lower()
             if self.device:
@@ -520,6 +526,15 @@ class EngineSession:
                     self.acp_plan = {}
                     self.acp_usage = {}
                     self.acp_waiting = False
+                elif etype == "profile_changed":
+                    payload = event.get("profile")
+                    if isinstance(payload, dict) and payload.get("name"):
+                        self.profile = ProfileSnapshot.from_dict(payload)
+                        self._profile_revision += 1
+                        if self.profile.provider != "acp":
+                            self.acp_plan = {}
+                            self.acp_usage = {}
+                            self.acp_waiting = False
 
                 elif etype == "daemon_closed":
                     break
