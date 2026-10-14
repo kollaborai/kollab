@@ -1243,6 +1243,22 @@ class TerminalLLMChat:
         ):
             return str(allow_once[0].get("optionId"))
 
+
+        # Native automatic modes may approve only a single opaque one-shot
+        # option. Never synthesize a vendor option or choose an ``always``
+        # option, and let ambiguous/always-only cards reach the human owner.
+        approval_mode = getattr(manager, "approval_mode", None)
+        mode_name = getattr(
+            approval_mode, "name", str(approval_mode).rsplit(".", 1)[-1]
+        )
+        auto_once = mode_name == "TRUST_ALL" or (
+            mode_name == "AUTO_APPROVE_EDITS"
+            and valid_operation
+            and request.operation.get("kind") == "edit"
+        )
+        if auto_once and len(allow_once) == 1:
+            return str(allow_once[0].get("optionId"))
+
         def schedule_cancel() -> None:
             orchestrator = getattr(self, "acp_orchestrator", None)
             schedule = getattr(orchestrator, "schedule_cancel", None)

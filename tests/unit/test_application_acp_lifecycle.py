@@ -3,7 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor.application import TerminalLLMChat
-from kollabor_events.permissions_models import PermissionDecision, ToolRiskLevel
+from kollabor_events.permissions_models import (
+    ApprovalMode,
+    PermissionDecision,
+    ToolRiskLevel,
+)
 
 
 class FakeRunner:
@@ -165,6 +169,101 @@ async def test_acp_decider_maps_native_reusable_approval_to_once(scope):
     assert seen[0]["source"] == "acp"
     assert seen[0]["approval_scope"] == "once"
     assert seen[0]["operation"]["kind"] == "edit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "kind", "operation", "options", "expected", "prompts"),
+    [
+        (
+            ApprovalMode.TRUST_ALL,
+            "execute",
+            {"kind": "execute", "command": ["echo", "owned"]},
+            (
+                {"optionId": "opaque-once", "kind": "allow_once"},
+                {"optionId": "opaque-always", "kind": "allow_always"},
+            ),
+            "opaque-once",
+            0,
+        ),
+        (
+            ApprovalMode.TRUST_ALL,
+            "execute",
+            None,
+            ({"optionId": "opaque-once", "kind": "allow_once"},),
+            "opaque-once",
+            0,
+        ),
+        (
+            ApprovalMode.AUTO_APPROVE_EDITS,
+            "edit",
+            {"kind": "edit", "paths": ["/tmp/owned/a.txt"]},
+            (
+                {"optionId": "opaque-once", "kind": "allow_once"},
+                {"optionId": "opaque-deny", "kind": "reject_once"},
+            ),
+            "opaque-once",
+            0,
+        ),
+        (
+            ApprovalMode.TRUST_ALL,
+            "execute",
+            {"kind": "execute"},
+            (
+                {"optionId": "opaque-a", "kind": "allow_once"},
+                {"optionId": "opaque-b", "kind": "allow_once"},
+                {"optionId": "opaque-deny", "kind": "reject_once"},
+            ),
+            "opaque-deny",
+            1,
+        ),
+        (
+            ApprovalMode.TRUST_ALL,
+            "execute",
+            {"kind": "execute"},
+            (
+                {"optionId": "opaque-always", "kind": "allow_always"},
+                {"optionId": "opaque-deny", "kind": "reject_once"},
+            ),
+            "opaque-deny",
+            1,
+        ),
+    ],
+)
+async def test_acp_decider_mode_policy_uses_only_unique_once_offer(
+    mode, kind, operation, options, expected, prompts
+):
+    prompts_seen = []
+
+    async def callback(details):
+        prompts_seen.append(details)
+        return PermissionDecision(
+            allowed=False,
+            reason="denied",
+            risk_level=ToolRiskLevel.MEDIUM,
+            confirmation_details={"acp_choice": "deny"},
+        )
+
+    app = TerminalLLMChat.__new__(TerminalLLMChat)
+    app.permission_manager = SimpleNamespace(
+        approval_mode=mode,
+        _confirmation_callback=callback,
+    )
+    request = SimpleNamespace(
+        request_id="perm-mode",
+        session_id="session-mode",
+        generation=1,
+        kind=kind,
+        operation=operation,
+        workspace="/tmp/owned",
+        profile="owned-acp",
+        options=options,
+    )
+
+    result = await app._acp_permission_decider(request)
+
+    assert result == expected
+    assert len(prompts_seen) == prompts
 
 
 @pytest.mark.asyncio
