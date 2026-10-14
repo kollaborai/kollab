@@ -535,14 +535,62 @@ Required open gates:
    only; no secret values were recorded and no account, login, billing or
    credential settings were changed. Evidence:
    `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/auth-prerequisite.json`.
+   The subsequent read-only Vertex prerequisite check refreshed the existing
+   ADC token in memory and received HTTP 200 from Service Usage with
+   `aiplatform.googleapis.com` **DISABLED**. BillingInfo returned HTTP 403
+   `SERVICE_DISABLED`, so billing readiness is unknown. No prediction/model
+   call, authentication-mode change, credential copy, API enablement or billing
+   change occurred; protected credential/settings bytes stayed unchanged.
+   Evidence: `/private/tmp/kacp-vertex-readiness-ty_dogwo/readiness.json`
+   (`18360cbbbe3921200391eaf59e6c3d4524e3042f1947bd6f36cfadb5198ff55d`).
 The real-provider Web UI and interactive terminal walkthrough gate is now
 closed by the fresh private run recorded above, together with the earlier
 actual browser and Codex terminal cases. Controlled SDK and narrow-layout
 evidence remain separately identified. The earlier summary that only Gemini
 remained preceded these actual user-facing acceptance checks and was too broad
-at that time. The user's existing Web UI engine has not been restarted onto
-the new owner-scoped Stop endpoint; this qualification does not claim that
-running user instance is updated.
+at that time. The user's existing Web UI instance has now been refreshed onto
+the updated engine, as recorded below; earlier private permission/Stop runs
+remain separate from the fresh user-session reply checks.
+
+User-runtime refresh on `307390ce` (2026-10-14):
+
+- Engine `98484` owns loopback port 7433; the existing port-8080 server and
+  external agents stayed running. All six engine session IDs, identities,
+  profiles, agents and approval modes were preserved. Every restored session
+  is ready and idle with zero pending permissions and the original three
+  connected MCP servers / 43 tools. Early partial MCP observations settled
+  after the native profile override's background tool initialization completed.
+- Full live backups preserved 225 messages before shutdown. New canonical
+  imports preserved their complete content, metadata, thinking and timestamps.
+  Native initial restore arrays were exact; subsequent turns regenerate only
+  the two dynamic Hub system blocks. All 223 original non-system messages and
+  all 225 timestamps/metadata/thinking fields remain exact. Original stored
+  conversation bytes remain prefixes after normal shutdown-save appends;
+  existing snapshots were unchanged. The timestamp repair in `307390ce` passed
+  22 focused resume tests.
+- Fresh actual Web UI requests to Sapphire and Zircon returned exactly
+  `CLAUDE_REFRESH_OK_261014` and `CODEX_REFRESH_OK_261014`, respectively, over
+  HTTP 200. Each appears once as a user request and once as its correlated
+  assistant reply. The first Claude submission never reached the daemon;
+  browser reload and explicit send succeeded. The first Zircon selection hit a
+  fetch error; a scoped retry after confirming healthy history/state GETs
+  succeeded. These runs do not repeat or vindicate the earlier B/B2 tests.
+- All 89 recorded old daemon/descendant births are gone. The old engine exited
+  and holds no listener; its defunct PID remains until the untouched original
+  UI parent reaps it. Only normal SIGTERM was used. The replacement engine
+  inherited that launcher's initial environment; equality to the old engine's
+  post-start environment was not verified. The engine token rotated normally.
+- Codex vendor session IDs were retained. Claude vendor IDs rotated while
+  profile/workspace/command/capabilities stayed exact; the exact vendor resume
+  outcome/reason is unverified. No force, release, install, push, credential
+  setting change or unrelated checkout edit is claimed.
+
+Final getter proof:
+`/private/tmp/kacp-refresh-observer-8tv729vt/capture-1792011999843170000/final-restoration-proof.json`
+(`606d25760702e422a73f05eda0c33b6bc14f0a4838f6c4280bf05d0593bd97e5`).
+Root physical/original-byte proofs and both Web UI screenshots/HTTP observations
+are under `/private/tmp/kacp-user-runtime-refresh-bjegubpe/`. Gemini's
+supported-auth positive rows remain open.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folders are retained until the qualification

@@ -27,9 +27,16 @@ pass. Terminal answer ownership and diagnostic overwrites were fixed in
 send the exact parent request to the daemon. Controlled browser Stop/reload,
 partial retention, a normal follow-up and 390px/820px layouts pass. Fresh actual
 Claude and Codex Web Stop/reload, exact approval/denial choices, recovery and
-Claude terminal input/permissions/active Escape also pass. These runs used
-private sessions; the user's existing Web UI engine has not been restarted
-onto these fixes.
+Claude terminal input/permissions/active Escape also pass. Those runs used
+private sessions. The user's existing Web UI now runs the updated engine on
+`307390ce`; all six sessions were restored with their identities, profiles,
+approval modes and 43 MCP tools preserved. Fresh Claude and Codex requests sent
+through that Web UI each produced the exact requested reply. Original
+conversation messages and timestamps were preserved; the two native agents'
+dynamic Hub system context regenerated normally. This does not establish exact
+Claude vendor-session continuity: its vendor IDs rotated. Gemini still needs
+supported authentication; the existing Google Cloud project's Vertex API is
+disabled and no Gemini API key is configured.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

@@ -660,8 +660,16 @@ history, normal follow-up, old-engine refusal and narrow layouts pass. A fresh
 private actual-provider run on `e99fe9d6` now passes Claude and Codex owned
 pending-permission Stop after reload, partial retention, exact opaque choices
 and recovery. Claude terminal input, one-time approval/denial, final rendering
-and Escape during active inference also pass. The existing user's Web UI
-engine has not been restarted onto these fixes; no installation or release is
+and Escape during active inference also pass. The user's existing Web UI now
+uses the updated engine on `307390ce`. All six sessions were restored with
+their identities, profiles, approval modes and 43 MCP tools preserved; fresh
+Claude and Codex requests through the actual Web UI returned their exact test
+replies. The original 223 non-system messages and all 225 original timestamps,
+metadata and thinking fields remain intact. The two native Hub system blocks
+regenerated as expected. Codex vendor IDs were retained; Claude vendor IDs
+rotated, and this refresh does not prove their exact vendor resume outcome.
+Gemini's positive rows remain open: no API key is configured, and the existing
+Google Cloud project's Vertex API is disabled. No installation or release is
 claimed.
 Exact source, fixture limits, diagnostics, traces and remaining gates are
 recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
