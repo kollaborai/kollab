@@ -250,3 +250,81 @@ async def test_appended_turns_restore_their_latest_usage_snapshot(tmp_path):
     reader.bind_session_stats(counters)
     assert reader.load_session("continued")
     assert counters["messages"] == 2 and counters["input_tokens"] == 22
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matching", ["uuid", "parent"])
+async def test_old_acp_snapshot_restores_only_matching_display_metadata(tmp_path, matching):
+    writer = KollaborConversationLogger(tmp_path)
+    snapshot = manager(tmp_path)
+    snapshot.current_session_id = writer.session_id
+    parent = snapshot.add_message("user", "Snapshot question")
+    await writer.log_user_message("Log question")
+    payload = {"sessionUpdate": "tool_call_update", "toolCallId": "old-card", "title": "Edited file",
+               "kind": "edit", "status": "completed", "rawInput": {"path": "owned.txt"},
+               "rawOutput": {"saved": True},
+               "content": [{"type": "diff", "path": "owned.txt", "oldText": "before", "newText": "after"}]}
+    display = {"provider": "acp", "stop_reason": "cancelled",
+               "acp_updates": [{"kind": "tool_call_update", "payload": payload}],
+               "tool_calls": [{"id": "old-card", "name": "Edited file", "input": {"path": "owned.txt"},
+                               "status": "completed", "result": {"saved": True}, "metadata": {"acp": payload}}]}
+    snapshot_uuid = snapshot.add_message("assistant", "Snapshot text is not authoritative", parent_uuid=parent,
+                                        metadata={**display, "private_binding": "must not copy"})
+    logged_uuid = await writer.log_assistant_message("Log answer", parent_uuid=parent, tool_calls=display["tool_calls"])
+    assert snapshot_uuid != logged_uuid
+    if matching == "uuid":
+        snapshot.messages[-1]["uuid"] = logged_uuid
+        snapshot.messages[-1]["parent_uuid"] = "different-parent"
+    snapshot.add_message("assistant", "Snapshot-only turn", parent_uuid="not-in-log", metadata=display)
+    snapshot_path = snapshot.save_conversation()
+    await writer.log_user_message("Newer log question")
+    await writer.log_assistant_message("Newer log answer", parent_uuid="newer-parent")
+    original_log, original_snapshot = writer.session_file.read_bytes(), snapshot_path.read_bytes()
+    state, reader, history, result = await resume(tmp_path, writer.session_id)
+    assert [message.content for message in history] == [
+        "Log question", "Log answer", "Newer log question", "Newer log answer",
+    ]
+    assert history[1].metadata == display
+    assert reader.messages[1]["uuid"] == logged_uuid
+    assert history[-1].metadata == {}
+    assert writer.session_file.read_bytes() == original_log and snapshot_path.read_bytes() == original_snapshot
+    provider = APICommunicationService.__new__(APICommunicationService)
+    assert all("tool_calls" not in row for row in provider._prepare_messages(history))
+    _, _, reopened, _ = await resume(tmp_path, result["new_session_id"])
+    assert reopened[1].metadata == display
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguity", ["snapshot", "log", "missing"])
+async def test_snapshot_recovery_does_not_guess_ambiguous_or_missing_parents(tmp_path, ambiguity):
+    writer = KollaborConversationLogger(tmp_path)
+    snapshot = manager(tmp_path)
+    snapshot.current_session_id = writer.session_id
+    parent = None if ambiguity == "missing" else "shared-parent"
+    display = {"provider": "acp", "stop_reason": "error", "tool_calls": [{"id": "card", "name": "Edit"}]}
+    snapshot.add_message("assistant", "Identical text", parent_uuid=parent, metadata=display)
+    if ambiguity == "snapshot":
+        snapshot.add_message("assistant", "Identical text", parent_uuid=parent, metadata=display)
+    snapshot.save_conversation()
+    await writer.log_assistant_message("Identical text", parent_uuid=parent)
+    if ambiguity == "log":
+        await writer.log_assistant_message("Identical text", parent_uuid=parent)
+    reader = manager(tmp_path)
+    assert reader.load_session(writer.session_id)
+    assert all(row["metadata"] == {} for row in reader.messages)
+
+
+@pytest.mark.asyncio
+async def test_current_log_display_metadata_wins_over_stale_snapshot(tmp_path):
+    writer = KollaborConversationLogger(tmp_path)
+    snapshot = manager(tmp_path)
+    snapshot.current_session_id = writer.session_id
+    parent = "shared-parent"
+    snapshot.add_message("assistant", "Older", parent_uuid=parent,
+                         metadata={"provider": "acp", "stop_reason": "end_turn", "tool_calls": [{"id": "old"}]})
+    snapshot.save_conversation()
+    display = {"provider": "acp", "stop_reason": "error", "acp_updates": [], "tool_calls": []}
+    await writer.log_assistant_message("Current", parent_uuid=parent, display_metadata=display)
+    reader = manager(tmp_path)
+    assert reader.load_session(writer.session_id)
+    assert reader.messages[0]["metadata"] == display

@@ -7,6 +7,7 @@ and message threading for LLM interactions.
 import json
 import logging
 import os
+from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -564,6 +565,7 @@ class ConversationManager:
             if not data:
                 logger.error(f"Session data empty for: {session_id}")
                 return False
+            self._restore_snapshot_acp_display(session_id, data.get("messages", []))
 
             # Restore session state
             self.current_session_id = session_id
@@ -612,6 +614,56 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Failed to load session: {e}")
             return False
+
+    def _restore_snapshot_acp_display(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Recover missing ACP cards from this session's existing rich snapshot.
+
+        Manager and logger UUIDs used to differ. Their assistant parent UUID
+        came from the same request, so it can match an unambiguous pair without
+        treating text/timestamps or a stale snapshot's whole history as truth.
+        """
+        snapshot_file = self.snapshots_dir / f"{session_id}_snapshot.json"
+        if not snapshot_file.exists():
+            return
+        try:
+            snapshot = json.loads(snapshot_file.read_text())
+        except (OSError, ValueError) as exc:
+            logger.warning("Cannot recover ACP display metadata (%s)", type(exc).__name__)
+            return
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("messages"), list):
+            return
+        by_uuid, by_parent = defaultdict(list), defaultdict(list)
+        for stored in snapshot["messages"]:
+            if not isinstance(stored, dict) or stored.get("role") != "assistant":
+                continue
+            for key, index in (("uuid", by_uuid), ("parent_uuid", by_parent)):
+                value = stored.get(key)
+                if isinstance(value, str) and value:
+                    index[value].append(stored)
+        parent_counts = Counter(
+            message.get("parent_uuid") for message in messages
+            if message.get("role") == "assistant" and isinstance(message.get("parent_uuid"), str)
+            and message["parent_uuid"]
+        )
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            metadata = message.get("metadata") or {}
+            if not isinstance(metadata, dict) or any(
+                key in metadata for key in ("acp_updates", "tool_calls", "xml_tool_calls", "provider_reasoning")
+            ) or metadata.get("provider") not in (None, "acp"):
+                continue
+            candidates = by_uuid.get(message.get("uuid"), [])
+            if not candidates:
+                parent = message.get("parent_uuid")
+                if not isinstance(parent, str) or not parent or parent_counts.get(parent, 0) != 1:
+                    continue
+                candidates = by_parent.get(parent, [])
+            if len(candidates) != 1:
+                continue
+            recovered = _acp_display_metadata(candidates[0].get("metadata"))
+            if any(key in recovered for key in ("acp_updates", "tool_calls", "stop_reason")):
+                message["metadata"] = {**recovered, **metadata}
 
     def get_available_sessions(self) -> List[Dict[str, Any]]:
         """Get list of available sessions.
@@ -945,7 +997,7 @@ class ConversationManager:
                             "role": data.get("message", {}).get("role", msg_type),
                             "content": content,
                             "timestamp": data.get("timestamp"),
-                            "parent_uuid": None,
+                            "parent_uuid": data.get("parentUuid"),
                             # Native calls are not reconstructed from streaming
                             # logs. ACP display cards stay separate; only a text
                             # turn can restore its provider-native reasoning.
