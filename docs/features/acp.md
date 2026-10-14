@@ -7,8 +7,9 @@ cross-device real Codex request/reply and revocation run pass. Gemini's
 missing-auth startup and clean runner-close checks
 also pass. Claude's full 300-second permission timeout and missing-login
 `-32000` checks pass; its normal empty-store session opens before the first
-controlled prompt rejects authentication. Full qualification remains open:
-Gemini's successful model run needs supported authentication. Actual Zed Preview
+controlled prompt rejects authentication. Full qualification remains open for
+Gemini's supported-auth positive rows and fresh real-provider Web UI and
+interactive terminal walkthroughs. Actual Zed Preview
 client checks pass with a controlled local SDK backend: normal/approval/absolute
 diff, partial UI Stop, attached denial/retention and reconnect, then owned
 physical shutdown after `4d4ceff1`. The earlier orphaned-daemon failure remains
@@ -18,8 +19,8 @@ waited-message delivery, correlated final/end and native model feedback. The
 same configured Z.AI route returned two actual HTTP 200 responses. Independent
 offline validation qualifies that frozen runtime evidence; the controller's
 observer assertion remains recorded as failed. The earlier user B/B2 and
-restored histories were untouched. Gemini's supported-auth positive model rows
-are the remaining qualification prerequisite.
+restored histories were untouched. The browser checks used a controlled SDK;
+CLI/daemon proof does not establish a fresh interactive terminal walkthrough.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

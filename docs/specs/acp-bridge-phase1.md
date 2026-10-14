@@ -398,6 +398,16 @@ Required open gates:
    only; no secret values were recorded and no account, login, billing or
    credential settings were changed. Evidence:
    `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/auth-prerequisite.json`.
+2. Fresh real-provider Web UI and interactive terminal walkthroughs. Existing
+   controlled SDK browser evidence covers cards, permissions, Stop/reload and
+   narrow layouts, and real Codex output was observed in Zircon's earlier
+   window. Actual CLI/SDK/daemon model runs and the private native feedback run
+   are separate evidence. They do not establish a fresh interactive TUI run or
+   the complete latest Claude/Codex launch/input/tool/permission/cancel flow in
+   both user interfaces. Private sessions are being prepared for these checks;
+   no new pass is claimed until actual input/render, persistence and cleanup
+   evidence is recorded. The earlier summary that only Gemini remained was too
+   broad for complete user-facing acceptance.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folders are retained until the qualification

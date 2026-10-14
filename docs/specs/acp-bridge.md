@@ -7,8 +7,9 @@ The source repairs and runtime fixes are committed. Focused suites, actual CLI/
 SDK boundaries, Claude Code and Codex model/tool/permission gates, Web UI
 persistence, an isolated two-host real Codex request/reply/revocation run and a
 new private native Koordinator → Codex Zircon request/final/end/feedback run
-pass. The full matrix remains open only for Gemini's supported-auth positive
-model/tool/permission/cancel rows. Actual Zed Preview client checks pass with a
+pass. The full matrix remains open for Gemini's supported-auth positive rows
+and fresh real-provider Web UI and interactive terminal walkthroughs.
+Actual Zed Preview client checks pass with a
 controlled local SDK backend after the ownership repair; Gemini's missing-auth
 startup and clean-close checks pass. No release or deployment has been performed.
 Current evidence and the implementation inventory are in
@@ -646,9 +647,11 @@ reply after both frames arrived. The same configured Z.AI route returned two
 actual HTTP 200 responses. Its controller's observer assertion remained red;
 independent offline validation qualifies the saved output and exact correlation
 without another model call. Earlier user B/B2 and restored histories were not
-rerun or vindicated. Gemini's supported-auth positive rows remain open. Exact
-source, fixture limits, diagnostics, traces and remaining gates
-are recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
+rerun or vindicated. Gemini's supported-auth positive rows and fresh real-provider
+Web UI/interactive terminal walkthroughs remain open. Existing CLI/backend and
+controlled SDK browser evidence do not establish those complete user-facing runs.
+Exact source, fixture limits, diagnostics, traces and remaining gates are
+recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 JetBrains, Buzz and T3 Code are claimed only after the same run. T3 Code
 opens with one `initialize` that carries both v1 and v2 fields and reads the
 generation from the answer's shape, so `kollab acp` answers version 1 in the v1
