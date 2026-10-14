@@ -38,15 +38,18 @@ class ACPProfile:
     BUILTIN_PROFILES: ClassVar[dict[str, dict[str, Any]]] = {
         "claude-code": {
             "command": ["claude-agent-acp"],
-            "install": "npm install -g @agentclientprotocol/claude-agent-acp@0.89.0",
+            "managed_dir": "claude-0.89.0",
+            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0",
         },
         "codex-cli": {
             "command": ["codex-acp"],
-            "install": "npm install -g @agentclientprotocol/codex-acp@2.1.1",
+            "managed_dir": "codex-2.1.1",
+            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
         },
         "gemini-cli": {
             "command": ["gemini", "--acp"],
-            "install": "npm install -g @google/gemini-cli@0.63.0",
+            "managed_dir": "gemini-0.63.0",
+            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
         },
     }
     _PROVIDER_KEYS: ClassVar[frozenset[str]] = frozenset({
@@ -120,6 +123,15 @@ class ACPProfile:
         candidate = Path(path)
         return bool(path and candidate.is_file() and os.access(candidate, os.X_OK))
 
+    def _managed_adapter_path(self) -> str:
+        builtin = self.BUILTIN_PROFILES.get(self.name)
+        if not builtin or self.command[0] != builtin["command"][0]:
+            return ""
+        return str(
+            Path.home() / ".local" / "share" / "kollab" / "acp-adapters"
+            / builtin["managed_dir"] / "node_modules" / ".bin" / self.command[0]
+        )
+
     def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
         cache_path = self._cache_path()
         cache: dict[str, Any] = {}
@@ -143,6 +155,7 @@ class ACPProfile:
                     for candidate in (
                         self._login_shell_path(),
                         shutil.which(self.command[0]) or "",
+                        self._managed_adapter_path(),
                     )
                     if self._is_executable_file(candidate)
                 ),

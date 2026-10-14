@@ -53,6 +53,7 @@ class ACPOrchestrator:
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
         self._selected_profile: LLMProfile | None = None
+        self.startup_error: str | None = None
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
@@ -91,6 +92,7 @@ class ACPOrchestrator:
             # acquiring a replacement, without creating a second owner.
             await self.close()
         self._closed = False
+        self.startup_error = None
         self._terminal_session_id = None
         self._observations.clear()
         self._observation_count = 0
@@ -135,7 +137,8 @@ class ACPOrchestrator:
             await self._runner.start(binding=binding)
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
-        except BaseException:
+        except BaseException as exc:
+            self.startup_error = str(exc) or type(exc).__name__
             try:
                 await self.close()
             except BaseException as cleanup_exc:
@@ -179,7 +182,7 @@ class ACPOrchestrator:
         origin: dict[str, Any] | None = None,
     ) -> ACPAdmission:
         if self._runner is None or self._closed:
-            raise RuntimeError("ACP runner is not active")
+            raise ACPError(self.startup_error or "ACP runner is not active")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
         admission = self._runner.admit(

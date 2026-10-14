@@ -581,7 +581,44 @@ def test_builtin_profile_and_missing_adapter_guidance(tmp_path, monkeypatch):
     assert profile.command == ("claude-agent-acp",)
     assert "claude-agent-acp@0.89.0" in profile.install_guidance
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: "")
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda command: None)
     with pytest.raises(ACPError, match="Install the adapter"):
+        profile.resolve()
+
+
+@pytest.mark.parametrize("name", ["claude-code", "codex-cli", "gemini-cli"])
+def test_builtin_resolves_managed_adapter_without_path_and_preserves_args(tmp_path, monkeypatch, name):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: "")
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda command: None)
+    profile = ACPProfile.builtin(name, cwd=str(tmp_path), env={"CUSTOM_SETTING": "kept"})
+    adapter = bridge_mod.Path(profile._managed_adapter_path())
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("#!/usr/bin/env node\n")
+    adapter.chmod(0o755)
+    node = tmp_path / "node" / "node"
+    node.parent.mkdir()
+    node.write_text("#!/bin/sh\n")
+    node.chmod(0o755)
+    monkeypatch.setattr(ACPProfile, "_login_shell_node", lambda self: str(node))
+    command, env, cwd = profile.resolve()
+    assert command == (str(adapter), *profile.command[1:])
+    assert env["PATH"].split(os.pathsep)[:2] == [str(adapter.parent), str(node.parent)]
+    assert env["CUSTOM_SETTING"] == "kept"
+    assert cwd == str(tmp_path)
+
+
+def test_managed_adapter_never_replaces_custom_builtin_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: "")
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda command: None)
+    profile = ACPProfile.builtin("claude-code", command=["custom-claude-adapter"], cwd=str(tmp_path))
+    assert profile._managed_adapter_path() == ""
+    with pytest.raises(ACPError, match="custom-claude-adapter"):
         profile.resolve()
 
 

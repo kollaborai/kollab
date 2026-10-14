@@ -8,6 +8,22 @@ from kollabor_ai.profile_manager import LLMProfile
 from kollabor_tui.display_tap import DisplayTap
 
 
+@pytest.mark.asyncio
+async def test_real_runner_start_failure_keeps_actionable_admission_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+    bus = Bus()
+    orchestrator = mod.ACPOrchestrator(bus)
+    missing = str(tmp_path / "missing-adapter")
+    profile = LLMProfile(name="missing-proof", provider="acp", command=(missing,), cwd=str(tmp_path))
+    with pytest.raises(mod.ACPError, match="adapter executable not found"):
+        await orchestrator.start(profile)
+    assert missing in orchestrator.startup_error
+    assert orchestrator.active is False
+    with pytest.raises(mod.ACPError, match="missing-adapter"):
+        orchestrator.admit("cannot run", request_id="owned", source="rpc")
+
+
 class Tap:
     def __init__(self):
         self.events = []
