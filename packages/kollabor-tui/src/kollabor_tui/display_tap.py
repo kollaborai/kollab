@@ -83,15 +83,29 @@ class DisplayTap:
         """
         event = dict(event)
         from .turn_context import current_turn
-        for key, value in current_turn.get().items():
-            event.setdefault(key, value)
+        context = current_turn.get()
+        completion = event.pop("_client_completion", None) or context.get("_client_completion")
         details = event.get("details")
         if isinstance(details, dict):
             for key in ("request_id", "turn_id", "input_source", "generation"):
                 if details.get(key) is not None:
-                    event.setdefault(key, details[key])
+                    if event.get(key) is None:
+                        event[key] = details[key]
+        for key, value in context.items():
+            if key != "_client_completion" and event.get(key) is None:
+                event[key] = value
         event.setdefault("ts", time.time())
         with self._lock:
+            if (event.get("type") == "turn_complete" and completion is not None
+                    and event.get("request_id") == completion["request_id"]
+                    and event.get("turn_id") == completion["turn_id"]):
+                # One client turn may end through broker cancellation and later
+                # through its native task. Fence both before any subscriber sees it.
+                if completion["completed"]:
+                    return
+                completion["completed"] = True
+                if completion["cancelled"]:
+                    event["stop_reason"] = "cancelled"
             event["seq"] = self._next_seq
             self._next_seq += 1
             self._history.append(event)
