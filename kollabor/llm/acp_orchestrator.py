@@ -55,6 +55,7 @@ class ACPOrchestrator:
         self._selected_profile: LLMProfile | None = None
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
+        self._user_history_tasks: dict[str, asyncio.Task] = {}
         from pathlib import Path
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
@@ -184,10 +185,17 @@ class ACPOrchestrator:
         admission = self._runner.admit(
             text, request_id=request_id, source=source, thread_id=thread_id, origin=origin
         )
-        self._record_user(request_id, text, source, thread_id)
         task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
         self._completion_tasks.add(task)
         task.add_done_callback(self._completion_tasks.discard)
+        try:
+            self._record_user(request_id, text, source, thread_id, track_completion=True)
+        except Exception as exc:
+            # Admission is already owned. Remove it before the worker can run,
+            # and let that owner's terminal event report the persistence error.
+            if not admission.future.done():
+                admission.future.set_exception(exc)
+            self._runner.cancel_queued(request_id)
         return admission
 
     def observe_notification(self, message: Any) -> None:
@@ -220,7 +228,17 @@ class ACPOrchestrator:
         if self._runner is not None and self._runner.binding is not None:
             self._bindings.save(self._binding_conversation_id or self._conversation_id(), self._runner.binding)
 
-    def _record_user(self, request_id: str, text: str, source: str, thread_id: str | None) -> None:
+    def _history_task_done(self, task: asyncio.Task) -> None:
+        self._history_tasks.discard(task)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                logger.warning("ACP user history write failed (%s)", type(error).__name__)
+
+    def _record_user(
+        self, request_id: str, text: str, source: str, thread_id: str | None,
+        *, track_completion: bool = False,
+    ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
         metadata = {"provider": "acp", "request_id": request_id, "source": source, "thread_id": thread_id}
@@ -230,7 +248,9 @@ class ACPOrchestrator:
         if logger_service is not None:
             task = asyncio.create_task(logger_service.log_user_message(text))
             self._history_tasks.add(task)
-            task.add_done_callback(self._history_tasks.discard)
+            if track_completion:
+                self._user_history_tasks[request_id] = task
+            task.add_done_callback(self._history_task_done)
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append({"role": "user", "content": text, "metadata": metadata})
@@ -285,16 +305,22 @@ class ACPOrchestrator:
             logger.exception("ACP Hub completion callback failed")
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
+        result: ACPResult | None = None
         try:
-            result: ACPResult = await admission.future
+            result = await admission.future
+            user_history = self._user_history_tasks.get(admission.request_id)
+            if user_history is not None:
+                await user_history
+            self._save_binding()
+            await self._record_result(result)
         except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
-            session_id = self._terminal_session_id
+            session_id = result.session_id if result is not None else self._terminal_session_id
             if session_id is None and self._runner is not None:
                 session_id = self._runner.session_id
             session_id = session_id or ""
-            generation = admission.generation
+            generation = result.generation if result is not None else admission.generation
             stop_reason = (
                 "cancelled"
                 if isinstance(exc, asyncio.CancelledError)
@@ -312,6 +338,7 @@ class ACPOrchestrator:
                 session_id=session_id, generation=generation,
                 turn_id=admission.turn_id, stop_reason=stop_reason,
                 input_source=admission.source, thread_id=admission.thread_id,
+                error=str(exc) or type(exc).__name__,
             )
             publish_semantic(
                 self.event_bus, "turn_end", **end_frame, hidden=True,
@@ -323,12 +350,14 @@ class ACPOrchestrator:
                 thread_id=admission.thread_id, source=admission.source,
                 text="", end_frame=end_frame, failed=True,
             )
+            self._flush_observations()
             return {"text": "", "session_id": session_id,
                     "generation": generation, "turn_id": admission.turn_id,
                     "request_id": admission.request_id,
                     "stop_reason": stop_reason, "end_frame": end_frame}
-        self._save_binding()
-        await self._record_result(result)
+        finally:
+            self._parents.pop(admission.request_id, None)
+            self._user_history_tasks.pop(admission.request_id, None)
         publish_semantic(
             self.event_bus, "turn_complete", request_id=result.request_id,
             session_id=result.session_id, generation=result.generation,
@@ -543,11 +572,19 @@ class ACPOrchestrator:
         self._closed = True
         close_error: BaseException | None = None
         runner = self._runner
-        self._save_binding()
+        try:
+            self._save_binding()
+        except BaseException as exc:
+            # A failed disk write must not leave the owned adapter running.
+            close_error = exc
         if self.hub_plugin is not None:
             runtime = getattr(self.hub_plugin, "_acp_hub_tools", None)
             if runtime is not None:
-                runtime.stop()
+                try:
+                    runtime.stop()
+                except BaseException as exc:
+                    if close_error is None:
+                        close_error = exc
         if runner is not None:
             self._terminal_session_id = getattr(runner, "session_id", None)
             try:
@@ -555,7 +592,10 @@ class ACPOrchestrator:
             except BaseException as exc:
                 # Cancellation must not skip process/binding cleanup.  Keep the
                 # original error for the caller after all owned resources settle.
-                close_error = exc
+                if close_error is None:
+                    close_error = exc
+                else:
+                    logger.warning("ACP runner teardown also failed (%s)", type(exc).__name__)
             finally:
                 self._runner = None
         if self._cancel_tasks:
