@@ -276,6 +276,19 @@ def _assistant_set_tool_result(tool_controller, result: Any) -> None:
         tool_controller.set_result(result)
 
 
+def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Preserve ACP vendor metadata while keeping native defaults stable."""
+    event_type = str(event.get("type") or "")
+    result: Dict[str, Any] = {
+        "decision": "approve" if event_type == "permission_granted" else "deny",
+        "scope": event.get("scope", "once"),
+    }
+    for key in ("option_id", "vendor_saved", "warning"):
+        if key in event:
+            result[key] = event[key]
+    return result
+
+
 def _assistant_set_usage(controller: Any, usage: Dict[str, Any]) -> None:
     """Publish usage without assuming a plain dict state.
 
@@ -932,19 +945,17 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     # else: adopted from the prior run; this run's wire stream
                     # never opened that call, so the state publish carries it.
                     publish_progress()
-                elif event_type == "permission_granted":
+                elif event_type in ("permission_granted", "permission_denied"):
                     source_tool_id = str(event.get("tool_id") or "")
+                    permission_result = _permission_result_from_event(event)
                     permission_part = assistant_tool_parts.get(
                         f"permission_{source_tool_id}"
                     )
                     if permission_part is not None:
                         permission_part.update(
                             {
-                                "result": {
-                                    "decision": "approve",
-                                    "scope": event.get("scope", "once"),
-                                },
-                                "isError": False,
+                                "result": permission_result,
+                                "isError": permission_result["decision"] == "deny",
                             }
                         )
                     permission_controller = permission_controllers.pop(
@@ -953,31 +964,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
-                            {
-                                "decision": "approve",
-                                "scope": event.get("scope", "once"),
-                            },
-                        )
-                    publish_progress()
-                elif event_type == "permission_denied":
-                    source_tool_id = str(event.get("tool_id") or "")
-                    permission_part = assistant_tool_parts.get(
-                        f"permission_{source_tool_id}"
-                    )
-                    if permission_part is not None:
-                        permission_part.update(
-                            {
-                                "result": {"decision": "deny"},
-                                "isError": True,
-                            }
-                        )
-                    permission_controller = permission_controllers.pop(
-                        source_tool_id, None
-                    )
-                    if permission_controller is not None:
-                        _assistant_set_tool_result(
-                            permission_controller,
-                            {"decision": "deny"},
+                            permission_result,
                         )
                     publish_progress()
                 elif event_type == "error":
