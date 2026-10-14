@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any
 
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 
 from .acp_bridge import (
@@ -256,7 +257,7 @@ class ACPOrchestrator:
             task.add_done_callback(self._history_task_done)
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
-            history.append({"role": "user", "content": text, "metadata": metadata})
+            history.append(ConversationMessage(role="user", content=text, metadata=metadata))
         display = getattr(llm, "message_display_service", None)
         if display is not None and source != "agent":
             display.display_user_message(text)
@@ -415,9 +416,11 @@ class ACPOrchestrator:
                 continue
             payload = update.get("payload") or {}
             tool_id = str(payload.get("toolCallId") or "")
+            previous = tools.get(tool_id, {}).get("metadata", {}).get("acp", {})
+            payload = {**previous, **{key: value for key, value in payload.items() if value is not None}}
             tools[tool_id] = {"id": tool_id, "name": payload.get("title") or payload.get("kind") or "Harness Tool",
-                "input": payload.get("rawInput") or {}, "status": payload.get("status"),
-                "result": payload.get("rawOutput") or payload.get("content"),
+                "input": payload.get("rawInput") if payload.get("rawInput") is not None else {}, "status": payload.get("status"),
+                "result": payload.get("rawOutput") if payload.get("rawOutput") is not None else payload.get("content"),
                 "is_error": payload.get("status") == "failed",
                 "metadata": {"acp": dict(payload)}}
         metadata["tool_calls"] = list(tools.values())
@@ -427,13 +430,13 @@ class ACPOrchestrator:
             manager.save_conversation()
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
-            history.append({"role": "assistant", "content": text or result.text, "metadata": metadata,
-                            "thinking": "".join(thoughts)})
+            history.append(ConversationMessage(role="assistant", content=text or result.text,
+                                               metadata=metadata, thinking="".join(thoughts)))
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
             await logger_service.log_assistant_message(text or result.text,
                 parent_uuid=self._parents.get(result.request_id, ""), model=self._profile_name,
-                thinking_content=thoughts, tool_calls=list(tools.values()))
+                thinking_content=thoughts, tool_calls=list(tools.values()), display_metadata=metadata)
         self._parents.pop(result.request_id, None)
 
     async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:

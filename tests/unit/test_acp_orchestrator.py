@@ -5,6 +5,10 @@ import pytest
 
 from kollabor.llm import acp_orchestrator as mod
 from kollabor_ai.profile_manager import LLMProfile
+from kollabor_ai.conversation_logger import KollaborConversationLogger
+from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_events.data_models import ConversationMessage
+from kollabor.state.local import LocalStateService
 from kollabor_tui.display_tap import DisplayTap
 
 
@@ -53,6 +57,76 @@ async def test_provider_refusal_keeps_one_correlated_terminal_and_rpc_code(monke
     assert terminals[0]["code"] == frames[0]["code"] == -32603
     assert "weekly limit" in terminals[0]["error"]
     await orchestrator.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason, tool_status", [("end_turn", "completed"), ("cancelled", "in_progress")])
+async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_and_merged_cards(tmp_path, stop_reason, tool_status):
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    history = []
+    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=history)
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    orchestrator._profile_name = "owned-harness"
+    state = LocalStateService(llm, None)
+    try:
+        orchestrator._record_user("owned-request", "Update the owned fixture", "rpc", None, track_completion=True)
+        await asyncio.gather(*orchestrator._history_tasks)
+        diff = {"type": "diff", "path": "owned_fixture.txt", "oldText": "old", "newText": "new"}
+        updates = (
+            {"kind": "text", "text": "Checking the fixture.\n"},
+            {"kind": "agent_thought_chunk", "payload": {"content": {"type": "text", "text": "Owned reasoning."}}},
+            {"kind": "tool_call", "payload": {
+                "toolCallId": "owned-card", "title": "Original title", "kind": "edit", "status": "in_progress",
+                "rawInput": {"path": "owned_fixture.txt"},
+            }},
+            {"kind": "tool_call_update", "payload": {
+                "toolCallId": "owned-card", "title": "Updated title", "status": tool_status,
+                "rawInput": None, "rawOutput": 0, "content": [diff],
+            }},
+            {"kind": "text", "text": "Turn ended."},
+        )
+        result = mod.ACPResult(1, "owned-session", "Turn ended.", stop_reason, updates, {}, 1, "owned-request", "rpc")
+        await orchestrator._record_result(result)
+        assert history is not manager.messages and all(isinstance(message, ConversationMessage) for message in history)
+        live = await state.get_conversation()
+        assert [message.role for message in live.messages] == ["user", "assistant"]
+        assert live.messages[0].content == "Update the owned fixture"
+        assert live.messages[1].content == "Checking the fixture.\nTurn ended."
+        assert all(message.timestamp for message in live.messages)
+        assert live.messages[1].thinking == "Owned reasoning."
+        metadata = live.messages[1].metadata
+        assert metadata["stop_reason"] == stop_reason
+        assert len(metadata["tool_calls"]) == 1
+        card = metadata["tool_calls"][0]
+        assert card["name"] == "Updated title" and card["input"] == {"path": "owned_fixture.txt"}
+        assert card["result"] == 0 and card["status"] == tool_status
+        assert card["metadata"]["acp"]["kind"] == "edit"
+        assert card["metadata"]["acp"]["content"] == [diff]
+
+        restored_manager = ConversationManager(configuration)
+        assert restored_manager.load_session(conversation_logger.session_id)
+        assistant = next(message for message in restored_manager.messages if message["role"] == "assistant")
+        assert set(assistant["metadata"]) == {"provider", "acp_updates", "tool_calls", "stop_reason"}
+        assert assistant["metadata"]["provider"] == "acp"
+        assert assistant["metadata"]["stop_reason"] == stop_reason
+        assert assistant["metadata"]["tool_calls"] == metadata["tool_calls"]
+        assert assistant["metadata"]["acp_updates"] == list(updates)
+        restored_history = [ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
+                            for message in restored_manager.messages]
+        restored = await LocalStateService(SimpleNamespace(conversation_history=restored_history,
+                                                          conversation_manager=restored_manager), None).get_conversation()
+        assert [message.role for message in restored.messages] == ["user", "assistant"]
+        assert restored.messages[1].content == live.messages[1].content
+        assert restored.messages[1].metadata["tool_calls"] == metadata["tool_calls"]
+    finally:
+        await orchestrator.close()
 
 
 class Tap:
