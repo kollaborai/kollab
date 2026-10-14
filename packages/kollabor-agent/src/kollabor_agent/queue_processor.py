@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -268,6 +269,12 @@ def _xml_tool_result_entry(result: Any, content: str) -> Dict[str, Any]:
     }
     if not result.success:
         entry["is_error"] = True
+    metadata = {
+        key: deepcopy(value) for key, value in (result.metadata or {}).items()
+        if key in {"diffs", "diff_info"} or key.startswith("tool_output_")
+    }
+    if metadata:
+        entry["metadata"] = metadata
     return entry
 
 
@@ -1711,18 +1718,9 @@ class QueueProcessor:
                     {"id": tc.id, "name": tc.name, "input": tc.input}
                     for tc in raw_tool_calls
                 ]
-            elif all_tools:
-                # XML tools: type/params format
-                tool_call_entries = [
-                    {
-                        "id": t.get("id", f"xml_{i}"),
-                        "name": t.get("type", "unknown"),
-                        "input": {
-                            k: v for k, v in t.items() if k not in ("type", "id")
-                        },
-                    }
-                    for i, t in enumerate(all_tools)
-                ]
+            if all_tools:
+                # Inline XML/plugin calls may run beside native calls.
+                tool_call_entries = [*(tool_call_entries or []), *_xml_tool_call_entries(all_tools)]
 
             # Log assistant response
             thinking_list = thinking_blocks if thinking_blocks else None
@@ -1784,11 +1782,13 @@ class QueueProcessor:
                 # so provider can reconstruct tool_result turns correctly
                 for result in native_results:
                     output_text = result.output if result.success else result.error
+                    result_entry = _xml_tool_result_entry(result, output_text)
                     await self.conversation_logger.log_system_message(
                         f"Executed {result.tool_type} ({result.tool_id}): {output_text}",
                         parent_uuid=parent_uuid,
                         subtype="tool_result",
                         tool_use_id=result.tool_id,
+                        tool_result=result_entry,
                     )
                     tool_calls_list = self.api_service.get_last_tool_calls()
                     for tc in tool_calls_list:
@@ -1812,13 +1812,7 @@ class QueueProcessor:
                                     # A failed call stays failed after a reload;
                                     # the web history reads this flag.
                                     **({} if result.success else {"is_error": True}),
-                                    **{
-                                        key: value
-                                        for key, value in (
-                                            result.metadata or {}
-                                        ).items()
-                                        if key.startswith("tool_output_")
-                                    },
+                                    **result_entry.get("metadata", {}),
                                 },
                             )
                             self.conversation_history.append(native_msg)
@@ -1838,19 +1832,17 @@ class QueueProcessor:
                     display_results = []
                     for result in history_results:
                         output = result.output if result.success else result.error
+                        tool_context = self.tool_executor.format_result_for_conversation(result)
+                        result_entry = _xml_tool_result_entry(result, tool_context)
                         await self.conversation_logger.log_system_message(
                             f"Executed {result.tool_type} ({result.tool_id}): {output}",
                             parent_uuid=parent_uuid,
                             subtype="tool_result",
                             tool_use_id=result.tool_id,
-                        )
-                        tool_context = (
-                            self.tool_executor.format_result_for_conversation(result)
+                            tool_result=result_entry,
                         )
                         batched.append(f"Tool result: {tool_context}")
-                        display_results.append(
-                            _xml_tool_result_entry(result, tool_context)
-                        )
+                        display_results.append(result_entry)
                         self._track_file_interaction(result)
                     if batched:
                         import uuid as _uuid
@@ -1897,19 +1889,17 @@ class QueueProcessor:
                     display_results = []
                     for result in history_results_xml:
                         output = result.output if result.success else result.error
+                        tool_context = self.tool_executor.format_result_for_conversation(result)
+                        result_entry = _xml_tool_result_entry(result, tool_context)
                         await self.conversation_logger.log_system_message(
                             f"Executed {result.tool_type} ({result.tool_id}): {output}",
                             parent_uuid=parent_uuid,
                             subtype="tool_result",
                             tool_use_id=result.tool_id,
-                        )
-                        tool_context = (
-                            self.tool_executor.format_result_for_conversation(result)
+                            tool_result=result_entry,
                         )
                         batched_tool_results.append(f"Tool result: {tool_context}")
-                        display_results.append(
-                            _xml_tool_result_entry(result, tool_context)
-                        )
+                        display_results.append(result_entry)
                         self._track_file_interaction(result)
                     if batched_tool_results:
                         import uuid as _uuid

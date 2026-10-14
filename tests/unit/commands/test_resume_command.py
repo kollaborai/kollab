@@ -34,6 +34,7 @@ async def test_daemon_resume_preserves_tool_voice_and_structured_message_data():
         messages=records,
         current_session_id="before",
         load_session=lambda _: True,
+        save_session=lambda _: True,
     )
     history = []
     llm = SimpleNamespace(conversation_manager=manager, conversation_history=history)
@@ -76,7 +77,8 @@ async def test_resumed_voice_turns_show_what_the_user_said():
     ]
     shown = [("user", "Can you hear me?")]
 
-    manager = SimpleNamespace(messages=records, current_session_id="a", load_session=lambda _: True)
+    manager = SimpleNamespace(messages=records, current_session_id="a", load_session=lambda _: True,
+                              save_session=lambda _: True)
     llm = SimpleNamespace(conversation_manager=manager, conversation_history=[])
     result = await LocalStateService(llm, None).resume_conversation("saved")
     assert [(m["role"], m["content"]) for m in result["messages"]] == shown

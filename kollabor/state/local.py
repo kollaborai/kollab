@@ -2995,7 +2995,7 @@ class LocalStateService(StateService):
             raise ValueError(f"failed to load session {session_id!r}")
 
         raw_messages = getattr(conv_mgr, "messages", None) or []
-        acp = self._event_bus.get_service("acp_orchestrator")
+        acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
 
         # Generate a fresh session id for the resumed conversation, then move the
         # session id across all three subsystems in lockstep (#26 cause B):
@@ -3024,8 +3024,7 @@ class LocalStateService(StateService):
             if api_service is not None and hasattr(api_service, "set_session_id"):
                 api_service.set_session_id(new_session_id)
         except Exception as e:
-            logger.debug(f"resume: session naming error: {e}")
-            new_session_id = session_id  # fall back to reused id
+            raise ValueError(f"failed to name resumed session: {e}") from e
 
         # Convert raw dicts to ConversationMessage objects.
         try:
@@ -3042,6 +3041,14 @@ class LocalStateService(StateService):
             role = str(msg.get("role", "user"))
             content = deepcopy(msg.get("content") or "")
             metadata = deepcopy(msg.get("metadata") or {})
+            if msg.get("tool_uses") and not metadata.get("tool_calls") and not metadata.get("xml_tool_calls"):
+                # JSONL loads text-only model history. Keep its logged calls
+                # for cards without fabricating provider-native tool calls.
+                metadata["xml_tool_calls"] = [
+                    {"id": tool.get("id"), "name": tool.get("name"),
+                     "input": deepcopy(tool.get("input", {}))}
+                    for tool in msg["tool_uses"] if isinstance(tool, dict)
+                ]
             loaded_messages.append(
                 ConversationMessage(
                     role=role,
@@ -3050,7 +3057,7 @@ class LocalStateService(StateService):
                     thinking=msg.get("thinking"),
                 )
             )
-            if role in ("user", "assistant") and shown != "":
+            if role in ("user", "assistant") and shown != "" and not metadata.get("tool_output_batch"):
                 visible = content if shown is None else shown
                 display_messages.append({"role": role, "content": visible})
 
@@ -3074,6 +3081,12 @@ class LocalStateService(StateService):
                 llm.session_stats["messages"] = len(loaded_messages)
             except Exception as e:
                 logger.debug(f"resume: session_stats update error: {e}")
+
+        # The ACP stable handle now points at this new native conversation ID.
+        # Persist its restored base before reporting success, so another
+        # process can reopen it even if no new prompt has run yet.
+        if not conv_mgr.save_session(new_session_id):
+            raise ValueError(f"failed to persist resumed session {new_session_id!r}")
 
         if acp is not None and acp.active:
             # Read the original harness binding, but open/save the continued

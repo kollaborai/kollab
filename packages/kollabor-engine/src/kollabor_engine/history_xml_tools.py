@@ -41,7 +41,12 @@ def _native_call(entry: Dict[str, Any], index: int) -> Dict[str, Any]:
 
 def _tool_row(entry: Dict[str, Any], index: int, timestamp: Any) -> Dict[str, Any]:
     """One role="tool" history row; the web UI puts it on its call's card."""
-    metadata: Dict[str, Any] = {"tool_call_id": str(entry.get("id") or f"xml_{index}")}
+    extra = entry.get("metadata")
+    metadata: Dict[str, Any] = dict(extra) if isinstance(extra, dict) else {}
+    metadata["tool_call_id"] = str(entry.get("id") or f"xml_{index}")
+    # The result's own status/timing override any incidental copied fields.
+    metadata.pop("is_error", None)
+    metadata.pop("tool_execution_time", None)
     if entry.get("is_error"):
         metadata["is_error"] = True
     if entry.get("tool_execution_time") is not None:
