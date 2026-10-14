@@ -1,4 +1,6 @@
 import asyncio
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -127,6 +129,197 @@ async def test_detached_history_snapshot_and_jsonl_restore_keep_typed_messages_a
         assert restored.messages[1].metadata["tool_calls"] == metadata["tool_calls"]
     finally:
         await orchestrator.close()
+
+
+INTERRUPTED_AGENT = r"""
+import asyncio, acp
+from pathlib import Path
+from acp.schema import (
+    AgentMessageChunk, InitializeResponse, NewSessionResponse,
+    PromptResponse, TextContentBlock, ToolCallStart, ToolCallProgress,
+)
+class Agent:
+    def on_connect(self, connection):
+        self.connection = connection
+        self.stopped = asyncio.Event()
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocolVersion=1)
+    async def new_session(self, cwd, **kwargs):
+        return NewSessionResponse(sessionId="owned-interrupted-session")
+    async def prompt(self, session_id, prompt, **kwargs):
+        text = "\n".join(getattr(block, "text", "") for block in prompt)
+        if "next turn" in text:
+            await self.connection.session_update(session_id, AgentMessageChunk(
+                sessionUpdate="agent_message_chunk",
+                content=TextContentBlock(type="text", text="Replacement turn only."),
+            ))
+            await self.connection.session_update(session_id, ToolCallStart(
+                sessionUpdate="tool_call", toolCallId="reused-card", title="Replacement fixture",
+                kind="read", status="pending", rawInput={"path": "next.txt"},
+            ))
+            return PromptResponse(stopReason="end_turn")
+        self.stopped.clear()
+        await self.connection.session_update(session_id, AgentMessageChunk(
+            sessionUpdate="agent_message_chunk",
+            content=TextContentBlock(type="text", text="Observed before interruption.\n"),
+        ))
+        await self.connection.session_update(session_id, ToolCallStart(
+            sessionUpdate="tool_call", toolCallId="reused-card", title="Original fixture",
+            kind="read", status="pending", rawInput={"path": "stopped.txt"},
+        ))
+        await self.connection.session_update(session_id, ToolCallProgress(
+            sessionUpdate="tool_call_update", toolCallId="reused-card",
+            title="Waiting fixture", status="in_progress",
+        ))
+        if "refusal" in text:
+            while not Path("release-refusal").exists():
+                await asyncio.sleep(0.01)
+            raise acp.RequestError(-32001, "Owned provider refusal")
+        await self.stopped.wait()
+        return PromptResponse(stopReason="cancelled")
+    async def cancel(self, session_id, **kwargs):
+        # These updates arrive after the admission future has been rejected.
+        await asyncio.sleep(0.05)
+        await self.connection.session_update(session_id, ToolCallProgress(
+            sessionUpdate="tool_call_update", toolCallId="reused-card",
+            title="Last reported fixture", status="in_progress",
+            content=[{"type": "content", "content": {"type": "text", "text": "Work remains pending."}}],
+        ))
+        self.stopped.set()
+asyncio.run(acp.run_agent(Agent()))
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["cancel", "forced-cancel", "refusal"])
+async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_replacement_updates(tmp_path, monkeypatch, scenario):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    (tmp_path / "home").mkdir()
+    profile = LLMProfile(name="owned-interrupted", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT),
+                         cwd=str(tmp_path), env={"HOME": str(tmp_path / "home")})
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit(scenario, request_id="stopped-request", source="rpc", thread_id="stopped-thread")
+        async with asyncio.timeout(5):
+            while not any(event.get("type") == "acp_update" and event.get("update", {}).get("title") == "Waiting fixture"
+                          for event in bus.services["display_tap"].events):
+                await asyncio.sleep(0.01)
+        stopped_generation = runner.generation
+        queued = orchestrator.admit("must not run", request_id="queued-cancel", source="rpc")
+        assert await orchestrator.cancel_request("queued-cancel") == {"cancelled": True, "queued": True}
+        with pytest.raises(asyncio.CancelledError):
+            await queued.future
+        # Reuse the tool id in a queued turn while cancellation is settling.
+        replacement = orchestrator.admit("next turn", request_id="next-request", source="rpc")
+        if scenario != "refusal":
+            if scenario == "forced-cancel":
+                runner.cancel_timeout = 0.01
+            assert orchestrator.prepare_cancel(session_id=runner.session_id, generation=stopped_generation)
+            await asyncio.wait_for(orchestrator.cancel(session_id=runner.session_id, generation=stopped_generation), 15)
+        else:
+            (tmp_path / "release-refusal").touch()
+        with pytest.raises(mod.ACPError):
+            await asyncio.wait_for(admission.future, 5)
+        await asyncio.wait_for(replacement.future, 10)
+        await asyncio.gather(*tuple(orchestrator._completion_tasks))
+        expected_reason = "error" if scenario == "refusal" else "cancelled"
+        snapshot = json.loads(json.dumps((await LocalStateService(llm, None).get_conversation()).to_dict()))
+        assistants = [message for message in snapshot["messages"] if message["role"] == "assistant"]
+        assert len(assistants) == 2
+        assert not any(message["metadata"].get("request_id") == "queued-cancel" for message in assistants)
+        stopped = next(message for message in assistants if message["metadata"]["request_id"] == "stopped-request")
+        next_turn = next(message for message in assistants if message["metadata"]["request_id"] == "next-request")
+        assert stopped["content"] == "Observed before interruption.\n"
+        assert stopped["metadata"]["stop_reason"] == expected_reason
+        card = stopped["metadata"]["tool_calls"][0]
+        assert card["input"] == {"path": "stopped.txt"} and card["status"] == "in_progress"
+        assert card["metadata"]["acp"]["kind"] == "read"
+        assert card["name"] == ("Last reported fixture" if scenario == "cancel" else "Waiting fixture")
+        if scenario == "cancel":
+            assert card["metadata"]["acp"]["content"][0]["content"]["text"] == "Work remains pending."
+        assert next_turn["content"] == "Replacement turn only."
+        assert next_turn["metadata"]["stop_reason"] == "end_turn"
+        assert next_turn["metadata"]["tool_calls"][0]["status"] == "pending"
+        assert all(update["request_id"] == "stopped-request" for update in stopped["metadata"]["acp_updates"])
+        terminal_events = [event for event in bus.services["display_tap"].events
+                           if event.get("request_id") == "stopped-request" and event.get("type") in {"turn_complete", "turn_end"}]
+        assert len(terminal_events) == 2
+        assert all(event["generation"] == stopped_generation for event in terminal_events)
+        assert all(event["thread_id"] == "stopped-thread" for event in terminal_events)
+        if scenario == "refusal":
+            assert all(event["code"] == -32001 for event in terminal_events)
+        assert not orchestrator._observed_turns
+
+        restored_manager = ConversationManager(configuration)
+        assert restored_manager.load_session(conversation_logger.session_id)
+        restored_history = [ConversationMessage(role=message["role"], content=message["content"], metadata=message["metadata"])
+                            for message in restored_manager.messages]
+        restored = await LocalStateService(SimpleNamespace(conversation_manager=restored_manager,
+                                                          conversation_history=restored_history), None).get_conversation()
+        restored_assistants = [message for message in restored.messages if message.role == "assistant"]
+        assert len(restored_assistants) == 2
+        restored_stopped = next(message for message in restored_assistants if message.metadata["stop_reason"] == expected_reason)
+        assert restored_stopped.content == stopped["content"]
+        assert restored_stopped.metadata["tool_calls"] == stopped["metadata"]["tool_calls"]
+        assert restored_stopped.metadata["acp_updates"] == stopped["metadata"]["acp_updates"]
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
+
+
+@pytest.mark.asyncio
+async def test_history_error_after_assistant_write_does_not_retry_or_duplicate_terminal(tmp_path, monkeypatch):
+    configuration = SimpleNamespace(_conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default)
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(conversation_manager=manager, conversation_logger=conversation_logger, conversation_history=[])
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    original_write = conversation_logger.log_assistant_message
+    writes = 0
+
+    async def fail_after_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        await original_write(*args, **kwargs)
+        raise OSError("Owned history write failed after append")
+
+    monkeypatch.setattr(conversation_logger, "log_assistant_message", fail_after_write)
+    profile = LLMProfile(name="owned-write", provider="acp", command=(sys.executable, "-c", INTERRUPTED_AGENT), cwd=str(tmp_path))
+    runner = None
+    try:
+        await orchestrator.start(profile)
+        runner = orchestrator.runner
+        admission = orchestrator.admit("next turn", request_id="write-request", source="rpc")
+        completion_tasks = tuple(orchestrator._completion_tasks)
+        await asyncio.wait_for(admission.future, 5)
+        completions = await asyncio.gather(*completion_tasks)
+        assert len(completions) == writes == 1
+        assert completions[0]["stop_reason"] == "error"
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        assert len([message for message in snapshot.messages if message.role == "assistant"]) == 1
+        restored = ConversationManager(configuration)
+        assert restored.load_session(conversation_logger.session_id)
+        assert len([message for message in restored.messages if message["role"] == "assistant"]) == 1
+        events = bus.services["display_tap"].events
+        assert len([event for event in events if event.get("type") == "turn_complete"]) == 1
+        assert len([event for event in events if event.get("type") == "turn_end"]) == 1
+        assert not orchestrator._observed_turns
+    finally:
+        await orchestrator.close()
+        if runner is not None:
+            assert not runner._live_owned_processes()
 
 
 class Tap:

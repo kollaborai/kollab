@@ -10,7 +10,8 @@ import inspect
 import logging
 import uuid
 from collections import deque
-from dataclasses import replace
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kollabor_ai.profile_manager import LLMProfile
@@ -28,6 +29,14 @@ from .acp_bridge import (
 from .acp_state import ACPBindingStore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _ObservedTurn:
+    session_id: str
+    generation: int
+    updates: list[dict[str, Any]] = field(default_factory=list)
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class ACPOrchestrator:
@@ -58,6 +67,7 @@ class ACPOrchestrator:
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
+        self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         from pathlib import Path
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
@@ -320,11 +330,24 @@ class ACPOrchestrator:
         except BaseException as exc:
             # Admission is immediately acknowledged, so every admitted request
             # must still receive one correlated terminal event on close/failure.
-            session_id = result.session_id if result is not None else self._terminal_session_id
+            observed = self._observed_turns.get((admission.request_id, admission.turn_id))
+            if (result is None and observed is not None and not observed.finished.is_set()
+                    and not isinstance(exc, asyncio.CancelledError)):
+                # Cancel rejects the admission before the SDK prompt settles.
+                # Retain updates through that prompt's own finish, without
+                # reading a replacement turn's shared runner buffer.
+                timeout = getattr(self._runner, "cancel_timeout", 30.0) + 15.0
+                try:
+                    await asyncio.wait_for(observed.finished.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("ACP stopped-turn history captured before prompt teardown settled")
+            session_id = (result.session_id if result is not None else
+                          observed.session_id if observed is not None else self._terminal_session_id)
             if session_id is None and self._runner is not None:
                 session_id = self._runner.session_id
             session_id = session_id or ""
-            generation = result.generation if result is not None else admission.generation
+            generation = (result.generation if result is not None else
+                          observed.generation if observed is not None else admission.generation)
             stop_reason = (
                 "cancelled"
                 if isinstance(exc, asyncio.CancelledError)
@@ -340,6 +363,25 @@ class ACPOrchestrator:
             error_code = getattr(exc, "code", None)
             if error_code is not None:
                 end_frame["code"] = error_code
+            if result is None and observed is not None and any(
+                update.get("kind") in {"text", "agent_thought_chunk", "tool_call", "tool_call_update"}
+                for update in observed.updates
+            ):
+                # An interrupted turn still owns its observed transcript. A
+                # failed write of a normal result is never retried here: that
+                # result may already have reached one history sink.
+                partial = ACPResult(
+                    generation, session_id, "", stop_reason,
+                    tuple(deepcopy(observed.updates)), dict(end_frame),
+                    admission.turn_id, admission.request_id, admission.source, admission.thread_id,
+                )
+                try:
+                    user_history = self._user_history_tasks.get(admission.request_id)
+                    if user_history is not None:
+                        await user_history
+                    await self._record_result(partial)
+                except BaseException as history_exc:
+                    logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
             if stop_reason == "error":
                 publish_semantic(
                     self.event_bus, "error", message=end_frame["error"], code=error_code,
@@ -373,6 +415,7 @@ class ACPOrchestrator:
         finally:
             self._parents.pop(admission.request_id, None)
             self._user_history_tasks.pop(admission.request_id, None)
+            self._observed_turns.pop((admission.request_id, admission.turn_id), None)
         publish_semantic(
             self.event_bus, "turn_complete", request_id=result.request_id,
             session_id=result.session_id, generation=result.generation,
@@ -450,6 +493,16 @@ class ACPOrchestrator:
 
     def _on_runner_update(self, update: dict[str, Any]) -> None:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
+        key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
+        if kind == "turn_start":
+            self._observed_turns[key] = _ObservedTurn(
+                str(getattr(self._runner, "session_id", None) or ""), int(update["generation"]),
+            )
+        elif observed := self._observed_turns.get(key):
+            if kind == "turn_finished":
+                observed.finished.set()
+            elif kind not in {"permission_request", "permission_resolved"}:
+                observed.updates.append(deepcopy(update))
         payload = update.get("payload") or {}
         llm = self.event_bus.get_service("llm_service")
         display = getattr(llm, "message_display_service", None)
