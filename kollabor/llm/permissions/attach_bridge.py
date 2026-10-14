@@ -30,6 +30,20 @@ def resolution_event(
     response: Any,
     details: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    """Resolve the offered choice without losing its explicit turn owner."""
+    event = _permission_resolution(tool_id, response, details)
+    if details:
+        for key in ("request_id", "turn_id", "input_source", "generation", "thread_id"):
+            if details.get(key) is not None:
+                event[key] = details[key]
+    return event
+
+
+def _permission_resolution(
+    tool_id: str,
+    response: Any,
+    details: dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Build the broadcast emitted when an attached prompt is resolved.
 
     ACP option IDs are opaque strings and must be resolved before native enum

@@ -1307,11 +1307,14 @@ class TerminalLLMChat:
             "waiting": True,
             "source": "acp",
             "approval_scope": "once",
+            "generation": request.generation,
         }
         active = getattr(getattr(self.acp_orchestrator, "runner", None), "_active_context", None)
         if active is not None:
             details["request_id"] = active.request_id
             details["turn_id"] = active.turn_id
+            details["input_source"] = active.source
+            details["thread_id"] = active.thread_id
         if request.display:
             details.update(request.display)
         try:
