@@ -1323,19 +1323,24 @@ class ACPRunner:
         for task in cancel_tasks:
             task.cancel()
         self._queue_release.set()
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if item is not None and not item.future.done():
-                item.future.set_exception(ACPError("ACP runner closed"))
+
+        def settle_queued() -> None:
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is not None and not item.future.done():
+                    item.future.set_exception(ACPError("ACP runner closed"))
+
+        settle_queued()
+        worker = self._worker
         # Wake an idle consumer without relying on cancellation of a Queue.get
         # waiter, which can remain pending under SDK callbacks.
-        self._queue.put_nowait(None)
+        if worker is not None and not worker.done():
+            self._queue.put_nowait(None)
         if self._active_future is not None and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP runner closed"))
-        worker = self._worker
         try:
             if worker is not None:
                 try:
@@ -1355,3 +1360,6 @@ class ACPRunner:
                     await asyncio.gather(*cancel_tasks, return_exceptions=True)
                 self._worker = None
                 self.session_id = None
+                # A cancelled consumer may never read its wake-up sentinel;
+                # admissions accepted before process close must also settle.
+                settle_queued()

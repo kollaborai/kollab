@@ -44,6 +44,113 @@ asyncio.run(acp.run_agent(Agent()))
     assert runner._connection is None
     assert not runner._live_owned_processes()
     await runner.close()
+    assert runner._queue.empty()
+    assert not runner.is_processing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_state", ["never_started", "finished"])
+async def test_close_without_queue_worker_releases_processing_and_is_repeatable(tmp_path, worker_state):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    if worker_state == "finished":
+        runner._worker = asyncio.create_task(asyncio.sleep(0))
+        await runner._worker
+
+    for _ in range(2):
+        await runner.close()
+        assert runner.state == "closed"
+        assert runner._worker is None
+        assert runner._queue.empty()
+        assert not runner.is_processing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["idle", "completed_turn", "concurrent_close"])
+async def test_close_after_started_worker_releases_queue_and_is_repeatable(tmp_path, stage):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)))
+    try:
+        await runner.start()
+        worker = runner._worker
+        if stage == "completed_turn":
+            assert (await runner.prompt("finish this turn")).text == "hello "
+        if stage == "concurrent_close":
+            await asyncio.gather(runner.close(), runner.close())
+        else:
+            await runner.close()
+        assert worker.done()
+        assert runner._queue.empty()
+        assert not runner.is_processing
+
+        await runner.close()
+        assert runner._queue.empty()
+        assert not runner.is_processing
+        assert runner._connection is None and runner._process is None
+        assert not runner._live_owned_processes()
+    finally:
+        await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_before_deadline", [True, False])
+async def test_close_settles_active_and_queued_owners_without_starting_more_turns(tmp_path, monkeypatch, release_before_deadline):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    dispatched = []
+
+    class Connection:
+        async def close(self):
+            pass
+
+    async def run_prompt(admission, generation):
+        dispatched.append(admission.request_id)
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(runner, "_run_prompt", run_prompt)
+    runner.session_id = "owned-session"
+    runner._connection = Connection()
+    runner._worker = asyncio.create_task(runner._drain_queue())
+    worker = runner._worker
+    first = runner.admit("active", request_id="active-request", source="hub", thread_id="active-thread")
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    waiting = runner.admit("waiting", request_id="waiting-request", source="state_rpc", thread_id="waiting-thread")
+    close = asyncio.create_task(runner.close())
+    try:
+        for admission in [first, waiting]:
+            with pytest.raises(ACPError, match="runner closed"):
+                await asyncio.wait_for(asyncio.shield(admission.future), timeout=1)
+        late = runner.admit("during close", request_id="late-request", source="hub", thread_id="late-thread")
+        if release_before_deadline:
+            release.set()
+        await asyncio.wait_for(close, timeout=4)
+        with pytest.raises(ACPError, match="runner closed"):
+            await asyncio.wait_for(asyncio.shield(late.future), timeout=1)
+        assert worker.done()
+        assert dispatched == ["active-request"]
+        assert first.thread_id == "active-thread" and waiting.thread_id == "waiting-thread"
+        assert runner._queue.empty()
+        assert not runner.is_processing
+    finally:
+        release.set()
+        await asyncio.gather(close, return_exceptions=True)
+        await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_close_settles_waiting_owners_when_consumer_is_held(tmp_path):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    runner.session_id = "owned-session"
+    runner._connection = SimpleNamespace(close=lambda: asyncio.sleep(0))
+    runner._queue_release.clear()
+    runner._worker = asyncio.create_task(runner._drain_queue())
+    waiting = [runner.admit(f"waiting-{i}", request_id=f"r{i}", source="hub") for i in range(2)]
+    await runner.close()
+    for admission in waiting:
+        with pytest.raises(ACPError, match="runner closed"):
+            await admission.future
+    assert runner._queue.empty()
+    assert not runner.is_processing
 
 
 @pytest.mark.asyncio
