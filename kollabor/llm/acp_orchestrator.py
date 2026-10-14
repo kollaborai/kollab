@@ -313,7 +313,12 @@ class ACPOrchestrator:
             finally:
                 self._runner = None
         if self._cancel_tasks:
-            await asyncio.gather(*tuple(self._cancel_tasks), return_exceptions=True)
+            pending = tuple(self._cancel_tasks)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._cancel_tasks.clear()
         if self._completion_tasks:
             await asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
         self._terminal_session_id = None
