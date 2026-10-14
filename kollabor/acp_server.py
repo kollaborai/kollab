@@ -369,10 +369,15 @@ class KollabACPAgent:
                    PermissionOption(optionId="deny", name="Deny Once", kind="reject_once")]
         if not session.attached:
             options.append(PermissionOption(optionId="session", name=f"Allow {event.get('tool_name') or 'this operation'} for this session", kind="allow_always"))
-        vendor_options = (event.get("details") or {}).get("acp_options") or []
-        if vendor_options:
+        details = event.get("details") or {}
+        vendor_options = details.get("acp_options") or []
+        vendor_request = details.get("source") == "acp" or "acp_options" in details
+        if vendor_request:
             options = [PermissionOption.model_validate(option) for option in vendor_options
                        if not session.attached or option.get("kind") not in {"allow_always", "reject_always"}]
+            if not options:
+                await session.engine.daemon.rpc.call("permission.respond", {"tool_id": tool_id, "control": "CANCEL"})
+                return
         try:
             response = await asyncio.wait_for(self.connection.request_permission(
                 session_id=session.id, tool_call=ToolCallUpdate(toolCallId=tool_id,
@@ -381,12 +386,13 @@ class KollabACPAgent:
             ), timeout=300)
             outcome = response.outcome
             selection = getattr(outcome, "optionId", None)
-            control = {"once": "APPROVE_ONCE", "deny": "DENY", "session": "APPROVE_SESSION"}.get(selection, "CANCEL")
-            if session.attached and control == "APPROVE_SESSION":
-                control = "CANCEL"
-            payload = {"tool_id": tool_id, "control": control}
-            if vendor_options and selection in {option.optionId for option in options}:
+            if selection not in {option.optionId for option in options}:
+                payload = {"tool_id": tool_id, "control": "CANCEL"}
+            elif vendor_request:
                 payload = {"tool_id": tool_id, "option_id": selection}
+            else:
+                control = {"once": "APPROVE_ONCE", "deny": "DENY", "session": "APPROVE_SESSION"}[selection]
+                payload = {"tool_id": tool_id, "control": control}
             await session.engine.daemon.rpc.call("permission.respond", payload)
         except asyncio.TimeoutError:
             await session.engine.daemon.rpc.call("permission.respond", {"tool_id": tool_id, "control": "DENY"})
