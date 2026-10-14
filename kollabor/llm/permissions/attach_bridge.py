@@ -69,6 +69,13 @@ def resolution_event(
                     }
                 return {"type": "permission_denied", "tool_id": tool_id}
 
+    if response is ConfirmationResponse.CANCEL:
+        return {
+            "type": "permission_denied",
+            "tool_id": tool_id,
+            "outcome": "cancelled",
+        }
+
     response_name = getattr(response, "name", None)
     scope = _GRANTED_SCOPES.get(response_name or str(response))
     if scope:

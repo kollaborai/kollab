@@ -764,6 +764,7 @@ class TerminalLLMChat:
                     tasks = {local_task, attach_task}
                     response = None
                     winner_task = None
+                    outer_cancelled = False
                     try:
                         while tasks and response is None:
                             done, tasks = await asyncio.wait(
@@ -793,7 +794,21 @@ class TerminalLLMChat:
                         # still registered, before canceling the local task.
                         if winner_task is attach_task:
                             self.renderer.layout_manager.cancel_permission_prompt()
+                    except asyncio.CancelledError:
+                        outer_cancelled = True
+                        raise
                     finally:
+                        if outer_cancelled and response is None:
+                            tap = self.event_bus.get_service("display_tap")
+                            if tap is not None:
+                                tap.publish(
+                                    resolution_event(
+                                        str(details.get("tool_id") or ""),
+                                        ConfirmationResponse.CANCEL,
+                                        details,
+                                    )
+                                )
+                            self.renderer.layout_manager.cancel_permission_prompt()
                         for pending in tasks:
                             pending.cancel()
                         if tasks:
