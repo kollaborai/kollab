@@ -29,6 +29,32 @@ async def test_real_runner_start_failure_keeps_actionable_admission_error(tmp_pa
         orchestrator.admit("cannot run", request_id="owned", source="rpc")
 
 
+@pytest.mark.asyncio
+async def test_provider_refusal_keeps_one_correlated_terminal_and_rpc_code(monkeypatch):
+    class RefusingRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(mod.ACPError("claude-code: You've hit your weekly limit", code=-32603))
+            return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
+    monkeypatch.setattr(mod, "ACPRunner", RefusingRunner)
+    bus = Bus()
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="claude-code", provider="acp", command=("owned",)))
+    admission = orchestrator.admit("request", request_id="quota-request", source="agent", thread_id="quota-thread")
+    with pytest.raises(mod.ACPError):
+        await admission.future
+    await asyncio.gather(*orchestrator._completion_tasks)
+    events = bus.services["display_tap"].events
+    terminals = [event for event in events if event.get("type") == "turn_complete"]
+    frames = [event for event in events if event.get("type") == "turn_end"]
+    assert len(terminals) == len(frames) == 1
+    assert terminals[0]["request_id"] == frames[0]["request_id"] == "quota-request"
+    assert terminals[0]["thread_id"] == frames[0]["thread_id"] == "quota-thread"
+    assert terminals[0]["code"] == frames[0]["code"] == -32603
+    assert "weekly limit" in terminals[0]["error"]
+    await orchestrator.close()
+
+
 class Tap:
     def __init__(self):
         self.events = []

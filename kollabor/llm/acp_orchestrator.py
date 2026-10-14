@@ -336,9 +336,12 @@ class ACPOrchestrator:
                 "stopReason": stop_reason, "error": str(exc) or type(exc).__name__,
                 "outcome": "failed",
             }
+            error_code = getattr(exc, "code", None)
+            if error_code is not None:
+                end_frame["code"] = error_code
             if stop_reason == "error":
                 publish_semantic(
-                    self.event_bus, "error", message=end_frame["error"],
+                    self.event_bus, "error", message=end_frame["error"], code=error_code,
                     request_id=admission.request_id, turn_id=admission.turn_id,
                     session_id=session_id, generation=generation,
                     input_source=admission.source, thread_id=admission.thread_id,
@@ -349,6 +352,7 @@ class ACPOrchestrator:
                 turn_id=admission.turn_id, stop_reason=stop_reason,
                 input_source=admission.source, thread_id=admission.thread_id,
                 error=str(exc) or type(exc).__name__,
+                code=error_code,
             )
             publish_semantic(
                 self.event_bus, "turn_end", **end_frame, hidden=True,

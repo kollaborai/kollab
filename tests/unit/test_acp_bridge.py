@@ -1,12 +1,100 @@
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
+import acp
 from acp.schema import PermissionOption, ToolCallStart
 
 from kollabor.llm import acp_bridge as bridge_mod
 from kollabor.llm.acp_bridge import ACPError, ACPPermissionBridge, ACPProfile, ACPRunner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message, login_guidance", [
+    ("Authentication required", True),
+    ("This client is no longer supported for Gemini Code Assist for individuals", False),
+    ("You've hit your weekly limit", False),
+])
+async def test_startup_refusal_preserves_public_message_code_and_cleans_process(tmp_path, message, login_guidance):
+    adapter = """
+import asyncio
+import acp
+from acp.schema import InitializeResponse
+class Agent:
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocolVersion=1)
+    async def new_session(self, cwd, **kwargs):
+        raise acp.RequestError(-32000, REFUSAL_MESSAGE)
+    def on_connect(self, conn):
+        pass
+asyncio.run(acp.run_agent(Agent()))
+""".replace("REFUSAL_MESSAGE", repr(message))
+    runner = ACPRunner(ACPProfile("codex-cli", (sys.executable, "-c", adapter), cwd=str(tmp_path)))
+    with pytest.raises(ACPError) as caught:
+        await runner.start()
+    assert caught.value.code == -32000
+    assert message in str(caught.value)
+    assert ("Run codex login" in str(caught.value)) is login_guidance
+    assert runner._connection is None
+    assert not runner._live_owned_processes()
+    await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code, rpc_message, streamed, expected", [
+    (-32603, "Internal error", "You've hit your weekly limit · resets 5am (America/Phoenix)", "weekly limit"),
+    (-32000, "Authentication required", "Failed to authenticate: OAuth session expired", "OAuth session expired"),
+    (-32001, "Provider quota exhausted", "", "Provider quota exhausted"),
+    (-32603, "Internal error", "Checking the limit of this function", "Internal error"),
+])
+async def test_provider_refusal_preserves_message_code_without_false_crash(tmp_path, code, rpc_message, streamed, expected):
+    runner = ACPRunner(ACPProfile.builtin("claude-code", cwd=str(tmp_path)))
+    runner.session_id = "owned-session"
+    runner.generation = 1
+    runner._process = SimpleNamespace(returncode=None)
+    runner.last_stderr = "[session/create] sessionId=irrelevant-session phase=register"
+
+    class Connection:
+        async def prompt(self, **kwargs):
+            if streamed:
+                runner._updates.append({"kind": "text", "text": streamed})
+            raise acp.RequestError(code, rpc_message, {"credentials": "must-not-be-displayed"})
+
+    runner._connection = Connection()
+    future = asyncio.get_running_loop().create_future()
+    admission = bridge_mod.ACPAdmission("request", "hub", "thread", 1, 1, "prompt", future)
+    with pytest.raises(ACPError) as caught:
+        await runner._run_prompt(admission, 1)
+    assert caught.value.code == code
+    assert expected in str(caught.value)
+    assert "irrelevant-session" not in str(caught.value)
+    assert "must-not-be-displayed" not in str(caught.value)
+    assert "stopped mid-change" not in str(caught.value)
+    assert runner._process.returncode is None
+    if code == -32000:
+        assert "Run claude" in str(caught.value)
+    future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_non_rpc_failure_warns_about_interrupted_work_only_after_process_exit(tmp_path):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    runner.session_id = "s1"
+    runner.generation = 1
+    class Connection:
+        async def prompt(self, **kwargs):
+            raise ConnectionError("stream disconnected")
+    runner._connection = Connection()
+    for returncode in (None, 1):
+        runner._process = SimpleNamespace(returncode=returncode)
+        future = asyncio.get_running_loop().create_future()
+        admission = bridge_mod.ACPAdmission("request", "rpc", None, 1, 1, "prompt", future)
+        with pytest.raises(ACPError) as caught:
+            await runner._run_prompt(admission, 1)
+        assert ("stopped mid-change" in str(caught.value)) is (returncode is not None)
+        future.cancel()
 
 STUBBORN_ADAPTER = """
 import asyncio

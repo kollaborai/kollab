@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,6 +24,10 @@ from kollabor.version import __version__
 
 class ACPError(RuntimeError):
     """A protocol, lifecycle, or adapter error."""
+
+    def __init__(self, message: str, *, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -506,6 +511,31 @@ class ACPRunner:
             await self.lifecycle_callback("ready", self)
         return self.session_id
 
+    def _request_error(self, exc: acp.RequestError, updates: list[dict[str, Any]] | None = None) -> ACPError:
+        """Keep a public provider refusal without opaque data or stale stderr."""
+        auth_hints = (
+            "authenticate", "authentication", "oauth", "session expired", "not logged in",
+            "please log in", "please sign in", "invalid credentials", "unauthorized",
+            "unauthenticated", "invalid api key", "credentials missing", "requires login",
+        )
+        refusal_hints = (
+            "weekly limit", "daily limit", "monthly limit", "rate limit", "usage limit",
+            "quota exceeded", "quota exhausted", "quota limit", "insufficient quota",
+            "too many requests", *auth_hints,
+        )
+        message = str(exc).strip() or "Harness request failed"
+        streamed = self._select_answer(updates or []).strip()
+        if (
+            message.lower() in {"internal error", "authentication required", "request failed"}
+            and any(hint in streamed.lower() for hint in refusal_hints)
+        ):
+            message = streamed
+        message = re.sub(r"\bsk-[A-Za-z0-9_*-]{8,}", "[redacted]", message)
+        message = re.sub(r"(?i)\b(bearer|(?:access_)?token[=:])\s*\S+", r"\1 [redacted]", message)
+        if exc.code == -32000 and any(hint in message.lower() for hint in auth_hints):
+            message += " " + self.profile.LOGIN_GUIDANCE.get(self.profile.name, "Log in using this harness's CLI.")
+        return ACPError(f"{self.profile.name}: {message[:2000]}", code=exc.code)
+
     async def start(self, binding: ACPBinding | None = None) -> str:
         self._closing = False
         self._resume_binding = binding
@@ -514,8 +544,8 @@ class ACPRunner:
         except BaseException as exc:
             self.state = "failed"
             await self._terminate_process()
-            if getattr(exc, "code", None) == -32000:
-                raise ACPError(f"{self.profile.name}: authentication required. " + self.profile.LOGIN_GUIDANCE.get(self.profile.name, "Log in using this harness's CLI.")) from exc
+            if isinstance(exc, acp.RequestError):
+                raise self._request_error(exc) from exc
             raise
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._drain_queue())
@@ -729,9 +759,12 @@ class ACPRunner:
             )
         except Exception as exc:
             exit_code = getattr(self._process, "returncode", None)
-            line = f"{self.profile.name}: harness failed ({type(exc).__name__}, exit={exit_code}); it may have stopped mid-change"
-            if self.last_stderr:
-                line += ": " + self.last_stderr
+            if isinstance(exc, acp.RequestError):
+                raise self._request_error(exc, self._updates) from exc
+            if exit_code is not None:
+                line = f"{self.profile.name}: harness exited ({type(exc).__name__}, exit={exit_code}); it may have stopped mid-change"
+            else:
+                line = f"{self.profile.name}: harness request failed ({type(exc).__name__})"
             raise ACPError(line) from exc
         finally:
             if self.update_callback is not None:
