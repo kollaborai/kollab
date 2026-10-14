@@ -130,3 +130,39 @@ async def test_system_info_round_trip_reads_current_startup_state():
     status[:] = ["failed", "Adapter executable not found"]
     failed = SystemInfoSnapshot.from_dict((await state.get_system_info()).to_dict())
     assert (failed.startup_state, failed.startup_error) == tuple(status)
+
+
+@pytest.mark.asyncio
+async def test_named_profile_uses_daemon_provider_and_waits_for_adapter(monkeypatch):
+    from kollabor.state.snapshots import ProfileSnapshot
+
+    ready = asyncio.Event()
+    queried = asyncio.Event()
+    events = asyncio.Queue()
+
+    async def info():
+        queried.set()
+        return SystemInfoSnapshot(startup_state="ready" if ready.is_set() else "starting")
+
+    profile = ProfileSnapshot(name="workspace-profile", provider="acp")
+    daemon = SimpleNamespace(alive=True, startup_error="", state=SimpleNamespace(
+        get_active_profile=AsyncMock(return_value=profile),
+        get_system_info=info,
+        get_conversation=AsyncMock(return_value=SimpleNamespace(messages=[], anchor="")),
+    ), subscribe=lambda: events, unsubscribe=lambda queue: None)
+    pool = SimpleNamespace(spawn=AsyncMock(return_value=daemon), stop=AsyncMock())
+    monkeypatch.setattr(session_module, "get_daemon_pool", lambda: pool)
+    session = EngineSession("named-acp", "workspace-profile", approval_mode="")
+    initializing = asyncio.create_task(session.initialize())
+    try:
+        await asyncio.wait_for(queried.wait(), 1)
+        assert not initializing.done()
+        assert session.profile is profile
+        ready.set()
+        await asyncio.wait_for(initializing, 1)
+        daemon.state.get_active_profile.assert_awaited_once()
+    finally:
+        if not initializing.done():
+            initializing.cancel()
+        await asyncio.gather(initializing, return_exceptions=True)
+        await session.shutdown()

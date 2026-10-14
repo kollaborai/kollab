@@ -231,6 +231,12 @@ class EngineSession:
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
         )
+        if isinstance(self.profile, str):
+            # Inbound clients pass a portable profile name. The daemon loads
+            # it in the requested workspace, whose config can differ from the
+            # engine's cwd; read that authoritative provider before admission.
+            self.profile = await self.state.get_active_profile()
+            is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
         if is_acp:
             await self._await_acp_startup()
 
