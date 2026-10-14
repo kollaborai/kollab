@@ -573,14 +573,22 @@ class PermissionManager:
 
             if approvals_file.exists():
                 data = json.loads(approvals_file.read_text(encoding="utf-8"))
-                self._project_approvals = set(data.get("approved_keys", []))
-                self._acp_project_grants = set(data.get("acp_grants", []))
+                # Authorization sets are independent from display metadata:
+                # malformed metadata must never discard valid grant keys.
+                raw_native = data.get("approved_keys", [])
+                self._project_approvals = {
+                    str(key) for key in raw_native if isinstance(key, (str, int, float))
+                } if isinstance(raw_native, (list, tuple, set)) else set()
+                raw_acp = data.get("acp_grants", [])
+                self._acp_project_grants = {
+                    str(key) for key in raw_acp if isinstance(key, str) and key.startswith("acp:")
+                } if isinstance(raw_acp, (list, tuple, set)) else set()
                 raw_metadata = data.get("acp_grant_metadata", {})
                 self._acp_project_grant_metadata = {
                     str(key): dict(value)
                     for key, value in raw_metadata.items()
                     if isinstance(value, dict)
-                }
+                } if isinstance(raw_metadata, dict) else {}
                 logger.info(
                     f"Loaded {len(self._project_approvals)} project approvals from {approvals_file}"
                 )
@@ -717,14 +725,34 @@ class PermissionManager:
             ("project", self._acp_project_grants, self._acp_project_grant_metadata),
         ):
             for key in sorted(keys):
-                record = dict(metadata.get(key, {}))
-                record.setdefault("grant_key", key)
-                record.setdefault("scope", scope)
-                record.setdefault("source", "kollab")
-                record.setdefault("operation", None)
-                record.setdefault("workspace", None)
-                record.setdefault("profile", None)
-                records.append(record)
+                stored = metadata.get(key)
+                operation = workspace = profile = None
+                if isinstance(stored, dict):
+                    candidate_operation = stored.get("operation")
+                    candidate_workspace = stored.get("workspace")
+                    candidate_profile = stored.get("profile")
+                    try:
+                        candidate_workspace = str(Path(candidate_workspace).expanduser().resolve())
+                        candidate_profile = str(candidate_profile)
+                        expected = self.acp_grant_key(
+                            candidate_operation, candidate_workspace, candidate_profile
+                        )
+                        if expected == key:
+                            # JSON round-trip prevents exposing mutable/internal aliases.
+                            operation = json.loads(json.dumps(candidate_operation, sort_keys=True))
+                            workspace = candidate_workspace
+                            profile = candidate_profile
+                    except (TypeError, ValueError, OSError, json.JSONDecodeError):
+                        pass
+                # Identity, scope, and source derive from the authoritative set.
+                records.append({
+                    "grant_key": key,
+                    "operation": operation,
+                    "workspace": workspace,
+                    "profile": profile,
+                    "scope": scope,
+                    "source": "kollab",
+                })
         return records
 
     def clear_acp_grants(self, *, scope: str | None = None) -> None:

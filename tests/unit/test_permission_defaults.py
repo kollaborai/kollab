@@ -158,3 +158,43 @@ def test_vendor_saved_choices_are_not_inventory_producer(tmp_path, monkeypatch):
     manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
     assert manager.get_acp_grant_inventory() == []
     assert not manager.has_acp_grant(vendor_operation, str(tmp_path), "vendor")
+
+
+def test_malformed_and_forged_metadata_never_changes_authorization_or_identity(tmp_path, monkeypatch):
+    from kollabor_config import config_utils
+    import json
+
+    monkeypatch.setattr(config_utils, "get_project_data_dir", lambda: tmp_path)
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    operation = {"kind": "execute", "command": ["echo", "safe"]}
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    key = manager.grant_acp(operation, str(tmp_path), "profile-a", scope="project")
+    data = json.loads((tmp_path / "permission_approvals.json").read_text())
+    data["approved_keys"].append("native:keep")
+    data["acp_grant_metadata"] = ["garbage"]
+    (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
+    restored = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    assert restored.has_acp_grant(operation, str(tmp_path), "profile-a")
+    assert restored.get_project_approvals() == ["native:keep"]
+    assert restored.get_acp_grant_inventory()[0]["operation"] is None
+    data["acp_grant_metadata"] = {key: "not-a-record", "garbage": 42}
+    (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
+    non_dict = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    assert non_dict.get_acp_grant_inventory()[0]["operation"] is None
+
+    data["acp_grant_metadata"] = {key: {
+        "grant_key": "acp:forged", "scope": "session", "source": "vendor",
+        "operation": operation, "workspace": str(tmp_path), "profile": "profile-a",
+    }}
+    (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
+    forged = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    row = forged.get_acp_grant_inventory()[0]
+    assert row["grant_key"] == key
+    assert row["scope"] == "project"
+    assert row["source"] == "kollab"
+    assert row["operation"] == operation
+
+    data["acp_grant_metadata"][key]["profile"] = "other-profile"
+    (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
+    mismatched = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    assert mismatched.get_acp_grant_inventory()[0]["operation"] is None
