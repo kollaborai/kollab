@@ -526,8 +526,11 @@ class DaemonPool:
                             if time.monotonic() >= deadline:
                                 raise
                             await asyncio.sleep(0.25)
-                except Exception:
-                    await handle.close()
+                except BaseException:
+                    try:
+                        await handle.close()
+                    except BaseException as cleanup_error:
+                        logger.warning("failed daemon startup cleanup (%s)", type(cleanup_error).__name__)
                     raise
 
                 self._daemons[session_id] = handle
@@ -551,8 +554,11 @@ class DaemonPool:
             handle.agent_name = str(found.get("agent") or "")
             try:
                 await handle.connect(str(found.get("socket_path") or ""))
-            except Exception:
-                await handle.close()
+            except BaseException:
+                try:
+                    await handle.close()
+                except BaseException as cleanup_error:
+                    logger.warning("failed daemon attach cleanup (%s)", type(cleanup_error).__name__)
                 raise
             self._daemons[session_id] = handle
             return handle

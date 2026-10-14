@@ -161,6 +161,7 @@ class EngineSession:
         self.device = ""
 
         self.daemon: Optional[DaemonHandle] = None
+        self._borrowed_daemon = False
 
         # Mirror of the daemon's conversation. The daemon is the source of
         # truth; this is refreshed on demand so synchronous readers (to_dict,
@@ -272,17 +273,26 @@ class EngineSession:
         if found.get("created_at"):
             started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
             session.created_at = started.replace(tzinfo=None)
-        session.daemon = await get_daemon_pool().adopt(session_id, found)
-        # Read in the background: a busy agent, or one on another computer whose
-        # replies queue behind its live events, answers late, and opening it must
-        # not wait on that. Its row fills in once it does.
-        session._facts_task = asyncio.create_task(
-            session._read_agent_facts(), name=f"session-facts-{session_id}"
-        )
-        session._event_task = asyncio.create_task(
-            session._track_events(), name=f"session-track-{session_id}"
-        )
-        await session.refresh_history()
+        try:
+            session.daemon = await get_daemon_pool().adopt(session_id, found)
+            # An existing pool-owned handle belongs to its original session;
+            # this attached view only owns its own subscriptions/tasks.
+            session._borrowed_daemon = session.daemon.launcher is not None
+            # Read in the background so opening a busy agent stays prompt.
+            session._facts_task = asyncio.create_task(
+                session._read_agent_facts(), name=f"session-facts-{session_id}"
+            )
+            session._event_task = asyncio.create_task(
+                session._track_events(), name=f"session-track-{session_id}"
+            )
+            await session.refresh_history()
+        except BaseException:
+            if session.daemon is not None:
+                try:
+                    await session.shutdown()
+                except BaseException as cleanup_error:
+                    logger.warning("adopted session cleanup failed (%s)", type(cleanup_error).__name__)
+            raise
         return session
 
     async def _read_agent_facts(self) -> None:
@@ -310,7 +320,8 @@ class EngineSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-        await get_daemon_pool().stop(self.session_id)
+        if not self._borrowed_daemon:
+            await get_daemon_pool().stop(self.session_id)
         self.daemon = None
 
     # === daemon access ===
