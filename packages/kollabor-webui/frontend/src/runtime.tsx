@@ -124,6 +124,7 @@ function historyToMessages(
     argsText: string;
     result?: unknown;
     isError?: boolean;
+    isPreliminary?: boolean;
     timing?: { startedAt: number; completedAt: number };
   };
 
@@ -162,6 +163,21 @@ function historyToMessages(
     const metadata = asRecord(message.metadata);
     const rawCalls = metadata?.tool_calls;
     if (!Array.isArray(rawCalls)) return [];
+    const harnessCards = new Map<string, Record<string, unknown>>();
+    const updates = metadata?.acp_updates;
+    if (Array.isArray(updates)) {
+      for (const rawUpdate of updates) {
+        const update = asRecord(rawUpdate);
+        if (update?.kind !== "tool_call" && update?.kind !== "tool_call_update") continue;
+        const payload = asRecord(update.payload);
+        const id = asString(payload?.toolCallId) || asString(payload?.tool_call_id);
+        if (!id || !payload) continue;
+        harnessCards.set(id, {
+          ...harnessCards.get(id),
+          ...Object.fromEntries(Object.entries(payload).filter(([, value]) => value != null)),
+        });
+      }
+    }
 
     return rawCalls.flatMap((rawCall, callIndex) => {
       const call = asRecord(rawCall);
@@ -171,19 +187,38 @@ function historyToMessages(
         asString(call.id) ||
         asString(call.tool_call_id) ||
         `history-${sourceIndex}-tool-${callIndex}`;
-      const toolName =
+      const storedResult = asRecord(call.result);
+      const harness: Record<string, unknown> | null =
+        asRecord(asRecord(call.metadata)?.acp) ||
+        asRecord(asRecord(storedResult?.metadata)?.acp) ||
+        harnessCards.get(toolCallId) ||
+        (metadata?.provider === "acp" ? {
+          toolCallId,
+          title: call.name,
+          status: call.status,
+          rawInput: call.input,
+          rawOutput: call.result,
+        } : null);
+      // Vendor titles are display text, never native tool-UI routing names.
+      const toolName = harness ? "harness_tool" :
         asString(functionValue?.name) ||
         asString(call.name) ||
         asString(call.tool_name) ||
         "tool";
       const rawArguments =
         functionValue?.arguments ?? call.arguments ?? call.input ?? call.args;
-      const { args, argsText } = parseArguments(rawArguments ?? {});
+      const { args, argsText } = parseArguments(harness?.rawInput ?? rawArguments ?? {});
+      const result = harness ? {
+        success: harness.status !== "failed",
+        output: harness.rawOutput ?? storedResult?.output ?? call.result ?? harness.content ?? "",
+        metadata: { acp: harness },
+      } : call.result;
       return [{
         type: "tool-call",
         toolCallId,
         toolName,
-        ...(call.result !== undefined ? { result: call.result, isError: Boolean(call.is_error) } : {}),
+        ...(result !== undefined ? { result, isError: harness?.status === "failed" || Boolean(call.is_error) } : {}),
+        ...(harness ? { isPreliminary: harness.status !== "completed" && harness.status !== "failed" } : {}),
         args,
         argsText,
       }];

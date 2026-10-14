@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { formatContent } from "@/utils/format-content";
-import { summarizeToolCall } from "@/utils/tool-summary";
+import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
 const ANIMATION_DURATION = 200;
@@ -131,17 +131,35 @@ function ToolFallbackDuration({
 /** A reloaded failure is the tool message's text, which opens with "Error: ". */
 const stripErrorPrefix = (text: string) => text.replace(/^(\s*error:\s*)+/i, "");
 
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+
+const harnessCard = (result: unknown) =>
+  asRecord(asRecord(asRecord(result)?.metadata)?.acp);
+
+const harnessStatusLabels: Record<string, string> = {
+  pending: "Pending",
+  in_progress: "Running",
+  completed: "Completed",
+  failed: "Failed",
+};
+
 /**
  * First line of a failed call's error. A live result is `{error, output, ...}`;
  * a reloaded one is the tool message's text.
  */
 export const toolErrorLine = (result: unknown): string => {
-  const record =
-    result && typeof result === "object"
-      ? (result as Record<string, unknown>)
-      : undefined;
+  const record = asRecord(result);
+  const card = harnessCard(result);
+  const content = Array.isArray(card?.content) ? card.content : [];
+  const textBlock = content.find((value) =>
+    typeof asRecord(asRecord(value)?.content)?.text === "string",
+  );
   const raw =
-    typeof result === "string" ? result : record?.error || record?.output;
+    typeof result === "string" ? result :
+      record?.error || asRecord(asRecord(textBlock)?.content)?.text || record?.output;
   const text = typeof raw === "string" ? stripErrorPrefix(raw).trim() : "";
   return text.split(/\r?\n/, 1)[0] || "Tool call failed";
 };
@@ -152,6 +170,8 @@ function ToolFallbackTrigger({
   status,
   isError,
   errorLine,
+  displayTitle,
+  detail,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
@@ -161,6 +181,8 @@ function ToolFallbackTrigger({
   /** The call finished with an error result: red icon plus `errorLine`. */
   isError?: boolean;
   errorLine?: string;
+  displayTitle?: string;
+  detail?: string;
 }) {
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
@@ -170,7 +192,7 @@ function ToolFallbackTrigger({
 
   const Icon = isFailed ? XCircleIcon : statusIconMap[statusType];
   const label = isCancelled ? "Cancelled: " : "";
-  const summary = summarizeToolCall(toolName, argsText);
+  const summary = displayTitle ?? summarizeToolCall(toolName, argsText);
 
   return (
     <CollapsibleTrigger
@@ -201,6 +223,11 @@ function ToolFallbackTrigger({
           {label}
           <span className="font-medium text-foreground/90">{summary}</span>
         </span>
+        {detail && (
+          <span data-slot="tool-fallback-trigger-status" className="block truncate text-xs">
+            {detail}
+          </span>
+        )}
         {isFailed && (
           <span
             data-slot="tool-fallback-trigger-error"
@@ -285,7 +312,7 @@ function ToolFallbackArgs({
       className={cn("aui-tool-fallback-args", className)}
       {...props}
     >
-      <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 rounded-md p-2.5 text-xs whitespace-pre-wrap">
+      <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
         {formatContent(argsText)}
       </pre>
     </div>
@@ -302,6 +329,12 @@ function ToolFallbackResult({
   isError?: boolean;
 }) {
   if (result === undefined) return null;
+  const card = harnessCard(result);
+  // Typed card content can include a diff beside rawOutput. Keep that richer
+  // representation intact instead of flattening the result envelope to JSON.
+  const content = Array.isArray(card?.content) ? card.content : [];
+  const output = card?.rawOutput ?? asRecord(result)?.output;
+  if (card && !content.length && (output === undefined || output === null || output === "")) return null;
 
   return (
     <div
@@ -315,15 +348,47 @@ function ToolFallbackResult({
           isError ? "text-destructive" : "text-muted-foreground",
         )}
       >
-        {isError ? "Error:" : "Result:"}
+        {isError ? "Error:" : card ? "Output:" : "Result:"}
       </p>
-      <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
+      {card && content.length > 0 ? content.map((value, index) => {
+        const block = asRecord(value);
+        const nested = asRecord(block?.content);
+        if (block?.type === "content" && nested?.type === "text" && typeof nested.text === "string") {
+          return (
+            <pre key={index} className="bg-muted/50 text-foreground/90 mt-1 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+              {nested.text}
+            </pre>
+          );
+        }
+        if (block?.type === "diff" && typeof block.newText === "string") {
+          return (
+            <div key={index} data-slot="tool-fallback-diff" className="mt-1 min-w-0 max-w-full space-y-1">
+              {typeof block.path === "string" && (
+                <p className="text-muted-foreground truncate text-xs" title={block.path}>{block.path}</p>
+              )}
+              {typeof block.oldText === "string" && (
+                <div>
+                  <p className="text-muted-foreground text-xs">Before</p>
+                  <pre className="bg-destructive/10 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">{block.oldText}</pre>
+                </div>
+              )}
+              <div>
+                <p className="text-muted-foreground text-xs">After</p>
+                <pre className="bg-emerald-500/10 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">{block.newText}</pre>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <pre key={index} className="bg-muted/50 text-foreground/90 mt-1 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">{formatContent(value)}</pre>
+        );
+      }) : <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
         {formatContent(
-          isError && typeof result === "string"
+          card ? output : isError && typeof result === "string"
             ? stripErrorPrefix(result)
             : result,
         )}
-      </pre>
+      </pre>}
     </div>
   );
 }
@@ -591,6 +656,17 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   approval,
   respondToApproval,
 }) => {
+  const card = harnessCard(result);
+  const kind = typeof card?.kind === "string" ? humanizeToolName(card.kind) : undefined;
+  const cardStatus = typeof card?.status === "string" ? card.status : undefined;
+  const displayStatus: ToolCallMessagePartStatus | undefined =
+    status?.type === "incomplete" ? status :
+      cardStatus === "completed" || cardStatus === "failed" ? { type: "complete" } :
+        cardStatus === "pending" || cardStatus === "in_progress" ? { type: "running" } : status;
+  const displayTitle = card
+    ? typeof card.title === "string" && card.title.trim() ? card.title : kind || "Tool"
+    : undefined;
+  const detail = [kind, cardStatus ? harnessStatusLabels[cardStatus] : undefined].filter(Boolean).join(" · ");
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
   // A gated tool row has no approval data of its own: the engine asks through a
@@ -599,7 +675,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const needsApproval =
     status?.type === "requires-action" &&
     (approval != null || interrupt != null);
-  const failed = isError === true && result !== undefined;
+  const failed = (isError === true || cardStatus === "failed") && result !== undefined;
 
   const [open, setOpen] = useState(needsApproval);
   const [prevNeedsApproval, setPrevNeedsApproval] = useState(needsApproval);
@@ -613,9 +689,12 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
       <ToolFallbackTrigger
         toolName={toolName}
         argsText={argsText}
-        status={status}
+        status={displayStatus}
         isError={failed}
         errorLine={failed ? toolErrorLine(result) : undefined}
+        displayTitle={displayTitle}
+        detail={detail || undefined}
+        title={displayTitle}
       />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
