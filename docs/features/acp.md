@@ -13,8 +13,13 @@ client checks pass with a controlled local SDK backend: normal/approval/absolute
 diff, partial UI Stop, attached denial/retention and reconnect, then owned
 physical shutdown after `4d4ceff1`. The earlier orphaned-daemon failure remains
 recorded separately. Native tool wire IDs are session-unique in `79e13257`.
-A fresh short-context native sender hit a Z.AI usage limit before Hub delivery;
-no native peer completion was proved and its reset window is unknown.
+A new private native Koordinator → Codex Zircon round trip now passes ordinary
+waited-message delivery, correlated final/end and native model feedback. The
+same configured Z.AI route returned two actual HTTP 200 responses. Independent
+offline validation qualifies that frozen runtime evidence; the controller's
+observer assertion remains recorded as failed. The earlier user B/B2 and
+restored histories were untouched. Gemini's supported-auth positive model rows
+are the remaining qualification prerequisite.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

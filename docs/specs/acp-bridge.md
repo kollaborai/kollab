@@ -5,13 +5,12 @@ Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
 The source repairs and runtime fixes are committed. Focused suites, actual CLI/
 SDK boundaries, Claude Code and Codex model/tool/permission gates, Web UI
-persistence and an isolated two-host real Codex request/reply/revocation run
-pass. The full matrix
-remains open: Gemini's successful model run needs supported authentication,
-and a fresh short-context native sender hit a Z.AI usage limit before Hub
-delivery. Actual Zed Preview client checks now pass with a controlled local SDK
-backend after the ownership repair; Gemini's missing-auth startup and clean-close
-checks pass. No release or deployment has been performed.
+persistence, an isolated two-host real Codex request/reply/revocation run and a
+new private native Koordinator → Codex Zircon request/final/end/feedback run
+pass. The full matrix remains open only for Gemini's supported-auth positive
+model/tool/permission/cancel rows. Actual Zed Preview client checks pass with a
+controlled local SDK backend after the ownership repair; Gemini's missing-auth
+startup and clean-close checks pass. No release or deployment has been performed.
 Current evidence and the implementation inventory are in
 [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 
@@ -639,10 +638,16 @@ normal/approval/diff, partial UI Stop, attached denial/retention and physical
 shutdown: all nine recorded owned process identities are gone, while the
 original stable Zed remains. This qualifies the client with a controlled local
 SDK backend; it does not infer proxy exit codes or an exact quit duration.
-Native wire tool IDs are session-unique in `79e13257`; the fresh
-native-to-harness gate also remains open after one short-context request
-returned Z.AI HTTP 429/code `1308` before Hub delivery;
-the account's reset window is unknown. Exact source, traces and remaining gates
+Native wire tool IDs are session-unique in `79e13257`. A new private native
+Koordinator → Codex Zircon run on the recorded clean `d6b2d3cc` runtime
+boundary passes ordinary waited-message delivery, completed Hub roster/status
+tools, one correlated final/end, and a native HTTP request containing the peer
+reply after both frames arrived. The same configured Z.AI route returned two
+actual HTTP 200 responses. Its controller's observer assertion remained red;
+independent offline validation qualifies the saved output and exact correlation
+without another model call. Earlier user B/B2 and restored histories were not
+rerun or vindicated. Gemini's supported-auth positive rows remain open. Exact
+source, fixture limits, diagnostics, traces and remaining gates
 are recorded in [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 JetBrains, Buzz and T3 Code are claimed only after the same run. T3 Code
 opens with one `initialize` that carries both v1 and v2 fields and reads the

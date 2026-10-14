@@ -299,6 +299,56 @@ Verified fixes and boundaries:
   were cleaned up; the user receiver and config were preserved. Evidence:
   `/tmp/kacp-fresh-native.KE50i8/summary.json`, `qualification-metadata.json`
   and `owned-process-audit.json`.
+- New native → ACP feedback: a new private Koordinator/Codex Zircon pair on
+  the recorded clean `d6b2d3cc` runtime boundary passes, using actual pinned
+  Codex adapter 2.1.1/CLI 0.159.3 and the same configured Z.AI
+  `/api/anthropic/v1/messages` route. The native sender's two actual requests
+  returned HTTP 200. The model generated one ordinary new `hub_msg` message
+  with `wait=true`, no `reply_to`, and request/thread
+  `3bdb45551935461bb620280629d8043e`; after one scoped native approval, the
+  receiver admitted it once as source `agent` and sent one ACP prompt. Its
+  `hub_agents` and `hub_status` cards completed with successful saved outputs;
+  two additional completed `Guardian Review` cards are internal thinking cards.
+  The saved final is `ACP-NATIVE-PAIR-JUIV2I OK` with the original request,
+  ACP session and `end_turn`. The sender received final
+  `e29800db3bca451c89aba70ad93e08d8` and hidden end
+  `6c3cb75b1f31435c9fdd15e6144f9604`, both on that original request/thread;
+  the end reports one reply, no failure and `end_turn`. Actual native HTTP
+  request 2 followed both frames, with the peer's final marker in post-initial
+  context. This proves native feedback beyond socket receipt.
+  The actual controller attempt took 47.047 seconds and remained red at
+  `experiment.py:673`: its generic socket-tool observer missed `hub_status`,
+  which `mcp_hub.py` serves directly from the authenticated binding. The saved
+  real completed roster/status output supplies that evidence. The original
+  helper, red `live-summary.json` and traces remain unchanged. A separate
+  independent offline validator passes this same attempt with no additional
+  model calls; it does not turn the original controller into a passing run.
+  Both public processing predicates were false, queue sizes were zero, and
+  turn locks, Hub owners, pending replies and waits settled. The receiver's
+  `active_owner` diagnostic retained the completed request context; it was not
+  an executing owner. Processing checks the actual RPC/future, queue,
+  cancellation drain and completion tasks. The consumed native and ACP queues
+  retain raw unfinished counters of `1`, because normal workers do not use
+  `task_done`/`join`; these are not zero-work-owner claims. The sender's absent
+  relay map was `None`, not zero, and neither private app joined a network.
+  No new source failure or queue repair was established.
+  Both apps exited zero and all 21 observed child PID/birth identities were
+  gone. Auth copies, owned sockets and presence were removed; all nine original
+  user process births and original files were preserved. No reopening test or
+  internal Codex HTTP count was qualified here. Old user B/B2/restored histories
+  and running UI sessions were not rerun or vindicated. The runtime source
+  attestation was clean when this attempt ran; later unrelated test edits do
+  not change that recorded boundary or imply the current checkout is clean.
+  Evidence: `/tmp/kacp-native-pair-corrected.JUiv2I/root-verified-round-trip.json`,
+  `verify_frozen_round_trip.py`, original `live-summary.json`, `manifest.json`
+  and saved receiver snapshot in the same root.
+  An earlier read-only prerequisite check at 13:36 UTC used the existing
+  configured native profile's keychain entry for one quota GET, not a model
+  call. It returned HTTP/business code 200 with current usage and next-reset
+  fields. That later snapshot does not establish the missing reset time of the
+  earlier `1308` failure. Actual capacity for this new round trip is proved by
+  its two model HTTP 200 responses. Quota evidence:
+  `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/zai-quota-recheck.json`.
 - Network: `99f4e9de` rechecks durable request authority after transport awaits
   and during remote ACP/CLI waits. Seven regressions reproduced hangs before
   the fix and pass afterward; 313 adjacent tests and two manual-grant/fast-final
@@ -341,12 +391,13 @@ Required open gates:
    Diagnosis: `/tmp/kacp-live-xVqw6o/gemini-qualification-diagnosis.md`;
    primary source: Google's
    [consumer deprecation notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals).
-2. Repeat the separate native Koordinator → Zircon request B after sender capacity
-   returns, checking a new request's original reply and terminal IDs. The actual
-   sender failed before Hub admission, including the later fresh short-context
-   Z.AI code `1308` run with an unknown reset window. The earlier A reply-chain
-   result and C operator result are recorded separately; no native peer
-   completion was proved.
+   Today's read-only check at 13:34 UTC still found `oauth-personal` selected,
+   existing consumer OAuth access/refresh fields, no API key in the checked
+   Gemini stores/keychain, no supported API-key/Vertex environment or dotenv
+   configuration, and no Kollab Gemini profile override. It inspected metadata
+   only; no secret values were recorded and no account, login, billing or
+   credential settings were changed. Evidence:
+   `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/auth-prerequisite.json`.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folders are retained until the qualification
