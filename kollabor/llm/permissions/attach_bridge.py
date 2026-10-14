@@ -25,9 +25,26 @@ _GRANTED_SCOPES = {
 }
 
 
-def resolution_event(tool_id: str, response: Any) -> Dict[str, Any]:
+def resolution_event(
+    tool_id: str,
+    response: Any,
+    details: dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """The event that tells every attached window a prompt is closed."""
-    scope = _GRANTED_SCOPES.get(getattr(response, "name", str(response)))
+    response_name = getattr(response, "name", None)
+    scope = _GRANTED_SCOPES.get(response_name or str(response))
+    if scope is None and isinstance(response, str) and details:
+        for option in details.get("acp_options", ()):
+            if isinstance(option, dict) and str(option.get("optionId")) == response:
+                kind = str(option.get("kind") or "")
+                scope = {
+                    "allow_once": "once",
+                    "allow_always": "always_edits",
+                    "allow_tool_always": "trust_tool",
+                }.get(kind)
+                if scope is None:
+                    return {"type": "permission_denied", "tool_id": tool_id}
+                break
     if scope:
         return {"type": "permission_granted", "tool_id": tool_id, "scope": scope}
     return {"type": "permission_denied", "tool_id": tool_id}
@@ -119,7 +136,7 @@ class AttachPermissionBridge:
             # Every attached window shows this prompt (a terminal and the web UI
             # can watch one daemon): tell them all it is closed, so the ones that
             # did not answer stop showing it.
-            display_tap.publish(resolution_event(tool_id, response))
+            display_tap.publish(resolution_event(tool_id, response, details))
         return response
 
     async def handle_client_event(
