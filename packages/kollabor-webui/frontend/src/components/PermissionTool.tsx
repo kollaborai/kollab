@@ -23,7 +23,10 @@ type PermissionArgs = {
 
 type PermissionResult = {
   decision: "approve" | "deny";
-  scope: "once" | "session" | "project" | "always_edits" | "trust_tool";
+  scope?: "once" | "session" | "project" | "always_edits" | "trust_tool";
+  option_id?: string;
+  vendor_saved?: boolean;
+  warning?: string;
 };
 
 const RISK_BADGE_VARIANT: Record<
@@ -83,10 +86,17 @@ function PermissionPrompt({
           </pre>
         ) : null}
         {decided ? (
-          <p className="font-medium text-muted-foreground">
-            {decided.decision === "approve" ? "Allowed" : "Denied"} (
-            {decided.scope})
-          </p>
+          <div className="flex flex-col gap-1">
+            <p className="font-medium text-muted-foreground">
+              {decided.decision === "approve" ? "Allowed" : "Denied"}
+              {decided.scope ? ` (${decided.scope})` : ""}
+            </p>
+            {decided.vendor_saved || decided.warning ? (
+              <p className="text-amber-700 dark:text-amber-300">
+                {decided.warning || "Saved by the ACP provider; Kollab cannot undo it."}
+              </p>
+            ) : null}
+          </div>
         ) : null}
       </CardContent>
       <CardFooter className="flex flex-wrap gap-2">

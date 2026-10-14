@@ -461,7 +461,15 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     )
 
     async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
-        session._events.put_nowait({"type": "permission_denied", "tool_id": tool_id})
+        session._events.put_nowait(
+            {
+                "type": "permission_denied",
+                "tool_id": tool_id,
+                "option_id": "vendor-denied",
+                "vendor_saved": True,
+                "warning": "Saved by the ACP provider; Kollab cannot undo it.",
+            }
+        )
         session._events.put_nowait({"type": "turn_complete"})
         return True
 
@@ -1082,3 +1090,39 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
     state = captured["controller"].state
     assert len(state["messages"]) == 3
     assert state["synced"] == {"history": 4, "messages": 3}
+
+
+def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
+    granted = messages._permission_result_from_event(
+        {
+            "type": "permission_granted",
+            "scope": "vendor_always",
+            "option_id": "allow-always",
+            "vendor_saved": True,
+            "warning": "Saved by [harness]; Kollab cannot undo it.",
+        }
+    )
+    denied = messages._permission_result_from_event(
+        {
+            "type": "permission_denied",
+            "scope": "vendor_always",
+            "option_id": "reject-always",
+            "vendor_saved": True,
+            "warning": "Saved by [harness]; Kollab cannot undo it.",
+        }
+    )
+
+    assert granted == {
+        "decision": "approve",
+        "scope": "vendor_always",
+        "option_id": "allow-always",
+        "vendor_saved": True,
+        "warning": "Saved by [harness]; Kollab cannot undo it.",
+    }
+    assert denied == {
+        "decision": "deny",
+        "scope": "vendor_always",
+        "option_id": "reject-always",
+        "vendor_saved": True,
+        "warning": "Saved by [harness]; Kollab cannot undo it.",
+    }
