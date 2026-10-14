@@ -2852,6 +2852,7 @@ class HubPlugin(BasePlugin):
         if turn is not None and turn.started and not turn.deferred and not turn.skipped:
             turn.ended = True
             turn.failed = turn.failed or failed
+        self._publish_idle_if_settled()
 
     async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
         """Relay tick: send the end-of-turn frame of a request whose turn is over.
@@ -8726,19 +8727,37 @@ class HubPlugin(BasePlugin):
                         break
         return context
 
-    async def _set_idle(self, context, event_context=None):
-        """Mark agent as idle when LLM response completes.
+    def _publish_idle_if_settled(self) -> None:
+        """Only a drained chain may release working presence, regardless of outcome."""
+        try:
+            identity = getattr(self, "_identity", None)
+            if identity is None or identity.state != AgentState.WORKING.value:
+                return
 
-        Preserves WAITING state for external attach/control-plane state.
-        """
-        from .presence_states import PresenceState
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            # The coordinator includes both native work and admitted ACP turns.
+            if getattr(llm, "is_processing", False):
+                return
+            qp = getattr(llm, "_queue_processor", None)
+            queue = getattr(qp, "processing_queue", None)
+            if queue is not None and not queue.empty():
+                return
+            turn_lock = getattr(qp, "_turn_lock", None)
+            if turn_lock is not None and turn_lock.locked():
+                return
 
-        if self._identity:
-            if self._identity.state != PresenceState.WAITING.value:
-                self._identity.state = AgentState.IDLE.value
-                if self._presence:
-                    self._presence.publish()
+            identity.state = AgentState.IDLE.value
             self._last_activity_at = time.time()
+            if self._presence:
+                self._presence.publish()
+        except Exception:
+            # Presence is a projection. A write/read failure must not suppress
+            # the request's owned final reply or hidden terminal frame.
+            logger.debug("Hub idle presence update failed", exc_info=True)
+
+    async def _set_idle(self, context, event_context=None):
+        """A response may still need tools or continuation; retain its work owner."""
+        self._publish_idle_if_settled()
         return context
 
     async def _broadcast_user_input(self, data, event=None):

@@ -1157,6 +1157,212 @@ def _real_processor(hub) -> QueueProcessor:
     )
 
 
+def _roster_processor(sent=None, *, acp=None):
+    """Use the real coordinator's native/ACP activity view with a real queue."""
+    from kollabor.llm.llm_coordinator import LLMService
+
+    plugin, _ = _responder(sent if sent is not None else [])
+    qp = _real_processor(plugin)
+    llm = LLMService.__new__(LLMService)
+    llm._queue_processor = qp
+    llm.conversation_history = qp.conversation_history
+    llm.event_bus = plugin.event_bus = qp.event_bus
+    qp.event_bus.get_service.side_effect = lambda name: {
+        "hub_plugin": plugin,
+        "llm_service": llm,
+        "acp_orchestrator": acp,
+    }.get(name)
+    return plugin, llm, qp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_path", ["provider_error", "cancelled", "prehook_error", "prehook_denied"])
+async def test_a_plain_user_terminal_republishes_idle_without_a_success_response(exit_path):
+    """Provider errors and pre-request aborts bypass LLM_RESPONSE_POST."""
+    plugin, llm, qp = _roster_processor()
+    published = []
+    plugin._presence.publish.side_effect = lambda: published.append(plugin._identity.state)
+    qp.api_service = SimpleNamespace(model="owned-test-model", last_stop_reason="")
+    events = []
+
+    async def pre_request(event, data, source):
+        events.append(event)
+        if event == EventType.LLM_REQUEST_PRE:
+            await plugin._set_working({"messages": []})
+            if exit_path == "prehook_error":
+                raise RuntimeError("owned pre-request failure")
+            if exit_path == "prehook_denied":
+                return {"cancelled": True}
+        return {}
+
+    async def provider(**kwargs):
+        if exit_path == "cancelled":
+            qp.cancel_processing = True
+            raise asyncio.CancelledError("owned user stop")
+        raise RuntimeError("owned provider failure")
+
+    qp.event_bus.emit_with_hooks = AsyncMock(side_effect=pre_request)
+    qp._streaming_handler.call_llm = AsyncMock(side_effect=provider)
+
+    async def batch(messages):
+        await qp._execute_llm_turn(user_message_provided=True, current_parent_uuid="owned-parent")
+
+    async def continue_turn():
+        await qp._execute_llm_turn(user_message_provided=False, current_parent_uuid="owned-parent")
+
+    continuation = AsyncMock(side_effect=continue_turn)
+    qp.processing_queue.put_nowait("owned user input")
+    if exit_path == "prehook_denied":
+        with pytest.raises(asyncio.CancelledError):
+            await qp.process_queue(None, batch, continuation)
+    else:
+        await qp.process_queue(None, batch, continuation)
+
+    assert not llm.is_processing and not qp._turn_lock.locked() and qp.processing_queue.empty()
+    assert plugin._net_turn is None  # ordinary human turn; no received request owns it
+    assert plugin._identity.state == "idle"
+    assert published == (["working", "working", "idle"] if exit_path == "prehook_error" else ["working", "idle"])
+    assert EventType.LLM_RESPONSE_POST not in events
+    assert qp._streaming_handler.call_llm.await_count == (0 if exit_path.startswith("prehook") else 1)
+    assert continuation.await_count == (1 if exit_path == "prehook_error" else 0)
+    if exit_path == "cancelled":
+        assert qp.last_turn_error is None
+    else:
+        assert qp.last_turn_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["native", "queued", "locked", "acp_active", "acp_queued"])
+async def test_idle_publication_waits_for_every_actual_work_owner(owner):
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+
+    acp = ACPOrchestrator.__new__(ACPOrchestrator)
+    acp._runner = SimpleNamespace(is_processing=owner == "acp_active")
+    acp._completion_tasks = {object()} if owner == "acp_queued" else set()
+    plugin, llm, qp = _roster_processor(acp=acp)
+    qp.turn_completed = True
+    if owner == "native":
+        qp.is_processing = True
+    elif owner == "queued":
+        qp.processing_queue.put_nowait("a pending continuation")
+    elif owner == "locked":
+        await qp._turn_lock.acquire()
+    published = []
+    plugin._presence.publish.side_effect = lambda: published.append(plugin._identity.state)
+    await plugin._set_working({"messages": []})
+
+    try:
+        response = {"has_native_tools": True, "turn_completed": False}
+        assert await plugin._set_idle(response) is response
+        plugin.network_chain_ended()
+        assert plugin._identity.state == "working"
+        assert published == ["working"]
+    finally:
+        if qp._turn_lock.locked():
+            qp._turn_lock.release()
+
+    if owner == "queued":
+        qp.processing_queue.get_nowait()
+    acp._runner.is_processing = False
+    acp._completion_tasks.clear()
+    qp.is_processing = False
+    qp.note_chain_end()
+    await plugin._set_idle({})
+    assert not llm.is_processing
+    assert plugin._identity.state == "idle"
+    assert published == ["working", "idle"]  # repeated terminal hooks are idempotent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["waiting", "active", "booting", "connecting", "dead", "idle"])
+async def test_chain_completion_preserves_states_that_are_not_working(state):
+    plugin, _, qp = _roster_processor()
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})
+    plugin._identity.state = state
+    plugin._presence.publish.reset_mock()
+    qp.is_processing = False
+    await plugin._set_idle({})
+    assert plugin._identity.state == state
+    plugin._presence.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["wake", "buffer"])
+async def test_presence_settlement_does_not_claim_another_requests_turn(mode):
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})  # the previous request's chain
+    plugin._open_network_turn(_request(T2, W2), mode)
+    turn = plugin._net_turn
+    qp.is_processing = False
+    await plugin.settle_network_turn(llm)
+    assert plugin._identity.state == "idle"
+    assert plugin._net_turn is turn and not turn.started and not turn.ended
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_waiting_bound_ask_stays_open_at_the_chain_boundary():
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    request = _request(T1, W1)
+    request.metadata["acp_ask"] = True
+    plugin._open_network_turn(request, "wake")
+    qp.turn_completed = True
+    qp.is_processing = True
+    await plugin._set_working({"messages": []})
+    turn = plugin._net_turn
+    plugin._identity.state = "waiting"
+    plugin._presence.publish.reset_mock()
+    qp.is_processing = False
+    await plugin.settle_network_turn(llm)
+    assert plugin._identity.state == "waiting"
+    assert plugin._net_turn is turn and turn.started and not turn.ended
+    assert sent == []
+    plugin._presence.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_presence_write_failure_does_not_suppress_a_bound_terminal(failed):
+    sent = []
+    plugin, llm, qp = _roster_processor(sent)
+    request = _request(T1, W1)
+    request.metadata["acp_ask"] = True
+    plugin._open_network_turn(request, "wake")
+    qp.turn_completed = True
+
+    def publish():
+        if plugin._identity.state == "idle":
+            raise OSError("owned presence write failure")
+
+    plugin._presence.publish.side_effect = publish
+
+    async def batch(messages):
+        await plugin._set_working({"messages": []})
+        if failed:
+            raise RuntimeError("owned provider failure")
+        plugin._note_network_answer({"turn_completed": True}, "owned answer")
+
+    qp.processing_queue.put_nowait("owned user input")
+    await qp.process_queue(None, batch, AsyncMock())
+    turn = plugin._net_turn
+    assert plugin._identity.state == "idle"
+    assert turn.ended and turn.failed is failed
+    await plugin.settle_network_turn(llm)
+    await plugin.settle_network_turn(llm)
+    assert [(item["thread_id"], item["reply_to"]) for item in sent] == [(T1, W1), (T1, W1)]
+    assert [item["content"] for item in _replies(sent)] == [FAILED if failed else "owned answer"]
+    assert [item["turn_end"] for item in _ends(sent)] == [
+        {"replies": 1, "failed": failed, "outcome": "error" if failed else "end_turn"}
+    ]
+    assert not plugin.network_turn_open()
+
+
 @pytest.mark.asyncio
 async def test_a_queue_drain_cancelled_before_it_completes_ends_the_request_failed():
     """The pre-request hook denying a turn raises CancelledError out of the model call."""

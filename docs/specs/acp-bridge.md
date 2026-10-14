@@ -136,6 +136,12 @@ not change, because `claude` is an ordinary agent name. The roster,
 `kollab --hub status` and `hub_status` show the harness beside the name,
 `claude (Claude Code)`, so people and agents know what they are talking to.
 
+Working presence ends when the owned input chain drains, including a provider
+failure, cancellation or a rejected pre-request hook. One model response can
+still need tools or continuation, so it cannot publish idle while native or ACP
+work, queued input or a turn lock remains. Explicit waiting states stay parked;
+a presence write failure cannot suppress the request's final reply or end frame.
+
 The runner is not a provider under the tool loop. The harness runs its own
 tools, so its text is display and history only: kollab never parses it for
 tags, and `<terminal>` quoted in a reply stays text. Kollab's tools reach the
