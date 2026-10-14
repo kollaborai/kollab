@@ -22,7 +22,7 @@ import logging
 import re
 from copy import deepcopy
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
@@ -203,6 +203,7 @@ class LocalStateService(StateService):
         started_at: float | None = None,
         context_registry: ContextRegistry | None = None,
         context_identity: str | None = None,
+        startup_status: Callable[[], tuple[str, str]] | None = None,
     ) -> None:
         import time as _time
 
@@ -223,6 +224,7 @@ class LocalStateService(StateService):
         # the daemon pid.
         self._context_registry: ContextRegistry | None = context_registry
         self._context_identity = context_identity
+        self._startup_status = startup_status
 
     def _mcp_enabled(self) -> bool:
         config = getattr(self._llm_service, "config", None)
@@ -982,6 +984,9 @@ class LocalStateService(StateService):
             except Exception as e:
                 logger.debug(f"voice status error: {e}")
 
+        startup_state, startup_error = (
+            self._startup_status() if self._startup_status is not None else ("", "")
+        )
         return SystemInfoSnapshot(
             cwd=cwd,
             git_branch=git_branch,
@@ -997,6 +1002,8 @@ class LocalStateService(StateService):
             plugin_count=plugin_count,
             voice_requested=voice_requested,
             voice_running=voice_running,
+            startup_state=startup_state,
+            startup_error=startup_error,
         )
 
     # === Command catalog ===
@@ -2695,7 +2702,14 @@ class LocalStateService(StateService):
         reason = submission.get("reason") if isinstance(submission, dict) else None
         if not isinstance(reason, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", reason):
             reason = "input not accepted"
-        return {"accepted": False, "reason": reason}
+        rejected = {"accepted": False, "reason": reason}
+        if reason == "acp_unavailable" and isinstance(submission, dict):
+            message = submission.get("message")
+            if isinstance(message, str) and message:
+                rejected["message"] = "".join(
+                    char for char in message if char.isprintable() or char == "\n"
+                )[:4096]
+        return rejected
 
     def _goal_service(self):
         event_bus = getattr(self, "_event_bus", None)

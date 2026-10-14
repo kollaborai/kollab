@@ -84,7 +84,7 @@ async def send_message(session_id: str, body: MessageRequest):
         session.unsubscribe(queue)
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
-        raise HTTPException(status_code=status, detail=reason)
+        raise HTTPException(status_code=status, detail=accepted.get("message") or reason)
     request_id = accepted.get("request_id") or body.request_id
     request_ids = {str(request_id)} if request_id else set()
 
@@ -820,7 +820,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     saw_action = True
                     if not accepted.get("accepted"):
                         controller.add_error(
-                            str(accepted.get("reason", "message rejected"))
+                            str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
                     if accepted.get("request_id"):

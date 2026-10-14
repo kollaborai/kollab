@@ -144,6 +144,7 @@ class DaemonHandle:
         self._read_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
+        self.startup_error: str = ""
 
         self.rpc: Any = None
         self.state: Any = None
@@ -219,6 +220,8 @@ class DaemonHandle:
                 if message.get("type") in _RENDERED_EVENT_TYPES:
                     continue
 
+                if message.get("type") == "error" and message.get("phase") == "startup":
+                    self.startup_error = str(message.get("message") or "ACP startup failed")
                 self._fan_out(_normalize_event(message))
         except asyncio.CancelledError:
             raise

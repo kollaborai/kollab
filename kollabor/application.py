@@ -862,6 +862,7 @@ class TerminalLLMChat:
                     permission_manager=self.permission_manager,
                     agent_manager=self.agent_manager,
                     event_bus=self.event_bus,
+                    startup_status=self._get_startup_status,
                 )
                 self.event_bus.register_service(
                     "state_service", self._local_state_service
@@ -1031,6 +1032,7 @@ class TerminalLLMChat:
         # Task tracking for race condition prevention
         self.running = False
         self._startup_complete = False
+        self._startup_error = ""
         self._startup_ready = asyncio.Event()
         self._background_tasks: list[asyncio.Task] = []
         self._pending_skill_display: list[tuple[str, str, dict[str, Any]]] = []
@@ -1435,6 +1437,12 @@ class TerminalLLMChat:
             message, source=UserInputSource.CLI_INITIAL
         )
 
+    def _get_startup_status(self) -> tuple[str, str]:
+        error = getattr(self, "_startup_error", "")
+        if error:
+            return "failed", error
+        return ("ready" if getattr(self, "_startup_complete", False) else "starting"), ""
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1442,6 +1450,7 @@ class TerminalLLMChat:
         and version check initialize in the background. User input is gated
         by _startup_ready event so messages typed during init are held, not lost.
         """
+        self._startup_error = ""
         try:
             # Fire-and-forget: version check (network, 5s timeout)
             self.create_background_task(self._check_for_updates(), "version_check")
@@ -1660,9 +1669,14 @@ class TerminalLLMChat:
                 await self._submit_cli_initial_message(initial_message)
 
         except asyncio.CancelledError:
+            self._startup_error = "Startup cancelled"
             logger.info("Deferred startup cancelled")
             raise
         except Exception as e:
+            self._startup_error = str(e) or type(e).__name__
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(getattr(self, "event_bus", None), "error", message=self._startup_error, phase="startup")
             logger.exception("Error during deferred startup: %s", e)
             self._startup_complete = False
             self.running = False

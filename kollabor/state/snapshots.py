@@ -495,6 +495,9 @@ class SystemInfoSnapshot(Snapshot):
     # listening now. Both False when the voice plugin is not loaded.
     voice_requested: bool = False
     voice_running: bool = False
+    # A published Hub socket precedes deferred provider/adapter startup.
+    startup_state: str = ""
+    startup_error: str = ""
 
 
 # === Phase 4.5: agent / skill / system_prompt snapshots ===

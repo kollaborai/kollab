@@ -45,6 +45,7 @@ INLINE_PROFILE = "app-inline"
 # RPC can be queued behind a long-running tool, so this is deliberately shorter
 # than the normal RPC timeout and falls back to the cached snapshot.
 HISTORY_REFRESH_TIMEOUT_SECONDS = 0.75
+ACP_STARTUP_TIMEOUT_SECONDS = 45.0
 
 
 def inline_profile_env(profile: Any) -> Dict[str, str]:
@@ -208,6 +209,17 @@ class EngineSession:
     async def initialize(self) -> None:
         """Spawn the daemon and start tracking its event stream."""
         profile_name = getattr(self.profile, "name", None) or str(self.profile or "")
+        is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
+        if is_acp:
+            from kollabor.llm.acp_bridge import ACPProfile
+
+            # Fail with installation guidance before creating a Hub identity.
+            ACPProfile.from_dict(profile_name, {
+                "command": getattr(self.profile, "command", None) or None,
+                "cwd": getattr(self.profile, "cwd", None) or self.workspace,
+                "env": getattr(self.profile, "env", None) or {},
+                "pass_env": getattr(self.profile, "pass_env", None) or (),
+            }).resolve()
         self.daemon = await get_daemon_pool().spawn(
             self.session_id,
             profile=profile_name or None,
@@ -219,6 +231,8 @@ class EngineSession:
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
         )
+        if is_acp:
+            await self._await_acp_startup()
 
         if self.approval_mode:
             try:
@@ -250,6 +264,30 @@ class EngineSession:
             self._track_events(), name=f"session-track-{self.session_id}"
         )
         await self.refresh_history()
+
+    async def _await_acp_startup(self) -> None:
+        """A connected daemon is usable only after its adapter has started."""
+        try:
+            async with asyncio.timeout(ACP_STARTUP_TIMEOUT_SECONDS):
+                while True:
+                    if not self.alive:
+                        raise RuntimeError("ACP daemon closed before startup completed")
+                    info = await self.state.get_system_info()
+                    status = getattr(info, "startup_state", "")
+                    if status == "failed":
+                        raise RuntimeError(info.startup_error or "ACP startup failed")
+                    if status == "ready":
+                        return
+                    await asyncio.sleep(0.05)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"ACP adapter did not become ready within {ACP_STARTUP_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
+        except Exception as exc:
+            startup_error = getattr(self.daemon, "startup_error", "")
+            if startup_error:
+                raise RuntimeError(startup_error) from exc
+            raise
 
     @classmethod
     async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":

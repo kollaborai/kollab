@@ -56,6 +56,14 @@ from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
 
+
+def _acp_unavailable_result(acp: Any) -> Dict[str, Any]:
+    result = {"status": "rejected", "reason": "acp_unavailable"}
+    error = getattr(acp, "startup_error", None)
+    if isinstance(error, str) and error:
+        result["message"] = f"ACP could not start: {error}"
+    return result
+
 _ACTIVE_OPERATION_PHASES = frozenset(
     {
         "provider_request",
@@ -1780,7 +1788,7 @@ class LLMService:
         else:
             profile_unknown = True
         if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
-            return {"status": "rejected", "reason": "acp_unavailable"}
+            return _acp_unavailable_result(acp)
         if acp_dispatch and not isinstance(message, str):
             return {"status": "rejected", "reason": "acp_text_only"}
 
@@ -1855,7 +1863,7 @@ class LLMService:
             except Exception:
                 selected_acp = False
         if selected_acp and not (acp is not None and getattr(acp, "active", False) is True):
-            return {"status": "rejected", "reason": "acp_unavailable"}
+            return _acp_unavailable_result(acp)
         if acp is not None and getattr(acp, "active", False) is True:
             request_id = data.get("request_id") or uuid.uuid4().hex
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
@@ -1872,7 +1880,7 @@ class LLMService:
             except (RuntimeError, ValueError) as exc:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}
-                return {"status": "rejected", "reason": "acp_unavailable"}
+                return _acp_unavailable_result(acp)
             except Exception as exc:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}

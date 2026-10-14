@@ -23,6 +23,7 @@ from kollabor.state import (
     AgentListSnapshot,
     AgentSnapshot,
     LocalStateService,
+    ProfileSnapshot,
     SessionStats,
     SkillInfo,
     SkillListSnapshot,
@@ -958,7 +959,7 @@ class TestSetActiveProfileACP(unittest.IsolatedAsyncioTestCase):
             profile_manager=manager,
             event_bus=bus,
         )
-        svc._profile_to_snapshot = lambda value, **kwargs: SimpleNamespace(name=value.name)
+        svc._profile_to_snapshot = lambda value, **kwargs: ProfileSnapshot(name=value.name)
         snapshot = await svc.set_active_profile("claude-code")
         orchestrator.close.assert_awaited_once()
         orchestrator.start.assert_awaited_once_with(profile)

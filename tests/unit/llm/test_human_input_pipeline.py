@@ -412,6 +412,22 @@ async def test_selected_acp_profile_rejects_when_orchestrator_missing():
     assert result == {"status": "rejected", "reason": "acp_unavailable"}
 
 
+@pytest.mark.asyncio
+async def test_acp_startup_failure_keeps_code_and_actionable_detail():
+    service = object.__new__(LLMService)
+    service.event_bus = EventBus()
+    service.event_bus.register_service("acp_orchestrator", SimpleNamespace(
+        active=False, startup_error="claude-agent-acp not found. Install the pinned adapter."
+    ))
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    result = await service.submit_human_input("hello", source=UserInputSource.STATE_RPC)
+    assert result["reason"] == "acp_unavailable"
+    assert result["status"] == "rejected"
+    assert "Install the pinned adapter" in result["message"]
+
+
 
 @pytest.mark.asyncio
 async def test_acp_admission_emits_hooks_once_and_returns_immediately():
@@ -461,7 +477,10 @@ async def test_acp_main_hook_backgrounds_submit_without_native_fallback():
     class ACP:
         active = True
 
-        def admit(self, message, *, request_id, source, thread_id=None):
+        async def steer(self, *args, **kwargs):
+            return False
+
+        def admit(self, message, *, request_id, source, thread_id=None, origin=None):
             calls.append((message, source))
             return SimpleNamespace(request_id=request_id, turn_id="turn-1")
 
@@ -486,6 +505,9 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     class ACP:
         active = True
 
+        async def steer(self, *args, **kwargs):
+            return False
+
         def admit(self, *args, **kwargs):
             raise RuntimeError("ACP prompt queue is full")
 
@@ -506,6 +528,9 @@ async def test_public_submit_settles_acp_queue_full_rejection():
 
     class ACP:
         active = True
+
+        async def steer(self, *args, **kwargs):
+            return False
 
         def admit(self, *args, **kwargs):
             raise RuntimeError("ACP prompt queue is full")

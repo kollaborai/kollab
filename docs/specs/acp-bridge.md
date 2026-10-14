@@ -1,10 +1,14 @@
 # Kollab speaks ACP
 
-Status: **audited source repairs committed; runtime unqualified**, 2026-10-13.
+Status: **qualification in progress**, 2026-10-13.
 Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
-Tests, builds, real adapters, client qualification, and deployment are deferred
-by explicit instruction. The implementation inventory is in
+The source-only repair pass is committed. The subsequent qualification pass is
+authorized: focused suites and the frontend build pass, and a fresh real Codex
+ordinary Hub request returns its answer and correlated end frame. Claude starts
+but the user's account reports a weekly limit; its remaining live gates are open.
+The full adapter/client/network matrix is not yet qualified. No release or
+deployment has been performed. Current evidence and the implementation inventory are in
 [`acp-bridge-phase1.md`](acp-bridge-phase1.md).
 
 Original direction, 2026-10-09, revised after an adversarial review:
@@ -526,6 +530,14 @@ only what that SDK can express, so every claim needs a real run.
 **Qualification.** A harness or client is supported once its run passes, with
 the protocol trace, thread ids, permission decisions, process counts and the
 rendered transcript kept as evidence.
+
+Web session creation must validate the selected ACP executable before spawning
+and wait for the daemon's actual deferred startup result after attaching to its
+socket. A published socket is not adapter readiness. Startup failure returns
+installation/login guidance, cleans up the candidate daemon and leaves no ready
+session in the engine registry. The New Session dialog keeps that error visible.
+Later rejected turns retain their machine reason code and carry a separate
+actionable message through direct input and Hub reply/end correlation.
 
 | Run | Claude Code (adapter 0.89.0) | Codex (adapter 2.1.1) | Gemini CLI (0.63.0) |
 |---|---|---|---|
