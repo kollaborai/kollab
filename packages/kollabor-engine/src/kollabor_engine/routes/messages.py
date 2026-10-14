@@ -823,6 +823,10 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             str(accepted.get("message") or accepted.get("reason", "message rejected"))
                         )
                         return
+                    if isinstance(body.state, dict) and body.state.get("error"):
+                        # Cancellation belongs to its previous turn. A new
+                        # admitted input must not keep that error as its status.
+                        controller.state["error"] = ""
                     if accepted.get("request_id"):
                         request_ids.add(str(accepted["request_id"]))
                     submitted_contents.append(message_content)

@@ -1092,6 +1092,29 @@ async def test_assistant_transport_says_how_much_history_the_messages_show(
     assert state["synced"] == {"history": 4, "messages": 3}
 
 
+@pytest.mark.asyncio
+async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
+    session = _FakeSession([*_tokens("new answer"), {"type": "turn_complete"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    cancelled = {"id": "old", "role": "assistant", "content": "interrupted",
+                 "status": {"type": "incomplete", "reason": "cancelled"}}
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{"type": "add-message", "content": "try again"}],
+            state={"messages": [cancelled], "error": "Run cancelled"},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+    state = captured["controller"].state
+    assert state["error"] == ""
+    assert state["messages"][0] == cancelled
+    assert state["messages"][-1]["status"] == {"type": "complete", "reason": "stop"}
+    assert captured["controller"].errors == []
+
+
 def test_permission_result_preserves_vendor_metadata_for_grant_and_denial():
     granted = messages._permission_result_from_event(
         {
