@@ -91,7 +91,7 @@ def test_attach_bridge_publishes_prompt_and_waits_for_rpc_response():
         assert PERMISSION_RESPONSE_RPC_METHOD in rpc_server.handlers
 
         response = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "terminal_0", "response": "APPROVE_ONCE"}
+            {"tool_id": "terminal_0", "control": "APPROVE_ONCE"}
         )
 
         assert response == {"ok": True}
@@ -123,7 +123,7 @@ def test_attach_bridge_client_event_shows_prompt_and_replies_over_rpc():
         assert rpc_client.calls == [
             (
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": "terminal_0", "response": "APPROVE_ONCE"},
+                {"tool_id": "terminal_0", "control": "APPROVE_ONCE"},
                 10,
             )
         ]
@@ -155,7 +155,7 @@ def test_attach_bridge_client_event_can_send_response_without_waiting_for_reply(
         assert rpc_client.calls == [
             (
                 PERMISSION_RESPONSE_RPC_METHOD,
-                {"tool_id": "terminal_0", "response": "APPROVE_ONCE"},
+                {"tool_id": "terminal_0", "control": "APPROVE_ONCE"},
                 10,
             )
         ]
@@ -366,7 +366,7 @@ def test_a_prompt_another_window_answered_closes_without_an_answer_from_here():
         bridge.handle_client_resolution(
             layout_manager=layout, event={"type": "permission_granted", "tool_id": "terminal_2"}
         )
-        assert [call[1] for call in rpc_client.calls] == [{"tool_id": "terminal_2", "response": "APPROVE_ONCE"}]
+        assert [call[1] for call in rpc_client.calls] == [{"tool_id": "terminal_2", "control": "APPROVE_ONCE"}]
         assert bridge._answered_elsewhere == set()
 
     asyncio.run(run_bridge())
@@ -395,7 +395,7 @@ def test_attach_bridge_accepts_offered_opaque_acp_option_id():
         )
         await asyncio.sleep(0)
         accepted = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "acp_0", "response": "opaque-second"}
+            {"tool_id": "acp_0", "option_id": "opaque-second"}
         )
         assert accepted == {"ok": True}
         assert await task == "opaque-second"
@@ -425,9 +425,9 @@ def test_attach_bridge_rejects_unoffered_acp_id_without_consuming_prompt():
         )
         await asyncio.sleep(0)
         handler = rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD]
-        assert (await handler({"tool_id": "acp-opaque", "response": "not-offered"}))["ok"] is False
+        assert (await handler({"tool_id": "acp-opaque", "option_id": "not-offered"}))["ok"] is False
         assert not task.done()
-        assert await handler({"tool_id": "acp-opaque", "response": "owned-second"}) == {"ok": True}
+        assert await handler({"tool_id": "acp-opaque", "option_id": "owned-second"}) == {"ok": True}
         assert await task == "owned-second"
 
     asyncio.run(run_bridge())
@@ -452,7 +452,7 @@ def test_attach_bridge_accepts_native_cancel_alongside_acp_options():
         )
         await asyncio.sleep(0)
         result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "acp-cancel", "response": "CANCEL"}
+            {"tool_id": "acp-cancel", "control": "CANCEL"}
         )
         assert result == {"ok": True}
         assert await task is ConfirmationResponse.CANCEL
@@ -481,7 +481,7 @@ def test_attach_bridge_accepts_acp_cancel_for_nonterminal_kind():
         )
         await asyncio.sleep(0)
         result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "acp-edit", "response": "CANCEL"}
+            {"tool_id": "acp-edit", "control": "CANCEL"}
         )
         assert result == {"ok": True}
         assert await task is ConfirmationResponse.CANCEL
@@ -576,7 +576,7 @@ def test_attach_bridge_keeps_native_control_distinct_from_opaque_id_collision():
         # Native d/CANCEL is carried as a control; an opaque vendor option
         # with the same spelling must not consume the prompt.
         result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
-            {"tool_id": "acp-collision", "response": "CANCEL"}
+            {"tool_id": "acp-collision", "control": "CANCEL"}
         )
         assert result == {"ok": True}
         assert await task is ConfirmationResponse.CANCEL

@@ -101,22 +101,24 @@ class AttachPermissionBridge:
             tool_id = str(params.get("tool_id") or "")
             option_id = params.get("option_id")
             control_name = params.get("control")
-            response_name = str(control_name or ("" if option_id is not None else params.get("response") or ""))
-            if option_id is not None:
-                response_name = str(option_id)
+            response_field = params.get("response")
+            if option_id is not None and (control_name is not None or response_field is not None):
+                return {"ok": False, "error": f"mixed permission response for {tool_id}"}
             future = self._pending.get(tool_id)
             offered_ids = self._pending_option_ids.get(tool_id, set())
             details = self._pending_details.get(tool_id, {})
-            if offered_ids and response_name in offered_ids:
-                response: ConfirmationResponse | str = response_name
-            elif offered_ids:
-                if not self._is_native_response_name(response_name):
+            if option_id is not None:
+                response_name = str(option_id)
+                if response_name not in offered_ids:
                     return {"ok": False, "error": f"unoffered option for {tool_id}"}
+                response: ConfirmationResponse | str = response_name
+            else:
+                response_name = str(control_name if control_name is not None else response_field or "")
+                if not self._is_native_response_name(response_name):
+                    return {"ok": False, "error": f"unsupported control for {tool_id}"}
                 response = self._parse_response(response_name)
                 if not self._native_response_allowed(details, response, response_name):
-                    return {"ok": False, "error": f"unoffered option for {tool_id}"}
-            else:
-                response = self._parse_response(response_name)
+                    return {"ok": False, "error": f"unoffered control for {tool_id}"}
             if future is None or future.done():
                 return {"ok": False, "error": f"no pending prompt for {tool_id}"}
             future.set_result(response)
@@ -207,10 +209,9 @@ class AttachPermissionBridge:
         response_name = getattr(response, "name", None)
         response_params = {"tool_id": details.get("tool_id")}
         if response_name is not None:
-            response_params["response"] = response_name
+            response_params["control"] = response_name
         else:
             response_params["option_id"] = str(response)
-            response_params["response"] = str(response)
 
         response_call = rpc_client.call(
             PERMISSION_RESPONSE_RPC_METHOD,

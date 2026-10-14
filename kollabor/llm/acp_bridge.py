@@ -219,6 +219,7 @@ class ACPPermissionRequest:
     profile: str
     options: tuple[dict[str, Any], ...]
     kind: str = ""
+    display: dict[str, Any] | None = None
 
 
 class ACPPermissionBridge:
@@ -668,6 +669,36 @@ class ACPRunner:
             canonical.append(resolved)
         return {"kind": kind, "paths": canonical}
 
+
+    @staticmethod
+    def _permission_display(raw_tool: dict[str, Any]) -> dict[str, Any]:
+        """Build non-authoritative card text from the merged ACP tool payload."""
+        display: dict[str, Any] = {}
+        title = raw_tool.get("title") or raw_tool.get("name") or raw_tool.get("toolName")
+        if title:
+            display["title"] = str(title)
+        kind = raw_tool.get("kind")
+        if kind:
+            display["display_kind"] = str(kind)
+        raw_input = raw_tool.get("rawInput", raw_tool.get("raw_input"))
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+        command = raw_input.get("command", raw_tool.get("command"))
+        if isinstance(command, (list, tuple)):
+            display["command"] = [str(part) for part in command]
+        elif isinstance(command, str):
+            display["command"] = command
+        locations = raw_tool.get("locations", raw_input.get("locations"))
+        if isinstance(locations, (list, tuple)):
+            paths = []
+            for location in locations:
+                path = location.get("path") if isinstance(location, dict) else getattr(location, "path", None)
+                if isinstance(path, str) and path:
+                    paths.append(path)
+            if paths:
+                display["paths"] = paths
+        return display
+
     async def _request_permission(self, session_id: str, tool_call: Any, options: list[Any]) -> Any:
         if session_id != self.session_id or not self._active_generation:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
@@ -690,6 +721,7 @@ class ACPRunner:
         raw_tool = self._merged_tool_payload(raw_tool, request_id)
         workspace = os.path.realpath(self.profile.workspace or self.profile.cwd or os.getcwd())
         operation = self._permission_operation(raw_tool, workspace)
+        display = self._permission_display(raw_tool)
         request = ACPPermissionRequest(
             request_id=request_id,
             session_id=session_id,
@@ -699,6 +731,7 @@ class ACPRunner:
             profile=self.profile.name,
             options=tuple(option_data),
             kind=str(raw_tool.get("kind") or "").lower(),
+            display=display,
         )
         if self.update_callback is not None:
             self.update_callback({
@@ -714,6 +747,7 @@ class ACPRunner:
                     "options": option_data,
                     "waiting": True,
                     "kind": request.kind,
+                    **display,
                 },
             })
         selected = await self.permission_bridge.request(request)
