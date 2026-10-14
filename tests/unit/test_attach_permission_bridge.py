@@ -551,3 +551,47 @@ def test_acp_vendor_reject_always_broadcast_is_truthful_without_scope():
         "vendor_saved": True,
         "warning": "Saved by the ACP provider; Kollab cannot undo it.",
     }
+
+
+def test_attach_bridge_keeps_native_control_distinct_from_opaque_id_collision():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        display_tap = FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "acp-collision",
+                    "source": "acp",
+                    "acp_options": [
+                        {"optionId": "DENY", "kind": "allow_always", "name": "Vendor"},
+                    ],
+                },
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        # Native d/CANCEL is carried as a control; an opaque vendor option
+        # with the same spelling must not consume the prompt.
+        result = await rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD](
+            {"tool_id": "acp-collision", "response": "CANCEL"}
+        )
+        assert result == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
+def test_an_attached_window_receives_acp_prompts_without_detached_mode():
+    from kollabor.application import TerminalLLMChat
+
+    app, asked = _prompting_app(detached=False)
+    response = asyncio.run(
+        TerminalLLMChat._try_attach_permission_prompt(
+            app, {"source": "acp", "tool_type": "acp", "acp_options": []}
+        )
+    )
+    assert response is ConfirmationResponse.APPROVE_ONCE
+    assert asked == [{"source": "acp", "tool_type": "acp", "acp_options": []}]

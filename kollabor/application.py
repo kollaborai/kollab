@@ -2608,7 +2608,9 @@ class TerminalLLMChat:
         Only a --detached daemon: a session with its own terminal answers its
         prompts there, even while the web UI or another window is attached.
         """
-        if not self.event_bus or not getattr(self.args, "detached", False):
+        if not self.event_bus:
+            return None
+        if not getattr(self.args, "detached", False) and str(details.get("source") or "").lower() != "acp":
             return None
 
         display_tap = self.event_bus.get_service("display_tap")

@@ -43,55 +43,91 @@ class PermissionStatusView:
         self._options = self._build_options()
 
     def _build_options(self) -> List[tuple]:
-        """Build list of response options based on tool type."""
+        """Build response options while preserving opaque ACP IDs."""
         R = self._response_enum
         if R is None:
             return []
 
         acp_options = self._details.get("acp_options")
         if isinstance(acp_options, list) and acp_options:
-            options = []
-            for index, option in enumerate(acp_options):
-                if not isinstance(option, dict):
-                    continue
-                option_id = str(option.get("optionId") or "")
-                if not option_id:
-                    continue
-                key = str(index + 1) if index < 9 else chr(ord("a") + index - 9)
-                label = str(option.get("name") or option.get("label") or option.get("kind") or option_id)
+            parsed = [
+                option
+                for option in acp_options
+                if isinstance(option, dict) and option.get("optionId")
+            ]
+            source_acp = str(self._details.get("source") or "").lower() == "acp"
+            if not source_acp:
+                return [
+                    (
+                        str(index + 1),
+                        str(
+                            option.get("name")
+                            or option.get("label")
+                            or option.get("kind")
+                            or option["optionId"]
+                        ),
+                        str(option["optionId"]),
+                    )
+                    for index, option in enumerate(parsed)
+                ]
+
+            once = [option for option in parsed if option.get("kind") == "allow_once"]
+            options: List[tuple] = []
+            once_keys = ["a"] if len(once) == 1 else [
+                str(index + 1) for index in range(min(len(once), 9))
+            ]
+            once_index = 0
+            has_deny = False
+            for option in parsed:
+                kind = str(option.get("kind") or "")
+                option_id = str(option["optionId"])
+                label = str(option.get("name") or option.get("label") or kind or option_id)
+                if kind == "allow_once":
+                    key = once_keys[once_index] if once_index < len(once_keys) else option_id
+                    once_index += 1
+                elif kind == "reject_once":
+                    key = "d"
+                    has_deny = True
+                elif kind == "reject_always":
+                    key = "R"
+                elif kind == "allow_always":
+                    key = "v"
+                else:
+                    key = option_id
                 options.append((key, label, option_id))
-            if options:
-                return options
+
+            operation = self._details.get("operation")
+            operation_kind = operation.get("kind") if isinstance(operation, dict) else None
+            structured_operation = isinstance(operation, dict) and bool(operation_kind)
+            if len(once) == 1 and structured_operation:
+                options.extend([
+                    ("s", "session", R.APPROVE_SESSION),
+                    ("p", "project", R.APPROVE_PROJECT),
+                ])
+                if operation_kind == "edit":
+                    options.append(("A", "always edits", R.APPROVE_ALWAYS))
+            if not has_deny and not any(key == "d" for key, _, _ in options):
+                # Keep a distinct native denial control when the adapter offers
+                # no reject_once option; this must not collide with an opaque ID.
+                options.append(("d", "deny", R.CANCEL))
+            return options
 
         tool_type = self._details.get("tool_type", "unknown")
-
-        # Build project option label based on tool type
-        if tool_type == "file_read":
-            project_label = (
-                "all reads"  # Approves all file reads (gitignored protected)
-            )
-        elif tool_type == "terminal":
-            project_label = "this cmd"  # Approves this specific command
-        else:
-            project_label = "project"
-
+        project_label = "all reads" if tool_type == "file_read" else (
+            "this cmd" if tool_type == "terminal" else "project"
+        )
         options = [
             ("a", "approve", R.APPROVE_ONCE),
             ("s", "session", R.APPROVE_SESSION),
             ("p", project_label, R.APPROVE_PROJECT),
         ]
-
         if tool_type in ("file_write", "file_edit"):
             options.append(("A", "always edits", R.APPROVE_ALWAYS))
         elif tool_type in ("mcp_tool", "mcp"):
             options.append(("t", "trust tool", R.APPROVE_TOOL_ALWAYS))
-
         options.append(("d", "deny", R.DENY))
-
-        # Only add cancel for shell commands (more dangerous)
         if tool_type == "terminal":
             options.append(("c", "cancel", R.CANCEL))
-
         return options
 
     def render(self) -> List[str]:
@@ -122,6 +158,16 @@ class PermissionStatusView:
         # Tool description line
         tool_line = self._get_tool_description()
         content_lines.append(tool_line)
+        acp_options = self._details.get("acp_options") or ()
+        vendor_offered = any(
+            isinstance(option, dict)
+            and str(option.get("kind")) in {"allow_always", "reject_always"}
+            for option in acp_options
+        )
+        if self._details.get("vendor_saved") or self._details.get("warning") or vendor_offered:
+            content_lines.append(
+                str(self._details.get("warning") or "Saved by the ACP provider; Kollab cannot undo it.")
+            )
 
         # Options line with bold keys (no brackets)
         options_parts = []
@@ -148,6 +194,30 @@ class PermissionStatusView:
         """Get single-line tool description."""
         tool_type = self._details.get("tool_type", "unknown")
         width = get_global_width()
+
+        operation = self._details.get("operation")
+        if tool_type == "acp" or isinstance(operation, dict):
+            kind = str(operation.get("kind") if isinstance(operation, dict) else tool_type)
+            value = ""
+            if isinstance(operation, dict):
+                command = operation.get("command")
+                paths = operation.get("paths") or operation.get("path")
+                if isinstance(command, list):
+                    value = " ".join(str(part) for part in command)
+                elif command:
+                    value = str(command)
+                elif isinstance(paths, list):
+                    value = ", ".join(str(path) for path in paths)
+                elif paths:
+                    value = str(paths)
+                else:
+                    value = str(operation.get("value") or "")
+            title = str(self._details.get("title") or self._details.get("tool_name") or "Tool")
+            description = f"{title} [{kind}]"
+            if value:
+                description += f"({value})"
+            max_len = width - 20
+            return description if len(description) <= max_len else description[: max_len - 3] + "..."
 
         if tool_type == "terminal":
             command = self._details.get("command", "")

@@ -99,7 +99,11 @@ class AttachPermissionBridge:
 
         async def _respond(params: dict[str, Any]) -> dict[str, Any]:
             tool_id = str(params.get("tool_id") or "")
-            response_name = str(params.get("response") or "")
+            option_id = params.get("option_id")
+            control_name = params.get("control")
+            response_name = str(control_name or ("" if option_id is not None else params.get("response") or ""))
+            if option_id is not None:
+                response_name = str(option_id)
             future = self._pending.get(tool_id)
             offered_ids = self._pending_option_ids.get(tool_id, set())
             details = self._pending_details.get(tool_id, {})
@@ -200,14 +204,17 @@ class AttachPermissionBridge:
                     return
         finally:
             self._queued.discard(tool_id)
-        response_name = getattr(response, "name", str(response))
+        response_name = getattr(response, "name", None)
+        response_params = {"tool_id": details.get("tool_id")}
+        if response_name is not None:
+            response_params["response"] = response_name
+        else:
+            response_params["option_id"] = str(response)
+            response_params["response"] = str(response)
 
         response_call = rpc_client.call(
             PERMISSION_RESPONSE_RPC_METHOD,
-            {
-                "tool_id": details.get("tool_id"),
-                "response": response_name,
-            },
+            response_params,
             timeout=10,
         )
         if wait_for_rpc_reply:
