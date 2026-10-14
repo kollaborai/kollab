@@ -255,13 +255,25 @@ class ACPPermissionBridge:
     async def request(self, request: ACPPermissionRequest) -> str | None:
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
-        offered = {str(option.get("optionId")): option for option in request.options}
-        if self._decide is None:
+        offered: dict[str, dict[str, Any]] = {}
+        for option in request.options:
+            option_id = option.get("optionId")
+            if (
+                not isinstance(option_id, str) or not option_id
+                or option_id in offered
+                or option.get("kind") not in {
+                    "allow_once", "reject_once", "allow_always", "reject_always",
+                }
+            ):
+                return None
+            offered[option_id] = option
+        if not offered or self._decide is None:
             return None
         decision = asyncio.get_running_loop().create_future()
         self._pending.add(decision)
-        task = asyncio.create_task(self._decide(request))
+        task = None
         try:
+            task = asyncio.create_task(self._decide(request))
             done, _ = await asyncio.wait(
                 (task, decision), timeout=300, return_when=asyncio.FIRST_COMPLETED
             )
@@ -269,25 +281,26 @@ class ACPPermissionBridge:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 reject_once = [
-                    option for option in request.options
-                    if str(option.get("kind")) == "reject_once"
+                    option_id for option_id, option in offered.items()
+                    if option.get("kind") == "reject_once"
                 ]
-                # A timeout may safely select the sole one-shot rejection;
-                # ambiguous or empty offerings fail closed and are cancelled
-                # by the owning orchestrator.
-                return str(reject_once[0].get("optionId")) if reject_once else None
-            selected = next(iter(done)).result()
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+                # A timeout selects the first offered one-shot rejection.
+                # Without one, the owning runner cancels the turn.
+                selected = reject_once[0] if reject_once else None
+            else:
+                selected = decision.result() if decision in done else task.result()
+        except (asyncio.CancelledError, Exception):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             return None
         finally:
             self._pending.discard(decision)
-            if not task.done():
+            if task is not None and not task.done():
                 task.cancel()
         if self._cancelled or request.session_id != self._session_id or request.generation != self._generation:
             return None
-        if selected is None or selected not in offered:
+        if not isinstance(selected, str) or selected not in offered:
             return None
         if offered[selected].get("kind") not in {
             "allow_once", "reject_once", "allow_always", "reject_always",
@@ -363,6 +376,7 @@ class ACPRunner:
         self._cancel_hold = False
         self._cancel_target: tuple[str | None, int | None] | None = None
         self._cancel_active_task: asyncio.Task[Any] | None = None
+        self._permission_cancel_tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -921,6 +935,11 @@ class ACPRunner:
     async def _request_permission(self, session_id: str, tool_call: Any, options: list[Any]) -> Any:
         if session_id != self.session_id or not self._active_generation:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        generation = self._active_generation
+        turn_id = self._active_turn_id
+        active = getattr(self, "_active_context", None)
+        source = getattr(active, "source", "acp")
+        thread_id = getattr(active, "thread_id", None)
         option_data = []
         for option in options:
             raw = option.model_dump() if hasattr(option, "model_dump") else {}
@@ -944,7 +963,7 @@ class ACPRunner:
         request = ACPPermissionRequest(
             request_id=request_id,
             session_id=session_id,
-            generation=self._active_generation,
+            generation=generation,
             operation=operation,
             workspace=os.path.realpath(self.profile.workspace or self.profile.cwd or os.getcwd()),
             profile=self.profile.name,
@@ -957,9 +976,9 @@ class ACPRunner:
             self.update_callback({
                 "kind": "permission_request",
                 "request_id": request.request_id,
-                "turn_id": self._active_turn_id,
-                "source": getattr(getattr(self, "_active_context", None), "source", "acp"),
-                "thread_id": getattr(getattr(self, "_active_context", None), "thread_id", None),
+                "turn_id": turn_id,
+                "source": source,
+                "thread_id": thread_id,
                 "payload": {
                     "operation": operation,
                     "workspace": request.workspace,
@@ -970,15 +989,43 @@ class ACPRunner:
                     **display,
                 },
             })
-        selected = await self.permission_bridge.request(request)
-        self.state = "prompting"
+        try:
+            selected = await self.permission_bridge.request(request)
+        except (asyncio.CancelledError, Exception):
+            selected = None
+        if session_id != self.session_id or generation != self._active_generation or generation != self.generation:
+            return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        if selected is None:
+            self._schedule_permission_cancel(session_id, generation)
+        elif not self._closing:
+            self.state = "prompting"
         if self.update_callback is not None:
             self.update_callback({"kind": "permission_resolved", "request_id": request.request_id,
-                                  "turn_id": self._active_turn_id,
+                                  "turn_id": turn_id, "source": source, "thread_id": thread_id,
                                   "payload": {"waiting": False, "tool_id": request.request_id}})
         if selected is None:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
         return acp.RequestPermissionResponse(outcome=AllowedOutcome(optionId=selected, outcome="selected"))
+
+    def _schedule_permission_cancel(self, session_id: str, generation: int) -> None:
+        """Reserve this owner synchronously; never await cancel inside an SDK callback."""
+        key = (session_id, generation)
+        if self._closing or key in self._permission_cancel_tasks:
+            return
+        if not self.prepare_cancel(expected_session_id=session_id, expected_generation=generation):
+            return
+        task = asyncio.create_task(self.cancel(
+            expected_session_id=session_id, expected_generation=generation,
+        ))
+        self._permission_cancel_tasks[key] = task
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            if self._permission_cancel_tasks.get(key) is completed:
+                self._permission_cancel_tasks.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(settled)
 
 
     def prepare_cancel(
@@ -1168,6 +1215,13 @@ class ACPRunner:
         self._closing = True
         self.state = "closed"
         self.permission_bridge.cancel()
+        current_task = asyncio.current_task()
+        cancel_tasks = [
+            task for task in self._permission_cancel_tasks.values()
+            if task is not current_task
+        ]
+        for task in cancel_tasks:
+            task.cancel()
         self._queue_release.set()
         while True:
             try:
@@ -1194,6 +1248,10 @@ class ACPRunner:
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
         finally:
-            await self._terminate_process()
-            self._worker = None
-            self.session_id = None
+            try:
+                await self._terminate_process()
+            finally:
+                if cancel_tasks:
+                    await asyncio.gather(*cancel_tasks, return_exceptions=True)
+                self._worker = None
+                self.session_id = None
