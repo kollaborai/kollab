@@ -592,7 +592,7 @@ function ToolFallbackApproval({
             key={option.id}
             size="sm"
             variant={option === allowOptions[0] ? "default" : "outline"}
-            className={pressable}
+            className={cn(pressable, "h-auto min-h-8 max-w-full py-2 text-left whitespace-normal wrap-anywhere")}
             onClick={() => handleOption(option)}
             disabled={submitted}
           >

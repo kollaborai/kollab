@@ -70,11 +70,11 @@ function PermissionPrompt({
   };
 
   return (
-    <Card className="w-full max-w-md">
+    <Card className="min-w-0 w-full max-w-md">
       <CardHeader>
         <CardTitle className="flex items-center justify-between gap-2 text-base">
-          <span>Permission required: {payload.tool_name || "tool"}</span>
-          <Badge variant={RISK_BADGE_VARIANT[riskLevel] ?? "outline"}>
+          <span className="min-w-0 wrap-anywhere">Permission required: {payload.tool_name || "tool"}</span>
+          <Badge className="shrink-0" variant={RISK_BADGE_VARIANT[riskLevel] ?? "outline"}>
             {riskLevel} risk
           </Badge>
         </CardTitle>
@@ -108,6 +108,7 @@ function PermissionPrompt({
       <CardFooter className="flex flex-wrap gap-2">
         {options.length > 0 ? options.map((option) => (
           <Button key={option.optionId} type="button" size="sm" disabled={answered}
+            className="h-auto min-h-8 max-w-full py-2 text-left whitespace-normal wrap-anywhere"
             variant={option.kind.startsWith("reject") ? "destructive" : "default"}
             title={option.kind.endsWith("always") ? "Saved by the harness; Kollab cannot undo it" : option.name}
             onClick={() => {
