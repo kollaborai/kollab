@@ -13731,16 +13731,32 @@ class HubPlugin(BasePlugin):
         return {"generation": self._acp_hub_generation, "roster": roster}
 
     def _acp_roster(self) -> list[dict[str, Any]]:
-        rows = [agent.to_dict() for agent in self._presence.discover_agents()] if self._presence else []
-        rows.extend(row for row in getattr(self, "_roster", []) if isinstance(row, dict))
+        rows: dict[str, dict[str, Any]] = {}
+        for summary in getattr(self, "_roster", []):
+            if not isinstance(summary, dict):
+                continue
+            identity = str(summary.get("identity") or summary.get("agent_id") or "")
+            if identity:
+                rows[identity] = dict(summary)
+        # Coordinator summaries come from an older cache and omit tags. The
+        # current presence snapshot wins for state and the complete tag set,
+        # including false/removed waiting flags after a turn or profile change.
+        live = [agent.to_dict() for agent in self._presence.discover_agents()] if self._presence else []
+        for row in sorted(live, key=lambda item: item.get("last_heartbeat") or 0):
+            identity = str(row.get("identity") or row.get("agent_id") or "")
+            if identity:
+                rows[identity] = {**rows.get(identity, {}), **row}
         for remote in self._remote_agent_rows():
             handle = remote.get("handle") or format_handle(remote.get("name", "?"), remote.get("device", "?"))
-            rows.append({"identity": handle, "state": remote.get("state"), "device": remote.get("device"),
-                         "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
-                                  "acp_waiting": bool(remote.get("acp_waiting"))}})
+            rows[handle] = {**rows.get(handle, {}),
+                           "identity": handle, "state": remote.get("state"), "device": remote.get("device"),
+                           "tags": {"harness": remote.get("harness") or "", "provider": "acp" if remote.get("harness") else "",
+                                    "acp_waiting": bool(remote.get("acp_waiting"))}}
         if self._identity:
-            rows.append(self._identity.to_dict())
-        return list({str(row.get("identity") or row.get("agent_id")): row for row in rows}.values())
+            current = self._identity.to_dict()
+            identity = str(current.get("identity") or current.get("agent_id") or "")
+            rows[identity] = {**rows.get(identity, {}), **current}
+        return list(rows.values())
 
     def _acp_tools(self):
         from .acp_tools import ACPHubTools
