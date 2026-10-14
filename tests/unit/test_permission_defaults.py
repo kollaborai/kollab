@@ -198,3 +198,17 @@ def test_malformed_and_forged_metadata_never_changes_authorization_or_identity(t
     (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
     mismatched = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
     assert mismatched.get_acp_grant_inventory()[0]["operation"] is None
+
+
+def test_acp_inventory_snapshots_input_and_output_operations(tmp_path):
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    operation = {"kind": "execute", "command": ["bash", "-lc", "echo approved-thing"], "paths": []}
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    manager.grant_acp(operation, str(tmp_path), "profile-a")
+    operation["command"][2] = "echo mutated"
+    rows = manager.get_acp_grant_inventory()
+    assert rows[0]["operation"]["command"][2] == "echo approved-thing"
+    assert manager.has_acp_grant({"kind": "execute", "command": ["bash", "-lc", "echo approved-thing"], "paths": []}, str(tmp_path), "profile-a")
+    assert not manager.has_acp_grant(operation, str(tmp_path), "profile-a")
+    rows[0]["operation"]["command"][2] = "echo forged"
+    assert manager.get_acp_grant_inventory()[0]["operation"]["command"][2] == "echo approved-thing"

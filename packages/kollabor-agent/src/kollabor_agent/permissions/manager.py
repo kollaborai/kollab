@@ -686,6 +686,9 @@ class PermissionManager:
         if scope not in ("session", "project"):
             raise ValueError(f"invalid ACP grant scope: {scope}")
         key = self.acp_grant_key(operation, workspace, profile)
+        # Capture a JSON-safe value at grant creation; callers may mutate their
+        # request object after approval, but the audit record must remain exact.
+        operation_snapshot = json.loads(json.dumps(operation, sort_keys=True))
         target = self._acp_project_grants if scope == "project" else self._acp_session_grants
         metadata_target = (
             self._acp_project_grant_metadata
@@ -695,7 +698,7 @@ class PermissionManager:
         target.add(key)
         metadata_target[key] = {
             "grant_key": key,
-            "operation": operation,
+            "operation": operation_snapshot,
             "workspace": str(Path(workspace).expanduser().resolve()),
             "profile": str(profile),
             "scope": scope,
