@@ -6,10 +6,12 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar
@@ -404,6 +406,9 @@ class ACPRunner:
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
+        self._process_nonce: str | None = None
+        self._process_started_at: float | None = None
+        self._process_username: str | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
@@ -443,6 +448,15 @@ class ACPRunner:
         command, env, cwd = self.profile.resolve()
         self.resolved_command = tuple(command)
         self.workspace = cwd
+        # An inherited run marker also identifies children that fork, detach
+        # and lose their parent wholly between tree observations. It is not
+        # a credential; avoid names that vendor env policies filter as one.
+        self._process_nonce = secrets.token_hex(32)
+        env["KOLLAB_ACP_PROCESS_NONCE"] = self._process_nonce
+        self._process_username = psutil.Process(os.getpid()).username()
+        # A rapidly exiting root may disappear before psutil can read it.
+        # Allow one second of kernel birth-time rounding in that fallback.
+        self._process_started_at = time.time() - 1
         self._process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
@@ -453,10 +467,16 @@ class ACPRunner:
             start_new_session=True,
         )
         self._adapter_pid = self._process.pid
-        with contextlib.suppress(psutil.NoSuchProcess):
+        with contextlib.suppress(psutil.Error):
             owner = psutil.Process(self._process.pid)
-            owner.create_time()
-            if owner.ppid() == os.getpid() and self._process.returncode is None:
+            birth = owner.create_time()
+            if (
+                owner.ppid() == os.getpid() and self._process.returncode is None
+                and owner.is_running()
+                and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
+                and owner.is_running()
+            ):
+                self._process_started_at = birth
                 self._owned_processes[owner.pid] = owner
         self._refresh_process_tree()
         self._process_tracker = asyncio.create_task(self._track_process_tree())
@@ -584,7 +604,35 @@ class ACPRunner:
             self._refresh_process_tree()
             await asyncio.sleep(0.1)
 
+    def _recover_tagged_processes(self) -> None:
+        """Recover same-user newborns by this run's inherited marker only."""
+        if self._process_nonce is None or self._process_started_at is None:
+            return
+        for owner in psutil.process_iter(("pid", "create_time", "username")):
+            with contextlib.suppress(psutil.Error):
+                birth = owner.info.get("create_time")
+                if (
+                    owner.info.get("username") != self._process_username
+                    or birth is None or birth < self._process_started_at
+                ):
+                    continue
+                if self._owned_processes.get(owner.pid) == owner:
+                    continue
+                # Compare only the marker, without retaining/logging an
+                # environment. Recheck birth identity across that read.
+                if (
+                    owner.is_running()
+                    and owner.environ().get("KOLLAB_ACP_PROCESS_NONCE") == self._process_nonce
+                    and owner.is_running()
+                ):
+                    owner.create_time()
+                    self._owned_processes[owner.pid] = owner
+
     def _live_owned_processes(self) -> list[psutil.Process]:
+        self._refresh_process_tree()
+        # Do the process-wide marker lookup at lifecycle boundaries, rather
+        # than reading unrelated environments on every 100ms tree sample.
+        self._recover_tagged_processes()
         self._refresh_process_tree()
         alive: list[psutil.Process] = []
         for owner in tuple(self._owned_processes.values()):
@@ -1252,6 +1300,9 @@ class ACPRunner:
                 if not survivors and not unreaped_adapter:
                     self._owned_processes.clear()
                     self._adapter_pid = None
+                    self._process_nonce = None
+                    self._process_started_at = None
+                    self._process_username = None
                 else:
                     detail = ", ".join(str(owner.pid) for owner in survivors)
                     if unreaped_adapter:
