@@ -21,8 +21,8 @@ from acp.schema import (
     AgentCapabilities, AgentMessageChunk, AgentThoughtChunk, CloseSessionResponse,
     Implementation, InitializeResponse, LoadSessionResponse, NewSessionResponse,
     PermissionOption, PromptResponse, ResumeSessionResponse, SessionMode,
-    SessionModeState, SetSessionModeResponse, TextContentBlock, ToolCall, ToolCallUpdate,
-    SessionNotification, UserMessageChunk,
+    SessionModeState, SetSessionModeResponse, TextContentBlock, ToolCallStart,
+    ToolCallProgress, ToolCallUpdate, SessionNotification, UserMessageChunk,
 )
 
 from .acp_stdio import acp_streams, isolated_stdout
@@ -315,26 +315,26 @@ class KollabACPAgent:
             sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text=str(text))))
 
     @staticmethod
-    def _tool_start(event: dict[str, Any]) -> ToolCall:
+    def _tool_start(event: dict[str, Any]) -> ToolCallStart:
         tool_type = str(event.get("tool_type") or "")
         kind = "execute" if tool_type == "terminal" else (
             "read" if tool_type in {"file_read", "file_grep"} else
             "delete" if tool_type in {"file_delete", "file_rmdir"} else
             "move" if tool_type == "file_move" else
             "edit" if tool_type.startswith("file_") else "other")
-        return ToolCall(toolCallId=str(event.get("tool_id") or uuid.uuid4().hex),
+        return ToolCallStart(sessionUpdate="tool_call", toolCallId=str(event.get("tool_id") or uuid.uuid4().hex),
             title=str(event.get("tool_name") or event.get("tool_type") or "Tool"), kind=kind,
             status="in_progress", rawInput=event.get("input") or {})
 
     @staticmethod
-    def _tool_result(event: dict[str, Any]) -> ToolCallUpdate:
+    def _tool_result(event: dict[str, Any]) -> ToolCallProgress:
         content = [{"type": "content", "content": {"type": "text", "text": str(event.get("output") or event.get("error") or "")}}]
         diffs = (event.get("metadata") or {}).get("diffs", [])
         for diff in diffs:
             if isinstance(diff, dict) and diff.get("path"):
                 content.append({"type": "diff", "path": diff["path"],
                                 "oldText": diff.get("old_text"), "newText": diff.get("new_text", "")})
-        return ToolCallUpdate(toolCallId=str(event.get("tool_id") or ""),
+        return ToolCallProgress(sessionUpdate="tool_call_update", toolCallId=str(event.get("tool_id") or ""),
                               status="completed" if event.get("success") else "failed",
                               content=content, rawOutput=event.get("output"))
 
