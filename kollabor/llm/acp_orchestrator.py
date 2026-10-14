@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import sys
 import uuid
 from collections import deque
 from copy import deepcopy
@@ -17,6 +18,7 @@ from typing import Any
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
+from kollabor_tui.terminal_state import TerminalMode
 
 from .acp_bridge import (
     ACPAdmission,
@@ -129,6 +131,7 @@ class ACPOrchestrator:
                 update_callback=self._on_runner_update,
                 lifecycle_callback=self._runner_lifecycle,
             )
+            self._runner.stderr_callback = self._on_runner_stderr
             self._profile_name = profile.name
             llm = self.event_bus.get_service("llm_service")
             stats = getattr(llm, "session_stats", None)
@@ -496,6 +499,20 @@ class ACPOrchestrator:
                 "generation": result.generation, "turn_id": result.turn_id,
                 "request_id": result.request_id, "stop_reason": result.stop_reason,
                 "end_frame": result.end_frame}
+
+    def _on_runner_stderr(self, chunk: bytes) -> None:
+        logger.info("ACP diagnostic [%s]: %s", self._profile_name, chunk.decode(errors="replace").rstrip())
+        llm = self.event_bus.get_service("llm_service")
+        display = getattr(llm, "message_display_service", None)
+        renderer = getattr(display, "renderer", None)
+        terminal_state = getattr(renderer, "terminal_state", None)
+        # Raw input owns an active TUI. Keep its diagnostics in the existing
+        # file log; detached/standalone and pipe paths retain original stderr.
+        if (not getattr(renderer, "pipe_mode", False)
+                and getattr(terminal_state, "current_mode", None) == TerminalMode.RAW):
+            return
+        sys.stderr.buffer.write(b"[acp] " + chunk)
+        sys.stderr.buffer.flush()
 
     def _on_runner_update(self, update: dict[str, Any]) -> None:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))

@@ -380,6 +380,7 @@ class ACPRunner:
         self.permission_bridge = permission_bridge or ACPPermissionBridge()
         self.update_callback = update_callback
         self.lifecycle_callback = lifecycle_callback
+        self.stderr_callback: Callable[[bytes], None] | None = None
         self.generation = 0
         self._next_turn_id = 0
         self._active_turn_id = 0
@@ -582,8 +583,11 @@ class ACPRunner:
             return
         while chunk := await self._process.stderr.readline():
             self.last_stderr = chunk.decode(errors="replace").strip()[-1000:]
-            sys.stderr.buffer.write(b"[acp] " + chunk)
-            sys.stderr.buffer.flush()
+            if self.stderr_callback is not None:
+                self.stderr_callback(chunk)
+            else:
+                sys.stderr.buffer.write(b"[acp] " + chunk)
+                sys.stderr.buffer.flush()
 
     def _refresh_process_tree(self) -> None:
         """Retain birth-checked descendants, including detached/orphaned roots."""
