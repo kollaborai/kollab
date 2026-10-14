@@ -102,7 +102,11 @@ class AttachPermissionBridge:
             option_id = params.get("option_id")
             control_name = params.get("control")
             response_field = params.get("response")
-            if option_id is not None and (control_name is not None or response_field is not None):
+            selector_count = sum(
+                value is not None
+                for value in (option_id, control_name, response_field)
+            )
+            if selector_count != 1:
                 return {"ok": False, "error": f"mixed permission response for {tool_id}"}
             future = self._pending.get(tool_id)
             offered_ids = self._pending_option_ids.get(tool_id, set())

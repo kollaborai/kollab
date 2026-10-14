@@ -500,6 +500,33 @@ def test_attach_bridge_rejects_unoffered_acp_id_without_consuming_prompt():
     asyncio.run(run_bridge())
 
 
+def test_attach_bridge_rejects_duplicate_response_selectors_before_settling():
+    async def run_bridge():
+        bridge = AttachPermissionBridge()
+        rpc_server = FakeRpcServer()
+        display_tap = FakeDisplayTap()
+        task = asyncio.create_task(
+            bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={"tool_id": "selector-collision", "source": "acp", "acp_options": []},
+                timeout=1,
+            )
+        )
+        await asyncio.sleep(0)
+        handler = rpc_server.handlers[PERMISSION_RESPONSE_RPC_METHOD]
+        result = await handler(
+            {"tool_id": "selector-collision", "control": "CANCEL", "response": "DENY"}
+        )
+        assert result["ok"] is False
+        assert not task.done()
+        valid = await handler({"tool_id": "selector-collision", "control": "CANCEL"})
+        assert valid == {"ok": True}
+        assert await task is ConfirmationResponse.CANCEL
+
+    asyncio.run(run_bridge())
+
+
 def test_attach_bridge_accepts_native_cancel_alongside_acp_options():
     async def run_bridge():
         bridge = AttachPermissionBridge()
