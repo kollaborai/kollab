@@ -8,8 +8,8 @@ missing-auth startup and clean runner-close checks
 also pass. Claude's full 300-second permission timeout and missing-login
 `-32000` checks pass; its normal empty-store session opens before the first
 controlled prompt rejects authentication. Full qualification remains open for
-Gemini's supported-auth positive rows and fresh real-provider Web UI and
-interactive terminal walkthroughs. Actual Zed Preview
+Gemini's supported-auth positive rows. Real-provider Web UI and interactive
+terminal walkthroughs now pass. Actual Zed Preview
 client checks pass with a controlled local SDK backend: normal/approval/absolute
 diff, partial UI Stop, attached denial/retention and reconnect, then owned
 physical shutdown after `4d4ceff1`. The earlier orphaned-daemon failure remains
@@ -25,9 +25,11 @@ pass. Terminal answer ownership and diagnostic overwrites were fixed in
 `917a434d` and `ad53626e`. Long permission choices now wrap in `d048763e`;
 `2b81ebf6` and `f128b4d0` keep Stop available for owned pending permissions and
 send the exact parent request to the daemon. Controlled browser Stop/reload,
-partial retention, a normal follow-up and 390px/820px layouts pass. The complete
-UI matrix still needs actual-provider Stop/reload and the remaining Claude
-terminal checks.
+partial retention, a normal follow-up and 390px/820px layouts pass. Fresh actual
+Claude and Codex Web Stop/reload, exact approval/denial choices, recovery and
+Claude terminal input/permissions/active Escape also pass. These runs used
+private sessions; the user's existing Web UI engine has not been restarted
+onto these fixes.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 

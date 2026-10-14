@@ -365,9 +365,64 @@ Verified fixes and boundaries:
   existing daemon boolean can acknowledge an initially matched owner even when
   its later generation check safely does nothing; physical cancellation is
   proved separately by SDK frames and saved completion. Actual-provider
-  Stop/reload and the remaining Claude terminal checks are still open. Both
+  replay followed in the private run recorded below. Both
   controlled process families and owned sockets were independently checked gone;
   no provider auth copies or real model calls were used in those two fixtures.
+- Fresh actual-provider replay on committed `e99fe9d6`: private fixture
+  `/private/tmp/kpstop-esmwte_n` used the pinned installed Claude/Codex adapters,
+  a 600-second permit and exactly three reviewed prompts per provider. Root
+  alone operated the actual browser and borrowed interactive Claude terminal;
+  observer lanes sent no prompts, choices or keys. Codex parent
+  `4911dea964a8493d8738f608349b06ed` reached genuine permission, survived reload
+  with Stop available and received one owner-scoped cancellation. SDK permission
+  RPC 0 returned `cancelled`; the parent finished `cancelled`, retained 22 text
+  characters and the vendor's actual `failed` card. No stopped sentinel was
+  created. Parent `84e34a0efdad4847b3691f3e3ade4608` selected offered `allow_once`
+  then offered `cancel` (`reject_once`) on separate real permissions: completed
+  and failed cards, exact eight-byte `approved` sentinel and no denied file.
+  Codex ended that denial turn `cancelled` with no final text; no reply marker
+  is inferred. Recovery `097bd33ada894a93b80e3a8a7b8cd456` then ended normally
+  with exactly `CODEX WEB RECOVERY OK`; that answer and earlier partial survived
+  browser reload. Evidence: `codex-three-turn-observation.json`,
+  `protocol.jsonl`, root DOM captures and `codex-final-reloaded.jpg`.
+- The same actual run stopped Claude parent `f58df51ed92e42f3a09c505d99451625`
+  after real permission and browser reload/reselection: one SDK cancel,
+  `cancelled` permission outcome and parent, 23 retained text characters and
+  unchanged vendor `pending` card. The Web UI displayed the cancelled parent
+  separately from that last reported tool status; no stopped file existed.
+  Actual terminal input admitted `93a05bb303da4a1a863ad13864f8b57a`; the offered
+  `a` and `d` keys selected `allow-once` and `reject` on the respective commands.
+  Only the approved eight-byte file existed; saved cards were completed/failed.
+  The normal 181-character reply ended with `TUI ACP CLAUDE INPUT OK` and
+  rendered above the Ready footer. Third parent
+  `be887c34dd9148d0be27eb0390d7581f` was still streaming positive text when root
+  pressed one Escape. SDK cancel followed 31.547 ms later, and the parent
+  finished cancelled 44.763 ms after the key. The 6,098-character partial,
+  with no tool or permission frames, persisted and survived browser reload;
+  the terminal returned to Ready. Evidence:
+  `/private/tmp/kctui-claude-rukp1c3n/evidence/claude-three-turns-final-observer-1792005824328435000.json`,
+  its wire/terminal captures, `claude-tui-active-escape-key.json` and
+  `claude-final-reloaded.txt` under the fixture root. Browser reload selected
+  Codex automatically, so root explicitly reselected Claude; session-selection
+  persistence is not claimed. The initial zero-model Codex approval-mode change
+  returned `Failed to fetch`; one observed GUI retry returned HTTP 200 and
+  ConfirmAll. That initial transport cause remains untraced, with its negative
+  evidence retained separately. No account/auth refusal was retried.
+- That six-turn fixture closed normally at its unchanged permit expiry. Root's
+  independent birth check found no remaining recorded private runtime or
+  terminal processes; all 12 preexisting user process births survived. Copied
+  auth and private daemon sockets were removed. Original file/keychain hashes
+  matched this fixture's baseline, and both unrelated test-file hashes stayed
+  unchanged. Earlier unattributed keychain drift remains unresolved. The
+  borrowed terminal exited on daemon disconnect; its exact private tmux server
+  closed normally. Its retained socket inode refuses connections with errno 61;
+  no claim that every socket pathname vanished is made. Exact Claude JSONL and
+  snapshot parent IDs, content hashes, stop reasons and tool projections match
+  for all three turns. Evidence: `cleanup.json`,
+  `root-six-turn-independent-check.json` and
+  `root-independent-cleanup-check.json` under the fixture root, plus
+  `claude-jsonl-snapshot-parity-1792005903667189000.json` and the terminal
+  cleanup/socket postchecks under the attached terminal's `evidence/` directory.
 - Fresh real-provider test cleanup: the private model window expired normally
   after four Codex and one Claude admissions; all 202 recorded owned process
   birth entries were independently checked gone, and daemon sockets and copied
@@ -480,19 +535,14 @@ Required open gates:
    only; no secret values were recorded and no account, login, billing or
    credential settings were changed. Evidence:
    `/var/folders/m2/9jqrk_yj05nc0tw10f9nv0t80000gn/T/kacp-prerequisite-recheck-sb4kib4a/auth-prerequisite.json`.
-2. Complete real-provider Web UI and interactive terminal walkthroughs. Existing
-   controlled SDK browser evidence covers cards, permissions, Stop/reload and
-   narrow layouts, and real Codex output was observed in Zircon's earlier
-   window. Actual CLI/SDK/daemon model runs and the private native feedback run
-   are separate evidence. Fresh `ad53626e` checks now prove real Claude browser
-   approval/denial/reply and Codex browser approval, attached-terminal denial,
-   typed reply and active Esc. The discovered Web Stop and long-label defects
-   are fixed in `d048763e`, `2b81ebf6` and `f128b4d0`; controlled restored Stop,
-   partial history, old-engine refusal, normal follow-up and narrow layouts pass.
-   Verify actual-provider Stop/reload and finish the remaining Claude terminal
-   surfaces before calling the entire UI matrix complete.
-   The earlier summary that only Gemini remained was too broad for complete
-   user-facing acceptance.
+The real-provider Web UI and interactive terminal walkthrough gate is now
+closed by the fresh private run recorded above, together with the earlier
+actual browser and Codex terminal cases. Controlled SDK and narrow-layout
+evidence remain separately identified. The earlier summary that only Gemini
+remained preceded these actual user-facing acceptance checks and was too broad
+at that time. The user's existing Web UI engine has not been restarted onto
+the new owner-scoped Stop endpoint; this qualification does not claim that
+running user instance is updated.
 
 Counts above overlap and are not a combined distinct-test total. Private
 artifacts and the owned Zed test folders are retained until the qualification
