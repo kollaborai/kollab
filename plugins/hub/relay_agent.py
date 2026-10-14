@@ -2018,6 +2018,7 @@ class RelayAgentBridge:
         tools = getattr(self.plugin, "_acp_hub_tools", None)
         if tools is not None and self._verified_return_event(record):
             message = self._acp_return_message(record)
+            tools.observe(message)
             if tools.consume(message):
                 if payload["kind"] in {"result", "error"}:
                     message.action = "turn_end"

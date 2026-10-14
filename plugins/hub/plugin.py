@@ -3266,7 +3266,9 @@ class HubPlugin(BasePlugin):
             # handling, so the asker (a CLI waiter, another agent) can tell
             # whose answer this is. The model never sees thread ids, so the
             # runtime supplies them.
-            if answering is not None:
+            if answering is not None and not (
+                tool_data.get("_acp_question_answer") or tool_data.get("_acp_ask")
+            ):
                 thread_id, reply_to = answering.thread_id, answering.message_id
         elif is_reply and self._active_thread_id:
             # <hub_reply> — inherit active thread from last received message
@@ -9313,7 +9315,11 @@ class HubPlugin(BasePlugin):
         self._trace_delivery(message, "route_started", detail=message.action)
 
         # Log outgoing message to vault (skip cron noise)
-        if self._vault and message.from_identity not in ("hub-cron", "task-cron"):
+        if (
+            self._vault and message.from_identity not in ("hub-cron", "task-cron")
+            and message.action != "turn_end"
+            and not (message.metadata or {}).get("turn_end")
+        ):
             self._vault.append_stream(
                 "sent",
                 message.content,
@@ -9400,6 +9406,8 @@ class HubPlugin(BasePlugin):
         self, message: HubMessage, delivered_identities: set[str]
     ) -> bool:
         """Queue direct messages for durable agent identities when offline."""
+        if message.action == "turn_end" or (message.metadata or {}).get("turn_end"):
+            return False
         target = (message.to or "").strip()
         if not target or target in ("*", "all", "everyone", "team", "project"):
             return False
@@ -9525,7 +9533,7 @@ class HubPlugin(BasePlugin):
         # dedicated hidden turn_end action; never send them as ordinary
         # model-visible messages or queue them in the identity mailbox.
         turn_end = (message.metadata or {}).get("turn_end")
-        if message.action == "message" and isinstance(turn_end, dict):
+        if message.action in {"message", "turn_end"} and isinstance(turn_end, dict):
             try:
                 from .dns.endpoint import is_remote_uri
 
@@ -9564,6 +9572,8 @@ class HubPlugin(BasePlugin):
                     detail=dial_target,
                 )
                 return success
+            # Hidden completion frames have no ordinary-message fallback.
+            return False
 
 
         # Control-plane traffic bypasses the WAITING gate entirely.
