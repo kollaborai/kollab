@@ -105,6 +105,12 @@ class ACPProfile:
         except (OSError, subprocess.SubprocessError):
             return ""
 
+    @staticmethod
+    def _is_executable_file(path: str) -> bool:
+        """Return whether path names a regular file executable by this process."""
+        candidate = Path(path)
+        return bool(path and candidate.is_file() and os.access(candidate, os.X_OK))
+
     def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
         cache_path = self._cache_path()
         cache: dict[str, Any] = {}
@@ -117,14 +123,22 @@ class ACPProfile:
         cached = cache.get(self.name)
         executable = str(cached.get("path", "")) if isinstance(cached, dict) else ""
         cached_command = cached.get("command") if isinstance(cached, dict) else None
-        executable_path = Path(executable)
         if (
             cached_command != self.command[0]
             or not executable
-            or not executable_path.is_file()
-            or not os.access(executable_path, os.X_OK)
+            or not self._is_executable_file(executable)
         ):
-            executable = self._login_shell_path() or shutil.which(self.command[0]) or ""
+            executable = next(
+                (
+                    candidate
+                    for candidate in (
+                        self._login_shell_path(),
+                        shutil.which(self.command[0]) or "",
+                    )
+                    if self._is_executable_file(candidate)
+                ),
+                "",
+            )
         if not executable:
             raise ACPError(f"ACP adapter executable not found: {self.command[0]}. {self.install_guidance}")
         executable = os.path.abspath(executable)
