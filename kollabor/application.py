@@ -1306,9 +1306,8 @@ class TerminalLLMChat:
             "source": "acp",
             "approval_scope": "once",
         }
-        display = getattr(request, "display", None)
-        if display:
-            details.update(display)
+        if request.display:
+            details.update(request.display)
         try:
             decision = await callback(details)
         except (asyncio.CancelledError, TimeoutError):

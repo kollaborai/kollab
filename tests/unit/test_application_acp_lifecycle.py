@@ -157,6 +157,12 @@ async def test_acp_decider_maps_native_reusable_approval_to_once(scope):
         operation={"kind": "edit", "path": "/tmp/work/a.txt"},
         workspace="/tmp/work",
         profile="claude-code",
+        display={
+            "title": "Edit file",
+            "display_kind": "edit",
+            "command": [],
+            "paths": ["/tmp/work/a.txt"],
+        },
         options=(
             {"optionId": "opaque-once", "kind": "allow_once"},
             {"optionId": "opaque-always", "kind": "allow_always"},
@@ -257,6 +263,12 @@ async def test_acp_decider_mode_policy_uses_only_unique_once_offer(
         operation=operation,
         workspace="/tmp/owned",
         profile="owned-acp",
+        display={
+            "title": "ACP permission",
+            "display_kind": kind,
+            "command": ["echo", "owned"] if kind == "execute" else [],
+            "paths": ["/tmp/owned/a.txt"] if kind == "edit" else [],
+        },
         options=options,
     )
 
@@ -293,6 +305,12 @@ async def test_acp_decider_does_not_store_grant_without_valid_operation_or_uniqu
         kind="file_edit",
         workspace="/tmp/work",
         profile="claude-code",
+        display={
+            "title": "Edit file",
+            "display_kind": "edit",
+            "command": [],
+            "paths": ["/tmp/work/a.txt"],
+        },
     )
     for operation, options in (
         (None, ({"optionId": "once", "kind": "allow_once"},)),
