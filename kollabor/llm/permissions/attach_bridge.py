@@ -30,21 +30,47 @@ def resolution_event(
     response: Any,
     details: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """The event that tells every attached window a prompt is closed."""
+    """Build the broadcast emitted when an attached prompt is resolved.
+
+    ACP option IDs are opaque strings and must be resolved before native enum
+    names.  An ACP provider is allowed to offer an ID such as
+    ``APPROVE_ONCE`` for a rejecting option; treating that ID as a native
+    control would incorrectly grant access to every attached window.
+    """
+    if isinstance(response, str) and details:
+        options = details.get("acp_options")
+        if isinstance(options, (list, tuple)):
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                if str(option.get("optionId") or "") != response:
+                    continue
+                kind = str(option.get("kind") or "").lower()
+                if kind == "allow_once":
+                    return {
+                        "type": "permission_granted",
+                        "tool_id": tool_id,
+                        "scope": "once",
+                        "option_id": response,
+                    }
+                if kind == "reject_once":
+                    return {"type": "permission_denied", "tool_id": tool_id}
+                if kind in {"allow_always", "reject_always"}:
+                    return {
+                        "type": "permission_granted"
+                        if kind == "allow_always"
+                        else "permission_denied",
+                        "tool_id": tool_id,
+                        "option_id": response,
+                        "vendor_saved": True,
+                        "warning": (
+                            "Saved by the ACP provider; Kollab cannot undo it."
+                        ),
+                    }
+                return {"type": "permission_denied", "tool_id": tool_id}
+
     response_name = getattr(response, "name", None)
     scope = _GRANTED_SCOPES.get(response_name or str(response))
-    if scope is None and isinstance(response, str) and details:
-        for option in details.get("acp_options", ()):
-            if isinstance(option, dict) and str(option.get("optionId")) == response:
-                kind = str(option.get("kind") or "")
-                scope = {
-                    "allow_once": "once",
-                    "allow_always": "always_edits",
-                    "allow_tool_always": "trust_tool",
-                }.get(kind)
-                if scope is None:
-                    return {"type": "permission_denied", "tool_id": tool_id}
-                break
     if scope:
         return {"type": "permission_granted", "tool_id": tool_id, "scope": scope}
     return {"type": "permission_denied", "tool_id": tool_id}
