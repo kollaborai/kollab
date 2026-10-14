@@ -205,6 +205,8 @@ class PermissionSnapshot(Snapshot):
     approval_mode: str = "TRUST_ALL"
     session_approvals_count: int = 0
     project_approvals_count: int = 0
+    # Display-only Kollab ACP grants; never used for authorization.
+    acp_grants: list[dict[str, Any]] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=dict)
 
 

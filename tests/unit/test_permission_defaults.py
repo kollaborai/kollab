@@ -70,3 +70,51 @@ def test_acp_project_grant_persists_without_native_keys(tmp_path, monkeypatch):
     }]
     restored.clear_project_approvals()
     assert restored.get_acp_grant_inventory() == []
+
+
+def test_acp_inventory_scope_reload_clear_and_isolation(tmp_path, monkeypatch):
+    from kollabor_config import config_utils
+    import json
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    monkeypatch.setattr(config_utils, "get_project_data_dir", lambda: project_dir)
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    operation = {"kind": "execute", "command": ["echo", "ok"]}
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    manager.grant_acp(operation, str(tmp_path), "profile-a", scope="session")
+    manager.grant_acp(operation, str(tmp_path), "profile-a", scope="project")
+    assert len(manager.get_acp_grant_inventory()) == 2
+    assert manager.has_acp_grant(operation, str(tmp_path), "profile-a")
+    assert not manager.has_acp_grant(operation, str(tmp_path), "profile-b")
+    assert not manager.has_acp_grant({"kind": "execute", "command": ["echo", "no"]}, str(tmp_path), "profile-a")
+
+    restored = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    scopes = {row["scope"] for row in restored.get_acp_grant_inventory()}
+    assert scopes == {"project"}
+    restored.clear_session_approvals()
+    assert {row["scope"] for row in restored.get_acp_grant_inventory()} == {"project"}
+    restored.clear_project_approvals()
+    assert restored.get_acp_grant_inventory() == []
+
+
+def test_legacy_and_vendor_records_are_not_invented_as_revokeable_grants(tmp_path, monkeypatch):
+    from kollabor_config import config_utils
+    import json
+
+    monkeypatch.setattr(config_utils, "get_project_data_dir", lambda: tmp_path)
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    operation = {"kind": "edit", "locations": ["/tmp/a"]}
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    key = manager.acp_grant_key(operation, str(tmp_path), "profile-a")
+    (tmp_path / "permission_approvals.json").write_text(json.dumps({
+        "approved_keys": [], "acp_grants": [key],
+        "vendor_saved_choices": [{"profile": "vendor", "operation": operation}],
+    }))
+    restored = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    rows = restored.get_acp_grant_inventory()
+    assert len(rows) == 1
+    assert rows[0]["grant_key"] == key
+    assert rows[0]["operation"] is None
+    assert rows[0]["profile"] is None
+    assert all(row.get("source") == "kollab" for row in rows)
