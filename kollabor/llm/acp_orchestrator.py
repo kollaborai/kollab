@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 class _ObservedTurn:
     session_id: str
     generation: int
+    text: str = ""
     updates: list[dict[str, Any]] = field(default_factory=list)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -68,6 +69,7 @@ class ACPOrchestrator:
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
+        self._display_turn: tuple[str, int] | None = None
         from pathlib import Path
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
@@ -383,6 +385,10 @@ class ACPOrchestrator:
                 except BaseException as history_exc:
                     logger.warning("ACP interrupted transcript write failed (%s)", type(history_exc).__name__)
             if stop_reason == "error":
+                llm = self.event_bus.get_service("llm_service")
+                display = getattr(llm, "message_display_service", None)
+                if display is not None:
+                    display.display_error_message(end_frame["error"])
                 publish_semantic(
                     self.event_bus, "error", message=end_frame["error"], code=error_code,
                     request_id=admission.request_id, turn_id=admission.turn_id,
@@ -494,30 +500,38 @@ class ACPOrchestrator:
     def _on_runner_update(self, update: dict[str, Any]) -> None:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
         key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
+        observed = self._observed_turns.get(key)
         if kind == "turn_start":
-            self._observed_turns[key] = _ObservedTurn(
+            observed = self._observed_turns[key] = _ObservedTurn(
                 str(getattr(self._runner, "session_id", None) or ""), int(update["generation"]),
             )
-        elif observed := self._observed_turns.get(key):
+        elif observed is not None:
             if kind == "turn_finished":
                 observed.finished.set()
             elif kind not in {"permission_request", "permission_resolved"}:
                 observed.updates.append(deepcopy(update))
+                if kind == "token":
+                    observed.text += str(update.get("text") or "")
         payload = update.get("payload") or {}
         llm = self.event_bus.get_service("llm_service")
         display = getattr(llm, "message_display_service", None)
         if display is not None:
             if kind == "turn_start":
+                self._display_turn = key
                 display.start_streaming_response()
                 display.show_loading("Harness is working")
-            elif kind == "token":
-                display.hide_loading()
-                display.message_coordinator.write_streaming_chunk(str(update.get("text") or ""))
-            elif kind == "turn_finished":
+            elif kind == "token" and key == self._display_turn and observed is not None:
+                # Match native streaming: the active area previews buffered text;
+                # only the coordinator writes the final transcript above it.
+                if not getattr(display.renderer, "pipe_mode", False) and observed.text.strip():
+                    display.show_loading("\n".join(observed.text.replace("\r\n", "\n").splitlines()[-5:]))
+            elif kind == "turn_finished" and key == self._display_turn:
+                self._display_turn = None
                 display.hide_loading()
                 display.end_streaming_response()
-                display.message_coordinator.write_streaming_chunk("\n")
-            elif kind == "agent_thought_chunk":
+                if observed is not None:
+                    display.display_complete_response(thinking_duration=0, response=observed.text)
+            elif kind == "agent_thought_chunk" and key == self._display_turn:
                 display.show_loading(str((payload.get("content") or {}).get("text") or "Harness is thinking")[:120])
         if kind in {"tool_call", "tool_call_update"}:
             tool_id = str(payload.get("toolCallId") or "")
