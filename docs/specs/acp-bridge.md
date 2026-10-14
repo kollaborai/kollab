@@ -135,6 +135,8 @@ coordinator runs them on the harness instead of a model API. Hub routing does
 not change, because `claude` is an ordinary agent name. The roster,
 `kollab --hub status` and `hub_status` show the harness beside the name,
 `claude (Claude Code)`, so people and agents know what they are talking to.
+Native `/hub status` and `/hub agents` output uses those labels too and shows
+`waiting for your OK` when an ACP permission is pending.
 
 Working presence ends when the owned input chain drains, including a provider
 failure, cancellation or a rejected pre-request hook. One model response can

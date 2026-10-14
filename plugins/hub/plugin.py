@@ -12032,9 +12032,11 @@ class HubPlugin(BasePlugin):
         for a in agents:
             role = " (coordinator)" if a.is_coordinator else ""
             me = " (you)" if a.agent_id == self._identity.agent_id else ""
-            harness = (getattr(a, "tags", None) or {}).get("harness")
+            tags = getattr(a, "tags", None) or {}
+            harness = tags.get("harness")
             label = f"{a.identity} ({harness})" if harness else a.identity
-            lines.append(f"  {a.identity}{role}{me}: {a.state}")
+            state = "waiting for your OK" if tags.get("acp_waiting") else a.state
+            lines.append(f"  {label}{role}{me}: {state}")
         return "\n".join(lines)
 
     # -- Cron commands --
@@ -12883,6 +12885,8 @@ class HubPlugin(BasePlugin):
         for a in agents:
             role = " (coordinator)" if a.is_coordinator else ""
             me = " (you)" if a.agent_id == self._identity.agent_id else ""
+            harness = (getattr(a, "tags", None) or {}).get("harness")
+            label = f"{a.identity} ({harness})" if harness else a.identity
 
             # Format state with cooldown countdown if waiting
             if a.state == "waiting":
