@@ -1,10 +1,12 @@
 # ACP bridge implementation checkpoint
 
-2026-10-13 implementation pass: source changes were committed as `9a123150`.
-The subsequent source audit found implementation blockers; the source pass is
-incomplete. No tests, builds, lint, adapter runs or deployment were performed
-during this pass, by explicit instruction. Earlier results below describe an
-earlier checkpoint and do not qualify these changes.
+2026-10-13: the initial implementation was committed as `9a123150`. The
+subsequent source audit identified 13 concrete repair items before a replacement
+goal was created. Those source repairs are now implemented in separate scoped
+commits, recorded below. The source remains unqualified. No tests, builds, lint,
+adapter/client runs, browser runs or deployment were performed during this pass,
+by explicit instruction. Earlier results below describe an earlier checkpoint
+and do not qualify these changes.
 
 ## Audited repair goal after 9a123150
 
@@ -56,7 +58,10 @@ commits and source evidence for each. All items are open at goal creation.
 6. **R6: Exactly-once local and relay return consumption.**
    `HubPlugin._on_message_received` consumes ask replies before message-ID
    deduplication. Relay `_rpc_event` consumes verified returns before checking
-   `presented`. Redelivery can append the same interim reply repeatedly.
+   `presented`; verified-return checks already reject ordinary presented
+   replays, but sibling/leased consumption needs an idempotence guard when
+   presentation writes fail. Local redelivery can append an interim reply
+   repeatedly.
    Deduplicate before mutable wait/receipt handling in both paths, after
    authorization. Preserve distinct reply/end events, ordered `earlier`, and
    normal treatment of legitimate late replies.
@@ -128,6 +133,52 @@ and individually recorded below with source evidence. It does not qualify ACP
 for production. By Marco's instruction, do not add/run tests, builds, lint,
 adapter/client runs or live qualification. Those checks remain deferred;
 never reuse the earlier checkpoint's results as proof of this repair pass.
+
+### Repair commit ledger
+
+Source inspection and scoped diffs are the evidence for this ledger. The
+13-item source-repair goal is complete; runtime behavior remains unverified.
+
+- R1 source fixed: `ed283dd2`; native live/replay share discriminated SDK helpers.
+- R2 source fixed: `92988ec2`; inbound runner enables the required SDK routes.
+- R3 source fixed: `ae020bd9`, `cae657a8`, `73baf934`; both queues release
+  cancelled slots, native terminals share a private completion fence, and a
+  cancelled queued client cannot finish another Web stream or inflate turns.
+- R4 source fixed: `1248596b`; ACP restore follows native conversation renaming.
+- R5 source fixed: `550e2240`, `947801d3`, `9c2d3aae`, `3409732d`, `f30f9cee`;
+  admission/completion and inbound startup/save/close retain cleanup owners,
+  partial attachments clean up, failed pool stops retain retry ownership, and
+  engine clients receive a correlated visible error before failed completion.
+- R6 source fixed: `e0064a22`; local and relay consumption deduplicate by sender,
+  ID and action, preserving synthesized reply/end pairs.
+- R7 source fixed: `7cc20b53`; immutable question receipts, original-final
+  buffering, bounded continuation lifetime and hidden answer end frames.
+- R8 source fixed: `c1b38e2f`; fallback scans earlier nonempty text segments.
+- R9 source fixed: `e69262da`, `4c457ee3`; retained PID/birth identities, descendant
+  refresh during shutdown, bounded grace/termination and explicit survivor
+  errors; failed teardown owners remain reachable for retry. Capture of a child
+  born, detached and orphaned wholly between polling observations remains
+  unverified; this is not proof of complete
+  live process containment.
+- R10 source fixed: `a85df02f`, `41f28c25`, `d6f02499`, `d27c07ac`;
+  explicit resolution ownership, cancellation settlement in the Web transport,
+  waiting state cleared at the owned turn boundary, and
+  tracked generation-scoped cancellation when no offered selection is valid.
+  Timeout still chooses the first offered one-shot rejection when available.
+- R11 source fixed: `8f0e414b`, `d27c07ac`, `ed4d64a1`, `84f206c1`; full merged
+  cards survive history, live cards update by ID, text/diff content is rendered,
+  and terminal parents stop activity without inventing a tool outcome.
+- R12 source fixed: `0cfa0293`; authoritative profile events refresh engine
+  snapshots, and initial adoption reads cannot overwrite newer profile state.
+- R13 source fixed: `4093cf10`; fresh presence overrides cached summaries,
+  preserving harness/waiting tags and circular-ask detection.
+
+Source completion does not close the qualification gates: native cancellation
+and permission races, process teardown (including detached children), nested
+local/remote asks, persistence failure behavior, SDK/client interoperability,
+and rendered Web/TUI behavior at 390px/820px have not been exercised. No version
+was released or deployed and no commits were pushed. The shared main checkout
+was preserved throughout; only explicit repair paths were staged.
 
 ## Source inventory
 

@@ -1,6 +1,6 @@
 # Kollab speaks ACP
 
-Status: **implementation incomplete; source audit blockers**, 2026-10-13.
+Status: **audited source repairs committed; runtime unqualified**, 2026-10-13.
 Outbound and inbound source, MCP Hub tools, correlated client turns, network
 return handling, and Web UI integration are present in the shared checkout.
 Tests, builds, real adapters, client qualification, and deployment are deferred
