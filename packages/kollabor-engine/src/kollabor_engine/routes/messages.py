@@ -40,6 +40,14 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 
 
+def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[str]) -> bool:
+    """A cancelled pre-start client request cannot finish another active stream."""
+    return (event.get("type") == "turn_complete"
+            and event.get("input_source") == "acp_client"
+            and event.get("queued") is True
+            and str(event.get("request_id") or "") not in request_ids)
+
+
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
@@ -77,6 +85,8 @@ async def send_message(session_id: str, body: MessageRequest):
         reason = accepted.get("reason", "rejected")
         status = 409 if "in flight" in reason else 400
         raise HTTPException(status_code=status, detail=reason)
+    request_id = accepted.get("request_id") or body.request_id
+    request_ids = {str(request_id)} if request_id else set()
 
     async def event_generator():
         try:
@@ -98,6 +108,8 @@ async def send_message(session_id: str, body: MessageRequest):
                     return
 
                 event.setdefault("session_id", session_id)
+                if _foreign_queued_client_completion(event, request_ids):
+                    continue
 
                 if event.get("type") == "daemon_closed":
                     yield {
@@ -731,6 +743,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             body.state.get("messages"), list
         )
         submitted_contents: List[MessageContent] = []
+        request_ids: set[str] = set()
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
@@ -810,6 +823,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             str(accepted.get("reason", "message rejected"))
                         )
                         return
+                    if accepted.get("request_id"):
+                        request_ids.add(str(accepted["request_id"]))
                     submitted_contents.append(message_content)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
@@ -874,6 +889,8 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
+                if _foreign_queued_client_completion(event, request_ids):
+                    continue
 
                 if event_type == "token":
                     token = str(event.get("text") or "")

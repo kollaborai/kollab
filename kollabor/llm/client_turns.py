@@ -53,7 +53,8 @@ class ClientTurnBroker:
         self.admitted.discard(request_id)
         publish_semantic(self.bus, "turn_complete", request_id=request_id,
                          turn_id=item["turn_id"], stop_reason=stop_reason,
-                         error=error, _client_completion=completion)
+                         error=error, input_source="acp_client", queued=completion is None,
+                         _client_completion=completion)
 
     async def _run(self) -> None:
         from kollabor.user_input_source import UserInputSource

@@ -506,6 +506,10 @@ class EngineSession:
                     turn_error = str(event.get("message") or "") or "engine error"
 
                 elif etype == "turn_complete":
+                    if event.get("input_source") == "acp_client" and event.get("queued") is True:
+                        # This admitted request was cancelled before a native
+                        # turn started; it has no history or usage to count.
+                        continue
                     self.total_turns += 1
                     self.total_input_tokens += int(event.get("input_tokens", 0) or 0)
                     self.total_output_tokens += int(event.get("output_tokens", 0) or 0)
