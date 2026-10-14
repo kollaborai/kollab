@@ -621,6 +621,17 @@ def test_profile_cache_invalid_or_non_executable_and_profile_keys_stay_stripped(
         profile.resolve()
 
 
+def test_profile_rejects_non_executable_fallback_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    adapter = tmp_path / "adapter"
+    adapter.write_text("#!/bin/sh\n")
+    adapter.chmod(0o644)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: str(adapter))
+    profile = ACPProfile("fallback", (str(adapter),), cwd=str(tmp_path))
+    with pytest.raises(ACPError, match="adapter executable not found"):
+        profile.resolve()
+
+
 
 def test_profile_prefixes_adapter_path_over_profile_path(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
