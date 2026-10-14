@@ -80,6 +80,14 @@ const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
+/** Harness cost, same rule as the terminal status bar (`_fmt_cost` in core_widgets.py). */
+function formatCost(cost: { amount?: string | number; currency?: string }): string {
+  const amount = Number(cost.amount);
+  if (cost.currency !== "USD" || !Number.isFinite(amount)) return `${cost.amount} ${cost.currency ?? ""}`.trim();
+  if (amount < 0.01) return "$0.00";
+  return amount < 100 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(0)}`;
+}
+
 /** True when the restored state still carries an unanswered permission prompt. */
 function hasPendingPermission(state: EngineState): boolean {
   return state.messages.some(
@@ -218,7 +226,7 @@ function RuntimeShell({
         {session.harness && session.acp_usage?.size !== undefined && (
           <span className="text-muted-foreground text-xs" title="Current harness context usage">
             {session.acp_usage.used ?? 0}/{session.acp_usage.size} Tokens
-            {session.acp_usage.cost?.amount !== undefined ? ` · ${session.acp_usage.cost.amount} ${session.acp_usage.cost.currency ?? ""}` : ""}
+            {session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}
           </span>
         )}
         <div
