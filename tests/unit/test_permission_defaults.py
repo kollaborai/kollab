@@ -118,3 +118,43 @@ def test_legacy_and_vendor_records_are_not_invented_as_revokeable_grants(tmp_pat
     assert rows[0]["operation"] is None
     assert rows[0]["profile"] is None
     assert all(row.get("source") == "kollab" for row in rows)
+
+
+def test_acp_clear_preserves_native_approval_keys_and_metadata_tamper_is_not_auth(tmp_path, monkeypatch):
+    from kollabor_config import config_utils
+    import json
+
+    monkeypatch.setattr(config_utils, "get_project_data_dir", lambda: tmp_path)
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    operation = {"kind": "execute", "command": ["python", "-c", "print(1)"]}
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    native_key = "execute:python -c print(1)"
+    manager._project_approvals.add(native_key)
+    key = manager.grant_acp(operation, str(tmp_path), "profile-a", scope="project")
+    manager.clear_acp_grants(scope="project")
+    assert manager.get_project_approvals() == [native_key]
+    assert not manager.has_acp_grant(operation, str(tmp_path), "profile-a")
+
+    manager.grant_acp(operation, str(tmp_path), "profile-a", scope="project")
+    data = json.loads((tmp_path / "permission_approvals.json").read_text())
+    data["acp_grant_metadata"][key]["operation"] = {"kind": "execute", "command": ["evil"]}
+    (tmp_path / "permission_approvals.json").write_text(json.dumps(data))
+    restored = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    assert restored.has_acp_grant(operation, str(tmp_path), "profile-a")
+    assert not restored.has_acp_grant(data["acp_grant_metadata"][key]["operation"], str(tmp_path), "profile-a")
+
+
+def test_vendor_saved_choices_are_not_inventory_producer(tmp_path, monkeypatch):
+    from kollabor_config import config_utils
+    import json
+
+    monkeypatch.setattr(config_utils, "get_project_data_dir", lambda: tmp_path)
+    config = {"kollabor": {"permissions": {"enabled": True}}}
+    vendor_operation = {"kind": "execute", "command": ["vendor-tool"]}
+    (tmp_path / "permission_approvals.json").write_text(json.dumps({
+        "approved_keys": [], "acp_grants": [],
+        "vendor_saved_choices": [{"profile": "vendor", "operation": vendor_operation}],
+    }))
+    manager = PermissionManager(config=config, risk_assessor=RiskAssessor(RiskAssessmentRules(), config), event_bus=_EventBus())
+    assert manager.get_acp_grant_inventory() == []
+    assert not manager.has_acp_grant(vendor_operation, str(tmp_path), "vendor")
