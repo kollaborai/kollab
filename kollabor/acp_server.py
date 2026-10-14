@@ -62,7 +62,7 @@ class KollabACPAgent:
             agentInfo=Implementation(name="kollab", version=__version__),
             agentCapabilities=AgentCapabilities(
                 loadSession=not bool(self.attach),
-                sessionCapabilities={"resume": {}, "close": {}},
+                sessionCapabilities={"close": {}} if self.attach else {"resume": {}, "close": {}},
             ),
         )
 
