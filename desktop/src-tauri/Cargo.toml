@@ -1,0 +1,22 @@
+[package]
+name = "kollab-desktop"
+version = "0.1.0"
+description = "Kollab desktop app: a native window around the local Kollab web UI"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+tauri = { version = "2.10", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-window-state = "2.4"
+tauri-plugin-dialog = "2.6"
+tauri-plugin-autostart = "2"
+serde_json = "1"
+libc = "0.2"
+objc2 = "0.6"
+tokio = { version = "1", features = ["signal"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

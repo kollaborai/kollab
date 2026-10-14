@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kollab</title>
+  <style>
+    :root { --bg: #f6f6f7; --fg: #16161a; --dim: #6b6b75; --panel: #e9e9ec; --accent: #16161a; --on-accent: #fff; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #101014; --fg: #ececf0; --dim: #8d8d98; --panel: #1b1b21; --accent: #ececf0; --on-accent: #101014; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+           font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; -webkit-user-select: none; }
+    main { width: 100%; max-width: 620px; padding: 24px 16px; text-align: center; }
+    .mark { width: 72px; color: var(--fg); }
+    h1 { margin: 20px 0 6px; font-size: 20px; font-weight: 600; }
+    p { margin: 0 0 16px; color: var(--dim); }
+    pre { margin: 0 0 10px; padding: 10px 12px; text-align: left; background: var(--panel); border-radius: 8px; overflow: auto;
+          font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; }
+    pre.command { -webkit-user-select: all; }
+    #log { max-height: 40vh; }
+    button { margin-top: 8px; padding: 8px 22px; border: 0; border-radius: 8px; background: var(--accent); color: var(--on-accent);
+             font: inherit; font-weight: 600; cursor: pointer; }
+    .spinner { width: 22px; height: 22px; margin: 22px auto 0; border: 2px solid var(--panel); border-top-color: var(--fg);
+               border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <main>
+    <svg class="mark" viewBox="150 423 1200 654.02" aria-label="Kollab" role="img">
+      <path fill="currentColor" d="M 150 903.46 L 821.26 423 L 1350 423 L 623.56 813.8 L 886.78 1077.02 L 685.63 1077.02 L 384.48 903.46 Z"/>
+      <path fill="currentColor" d="M 297.89 726.61 L 657.18 469.45 L 375.29 469.45 Z"/>
+    </svg>
+
+    <section id="loading">
+      <h1>Starting Kollab</h1>
+      <p>Waiting for the web UI on this computer.</p>
+      <div class="spinner"></div>
+    </section>
+
+    <section id="install" hidden>
+      <h1>Install Kollab</h1>
+      <p>This app runs the <code>kollab</code> command, and it isn't installed yet. Run one of these in Terminal, then press Retry.</p>
+      <pre class="command">uv tool install kollab</pre>
+      <pre class="command">curl -sS https://raw.githubusercontent.com/kollaborai/kollab/main/install.sh | bash</pre>
+      <button>Retry</button>
+    </section>
+
+    <section id="error" hidden>
+      <h1>Kollab Did Not Start</h1>
+      <p>The web UI did not answer. Last output from <code>kollab --web-ui</code>:</p>
+      <pre id="log"></pre>
+      <button>Retry</button>
+    </section>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const state = params.get('state') || 'loading';
+    for (const section of document.querySelectorAll('section')) section.hidden = section.id !== state;
+    document.getElementById('log').textContent = params.get('log') || '(no output)';
+    for (const button of document.querySelectorAll('button')) {
+      button.onclick = () => window.__TAURI_INTERNALS__.invoke('retry');
+    }
+  </script>
+</body>
+</html>
