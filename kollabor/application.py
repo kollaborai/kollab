@@ -1245,24 +1245,30 @@ class TerminalLLMChat:
 
         def schedule_cancel() -> None:
             orchestrator = getattr(self, "acp_orchestrator", None)
-            cancel = getattr(orchestrator, "cancel", None)
-            if callable(cancel):
-                prepare = getattr(orchestrator, "prepare_cancel", None)
-                if callable(prepare):
-                    prepare(
-                        session_id=request.session_id,
-                        generation=request.generation,
-                    )
+            schedule = getattr(orchestrator, "schedule_cancel", None)
+            if callable(schedule):
                 # The ACP request callback runs inside the active prompt RPC;
-                # awaiting cancellation here deadlocks that RPC. Schedule the
-                # owner and return immediately so the runner can emit the
-                # protocol-cancelled response and drain its queue boundary.
-                asyncio.create_task(
-                    cancel(
-                        session_id=request.session_id,
-                        generation=request.generation,
-                    )
+                # awaiting cancellation here deadlocks that RPC. The
+                # orchestrator owns the tracked task and joins it during close.
+                schedule(
+                    session_id=request.session_id,
+                    generation=request.generation,
                 )
+            else:
+                cancel = getattr(orchestrator, "cancel", None)
+                if callable(cancel):
+                    prepare = getattr(orchestrator, "prepare_cancel", None)
+                    if callable(prepare):
+                        prepare(
+                            session_id=request.session_id,
+                            generation=request.generation,
+                        )
+                    asyncio.create_task(
+                        cancel(
+                            session_id=request.session_id,
+                            generation=request.generation,
+                        )
+                    )
 
         if not options:
             schedule_cancel()

@@ -47,6 +47,7 @@ class ACPOrchestrator:
         self._closed = False
         self._completion_tasks: set[asyncio.Task[Any]] = set()
         self._delivery_tasks: set[asyncio.Task[Any]] = set()
+        self._cancel_tasks: set[asyncio.Task[Any]] = set()
         self._terminal_session_id: str | None = None
 
     @property
@@ -276,6 +277,25 @@ class ACPOrchestrator:
                 expected_generation=generation,
             )
 
+
+    def schedule_cancel(
+        self,
+        *,
+        session_id: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        """Reserve and own a nonblocking ACP cancellation task."""
+        if self._runner is None or self._closed:
+            return False
+        if not self.prepare_cancel(session_id=session_id, generation=generation):
+            return False
+        task = asyncio.create_task(
+            self.cancel(session_id=session_id, generation=generation)
+        )
+        self._cancel_tasks.add(task)
+        task.add_done_callback(self._cancel_tasks.discard)
+        return True
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -292,6 +312,8 @@ class ACPOrchestrator:
                 close_error = exc
             finally:
                 self._runner = None
+        if self._cancel_tasks:
+            await asyncio.gather(*tuple(self._cancel_tasks), return_exceptions=True)
         if self._completion_tasks:
             await asyncio.gather(*tuple(self._completion_tasks), return_exceptions=True)
         self._terminal_session_id = None
