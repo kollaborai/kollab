@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import re
 import sys
@@ -1443,6 +1444,55 @@ class TerminalLLMChat:
             return "failed", error
         return ("ready" if getattr(self, "_startup_complete", False) else "starting"), ""
 
+    @staticmethod
+    def _parent_process_alive(parent_pid: int, create_time: float | None) -> bool:
+        import psutil
+
+        try:
+            parent = psutil.Process(parent_pid)
+            if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE:
+                return False
+            return create_time is None or parent.create_time() == create_time
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            # An unreadable identity is not evidence that a parent exited.
+            logger.debug("Parent process identity unavailable: %s", parent_pid)
+            return True
+
+    def _start_parent_watchdog(self) -> None:
+        # This identity belongs only to this app. Child orchestrators replace
+        # KOLLAB_PARENT_PID with their own PID and must not inherit its birth.
+        parent_birth = os.environ.pop("KOLLAB_PARENT_CREATE_TIME", None)
+        parent_pid = os.environ.get("KOLLAB_PARENT_PID", "")
+        if not parent_pid:
+            return
+        pid = int(parent_pid)
+        birth = float(parent_birth) if parent_birth is not None else None
+        if pid <= 0 or (birth is not None and (not math.isfinite(birth) or birth <= 0)):
+            raise ValueError("Invalid parent process identity")
+        self.create_background_task(
+            self._watch_parent_process(pid, birth), "parent_watchdog"
+        )
+        logger.info("Parent watchdog started (pid %s)", pid)
+
+    async def _watch_parent_process(
+        self, parent_pid: int, create_time: float | None
+    ) -> None:
+        while self.running:
+            if not self._parent_process_alive(parent_pid, create_time):
+                logger.warning("Parent process %s exited, shutting down", parent_pid)
+                self.running = False
+                # Both foreground loops have their own running flags. Stop
+                # through their lifecycle APIs so start() reaches its finally
+                # block and closes the ACP runner, tools and Hub resources.
+                render_loop = getattr(self, "render_loop", None)
+                if render_loop is not None:
+                    render_loop.stop()
+                await self.input_handler.stop()
+                return
+            await asyncio.sleep(1.0 if create_time is not None else 10.0)
+
     async def _deferred_startup(self, initial_message: str | None = None) -> None:
         """Run heavy initialization in background after render loop starts.
 
@@ -1455,25 +1505,7 @@ class TerminalLLMChat:
             # Fire-and-forget: version check (network, 5s timeout)
             self.create_background_task(self._check_for_updates(), "version_check")
 
-            # Parent watchdog -- self-terminate if parent dies
-            parent_pid_str = os.environ.get("KOLLAB_PARENT_PID", "")
-            if parent_pid_str:
-                parent_pid = int(parent_pid_str)
-
-                async def _parent_watchdog():
-                    while self.running:
-                        await asyncio.sleep(10)
-                        try:
-                            os.kill(parent_pid, 0)
-                        except (OSError, ProcessLookupError):
-                            logger.warning(
-                                f"Parent process {parent_pid} died, shutting down"
-                            )
-                            self.running = False
-                            break
-
-                self.create_background_task(_parent_watchdog(), "parent_watchdog")
-                logger.info(f"Parent watchdog started (pid {parent_pid})")
+            self._start_parent_watchdog()
 
             # Load config-based hooks EARLY (before LLM/MCP init so connect events fire)
             await self._load_config_hooks()

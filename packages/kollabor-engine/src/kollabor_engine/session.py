@@ -139,9 +139,11 @@ class EngineSession:
         agent: Optional[str] = None,
         identity: Optional[str] = None,
         solo: bool = False,
+        stop_on_owner_exit: bool = False,
     ):
         self.session_id = session_id
         self.solo = solo
+        self.stop_on_owner_exit = stop_on_owner_exit
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
@@ -230,6 +232,7 @@ class EngineSession:
             user_token=self.user_token,
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
+            stop_on_owner_exit=self.stop_on_owner_exit,
         )
         if isinstance(self.profile, str):
             # Inbound clients pass a portable profile name. The daemon loads

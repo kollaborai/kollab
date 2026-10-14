@@ -171,6 +171,7 @@ async def test_deferred_startup_orders_plugins_hub_ready_then_acp(monkeypatch):
         pass
 
     class App:
+        _start_parent_watchdog = application_module.TerminalLLMChat._start_parent_watchdog
         _attach_to = None
         _attach_socket = None
         pipe_mode = True

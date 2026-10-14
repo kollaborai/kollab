@@ -150,7 +150,8 @@ class KollabACPAgent:
                 self.attaching = False
         else:
             engine = EngineSession(session_id, profile=self.profile, workspace=workspace,
-                                   approval_mode="", identity=f"acp-{session_id[:8]}")
+                                   approval_mode="", identity=f"acp-{session_id[:8]}",
+                                   stop_on_owner_exit=True)
         session = ClientSession(session_id, engine, workspace, bool(self.attach))
         self.sessions[session_id] = session
         try:

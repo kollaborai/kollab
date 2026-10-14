@@ -458,6 +458,7 @@ class DaemonPool:
         user_token: Optional[str] = None,
         solo: bool = False,
         profile_env: Optional[Dict[str, str]] = None,
+        stop_on_owner_exit: bool = False,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -496,6 +497,16 @@ class DaemonPool:
                 env.pop("KOLLAB_HUB_SOLO", None)
             # An inline profile (request credentials) exists only in these vars.
             env.update(profile_env or {})
+            if stop_on_owner_exit:
+                import psutil
+
+                # ACP's stdio process owns this daemon even when a client drops
+                # the process before its finally block can run. Ordinary
+                # detached/Web sessions keep their independent lifetime.
+                env["KOLLAB_PARENT_PID"] = str(os.getpid())
+                env["KOLLAB_PARENT_CREATE_TIME"] = str(
+                    psutil.Process(os.getpid()).create_time()
+                )
 
             cwd = workspace or os.getcwd()
             if not Path(cwd).is_dir():
