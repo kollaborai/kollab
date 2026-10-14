@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import sys
 import uuid
@@ -188,7 +189,20 @@ class KollabACPAgent:
             self.restoring.discard(session_id)
 
     async def _replay_history(self, session: ClientSession) -> None:
-        for message in await session.engine.refresh_history():
+        history = await session.engine.refresh_history()
+        # Native and display-only tool histories use separate result rows.
+        # A reused tool ID belongs to the immediately preceding assistant block,
+        # never an earlier turn that happened to use the same ID.
+        results: dict[int, dict[str, dict[str, Any]]] = {}
+        owner = None
+        for index, message in enumerate(history):
+            if message.get("role") == "assistant":
+                owner = index
+            elif message.get("role") == "tool" and owner is not None:
+                tool_id = (message.get("metadata") or {}).get("tool_call_id")
+                if tool_id:
+                    results.setdefault(owner, {})[str(tool_id)] = message
+        for index, message in enumerate(history):
             role = message.get("role")
             metadata = message.get("metadata") or {}
             updates = metadata.get("acp_updates") or []
@@ -213,14 +227,31 @@ class KollabACPAgent:
                         sessionUpdate="agent_thought_chunk", content=TextContentBlock(type="text", text=str(thought))))
                 for tool in metadata.get("tool_calls") or []:
                     tool_id = str(tool.get("id") or tool.get("tool_call_id") or uuid.uuid4().hex)
+                    function = tool.get("function") or {}
+                    name = tool.get("name") or function.get("name")
+                    input_value = tool.get("input", function.get("arguments", {}))
+                    if isinstance(input_value, str):
+                        with contextlib.suppress(json.JSONDecodeError):
+                            input_value = json.loads(input_value)
+                    tool_type = tool.get("type")
+                    if not tool_type or tool_type == "function":
+                        tool_type = str(name or "").replace("-", "_")
                     await self.connection.session_update(session.id, self._tool_start({
-                        "tool_id": tool_id, "tool_name": tool.get("name"),
-                        "tool_type": tool.get("type"), "input": tool.get("input") or {},
+                        "tool_id": tool_id, "tool_name": name,
+                        "tool_type": tool_type, "input": input_value,
                     }))
-                    if "result" in tool or tool.get("status") in {"completed", "failed"}:
+                    result = results.get(index, {}).get(tool_id)
+                    if result is not None:
+                        result_metadata = result.get("metadata") or {}
+                        await self.connection.session_update(session.id, self._tool_result({
+                            "tool_id": tool_id, "output": result.get("content"),
+                            "success": not bool(result_metadata.get("is_error")), "metadata": result_metadata,
+                        }))
+                    elif "result" in tool or tool.get("status") in {"completed", "failed"}:
                         await self.connection.session_update(session.id, self._tool_result({
                             "tool_id": tool_id, "output": tool.get("result"),
-                            "success": not bool(tool.get("is_error")), "metadata": tool.get("metadata") or {},
+                            "success": tool.get("status") != "failed" and not bool(tool.get("is_error")),
+                            "metadata": tool.get("metadata") or {},
                         }))
                 if content:
                     await self._text(session.id, str(content))

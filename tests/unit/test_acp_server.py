@@ -103,6 +103,57 @@ async def test_native_replay_uses_same_sdk_tool_variants(engine_factory, tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ['{"command":"echo native"}', {"command": "echo native"}])
+async def test_native_replay_joins_function_call_to_separate_error_and_diff(engine_factory, tmp_path, arguments):
+    agent = KollabACPAgent()
+    agent.on_connect(sdk_connection())
+    await agent.initialize(1)
+    session_id = (await agent.new_session(str(tmp_path))).sessionId
+    engine_factory.instances[-1].refresh_history.return_value = [
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [
+            {"id": "native-tool", "type": "function", "function": {"name": "terminal", "arguments": arguments}}]}},
+        {"role": "tool", "content": "tool failed", "metadata": {"tool_call_id": "native-tool", "is_error": True,
+            "diffs": [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]}},
+        {"role": "assistant", "content": "saved answer"},
+    ]
+    await agent.load_session(str(tmp_path), session_id)
+    start, result, answer = agent.connection.updates
+    assert start["sessionUpdate"] == "tool_call"
+    assert start["toolCallId"] == "native-tool" and start["title"] == "terminal"
+    assert start["kind"] == "execute" and start["rawInput"] == {"command": "echo native"}
+    assert result["sessionUpdate"] == "tool_call_update" and result["status"] == "failed"
+    assert result["rawOutput"] == "tool failed"
+    assert result["content"][1] == {"type": "diff", "path": "owned.txt", "oldText": "before", "newText": "after"}
+    assert answer["content"]["text"] == "saved answer"
+    await agent.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_native_replay_cannot_join_reused_id_across_assistant_turns(engine_factory, tmp_path):
+    agent = KollabACPAgent()
+    agent.on_connect(sdk_connection())
+    await agent.initialize(1)
+    session_id = (await agent.new_session(str(tmp_path))).sessionId
+    calls = lambda command: {"tool_calls": [{"id": "reused", "type": "function",
+        "function": {"name": "terminal", "arguments": {"command": command}}}]}
+    engine_factory.instances[-1].refresh_history.return_value = [
+        {"role": "assistant", "content": "", "metadata": calls("first")},
+        {"role": "assistant", "content": "interrupted before output"},
+        {"role": "assistant", "content": "", "metadata": calls("second")},
+        {"role": "tool", "content": "second output", "metadata": {"tool_call_id": "reused"}},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    await agent.load_session(str(tmp_path), session_id)
+    updates = agent.connection.updates
+    assert [entry["sessionUpdate"] for entry in updates] == [
+        "tool_call", "agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"]
+    assert updates[0]["rawInput"] == {"command": "first"}
+    assert updates[2]["rawInput"] == {"command": "second"}
+    assert updates[3]["rawOutput"] == "second output" and updates[3]["status"] == "completed"
+    await agent.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failed_new_save_shuts_down_owned_engine(engine_factory, tmp_path, monkeypatch):
     agent = KollabACPAgent()
     await agent.initialize(1)
