@@ -621,11 +621,20 @@ class DaemonPool:
         )
 
     async def stop(self, session_id: str) -> bool:
-        handle = self._daemons.pop(session_id, None)
-        if handle is None:
-            return False
-        await handle.close()
-        return True
+        async with self._spawn_lock:
+            handle = self._daemons.get(session_id)
+            if handle is None:
+                return False
+            try:
+                await handle.close()
+            except BaseException:
+                # Keep the owner reachable for a later EOF/shutdown retry.
+                # close() reserves its closed flag before awaited cleanup.
+                handle._closed = False
+                raise
+            if self._daemons.get(session_id) is handle:
+                self._daemons.pop(session_id)
+            return True
 
     async def stop_all(self) -> None:
         for session_id in list(self._daemons):
