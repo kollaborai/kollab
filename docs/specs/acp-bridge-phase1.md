@@ -1,9 +1,135 @@
 # ACP bridge implementation checkpoint
 
-2026-10-13 implementation pass: source changes are ready for review in the shared
-checkout. No tests, builds, lint, adapter runs or deployment are being performed
+2026-10-13 implementation pass: source changes were committed as `9a123150`.
+The subsequent source audit found implementation blockers; the source pass is
+incomplete. No tests, builds, lint, adapter runs or deployment were performed
 during this pass, by explicit instruction. Earlier results below describe an
 earlier checkpoint and do not qualify these changes.
+
+## Audited repair goal after 9a123150
+
+The source audit is complete for this repair scope. It compared the canonical
+spec's current sections 3-8 with the outbound runner/orchestrator, native client
+broker, inbound server, Hub/MCP/local and relay returns, permission bridge,
+conversation state, engine projections and terminal/Web UI consumers. It also
+inspected the installed SDK 0.12.1 schema, connection and router implementation.
+These are source findings, not reproduced runtime results. Section 9's real
+qualification and section 10's future features are separate from this goal.
+
+The goal is to implement the following 13 concrete repairs, with small scoped
+commits and source evidence for each. All items are open at goal creation.
+
+1. **R1: Valid inbound native tool notifications.**
+   `kollabor/acp_server.py:_tool_start/_tool_result` return `ToolCall` and
+   `ToolCallUpdate`, without the notification discriminator. SDK
+   `AgentSideConnection.session_update` requires `ToolCallStart` and
+   `ToolCallProgress`. Emit those notification variants with `sessionUpdate`
+   for both live native tools and saved native replay. Retain `ToolCallUpdate`
+   for permission request cards, where it is the correct SDK model.
+2. **R2: Reachable advertised inbound resume/close routes.**
+   `KollabACPAgent.initialize` advertises resume/close, but `main` uses
+   `acp.run_agent` with its default unstable routes disabled. SDK 0.12.1 marks
+   both routes unstable and refuses them with method-not-found. Enable the
+   required routes so capability declarations and dispatch agree; preserve
+   attached-session restrictions and unknown-method errors.
+3. **R3: Prompt cancellation releases its own queue slot and settles once.**
+   `ClientTurnBroker.cancel` marks queued items but waits behind the active
+   client before publishing their terminal event. `ACPRunner.cancel_queued`
+   cancels the future but leaves the item occupying the ten-slot FIFO. Remove
+   and settle queued requests promptly in both paths. Fence active native
+   cancellation so the broker's immediate terminal and the later native
+   completion cannot count as two terminals. Preserve FIFO and other owners.
+4. **R4: Resume bindings follow the continued conversation ID.**
+   `LocalStateService.resume_conversation` restores ACP before allocating the
+   continued conversation's new native ID; `ACPOrchestrator.start` captures
+   the earlier ID. Load from the original binding, then persist subsequent ACP
+   bindings under the continued conversation ID. Keep profile/cwd/command
+   matching and fresh-context fallback intact.
+5. **R5: Persistence cannot strand admissions or skip owned cleanup.**
+   `ACPOrchestrator.admit` queues before recording the user, and registers
+   completion only afterward. `_complete` persists outside its error handler;
+   `close` marks closed and saves before runner teardown. Inbound
+   `new_session/close_session` also save before owned cleanup is guaranteed.
+   Ensure every admitted request retains a completion owner and a correlated
+   terminal failure even if history/binding writes fail. Teardown must run
+   despite those errors, preserving the underlying error and attached daemons.
+6. **R6: Exactly-once local and relay return consumption.**
+   `HubPlugin._on_message_received` consumes ask replies before message-ID
+   deduplication. Relay `_rpc_event` consumes verified returns before checking
+   `presented`. Redelivery can append the same interim reply repeatedly.
+   Deduplicate before mutable wait/receipt handling in both paths, after
+   authorization. Preserve distinct reply/end events, ordered `earlier`, and
+   normal treatment of legitimate late replies.
+7. **R7: Question-back ownership and bounded continuation lifetime.**
+   `ACPHubTools.questions` stores the old wait but no immutable question ID;
+   answers use the latest peer ID instead. A subsequent peer message can change
+   the reply target. Relay `_rpc_event` can consume a question without
+   `observe`, leaving a new question thread unowned. `stop` retains question
+   state, and question entries are not bounded. Store the exact question's
+   ID/thread/peer and original wait; register verified remote receipts before
+   returning their handles. Bound and expire continuation state, clear it on
+   session retirement, and send question-answer end frames as hidden terminal
+   actions. Both `hub_msg` and `hub_ask` must answer the correct question;
+   `hub_ask` must then wait for the original request's final answer.
+8. **R8: Final-answer fallback survives consecutive tools.**
+   `ACPRunner._select_answer` searches only between the last two tool starts
+   when no text follows the last tool. A stream `text, tool A, tool B` produces
+   an empty answer although text exists before B. Select the last nonempty
+   assistant text segment before the final tool when no later text exists;
+   retain message-ID selection and exclude thoughts, tool output and interim
+   Hub messages.
+9. **R9: Owned process cleanup survives parent exit and late child birth.**
+   `ACPRunner._terminate_process` snapshots descendants only while the adapter
+   is alive, before SDK/session close. Already orphaned `setsid` children and
+   children created during close escape that snapshot. Retain descendant
+   ownership while the adapter lives, refresh it through teardown, and use
+   process identity checks so reused PIDs are never signalled. Apply the spec's
+   bounded five-second graceful/termination stages and reap owned survivors on
+   clear, close, cancel timeout, startup failure and crash/restart.
+10. **R10: Permission cancellation and resolution retain turn ownership.**
+    `_acp_permission_decider` can return `None` on callback error/cancellation;
+    `ACPPermissionBridge` can do so on outer timeout. `_request_permission`
+    returns a cancelled outcome without universally arranging session cancel.
+    Also `resolution_event` drops explicit request/turn fields from details,
+    while SDK callbacks run outside a native turn context. Stop the matching
+    generation when a valid selection cannot be made and preserve explicit
+    ownership on resolution events so other ACP clients/windows close their
+    prompts. Keep opaque options, exact grants and first-answer-wins behavior.
+11. **R11: Merge live and restored harness tool cards in the Web UI.**
+    `ACPOrchestrator` produces merged `tool_call_update/acp_update`, but engine
+    `assistant_transport` handles only tool start and terminal result. It drops
+    intermediate title/kind/status/content updates; terminal structured content
+    is rendered as generic JSON. Carry the merged card by tool ID through the
+    live transport and history projector, displaying text/diff output and
+    current status without executing harness tools or duplicating cards.
+12. **R12: Adopted/CLI-switched harness identity stays current.**
+    `EngineSession._read_agent_facts` reads a profile once, `_track_events` uses
+    `acp_session` only to clear state, and `list_sessions` refreshes names but
+    not registered sessions' provider/harness. Switching profiles from an
+    attached CLI can leave the Web UI's harness label/model controls on the
+    prior provider. Update authoritative profile/harness state on changes,
+    including transitions back to native, without persisting client modes.
+13. **R13: Roster merging preserves circular-ask detection.**
+    `HubPlugin._acp_roster` appends `_roster` summaries after full presence rows
+    and keeps the last row per identity. `PresenceManager.get_roster_summary`
+    omits tags, erasing peers' `acp_ask_waiting`, harness and approval-waiting
+    metadata. Merge summaries without discarding current presence tags so
+    asking an agent waiting on another ask returns `busy`, while the original
+    requester remains eligible for a question back.
+
+Execution ownership: outbound bridge/process repairs; Hub/relay/continuation
+repairs; inbound protocol/broker and engine/Web UI projection repairs; root
+conversation/persistence/permission integration and documentation. Only the
+root stages and commits, one coherent repair at a time, with explicit paths.
+All agents use the shared main checkout and preserve concurrent work.
+
+Completion of this goal means the 13 source repairs are implemented, committed
+and individually recorded below with source evidence. It does not qualify ACP
+for production. By Marco's instruction, do not add/run tests, builds, lint,
+adapter/client runs or live qualification. Those checks remain deferred;
+never reuse the earlier checkpoint's results as proof of this repair pass.
+
+## Source inventory
 
 Current source inventory:
 
