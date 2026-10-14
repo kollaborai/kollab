@@ -494,6 +494,40 @@ async def test_acp_admission_rejects_full_queue_before_hooks():
     assert result == {"status": "rejected", "reason": "acp_queue_full"}
 
 
+
+@pytest.mark.asyncio
+async def test_public_submit_settles_acp_queue_full_rejection():
+    bus = EventBus()
+    service = object.__new__(LLMService)
+    service.event_bus = bus
+    service.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+
+    class ACP:
+        active = True
+
+        def admit(self, *args, **kwargs):
+            raise RuntimeError("ACP prompt queue is full")
+
+    bus.register_service("acp_orchestrator", ACP())
+    await bus.register_hook(
+        Hook(
+            name="process_user_input",
+            plugin_name="llm_core",
+            event_type=EventType.USER_INPUT,
+            priority=HookPriority.LLM.value,
+            callback=service._handle_user_input,
+        )
+    )
+
+    result = await service.submit_human_input(
+        "hello", source=UserInputSource.STATE_RPC
+    )
+
+    assert result == {"status": "rejected", "reason": "acp_queue_full"}
+
+
 @pytest.mark.asyncio
 async def test_authenticated_agent_input_is_nonhuman_and_permission_pending_rejected():
     bus = EventBus()
