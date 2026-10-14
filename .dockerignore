@@ -1,7 +1,7 @@
 .git
 .gitignore
 
-# Local Python/build artifacts
+# Local build artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -13,6 +13,10 @@ htmlcov/
 build/
 dist/
 wheels/
+**/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/binaries/
 .venv/
 venv/
 env/
