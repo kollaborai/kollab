@@ -15,7 +15,7 @@ from aiohttp import web
 ROOT = Path(__file__).resolve().parents[2]
 
 SDK_AGENT = r'''
-import asyncio, os
+import asyncio, os, uuid
 from pathlib import Path
 import acp
 from acp.exceptions import RequestError
@@ -65,12 +65,15 @@ class Agent:
     async def prompt(self, session_id, prompt, **kwargs):
         if os.environ.get("OWNED_ACP_SCENARIO") == "prompt-auth":
             raise RequestError.auth_required({"reason": "OWNED login expired"})
+        # Reuse is an explicit incompatible-provider regression, not the normal fixture.
+        tool_id = "owned-vendor-edit" if os.environ.get("OWNED_ACP_SCENARIO") == "reuse-tool-id" else uuid.uuid4().hex
+        diff_path = str(Path("vendor.txt").resolve())
         await self.connection.session_update(session_id, ToolCallStart(
-            sessionUpdate="tool_call", toolCallId="owned-vendor-edit",
+            sessionUpdate="tool_call", toolCallId=tool_id,
             title="Owned vendor edit", kind="edit", status="pending",
             rawInput={"path": "vendor.txt", "content": "after"}))
         result = await self.connection.request_permission(session_id=session_id,
-            tool_call=ToolCallUpdate(toolCallId="owned-vendor-edit", title="Owned vendor edit", kind="edit"),
+            tool_call=ToolCallUpdate(toolCallId=tool_id, title="Owned vendor edit", kind="edit"),
             options=[PermissionOption(optionId="vendor-once", name="Allow once", kind="allow_once"),
                      PermissionOption(optionId="vendor-deny", name="Deny once", kind="reject_once"),
                      PermissionOption(optionId="vendor-always", name="Always", kind="allow_always")])
@@ -80,10 +83,10 @@ class Agent:
         permitted = selected in {"vendor-once", "vendor-always"}
         if permitted and os.environ.get("OWNED_ACP_SCENARIO") == "wait-cancel":
             await self.connection.session_update(session_id, ToolCallProgress(
-                sessionUpdate="tool_call_update", toolCallId="owned-vendor-edit",
+                sessionUpdate="tool_call_update", toolCallId=tool_id,
                 title="Owned vendor waiting", status="in_progress", rawOutput=0,
                 content=[{"type": "content", "content": {"type": "text", "text": "waiting"}},
-                         {"type": "diff", "path": "vendor.txt", "oldText": "before", "newText": "after"}]))
+                         {"type": "diff", "path": diff_path, "oldText": "before", "newText": "after"}]))
             await self.connection.session_update(session_id, AgentMessageChunk(
                 sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text="OWNED SDK PARTIAL")))
             await self.cancelled.wait()
@@ -91,10 +94,10 @@ class Agent:
         if permitted:
             Path("vendor.txt").write_text("after")
         await self.connection.session_update(session_id, ToolCallProgress(
-            sessionUpdate="tool_call_update", toolCallId="owned-vendor-edit",
+            sessionUpdate="tool_call_update", toolCallId=tool_id,
             title="Owned vendor edited", status="completed" if permitted else "failed",
             content=[{"type": "content", "content": {"type": "text", "text": "edited" if permitted else "denied"}},
-                     {"type": "diff", "path": "vendor.txt", "oldText": "before", "newText": "after"}],
+                     {"type": "diff", "path": diff_path, "oldText": "before", "newText": "after"}],
             rawOutput={"message": "edited" if permitted else "denied"}))
         await self.connection.session_update(session_id, AgentMessageChunk(
             sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text",
@@ -127,6 +130,11 @@ class ProtocolFailure(Exception):
     def __init__(self, error):
         self.error = error
         super().__init__(str(error))
+
+
+def tool_card_body(card):
+    """Compare saved provider payloads without the inbound emission ID."""
+    return {key: value for key, value in card.items() if key != "toolCallId"}
 
 
 class StdioClient:
@@ -227,7 +235,7 @@ async def client(workspace, home, profile=None, attach=None, permission_choice=N
 
 @contextlib.asynccontextmanager
 async def local_provider(final_release=None, tool_command="printf 'owned output' > owned.txt",
-                         tool_name="terminal", tool_input=None):
+                         tool_name="terminal", tool_input=None, xml_terminal=False):
     calls = []
 
     async def models(request):
@@ -236,7 +244,12 @@ async def local_provider(final_release=None, tool_command="printf 'owned output'
     async def completion(request):
         body = await request.json()
         calls.append(body)
-        if any(message.get("role") == "tool" for message in body.get("messages", [])):
+        if xml_terminal:
+            # Repeat the actual XML parser's terminal_0 on each human turn.
+            message = {"role": "assistant", "content":
+                "OWNED NATIVE ANSWER" if len(calls) % 2 == 0 else f"<terminal>{tool_command}</terminal>"}
+            reason = "stop"
+        elif any(message.get("role") == "tool" for message in body.get("messages", [])):
             if final_release is not None:
                 await final_release.wait()
             message = {"role": "assistant", "content": "OWNED NATIVE ANSWER"}
@@ -430,6 +443,9 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert connection.permissions
             assert any(update["update"]["sessionUpdate"] == "tool_call" for update in connection.updates)
             assert any(update["update"]["sessionUpdate"] == "tool_call_update" for update in connection.updates)
+            live_tool_id = next(update["update"]["toolCallId"] for update in connection.updates
+                                if update["update"]["sessionUpdate"] == "tool_call")
+            assert connection.permissions[0]["toolCall"]["toolCallId"] == live_tool_id
             assert any(update["update"].get("content", {}).get("text") == "OWNED NATIVE ANSWER"
                        for update in connection.updates if update["update"]["sessionUpdate"] == "agent_message_chunk")
             await connection.rpc("session/close", {"sessionId": session_id})
@@ -445,7 +461,8 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             result = next(update["update"] for update in connection.updates[before:] if update["update"]["sessionUpdate"] == "tool_call_update")
             assert start["title"] == "terminal" and start["kind"] == "execute"
             assert start["rawInput"] == {"command": "printf 'owned output' > owned.txt"}
-            assert result["toolCallId"] == start["toolCallId"] == "owned-write" and result["status"] == "completed"
+            assert result["toolCallId"] == start["toolCallId"] != "owned-write" and result["status"] == "completed"
+            replay_tool_id = start["toolCallId"]
             await connection.rpc("session/close", {"sessionId": session_id})
             await wait_no_daemons(home)
             assert not process_alive(resumed_pid)
@@ -459,6 +476,7 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert [entry["sessionUpdate"] for entry in restored_tools] == ["tool_call", "tool_call_update"]
             assert restored_tools[0]["rawInput"] == {"command": "printf 'owned output' > owned.txt"}
             assert restored_tools[1]["status"] == "completed"
+            assert restored_tools[0]["toolCallId"] == restored_tools[1]["toolCallId"] == replay_tool_id
             assert any(entry["update"].get("content", {}).get("text") == "OWNED NATIVE ANSWER" for entry in restored.updates
                        if entry["update"]["sessionUpdate"] == "agent_message_chunk")
             before = len(restored.updates)
@@ -467,6 +485,10 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert response["stopReason"] == "end_turn"
             assert [entry["update"]["sessionUpdate"] for entry in restored.updates[before:]
                     if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}] == ["tool_call", "tool_call_update"]
+            new_tools = [entry["update"] for entry in restored.updates[before:]
+                         if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+            assert new_tools[0]["toolCallId"] == new_tools[1]["toolCallId"] != replay_tool_id
+            assert restored.permissions[0]["toolCall"]["toolCallId"] == new_tools[0]["toolCallId"]
         await wait_no_daemons(home)
         assert not process_alive(restored_pid)
         async with client(workspace, home, "owned-native") as continued:
@@ -475,6 +497,9 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             continued_pid = owned_daemons(home)[0]["pid"]
             assert sum(entry["update"]["sessionUpdate"] == "tool_call" for entry in continued.updates) == 2
             assert sum(entry["update"]["sessionUpdate"] == "tool_call_update" for entry in continued.updates) == 2
+            replayed_ids = [entry["update"]["toolCallId"] for entry in continued.updates
+                            if entry["update"]["sessionUpdate"] == "tool_call"]
+            assert len(set(replayed_ids)) == 2 and replayed_ids[0] == replay_tool_id
             assert sum(entry["update"].get("content", {}).get("text") == "OWNED NATIVE ANSWER" for entry in continued.updates
                        if entry["update"]["sessionUpdate"] == "agent_message_chunk") == 2
         await wait_no_daemons(home)
@@ -482,6 +507,68 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
     assert connection.process.returncode == 0
     assert restored.process.returncode == 0 and continued.process.returncode == 0
     assert connection.bad_lines == [] and restored.bad_lines == [] and continued.bad_lines == []
+
+
+@pytest.mark.asyncio
+async def test_real_xml_terminal_source_id_reuse_is_unique_on_wire_and_unchanged_in_history(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    async with local_provider(xml_terminal=True) as (endpoint, calls):
+        configure(home, endpoint)
+        async with client(workspace, home, "owned-native") as connection:
+            await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+            session_id = (await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
+            daemon_pid = owned_daemons(home)[0]["pid"]
+            for _ in range(2):
+                result = await connection.rpc("session/prompt", {"sessionId": session_id,
+                    "prompt": [{"type": "text", "text": "Run the owned XML terminal fixture."}]})
+                assert result["stopReason"] == "end_turn"
+            live = [row["update"] for row in connection.updates
+                    if row["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+            live_ids = [card["toolCallId"] for card in live if card["sessionUpdate"] == "tool_call"]
+            assert len(set(live_ids)) == 2
+            assert [card["toolCallId"] for card in live if card["sessionUpdate"] == "tool_call_update"] == live_ids
+            assert [permission["toolCall"]["toolCallId"] for permission in connection.permissions] == live_ids
+            assert (workspace / "owned.txt").read_text() == "owned output"
+            await connection.rpc("session/close", {"sessionId": session_id})
+            await wait_no_daemons(home)
+            assert not process_alive(daemon_pid)
+        async with client(workspace, home, "owned-native") as restored:
+            await restored.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+            await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
+            record = owned_daemons(home)[0]
+            replayed = [row["update"] for row in restored.updates
+                        if row["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+            replayed_ids = [card["toolCallId"] for card in replayed if card["sessionUpdate"] == "tool_call"]
+            assert len(set(replayed_ids)) == 2
+            assert [card["toolCallId"] for card in replayed
+                    if card["sessionUpdate"] == "tool_call_update"] == replayed_ids
+            before = len(restored.updates)
+            await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
+            assert [row["update"] for row in restored.updates[before:]
+                    if row["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}] == replayed
+            before = len(restored.updates)
+            result = await restored.rpc("session/prompt", {"sessionId": session_id,
+                "prompt": [{"type": "text", "text": "Run another owned XML terminal fixture."}]})
+            assert result["stopReason"] == "end_turn"
+            new = [row["update"] for row in restored.updates[before:]
+                   if row["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+            assert len(new) == 2 and new[0]["toolCallId"] == new[1]["toolCallId"]
+            assert new[0]["toolCallId"] not in live_ids + replayed_ids
+            assert restored.permissions[0]["toolCall"]["toolCallId"] == new[0]["toolCallId"]
+            async with daemon_rpc(record, tmp_path / "xml-source-events.json") as (rpc, _):
+                snapshot = await rpc.call("state.get_conversation")
+            source_ids = [tool["id"] for message in snapshot["messages"]
+                          for tool in (message.get("metadata") or {}).get("xml_tool_calls", [])]
+            assert source_ids == ["terminal_0"] * 3
+            (tmp_path / "xml-source-id-proof.json").write_text(json.dumps({
+                "source_ids": source_ids, "live_ids": live_ids, "replayed_ids": replayed_ids,
+                "new_id": new[0]["toolCallId"], "native_conversation_id": snapshot["session_id"]}, indent=2))
+        await wait_no_daemons(home)
+        assert not process_alive(record["pid"]) and len(calls) == 6
+    assert connection.bad_lines == [] and restored.bad_lines == []
+    assert connection.process.returncode == restored.process.returncode == 0
 
 
 @pytest.mark.asyncio
@@ -704,11 +791,12 @@ async def test_real_stdio_keeps_python_print_and_fd_write_off_protocol(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_path):
+@pytest.mark.parametrize("scenario", ["normal", "reuse-tool-id"])
+async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_path, scenario):
     home = tmp_path / "home"
     workspace = tmp_path / "project"
     workspace.mkdir()
-    configure_acp(home, workspace)
+    configure_acp(home, workspace, scenario)
     async with client(workspace, home, "owned-acp") as connection:
         await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
         session_id = (await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
@@ -719,12 +807,21 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
         assert connection.permissions[0]["options"][0]["optionId"] == "vendor-once"
         cards = [entry["update"] for entry in connection.updates
                  if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
-        assert [card["toolCallId"] for card in cards] == ["owned-vendor-edit", "owned-vendor-edit"]
+        record = owned_daemons(home)[0]
+        async with daemon_rpc(record, tmp_path / "initial-sdk-source-events.json") as (rpc, _):
+            snapshot = await rpc.call("state.get_conversation")
+        original_ids = [tool["id"] for message in snapshot["messages"]
+                        if (message.get("metadata") or {}).get("provider") == "acp"
+                        for tool in (message.get("metadata") or {}).get("tool_calls", [])]
+        assert len(original_ids) == 1
+        assert len(cards) == 2 and cards[0]["toolCallId"] == cards[1]["toolCallId"] != original_ids[0]
+        assert connection.permissions[0]["toolCall"]["toolCallId"] == cards[0]["toolCallId"]
         assert cards[0]["title"] == "Owned vendor edit" and cards[0]["kind"] == "edit"
         assert cards[0]["rawInput"] == {"path": "vendor.txt", "content": "after"}
         assert cards[1]["title"] == "Owned vendor edited" and cards[1]["status"] == "completed"
         assert cards[1]["rawOutput"] == {"message": "edited"}
-        assert cards[1]["content"][1] == {"type": "diff", "path": "vendor.txt", "oldText": "before", "newText": "after"}
+        assert cards[1]["content"][1] == {"type": "diff", "path": str((workspace / "vendor.txt").resolve()),
+                                         "oldText": "before", "newText": "after"}
         await connection.rpc("session/close", {"sessionId": session_id})
         await wait_no_daemons(home)
         assert not process_alive(adapter_pid)
@@ -735,7 +832,38 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
         await connection.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
         restored = [entry["update"] for entry in connection.updates[before:]
                     if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
-        assert restored == cards
+        assert [tool_card_body(card) for card in restored] == [tool_card_body(card) for card in cards]
+        assert restored[0]["toolCallId"] == restored[1]["toolCallId"]
+        before = len(connection.updates)
+        await connection.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
+        repeated = [entry["update"] for entry in connection.updates[before:]
+                    if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+        assert repeated == restored
+        before = len(connection.updates)
+        response = await connection.rpc("session/prompt", {"sessionId": session_id,
+            "prompt": [{"type": "text", "text": "Repeat the owned SDK edit."}]})
+        assert response["stopReason"] == "end_turn"
+        new_cards = [entry["update"] for entry in connection.updates[before:]
+                     if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
+        assert len(new_cards) == 2 and new_cards[0]["toolCallId"] == new_cards[1]["toolCallId"]
+        assert new_cards[0]["toolCallId"] not in {card["toolCallId"] for card in cards + restored}
+        assert connection.permissions[-1]["toolCall"]["toolCallId"] == new_cards[0]["toolCallId"]
+        record = owned_daemons(home)[0]
+        async with daemon_rpc(record, tmp_path / "continued-sdk-source-events.json") as (rpc, _):
+            snapshot = await rpc.call("state.get_conversation")
+        continued_ids = [tool["id"] for message in snapshot["messages"]
+                         if (message.get("metadata") or {}).get("provider") == "acp"
+                         for tool in (message.get("metadata") or {}).get("tool_calls", [])]
+        assert len(continued_ids) == 2 and continued_ids[0] == original_ids[0]
+        assert new_cards[0]["toolCallId"] != continued_ids[1]
+        if scenario == "normal":
+            assert len(set(continued_ids)) == 2
+        else:
+            assert continued_ids == ["owned-vendor-edit"] * 2
+        (tmp_path / "sdk-source-id-proof.json").write_text(json.dumps({
+            "scenario": scenario, "original_ids": continued_ids,
+            "live_id": cards[0]["toolCallId"], "replay_id": restored[0]["toolCallId"],
+            "new_live_id": new_cards[0]["toolCallId"]}, indent=2))
     await wait_no_daemons(home)
     assert not process_alive(resumed_pid)
     assert "resume" in (workspace / "owned-session-methods.txt").read_text().splitlines()
@@ -780,7 +908,8 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
         await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
         restored_cards = [entry["update"] for entry in restored.updates
                           if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
-        assert restored_cards == live_cards
+        assert [tool_card_body(card) for card in restored_cards] == [tool_card_body(card) for card in live_cards]
+        assert len({card["toolCallId"] for card in restored_cards}) == 1
         assert [entry["update"]["content"]["text"] for entry in restored.updates
                 if entry["update"]["sessionUpdate"] == "agent_message_chunk"] == ["OWNED SDK PARTIAL"]
         record = owned_daemons(home)[0]
@@ -794,7 +923,11 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
         saved_cards = [SessionNotification.model_validate({"sessionId": session_id, "update": update["payload"]})
                        .update.model_dump(by_alias=True, exclude_none=True) for update in metadata["acp_updates"]
                        if update.get("kind") in {"tool_call", "tool_call_update"}]
-        assert saved_cards == live_cards
+        assert [tool_card_body(card) for card in saved_cards] == [tool_card_body(card) for card in live_cards]
+        original_id = metadata["tool_calls"][0]["id"]
+        assert all(card["toolCallId"] == original_id for card in saved_cards)
+        assert original_id == metadata["tool_calls"][0]["metadata"]["acp"]["toolCallId"]
+        assert original_id != live_cards[0]["toolCallId"]
         assert metadata["tool_calls"][0]["metadata"]["acp"]["status"] == "in_progress"
         (tmp_path / "stopped-parent.json").write_text(json.dumps(metadata, indent=2))
     await wait_no_daemons(home)

@@ -41,6 +41,35 @@ class ClientSession:
     permission_tasks: dict[tuple[str, str], asyncio.Task] = field(default_factory=dict)
 
 
+@dataclass
+class _ToolCallIds:
+    """Scope wire IDs to an invocation without changing daemon/history IDs."""
+
+    session_id: str
+    scope: str
+    active: dict[str, str] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
+    started: set[str] = field(default_factory=set)
+    completed: set[str] = field(default_factory=set)
+
+    def resolve(self, source_id: str, *, start: bool = False,
+                permission: bool = False, complete: bool = False) -> str:
+        if (source_id not in self.active or (start and source_id in self.started)
+                or (permission and source_id in self.completed)):
+            self.counts[source_id] = self.counts.get(source_id, 0) + 1
+            key = json.dumps(["kollab-acp-tool", self.session_id, self.scope,
+                              source_id, self.counts[source_id]], separators=(",", ":"))
+            self.active[source_id] = uuid.uuid5(uuid.NAMESPACE_URL, key).hex
+            self.started.discard(source_id)
+            self.completed.discard(source_id)
+        if start:
+            # A permission or progress update may precede the initial start.
+            self.started.add(source_id)
+        if complete:
+            self.completed.add(source_id)
+        return self.active[source_id]
+
+
 class KollabACPAgent:
     def __init__(self, *, attach: str | None = None, profile: str | None = None):
         self.attach = attach
@@ -205,6 +234,9 @@ class KollabACPAgent:
         for index, message in enumerate(history):
             role = message.get("role")
             metadata = message.get("metadata") or {}
+            # The saved assistant block owns these invocations. Replaying the
+            # unchanged history reuses its IDs, including after a new backend.
+            tool_ids = _ToolCallIds(session.id, f"replay:{index}")
             updates = metadata.get("acp_updates") or []
             if role == "assistant" and updates:
                 for update in updates:
@@ -213,7 +245,7 @@ class KollabACPAgent:
                         continue
                     payload = update.get("payload") or {}
                     if payload.get("sessionUpdate"):
-                        await self._wire_update(session.id, payload)
+                        await self._wire_update(session.id, payload, tool_ids=tool_ids)
                 continue
             content = message.get("content") or ""
             if isinstance(content, list):
@@ -226,7 +258,8 @@ class KollabACPAgent:
                     await self.connection.session_update(session.id, AgentThoughtChunk(
                         sessionUpdate="agent_thought_chunk", content=TextContentBlock(type="text", text=str(thought))))
                 for tool in metadata.get("tool_calls") or []:
-                    tool_id = str(tool.get("id") or tool.get("tool_call_id") or uuid.uuid4().hex)
+                    source_id = str(tool.get("id") or tool.get("tool_call_id") or "")
+                    tool_id = tool_ids.resolve(source_id, start=True)
                     function = tool.get("function") or {}
                     name = tool.get("name") or function.get("name")
                     input_value = tool.get("input", function.get("arguments", {}))
@@ -240,7 +273,7 @@ class KollabACPAgent:
                         "tool_id": tool_id, "tool_name": name,
                         "tool_type": tool_type, "input": input_value,
                     }))
-                    result = results.get(index, {}).get(tool_id)
+                    result = results.get(index, {}).get(source_id)
                     if result is not None:
                         result_metadata = result.get("metadata") or {}
                         await self.connection.session_update(session.id, self._tool_result({
@@ -259,7 +292,15 @@ class KollabACPAgent:
                 await self.connection.session_update(session.id, UserMessageChunk(
                     sessionUpdate="user_message_chunk", content=TextContentBlock(type="text", text=str(content))))
 
-    async def _wire_update(self, session_id: str, update: dict[str, Any]) -> None:
+    async def _wire_update(self, session_id: str, update: dict[str, Any],
+                           *, tool_ids: _ToolCallIds) -> None:
+        kind = update.get("sessionUpdate")
+        if kind in {"tool_call", "tool_call_update"}:
+            source_id = str(update.get("toolCallId") or "")
+            update = dict(update, toolCallId=tool_ids.resolve(
+                source_id, start=kind == "tool_call",
+                complete=update.get("status") in {"completed", "failed"},
+            ))
         notification = SessionNotification.model_validate({"sessionId": session_id, "update": update})
         await self.connection.session_update(session_id, notification.update)
 
@@ -292,6 +333,9 @@ class KollabACPAgent:
         if not text.strip():
             raise RequestError.invalid_params({"reason": "prompt is empty"})
         request_id = f"acp-client-{uuid.uuid4().hex}"
+        # Client requests are unique across queued turns and process restarts.
+        # Replay uses a separate scope so restored source IDs cannot collide.
+        tool_ids = _ToolCallIds(session.id, f"live:{request_id}")
         session.requests.append(request_id)
         events = session.engine.subscribe()
         streamed = False
@@ -320,21 +364,24 @@ class KollabACPAgent:
                     await self.connection.session_update(session_id, AgentThoughtChunk(
                         sessionUpdate="agent_thought_chunk", content=TextContentBlock(type="text", text=str(event.get("text") or ""))))
                 elif kind == "tool_start":
-                    await self.connection.session_update(session_id, self._tool_start(event))
+                    wire_id = tool_ids.resolve(str(event.get("tool_id") or ""), start=True)
+                    await self.connection.session_update(session_id, self._tool_start(dict(event, tool_id=wire_id)))
                 elif kind == "tool_result":
-                    await self.connection.session_update(session_id, self._tool_result(event))
+                    wire_id = tool_ids.resolve(str(event.get("tool_id") or ""), complete=True)
+                    await self.connection.session_update(session_id, self._tool_result(dict(event, tool_id=wire_id)))
                 elif kind == "permission_request":
                     tool_id = str(event.get("tool_id") or "")
-                    task = asyncio.create_task(self._permission(session, event))
+                    wire_id = tool_ids.resolve(tool_id, permission=True)
+                    task = asyncio.create_task(self._permission(session, event, wire_tool_id=wire_id))
                     session.permission_tasks[(request_id, tool_id)] = task
                 elif kind in {"permission_granted", "permission_denied", "permission_cancelled"}:
                     task = session.permission_tasks.pop((request_id, str(event.get("tool_id") or "")), None)
                     if task and not task.done():
                         task.cancel()
                 elif kind == "acp_update":
-                    await self._wire_update(session_id, event["update"])
+                    await self._wire_update(session_id, event["update"], tool_ids=tool_ids)
                 elif kind == "usage_update":
-                    await self._wire_update(session_id, event["payload"])
+                    await self._wire_update(session_id, event["payload"], tool_ids=tool_ids)
                 elif kind == "turn_complete":
                     completed = True
                     await self._save(session)
@@ -394,7 +441,8 @@ class KollabACPAgent:
                               status="completed" if event.get("success") else "failed",
                               content=content, rawOutput=event.get("output"))
 
-    async def _permission(self, session: ClientSession, event: dict[str, Any]) -> None:
+    async def _permission(self, session: ClientSession, event: dict[str, Any],
+                          *, wire_tool_id: str | None = None) -> None:
         tool_id = str(event.get("tool_id") or "")
         options = [PermissionOption(optionId="once", name="Allow Once", kind="allow_once"),
                    PermissionOption(optionId="deny", name="Deny Once", kind="reject_once")]
@@ -411,7 +459,7 @@ class KollabACPAgent:
                 return
         try:
             response = await asyncio.wait_for(self.connection.request_permission(
-                session_id=session.id, tool_call=ToolCallUpdate(toolCallId=tool_id,
+                session_id=session.id, tool_call=ToolCallUpdate(toolCallId=wire_tool_id or tool_id,
                     title=str(event.get("tool_name") or "Tool permission"), status="pending", rawInput=event.get("input") or {}),
                 options=options,
             ), timeout=300)
