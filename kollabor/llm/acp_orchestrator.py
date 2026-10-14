@@ -500,7 +500,9 @@ class ACPOrchestrator:
                 if callback is not None:
                     active = getattr(self._runner, "_active_context", None)
                     callback(getattr(active, "request_id", ""), True, payload)
-        elif kind == "permission_resolved":
+        elif kind in {"permission_resolved", "turn_finished"}:
+            # A stopped prompt can finish before its SDK permission callback
+            # resumes. Clear its waiting state at this still-owned turn boundary.
             publish_semantic(self.event_bus, "acp_waiting", waiting=False, harness=self._profile_name)
             if self.hub_plugin is not None:
                 callback = getattr(self.hub_plugin, "on_acp_waiting", None)
