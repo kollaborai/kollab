@@ -26,6 +26,23 @@ export type HubMessageHeader = {
   replyTo?: string;
 };
 
+/** Saved ACP observation batches predate the HUD envelope. Parse only when
+ * their persisted source identifies them, never for user-authored examples. */
+export function splitObservationReplies(text: string): { notes: HubNote[]; rest: string } {
+  const header = /^Reply from ([^\s\[]+) \[thread:([^\]\r\n]*)\]\r?\n/gm;
+  const matches = [...text.matchAll(header)];
+  if (!matches.length || matches[0].index !== 0) return { notes: [], rest: text };
+  const notes = matches.map((match, index) => {
+    const rawText = text.slice(match.index, matches[index + 1]?.index ?? text.length).trim();
+    const body = text.slice(match.index + match[0].length, matches[index + 1]?.index ?? text.length).trim();
+    return {
+      from: match[1], to: "", text: stripReplyInstructions(body), observed: true,
+      ...(match[2] ? { threadId: match[2] } : {}), rawText,
+    };
+  });
+  return { notes, rest: "" };
+}
+
 export type RosterEntry = {
   name?: string;
   identity?: string;

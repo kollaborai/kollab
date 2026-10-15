@@ -34,7 +34,7 @@ import type {
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
-import { parseHubMessageHeader, splitAgentHud, type HubNote } from "./hub-notes";
+import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
   historyTurnTiming,
@@ -122,17 +122,20 @@ function historyContentToThreadContent(content: unknown): ThreadMessageLike["con
  * hub-notes.ts) and what is left: what the user typed. The HUD rides on the
  * first text part.
  */
-function withHubNotes(content: ThreadMessageLike["content"]): {
+function withHubNotes(content: ThreadMessageLike["content"], source?: unknown): {
   notes: HubNote[];
   content: ThreadMessageLike["content"];
 } {
   if (typeof content === "string") {
-    const { notes, rest } = splitAgentHud(content);
+    const { notes, rest } = source === "observation" && content.startsWith("Reply from ")
+      ? splitObservationReplies(content) : splitAgentHud(content);
     return { notes, content: rest };
   }
   const first = content.findIndex((part) => part.type === "text");
   if (first < 0) return { notes: [], content };
-  const { notes, rest } = splitAgentHud((content[first] as TextMessagePart).text);
+  const text = (content[first] as TextMessagePart).text;
+  const { notes, rest } = source === "observation" && text.startsWith("Reply from ")
+    ? splitObservationReplies(text) : splitAgentHud(text);
   return {
     notes,
     content: content
@@ -360,6 +363,8 @@ function historyToMessages(
   history.forEach((message, sourceIndex) => {
     if (sourceIndex === turnError?.history_length) showTurnError();
     const metadata = asRecord(message.metadata);
+    // Initialization context remains in model history and Trajectory, not Chat.
+    if (metadata?.system_initialization === true) return;
     if (
       metadata?.context_compaction === true ||
       metadata?.context_compaction === "true"
@@ -380,7 +385,7 @@ function historyToMessages(
       closeTurn();
       turnStartedAt = message.timestamp;
       const rawPrompt = historyContentToThreadContent(message.content);
-      const { notes, content } = withHubNotes(rawPrompt);
+      const { notes, content } = withHubNotes(rawPrompt, metadata?.source);
       // What other agents sent this one, as messages from their gems.
       notes.forEach((note, noteIndex) => {
         messages.push({

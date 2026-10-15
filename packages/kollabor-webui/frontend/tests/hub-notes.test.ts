@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseHubMessageHeader, resolveAgentSender, splitAgentHud } from "../src/hub-notes.ts";
+import { parseHubMessageHeader, resolveAgentSender, splitAgentHud, splitObservationReplies } from "../src/hub-notes.ts";
+
+test("saved Reply from batches become separate peer messages, including repeated senders", () => {
+  const batch = "Reply from zircon [thread:thread-z]\nzircon here.\n\n" +
+    "Reply from aquamarine [thread:thread-a]\nAcknowledged.\n\n" +
+    "Reply from zircon [thread:thread-z]\nA second reply.";
+  const parsed = splitObservationReplies(batch);
+  assert.deepEqual(parsed.notes.map(({ from, text, threadId }) => ({ from, text, threadId })), [
+    { from: "zircon", text: "zircon here.", threadId: "thread-z" },
+    { from: "aquamarine", text: "Acknowledged.", threadId: "thread-a" },
+    { from: "zircon", text: "A second reply.", threadId: "thread-z" },
+  ]);
+  assert.equal(parsed.rest, "");
+  assert.equal(splitAgentHud(batch).rest, batch);
+  assert.deepEqual(splitObservationReplies("Please review:\n" + batch), { notes: [], rest: "Please review:\n" + batch });
+});
 
 // Made by kollabor/llm/agent_hud.py (merge_agent_hud_with_user_message) from the
 // entries plugins/hub/plugin.py queues for incoming messages.
