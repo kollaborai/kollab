@@ -20,6 +20,7 @@ import type {
   SettingsTab,
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
+import { SetupGuide } from "@/setup/SetupGuide";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -68,6 +69,15 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 }
 
 const api = new EngineApi();
+
+/** True until this browser recorded a guided-setup dismissal. */
+const noGuideYet = () => {
+  try {
+    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+  } catch {
+    return false;
+  }
+};
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
@@ -317,6 +327,7 @@ export default function App() {
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -602,6 +613,9 @@ export default function App() {
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
+      } else if (noGuideYet()) {
+        // First run: nothing to restore and no dismissal on record.
+        setSetupGuideOpen(true);
       }
       setError(null);
     })()
@@ -894,6 +908,13 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        <SetupGuide
+          api={api}
+          open={setupGuideOpen}
+          onOpenChange={setSetupGuideOpen}
+          onOpenSettings={(tab) => openSettings({ tab })}
+          onStartSession={() => void createSession()}
+        />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -1009,14 +1030,26 @@ export default function App() {
                       ? busyMessage
                       : `Ready on ${selectedModelLabel}. Start a session to begin.`)}
                 </p>
-                <Button
-                  type="button"
-                  onClick={() => void createSession()}
-                  disabled={busy}
-                >
-                  {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {busy ? "Starting…" : "Start Session"}
-                </Button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={() => void createSession()}
+                    disabled={busy}
+                  >
+                    {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                    {busy ? "Starting…" : "Start Session"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    data-testid="guided-setup-open"
+                    onClick={() => setSetupGuideOpen(true)}
+                    disabled={busy}
+                  >
+                    <Waypoints className="size-4" />
+                    Guided setup
+                  </Button>
+                </div>
               </div>
             </>
           )}
