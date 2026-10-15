@@ -66,7 +66,7 @@ For a source build, first build the native CLI with
 python scripts/desktop_release.py stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
 cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
 cd desktop
-cargo tauri build --config src-tauri/tauri.release.json --bundles appimage,deb
+NO_STRIP=1 cargo tauri build --config src-tauri/tauri.release.json --bundles appimage,deb
 cd ..
 python scripts/desktop_release.py collect --platform linux-x86_64
 ```
@@ -74,7 +74,9 @@ python scripts/desktop_release.py collect --platform linux-x86_64
 The verified CLI becomes `src-tauri/binaries/kollab-x86_64-unknown-linux-gnu`;
 Tauri installs it next to the desktop executable as `kollab`. Staging restores
 its executable bit after an Actions artifact download and checks both its
-SHA-256 and reported version. The generated, ignored `tauri.release.json`
+SHA-256 and reported version. `NO_STRIP=1` preserves the scie's appended Python
+archive during AppImage bundling. CI extracts both packages, compares the bundled
+CLI byte for byte, and runs its `--version`. The generated, ignored `tauri.release.json`
 uses the source version; a supplied release tag must agree with that source.
 
 Public Linux assets are:
@@ -92,6 +94,14 @@ uploading. It rejects missing files, unexpected names, symlinks, and changed
 payloads. The combined manifest has 20 release files: four CLI/checksum pairs,
 four macOS desktop/checksum pairs, and two Linux desktop/checksum pairs.
 The merged macOS packaging and Apple signing preparation are retained.
+
+CI also opens the packaged AppImage under Xvfb against an isolated test Web UI,
+checks rendered content, closes/reopens the window through a second launch,
+and quits while confirming the attached test runtime remains reachable. This
+checks the native package/window lifecycle; it does not prove a live model turn.
+
+Windows packages are deferred until a native Windows CLI and backend exist.
+This release path does not include WSL sidecars or Windows assets.
 
 ## Startup
 

@@ -12,6 +12,7 @@ on:
       - .github/workflows/publish.yml
       - scripts/build_binary.py
       - scripts/desktop_release.py
+      - scripts/check_desktop_package.py
       - tests/unit/test_desktop_release.py
       - desktop/**
       - install.sh
@@ -164,6 +165,8 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       APPIMAGE_EXTRACT_AND_RUN: "1"
+      # A scie holds an appended Python archive. Keep its packaged bytes intact.
+      NO_STRIP: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -176,7 +179,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
-            libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+            libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf \
+            xvfb xauth dbus-x11
 
       - uses: actions/download-artifact@v8
         with:
@@ -204,11 +208,28 @@ jobs:
         run: |
           python scripts/desktop_release.py --version "$VERSION" collect --platform linux-x86_64
           dpkg-deb --info dist/desktop/*.deb
-          dpkg-deb --contents dist/desktop/*.deb | grep '/usr/bin/kollab$'
+          dpkg-deb --contents dist/desktop/*.deb
+          dpkg-deb --extract dist/desktop/*.deb "$RUNNER_TEMP/kollab-deb-check"
+          test -x "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab-desktop"
+          test -x "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab"
+          cmp dist/bin/kollab-linux-x86_64 "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab"
+          "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab" --version
+          mkdir -p "$RUNNER_TEMP/kollab-appimage-check"
+          (
+            cd "$RUNNER_TEMP/kollab-appimage-check"
+            "$GITHUB_WORKSPACE"/dist/desktop/*.AppImage --appimage-extract > /dev/null
+            test -x squashfs-root/usr/bin/kollab-desktop
+            test -x squashfs-root/usr/bin/kollab
+            cmp "$GITHUB_WORKSPACE/dist/bin/kollab-linux-x86_64" squashfs-root/usr/bin/kollab
+            squashfs-root/usr/bin/kollab --version
+          )
           (
             cd dist/desktop
             sha256sum -c ./*.sha256
           )
+
+      - name: Smoke the packaged Linux window and attached-runtime lifecycle
+        run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage
 
       - uses: actions/upload-artifact@v7
         with:
