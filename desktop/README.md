@@ -72,12 +72,18 @@ python scripts/desktop_release.py collect --platform linux-x86_64
 ```
 
 The verified CLI becomes `src-tauri/binaries/kollab-x86_64-unknown-linux-gnu`;
-Tauri installs it next to the desktop executable as `kollab`. Staging restores
+both Linux packages install it as `usr/share/kollab/runtime/kollab`, which the
+app resolves relative to its `usr/bin/kollab-desktop`. Staging restores
 its executable bit after an Actions artifact download and checks both its
 SHA-256 and reported version. `NO_STRIP=1` preserves the scie's appended Python
-archive during AppImage bundling. CI extracts both packages, compares the bundled
+archive during AppImage bundling. The data-directory placement also keeps
+linuxdeploy from rewriting its ELF library paths and corrupting the scie lift
+manifest. CI extracts both packages, compares the bundled
 CLI byte for byte, and runs its `--version`. The generated, ignored `tauri.release.json`
 uses the source version; a supplied release tag must agree with that source.
+The Debian package also declares `xdg-utils` for external links; AppImage hosts
+need `xdg-open` available. CI uses the pinned prebuilt npm Tauri 2.12.0 CLI;
+the equivalent Cargo CLI invocation above works for source builds.
 
 Public Linux assets are:
 
@@ -168,7 +174,8 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 | Path | What it is |
 | --- | --- |
 | `src-tauri/src/main.rs` | All app logic |
-| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the `binaries/kollab` sidecar |
+| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar |
+| `src-tauri/tauri.release.json` | Generated Linux version, formats and opaque runtime file mappings |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
 | `ui/index.html` | Bundled loading, install and error page |
 | `app-icon.png` | 1024 px icon source (the Kollab mark) |

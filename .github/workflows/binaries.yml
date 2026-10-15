@@ -192,15 +192,19 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked --version "2.12.0"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Check pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.12.0 --version
 
       - name: Test Linux runtime ownership
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
 
       - name: Build Linux AppImage and Debian packages
         working-directory: desktop
-        run: cargo tauri build --config src-tauri/tauri.release.json --bundles appimage,deb
+        run: npx --yes @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.json --bundles appimage,deb
 
       - name: Check and collect Linux packages
         env:
@@ -211,28 +215,30 @@ jobs:
           dpkg-deb --contents dist/desktop/*.deb
           dpkg-deb --extract dist/desktop/*.deb "$RUNNER_TEMP/kollab-deb-check"
           test -x "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab-desktop"
-          test -x "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab"
-          cmp dist/bin/kollab-linux-x86_64 "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab"
-          "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab" --version
+          test -x "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab"
+          cmp dist/bin/kollab-linux-x86_64 "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab"
+          "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab" --version
+          dpkg-deb --field dist/desktop/*.deb Depends | grep -w xdg-utils
           mkdir -p "$RUNNER_TEMP/kollab-appimage-check"
           (
             cd "$RUNNER_TEMP/kollab-appimage-check"
             "$GITHUB_WORKSPACE"/dist/desktop/*.AppImage --appimage-extract > /dev/null
             test -x squashfs-root/usr/bin/kollab-desktop
-            test -x squashfs-root/usr/bin/kollab
-            cmp "$GITHUB_WORKSPACE/dist/bin/kollab-linux-x86_64" squashfs-root/usr/bin/kollab
-            squashfs-root/usr/bin/kollab --version
+            test -x squashfs-root/usr/share/kollab/runtime/kollab
+            cmp "$GITHUB_WORKSPACE/dist/bin/kollab-linux-x86_64" squashfs-root/usr/share/kollab/runtime/kollab
+            squashfs-root/usr/share/kollab/runtime/kollab --version
           )
           (
             cd dist/desktop
             sha256sum -c ./*.sha256
           )
 
-      - name: Smoke the packaged Linux window and attached-runtime lifecycle
-        run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage
-
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: kollab-desktop-linux-x86_64
           path: dist/desktop/*
           if-no-files-found: error
+
+      - name: Smoke the packaged Linux window and attached-runtime lifecycle
+        run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage

@@ -187,10 +187,20 @@ fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
         .collect()
 }
 
-/// The kollab shipped inside the app: the Tauri sidecar next to this executable.
+/// macOS ships an adjacent sidecar; Linux keeps the scie as opaque package data.
 fn bundled_kollab() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let path = linux_bundled_kollab(&std::env::current_exe().ok()?)?;
+    #[cfg(not(target_os = "linux"))]
     let path = std::env::current_exe().ok()?.with_file_name("kollab");
     path.is_file().then_some(path)
+}
+
+/// Debian and AppImage share the usr/bin + usr/share package layout. Keeping
+/// the scie outside linuxdeploy's ELF scan preserves its appended Python data.
+#[cfg(any(target_os = "linux", test))]
+fn linux_bundled_kollab(executable: &Path) -> Option<PathBuf> {
+    Some(executable.parent()?.parent()?.join("share/kollab/runtime/kollab"))
 }
 
 /// GUI apps don't get the shell's PATH: ask the login shell, then try the usual install spots.
@@ -1009,6 +1019,15 @@ mod tests {
         assert_eq!(stat_process_group("17 (closing) ) name) Z 12 41 17 0").unwrap(), 41);
         assert!(stat_process_group("17 (truncated").is_err());
         assert!(stat_process_group("17 (name) S 12 invalid").is_err());
+    }
+
+    #[test]
+    fn linux_sidecar_lookup_matches_debian_and_extracted_appimage_layouts() {
+        assert_eq!(linux_bundled_kollab(Path::new("/usr/bin/kollab-desktop")),
+            Some(PathBuf::from("/usr/share/kollab/runtime/kollab")));
+        assert_eq!(linux_bundled_kollab(Path::new("/tmp/Kollab.AppDir/usr/bin/kollab-desktop")),
+            Some(PathBuf::from("/tmp/Kollab.AppDir/usr/share/kollab/runtime/kollab")));
+        assert_eq!(linux_bundled_kollab(Path::new("kollab-desktop")), None);
     }
 
     /// These kernel tests create only private groups with short natural

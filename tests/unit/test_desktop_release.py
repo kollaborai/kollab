@@ -109,7 +109,13 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
     assert staged.stat().st_mode & 0o111
     assert calls[0][0] == [str(staged), "--version"]
     config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
-    assert config == {"version": "1.2.3", "bundle": {"targets": ["appimage", "deb"]}}
+    assert config["version"] == "1.2.3"
+    assert config["bundle"]["targets"] == ["appimage", "deb"]
+    assert config["bundle"]["externalBin"] == []
+    expected = {"/usr/share/kollab/runtime/kollab": "binaries/kollab-x86_64-unknown-linux-gnu"}
+    assert config["bundle"]["linux"]["deb"]["files"] == expected
+    assert config["bundle"]["linux"]["appimage"]["files"] == expected
+    assert "xdg-utils" in config["bundle"]["linux"]["deb"]["depends"]
 
 
 def test_stage_never_executes_a_corrupted_sidecar(source_root, monkeypatch):

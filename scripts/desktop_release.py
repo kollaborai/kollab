@@ -100,8 +100,22 @@ def stage(platform: str, source: Path, version: str) -> Path:
     if result.stdout.split()[-1:] != [version]:
         raise ValueError(f"sidecar reports {result.stdout!r}, expected {version}")
     config = ROOT / "desktop/src-tauri/tauri.release.json"
+    # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a scie's
+    # appended archive. Keep the verified CLI opaque under usr/share instead.
+    files = {"/usr/share/kollab/runtime/kollab": f"binaries/{destination.name}"}
     config.write_text(
-        json.dumps({"version": version, "bundle": {"targets": [package[0] for package in packages]}}, indent=2) + "\n"
+        json.dumps(
+            {
+                "version": version,
+                "bundle": {
+                    "targets": [package[0] for package in packages],
+                    "externalBin": [],
+                    "linux": {"deb": {"files": files, "depends": ["xdg-utils"]}, "appimage": {"files": files}},
+                },
+            },
+            indent=2,
+        )
+        + "\n"
     )
     print(f"staged {destination.name}: {result.stdout.strip()}")
     return destination
