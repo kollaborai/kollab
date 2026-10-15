@@ -71,6 +71,17 @@ def main() -> None:
                     if reopened.returncode:
                         raise RuntimeError(f"second launch failed: {reopened.stderr.decode(errors='replace')}")
                     wait_log(process, log, "second launch, focusing the existing window")
+                    # Use the real Quit accelerator. Interrupting the entire
+                    # session also interrupts AppImage's extraction wrapper,
+                    # whose -SIGINT status says nothing about the app's exit.
+                    windows = subprocess.check_output(
+                        ["xdotool", "search", "--onlyvisible", "--name", "^Kollab$"], text=True, timeout=5
+                    ).split()
+                    if len(windows) != 1:
+                        raise RuntimeError(f"expected one visible Kollab window, found {windows}")
+                    subprocess.run(["xdotool", "windowfocus", "--sync", windows[0]], check=True, timeout=5)
+                    subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+q"], check=True, timeout=5)
+                    process.wait(timeout=15)
                 finally:
                     if process.poll() is None:
                         # Only this private test session, whose leader remains
