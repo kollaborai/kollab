@@ -137,7 +137,7 @@ const HubNoteView: FC<{
   );
 };
 
-// Online announcements from other agents collapse into a compact one-line chip.
+// Online announcements read as quiet activity; details remain available on demand.
 const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
   const pool = useContext(PoolContext);
   const { remote: remoteAgents } = useContext(ComposerHubContext);
@@ -151,36 +151,37 @@ const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
   const sender = pool.find((agent) => agent.name === name);
 
   const lines = note.text.trim().split("\n");
-  const firstLine = lines[0] ?? note.text;
   const details = lines.slice(1).join("\n").trim();
+  const summary = (
+    <>
+      <GemAvatar
+        gem={name}
+        where={device || where}
+        caste={sender?.caste}
+        color={sender?.color}
+        state={sender?.active ? sender.state : "idle"}
+        size={18}
+        className="shrink-0"
+      />
+      <span className="min-w-0 truncate text-start">{titleCase(name)} came online</span>
+      {details ? <ChevronDownIcon className="size-3 shrink-0 transition-transform group-data-[state=open]/chip:rotate-180" /> : null}
+    </>
+  );
 
   return (
     <div data-slot="kollab_online-notice" className="my-1.5 w-full">
       <Collapsible defaultOpen={false}>
         <CollapsibleTrigger
           data-slot="kollab_online-chip-trigger"
-          className="group/chip hover:bg-muted/80 bg-muted/40 border-border/60 flex w-full items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-muted-foreground transition-colors cursor-pointer select-none"
+          title={agentLabel(resolvedFrom)}
+          className="group/chip inline-flex max-w-full cursor-pointer items-center gap-2 rounded-sm py-1 text-xs text-muted-foreground transition-colors select-none hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <GemAvatar
-            gem={name}
-            where={device || where}
-            caste={sender?.caste}
-            color={sender?.color}
-            state={sender?.active ? sender.state : "idle"}
-            size={18}
-            className="shrink-0"
-          />
-          <span className="font-medium text-foreground truncate text-start">
-            {firstLine}
-          </span>
-          {details ? (
-            <ChevronDownIcon className="ml-auto size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]/chip:rotate-180" />
-          ) : null}
+          {summary}
         </CollapsibleTrigger>
         {details ? (
           <CollapsibleContent
             data-slot="kollab_online-chip-content"
-            className="mt-1.5 rounded-lg border border-border/40 bg-muted/20 px-3 py-2 text-xs font-mono whitespace-pre-wrap text-muted-foreground"
+            className="mt-1 max-h-48 overflow-y-auto pl-6 text-xs whitespace-pre-wrap text-muted-foreground"
           >
             {details}
           </CollapsibleContent>
