@@ -179,7 +179,9 @@ target_dir=${CARGO_TARGET_DIR:-"$repo_root/desktop/src-tauri/target"}
 artifact_dir=${APPLE_ARTIFACT_DIR:-"$repo_root/desktop/dist"}
 app="$target_dir/$target/release/bundle/macos/Kollab.app"
 archive="Kollab-macos-$arch-$mode.zip"
-[ ! -e "$artifact_dir/$archive" ] && [ ! -e "$artifact_dir/$archive.sha256" ] || fail 'refusing to overwrite an existing distributable archive'
+if [ -e "$artifact_dir/$archive" ] || [ -e "$artifact_dir/$archive.sha256" ]; then
+  fail 'refusing to overwrite an existing distributable archive'
+fi
 if [ "$mode" = developer-id ]; then prepare_keychain; fi
 
 (

@@ -139,6 +139,15 @@ class PackagingContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.artifacts / "Kollab-macos-x86_64-unsigned.zip").is_file())
 
+    def test_existing_archive_is_preserved_without_starting_a_build(self):
+        self.artifacts.mkdir()
+        archive = self.artifacts / "Kollab-macos-aarch64-unsigned.zip"
+        archive.write_text("previous artifact")
+        result = self.run_script("package", "unsigned", TARGET)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(archive.read_text(), "previous artifact")
+        self.assertEqual(self.calls(), [])
+
     def test_requested_signing_without_secrets_fails_before_build(self):
         result = self.run_script("preflight", "developer-id")
         self.assertNotEqual(result.returncode, 0)
