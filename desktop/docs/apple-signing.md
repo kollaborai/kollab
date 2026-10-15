@@ -219,6 +219,8 @@ require operator attention; fixture tests do not prove Apple's acceptance.
 
 Needs Python 3.9+, Ruby's standard YAML library, Bash and ShellCheck. Tests replace
 Apple/Rust tools with fixture executables and never access the real keychain.
+They execute the documented unsigned build, both signing authentication methods,
+and the cleanup retry after loading the example's `GITHUB_ENV` state path.
 
 ```bash
 python3 -m unittest discover -s desktop/tests -p 'test_apple_signing.py' -v

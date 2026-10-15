@@ -15,6 +15,20 @@ SCRIPT = ROOT / "desktop/scripts/sign-macos.sh"
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-signing.yml"
 TARGET = "aarch64-apple-darwin"
 
+
+def load_yaml(source):
+    # Ruby's standard YAML parser keeps these tests independent of pytest/PyYAML.
+    result = subprocess.run([
+        "ruby", "-rjson", "-ryaml", "-e", "puts JSON.generate(YAML.load(STDIN.read))"
+    ], input=source, capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+def documented_examples():
+    docs = (ROOT / "desktop/docs/apple-signing.md").read_text()
+    return [load_yaml(source) for source in re.findall(r"```yaml\n(.*?)\n```", docs, re.S)]
+
+
 MOCK_TOOL = r'''
 import json, os, pathlib, sys
 tool, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
@@ -40,7 +54,10 @@ elif tool == "cargo":
     assert os.getcwd() == os.environ["MOCK_BUILD_CWD"]
     assert not any(os.environ.get(name) for name in ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY", "APPLE_API_KEY_PATH"))
     expected = "Developer ID Application: Fixture (FIXTURETEAM)" if os.environ.get("MOCK_SIGNED") else "-"
-    assert os.environ["APPLE_SIGNING_IDENTITY"] == expected
+    if os.environ.get("MOCK_UNWRAPPED_UNSIGNED"):
+        assert "APPLE_SIGNING_IDENTITY" not in os.environ
+    else:
+        assert os.environ["APPLE_SIGNING_IDENTITY"] == expected
     if os.environ.get("MOCK_NO_APP"):
         sys.exit(0)
     (app / "Contents/MacOS").mkdir(parents=True, exist_ok=True)
@@ -124,6 +141,42 @@ class SigningContractTests(unittest.TestCase):
         self.env["MOCK_APP"] = str(self.app)
         self.build_command = ["cargo", "tauri", "build", "--target", target, "--bundles", "app", *extra_args]
         return self.run_script("build", str(self.app), "--", *self.build_command)
+
+    def configure_documented_run(self):
+        self.build_number += 1
+        run_id = "fixture-" + str(self.build_number)
+        target_dir = self.scratch / ("documented target " + str(self.build_number))
+        self.state = self.scratch / ("kollab-apple-signing-" + run_id + "-1")
+        self.app = target_dir / TARGET / "release/bundle/macos/Kollab.app"
+        self.github_env = self.scratch / ("github-env-" + str(self.build_number))
+        self.env.pop("APPLE_SIGNING_STATE_DIR", None)
+        self.env.update(
+            TARGET=TARGET, CARGO_TARGET_DIR=str(target_dir), MOCK_APP=str(self.app),
+            GITHUB_REF="refs/heads/main", GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT="1",
+            GITHUB_ENV=str(self.github_env),
+        )
+        steps = documented_examples()[1]["steps"]
+        self.doc_guard = steps[0]
+        self.doc_unsigned = next(step for step in steps if step.get("if") == "env.APPLE_SIGNING_MODE == 'unsigned'")
+        self.doc_signed = next(step for step in steps if "secrets." in json.dumps(step.get("env", {})))
+        self.doc_cleanup = next(step for step in steps if step.get("run", "").endswith(" cleanup"))
+
+    def run_documented_step(self, step):
+        # Model step-scoped secret injection; repository secrets are not job env.
+        env = {name: value for name, value in self.env.items()
+               if not name.startswith("APPLE_") or name in ("APPLE_SIGNING_MODE", "APPLE_SIGNING_STATE_DIR")}
+        for name, source in step.get("env", {}).items():
+            self.assertEqual(source, "${{ secrets." + name + " }}")
+            env[name] = self.env.get(name, "")
+        return subprocess.run(["/bin/bash", "-e", "-o", "pipefail", "-c", step["run"]],
+                              cwd=ROOT / step.get("working-directory", "."), env=env,
+                              capture_output=True, text=True)
+
+    def apply_documented_environment(self):
+        lines = self.github_env.read_text().splitlines()
+        self.assertEqual(lines, ["APPLE_SIGNING_STATE_DIR=" + str(self.state)])
+        name, value = lines[0].split("=", 1)
+        self.env[name] = value
 
     def calls(self):
         path = self.scratch / "tools.jsonl"
@@ -240,6 +293,51 @@ class SigningContractTests(unittest.TestCase):
                        env=self.env, check=True, capture_output=True)
         self.assertEqual(archive.read_text(), "stapled")
 
+    def test_documented_unsigned_step_builds_without_the_signing_wrapper(self):
+        self.configure_documented_run()
+        self.env.update(APPLE_SIGNING_MODE="unsigned", MOCK_UNWRAPPED_UNSIGNED="1")
+        self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
+        result = self.run_documented_step(self.doc_unsigned)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), [["cargo", ["tauri", "build", "--target", TARGET, "--bundles", "app"]]])
+        self.assertTrue(self.app.is_dir())
+        self.assertFalse(self.github_env.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_documented_signing_step_and_cleanup_run_with_both_auth_methods(self):
+        original = self.env.copy()
+        for api in (False, True):
+            with self.subTest(api=api):
+                self.env = original.copy()
+                self.signed(api=api)
+                self.configure_documented_run()
+                self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
+                result = self.run_documented_step(self.doc_signed)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((self.app / "stapled").is_file())
+                self.assertFalse(self.state.exists())
+                cargo_args = [args for tool, args in self.calls() if tool == "cargo"][-1]
+                config = json.loads(cargo_args[cargo_args.index("--config") + 1])
+                self.assertTrue(config["bundle"]["macOS"]["hardenedRuntime"])
+                self.apply_documented_environment()
+                cleanup = self.run_documented_step(self.doc_cleanup)
+                self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+
+    def test_documented_cleanup_retries_using_the_exported_state_path(self):
+        self.signed()
+        self.configure_documented_run()
+        self.env.update(MOCK_CARGO_FAIL="1", MOCK_CLEANUP_FAIL="1")
+        result = self.run_documented_step(self.doc_signed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.state.exists())
+        self.assertFalse((self.state / "certificate.p12").exists())
+        self.assertNotIn("the caller may now archive", result.stdout)
+        self.apply_documented_environment()
+        self.env.pop("MOCK_CLEANUP_FAIL")
+        cleanup = self.run_documented_step(self.doc_cleanup)
+        self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+        self.assertFalse(self.state.exists())
+
     def test_api_authentication_uses_an_ephemeral_key_file(self):
         self.signed(api=True)
         result = self.run_build()
@@ -355,16 +453,8 @@ class SigningContractTests(unittest.TestCase):
 class WorkflowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Ruby's standard YAML parser keeps this test independent of pytest/PyYAML.
-        def load_yaml(source):
-            result = subprocess.run([
-                "ruby", "-rjson", "-ryaml", "-e", "puts JSON.generate(YAML.load(STDIN.read))"
-            ], input=source, capture_output=True, text=True, check=True)
-            return json.loads(result.stdout)
-
         cls.workflow = load_yaml(WORKFLOW.read_text())
-        docs = (ROOT / "desktop/docs/apple-signing.md").read_text()
-        cls.input_example, cls.job_example = [load_yaml(source) for source in re.findall(r"```yaml\n(.*?)\n```", docs, re.S)]
+        cls.input_example, cls.job_example = documented_examples()
 
     def test_active_workflow_only_validates_without_secrets_or_publication(self):
         self.assertEqual(set(self.workflow["jobs"]), {"validate"})
