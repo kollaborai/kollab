@@ -22,6 +22,7 @@ import type {
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { CliBadge } from "@/components/shell/CliBadge";
+import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -211,7 +212,7 @@ function RuntimeShell({
     <>
       {/* One slim row; the controls wrap under the title on narrow screens. The
           model picker shows model and profile, so the title carries no subtitle. */}
-      <header className="bg-background sticky top-0 z-10 flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b px-3 py-1.5">
+      <ShellHeader className="bg-background sticky top-0 z-10 flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b px-3 py-1.5">
         <SidebarTrigger className="-ml-1" />
         <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
         <span
@@ -276,7 +277,7 @@ function RuntimeShell({
           onOpenSettings={() => onOpenSettings()}
           onHistoryCleared={onHistoryCleared}
         />
-      </header>
+      </ShellHeader>
       {session.harness && Boolean(session.acp_plan?.entries?.length) && (
         <details className="border-b px-3 py-2 text-xs">
           <summary className="cursor-pointer font-medium">Harness Plan</summary>
@@ -924,11 +925,11 @@ export default function App() {
             </EngineRuntimeProvider>
           ) : (
             <>
-              <header className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
                 <SidebarTrigger className="-ml-1" />
                 <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
                 <span className="text-muted-foreground text-sm">No session</span>
-              </header>
+              </ShellHeader>
               {/* The next free gem greets here, as it will once its session starts. */}
               <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
                 {nextGem ? (

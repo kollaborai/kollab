@@ -194,6 +194,13 @@ reload. Invalid or blocked storage does not prevent resizing. An explicit provid
 user resize may change it within the same bounds. The mobile sheet retains its
 existing 18rem width and toggle behavior; it has no resize rail.
 
+The active and empty chat headers share `ShellHeader`. It publishes its complete
+border-box height to the sidebar wrapper's `--shell-header-height`; a resize
+observer updates it when the toolbar wraps or the sidebar width changes. The
+desktop logo header consumes that height with no added vertical padding, so both
+bottom borders meet at the divider. The mobile sheet uses its independent 3rem
+header. Unmount disconnects the observer and clears the measured height.
+
 ## Auth
 
 Every engine route except `/health`, `/version`, `/status`, `/ready`, `/` needs

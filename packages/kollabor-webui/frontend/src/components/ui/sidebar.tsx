@@ -51,6 +51,7 @@ type SidebarContextProps = {
   getSidebarWidth: (measuredWidth: number) => number
   isResizing: boolean
   setIsResizing: (resizing: boolean) => void
+  setShellHeaderHeight: (height: number | null) => void
 }
 
 const SidebarContext = React.createContext<SidebarContextProps | null>(null)
@@ -90,6 +91,7 @@ function SidebarProvider({
   const [resizedWidth, setResizedWidth] = React.useState<{ initial: typeof styleWidth; width: number } | null>(null)
   const requestedWidth = React.useRef<typeof resizedWidth>(null)
   const [isResizing, setIsResizing] = React.useState(false)
+  const [shellHeaderHeight, setShellHeaderHeight] = React.useState<number | null>(null)
   const preferredWidth = resizedWidth && resizedWidth.initial === styleWidth
     ? resizedWidth.width
     : styleWidth ?? savedWidth ?? SIDEBAR_WIDTH
@@ -170,6 +172,7 @@ function SidebarProvider({
       getSidebarWidth,
       isResizing,
       setIsResizing,
+      setShellHeaderHeight,
     }),
     [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar, setSidebarWidth, getSidebarWidth, isResizing]
   )
@@ -183,8 +186,10 @@ function SidebarProvider({
           style={
             {
               "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+              "--shell-header-height": "3rem",
               ...style,
               "--sidebar-width": sidebarWidthStyle(preferredWidth),
+              ...(shellHeaderHeight === null ? {} : { "--shell-header-height": `${shellHeaderHeight}px` }),
             } as React.CSSProperties
           }
           className={cn(
