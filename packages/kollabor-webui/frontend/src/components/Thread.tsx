@@ -1,4 +1,5 @@
 import { createContext, useContext, type FC, type ReactNode } from "react";
+import { ChevronDownIcon } from "lucide-react";
 import {
   makeAssistantToolUI,
   MessagePrimitive,
@@ -14,9 +15,14 @@ import {
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback, toolErrorLine } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
-import type { HubNote } from "@/hub-notes";
+import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { titleCase } from "@/components/panels/panel-model";
 import { cn } from "@/lib/utils";
@@ -116,6 +122,15 @@ const HubNoteMessage: FC = () => {
     const match = remoteAgents.find((agent) => [agent.name, agent.handle].some((value) => String(value || "") === id));
     return match ? `${match.name}@${match.device || "remote"}` : agentLabel(id);
   };
+  if (note?.isOnlineNotice) {
+    const summary = note.text.split("\n", 1)[0] || `Online: ${note.from}`;
+    return (
+      <details data-slot="kollab_hub-online" className="text-muted-foreground mx-2 my-1 rounded-md border px-2 py-1 text-xs">
+        <summary className="cursor-pointer list-none truncate [&::-webkit-details-marker]:hidden">{summary}</summary>
+        <pre className="text-muted-foreground mt-1 max-h-40 overflow-auto whitespace-pre-wrap">{note.text}</pre>
+      </details>
+    );
+  }
   return (
     <MessagePrimitive.Root
       data-slot="kollab_hub-message"

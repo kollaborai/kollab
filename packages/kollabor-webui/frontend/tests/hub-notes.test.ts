@@ -68,3 +68,10 @@ test("removes hidden hub thread and reply instructions", () => {
   assert.equal(result.notes[0]?.replyTo, "r");
   assert.equal(result.rest, "hello");
 });
+
+
+test("marks online system notices for compact chip rendering", () => {
+  const result = splitAgentHud("Message from nephrite [thread:online-1]\nagent 'nephrite' just came online\n  cwd: /tmp\n  model: test");
+  assert.equal(result.notes[0]?.isOnlineNotice, true);
+  assert.equal(result.notes[0]?.from, "nephrite");
+});
