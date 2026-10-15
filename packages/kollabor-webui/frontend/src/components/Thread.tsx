@@ -78,18 +78,43 @@ const agentLabel = (id: string) => {
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
-const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: string; resolveAgent?: (id: string) => string; children: ReactNode; footer?: ReactNode }> = ({
+const HubNoteView: FC<{
+  from: string;
+  to: string;
+  threadId?: string;
+  replyTo?: string;
+  isReply?: boolean;
+  children: ReactNode;
+  footer?: ReactNode;
+}> = ({
   from,
   to,
   threadId,
   replyTo,
-  resolveAgent,
+  isReply = false,
   children,
   footer,
 }) => {
-  const sender = useContext(PoolContext).find((agent) => agent.name === from);
-  const [name, device] = from.split("@");
+  const pool = useContext(PoolContext);
+  const { remote: remoteAgents } = useContext(ComposerHubContext);
   const where = useContext(WhereContext);
+  const gem = useContext(WelcomeContext);
+
+  const resolvedFrom = resolveAgentSender(from, { agents: pool, remoteAgents });
+  const [name, device] = resolvedFrom.split("@");
+  const sender = pool.find((agent) => agent.name === name);
+
+  const resolvedTo = to ? resolveAgentSender(to, { agents: pool, remoteAgents }) : "";
+  const recipient = resolvedTo
+    ? agentLabel(resolvedTo)
+    : gem?.name
+      ? agentLabel(gem.name)
+      : "All";
+
+  const label = isReply
+    ? `Replied to ${recipient}`
+    : `${agentLabel(resolvedFrom)} → ${recipient}`;
+
   return (
     <div className="flex gap-3">
       <GemAvatar
@@ -103,8 +128,7 @@ const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: s
       />
       <div className="min-w-0 flex-1">
         <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
-          <span>{(resolveAgent ?? agentLabel)(from)} → {to ? (resolveAgent ?? agentLabel)(to) : "All"}</span>
-
+          <span>{label}</span>
         </div>
         <div className="text-foreground wrap-break-word">{children}</div>
         {footer}
@@ -113,22 +137,72 @@ const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: s
   );
 };
 
+// Online announcements from other agents collapse into a compact one-line chip.
+const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
+  const pool = useContext(PoolContext);
+  const { remote: remoteAgents } = useContext(ComposerHubContext);
+  const where = useContext(WhereContext);
+  const resolvedFrom = resolveAgentSender(
+    note.from,
+    { agents: pool, remoteAgents },
+    note.rawText || note.text,
+  );
+  const [name, device] = resolvedFrom.split("@");
+  const sender = pool.find((agent) => agent.name === name);
+
+  const lines = note.text.trim().split("\n");
+  const firstLine = lines[0] ?? note.text;
+  const details = lines.slice(1).join("\n").trim();
+
+  return (
+    <div data-slot="kollab_online-notice" className="my-1.5 w-full">
+      <Collapsible defaultOpen={false}>
+        <CollapsibleTrigger
+          data-slot="kollab_online-chip-trigger"
+          className="group/chip hover:bg-muted/80 bg-muted/40 border-border/60 flex w-full items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-muted-foreground transition-colors cursor-pointer select-none"
+        >
+          <GemAvatar
+            gem={name}
+            where={device || where}
+            caste={sender?.caste}
+            color={sender?.color}
+            state={sender?.active ? sender.state : "idle"}
+            size={18}
+            className="shrink-0"
+          />
+          <span className="font-medium text-foreground truncate text-start">
+            {firstLine}
+          </span>
+          {details ? (
+            <ChevronDownIcon className="ml-auto size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]/chip:rotate-180" />
+          ) : null}
+        </CollapsibleTrigger>
+        {details ? (
+          <CollapsibleContent
+            data-slot="kollab_online-chip-content"
+            className="mt-1.5 rounded-lg border border-border/40 bg-muted/20 px-3 py-2 text-xs font-mono whitespace-pre-wrap text-muted-foreground"
+          >
+            {details}
+          </CollapsibleContent>
+        ) : null}
+      </Collapsible>
+    </div>
+  );
+};
+
 // Another agent's hub message (runtime.tsx turns the daemon's agent HUD into
 // these). One this agent only saw go by is dimmed, like the terminal's ◇.
 const HubNoteMessage: FC = () => {
   const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
-  const { remote: remoteAgents } = useContext(ComposerHubContext);
-  const resolveAgent = (id: string) => {
-    const match = remoteAgents.find((agent) => [agent.name, agent.handle].some((value) => String(value || "") === id));
-    return match ? `${match.name}@${match.device || "remote"}` : agentLabel(id);
-  };
   if (note?.isOnlineNotice) {
-    const summary = note.text.split("\n", 1)[0] || `Online: ${note.from}`;
     return (
-      <details data-slot="kollab_hub-online" className="text-muted-foreground mx-2 my-1 rounded-md border px-2 py-1 text-xs">
-        <summary className="cursor-pointer list-none truncate [&::-webkit-details-marker]:hidden">{summary}</summary>
-        <pre className="text-muted-foreground mt-1 max-h-40 overflow-auto whitespace-pre-wrap">{note.text}</pre>
-      </details>
+      <MessagePrimitive.Root
+        data-slot="kollab_hub-message"
+        data-role="system"
+        className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150"
+      >
+        <OnlineNoticeChip note={note} />
+      </MessagePrimitive.Root>
     );
   }
   return (
@@ -140,7 +214,7 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} resolveAgent={resolveAgent}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>
@@ -157,6 +231,7 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
   const text = String(props.args?.message ?? props.args?.content ?? "").trim();
   if (!gem || !text) return <ToolFallback {...props} />;
   const to = props.toolName === "hub_broadcast" ? "" : String(props.args?.to ?? props.args?.target ?? "");
+  const isReply = props.toolName === "hub_reply";
   const threadId = String(props.args?.thread_id ?? props.args?.thread ?? "") || undefined;
   const replyTo = String(props.args?.reply_to ?? props.args?.replyTo ?? "") || undefined;
   return (
@@ -169,6 +244,7 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
         to={to}
         threadId={threadId}
         replyTo={replyTo}
+        isReply={isReply}
         footer={
           props.isError ? (
             <p className="text-destructive mt-1 text-xs">Not delivered: {toolErrorLine(props.result)}</p>

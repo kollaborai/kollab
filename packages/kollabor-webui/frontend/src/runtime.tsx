@@ -128,13 +128,6 @@ function withHubNotes(content: ThreadMessageLike["content"]): {
 } {
   if (typeof content === "string") {
     const { notes, rest } = splitAgentHud(content);
-    // Direct ACP hub wrappers are presentation-only cards; parsing the stable
-    // prefix here keeps runtime conversion explicit while the model text stays
-    // available to the history layer.
-    if (!notes.length) {
-      const firstLine = content.split("\n", 1)[0] ?? "";
-      parseHubMessageHeader(firstLine);
-    }
     return { notes, content: rest };
   }
   const first = content.findIndex((part) => part.type === "text");
@@ -386,16 +379,15 @@ function historyToMessages(
       // Before the HUD check: a status-only turn still ends the one before.
       closeTurn();
       turnStartedAt = message.timestamp;
-      const { notes, content } = withHubNotes(
-        historyContentToThreadContent(message.content),
-      );
+      const rawPrompt = historyContentToThreadContent(message.content);
+      const { notes, content } = withHubNotes(rawPrompt);
       // What other agents sent this one, as messages from their gems.
       notes.forEach((note, noteIndex) => {
         messages.push({
           id: `history-${sourceIndex}-hub-${noteIndex}`,
           role: "system",
           content: note.text,
-          metadata: { custom: { hub: note } },
+          metadata: { custom: { hub: { ...note, rawText: note.rawText || (typeof rawPrompt === "string" ? rawPrompt : JSON.stringify(rawPrompt)) }, rawPrompt } },
         });
       });
       // A turn that was only agent status stays in the Trajectory tab.
