@@ -22,12 +22,13 @@ import {
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
+import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { titleCase } from "@/components/panels/panel-model";
 import { cn } from "@/lib/utils";
 
-type WelcomeGem = { name: string; pool?: AgentPoolEntry; onOpen?: () => void };
+type WelcomeGem = { name: string; pool?: AgentPoolEntry; activity?: Activity | null; onOpen?: () => void };
 
 const WelcomeContext = createContext<WelcomeGem | null>(null);
 const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
@@ -67,6 +68,38 @@ const Welcome: FC = () => {
         Everything has hooks. Send a message to begin.
       </p>
     </div>
+  );
+};
+
+const ComposerGem: FC = () => {
+  const gem = useContext(WelcomeContext);
+  const where = useContext(WhereContext);
+  if (!gem) return null;
+
+  return (
+    <button
+      type="button"
+      data-slot="kollab_composer-gem"
+      data-activity={gem.activity ?? undefined}
+      className="inline-flex shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label={`Open ${titleCase(gem.name)} Properties`}
+      title={`${titleCase(gem.name)} · Properties`}
+      onClick={gem.onOpen}
+      disabled={!gem.onOpen}
+    >
+      <GemAvatar
+        gem={gem.name}
+        where={where}
+        caste={gem.pool?.caste}
+        color={gem.pool?.color}
+        state={gem.pool?.active ? gem.pool.state : "idle"}
+        live
+        activity={gem.activity}
+        season="auto"
+        follow
+        size={56}
+      />
+    </button>
   );
 };
 
@@ -274,6 +307,8 @@ export const Thread: FC<{
   attachmentsEnabled?: boolean;
   /** The session's gem, which greets on the empty thread. */
   identity?: string;
+  /** The selected session's live activity, shared with its sidebar gem. */
+  activity?: Activity | null;
   /** Opens the session's Properties (double-click on the greeting gem). */
   onOpenGem?: () => void;
   /** Agents on the network's other computers, for the @ picker. */
@@ -284,14 +319,14 @@ export const Thread: FC<{
   device?: string;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
     <WelcomeContext.Provider
       value={
         identity
-          ? { name: identity, pool: agents.find((agent) => agent.name === identity), onOpen: onOpenGem }
+          ? { name: identity, pool: agents.find((agent) => agent.name === identity), activity, onOpen: onOpenGem }
           : null
       }
     >
@@ -303,7 +338,7 @@ export const Thread: FC<{
         ))}
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
-            components={{ Welcome, ToolGroup, SystemMessage: HubNoteMessage }}
+            components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
             agents={agents}
             commands={commands}
             onOpenPanel={onOpenPanel}

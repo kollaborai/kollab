@@ -221,6 +221,13 @@ approval mode, context usage, full status/errors, MCP servers, the online roster
 settings and clear-history actions. Dialogs remain mounted when the popover closes;
 closing one returns focus to its control. Chat/Trajectory stay directly available.
 
+Once a chat has messages, its agent's live gem docks immediately beside the input
+bar and stays visible while the conversation scrolls. It shares the selected
+session's real activity with the sidebar (thinking, tools, speaking and errors),
+uses the same saved appearance, and opens Properties on click. The empty chat
+keeps its large welcome gem without a second composer gem. The input remains
+shrinkable beside the gem at narrow widths, including with a wide sidebar.
+
 Initialization records carry `metadata.system_initialization: true` and are omitted
 from Chat, while original context remains available to the model and Trajectory.
 Resume preserves explicit initialization provenance rather than classifying user

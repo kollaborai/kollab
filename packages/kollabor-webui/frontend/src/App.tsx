@@ -299,6 +299,7 @@ function RuntimeShell({
               session.supports_vision ?? profile?.supports_vision ?? true
             }
             identity={session.identity}
+            activity={activity}
             onOpenGem={onOpenProperties}
             remoteAgents={targets.remote}
             workspace={session.workspace ?? ""}
