@@ -25,12 +25,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor.state.snapshots import ProfileSnapshot
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
+from kollabor_config.config_utils import get_conversations_dir
 from kollabor_events.permissions_models import ApprovalMode
-from kollabor.state.snapshots import ProfileSnapshot
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
+from .history_provenance import mark_system_initialization
 from .history_xml_tools import web_history
 
 logger = logging.getLogger(__name__)
@@ -477,8 +479,30 @@ class EngineSession:
                 return self.history
             self._raw_history = (held[:since] if since else []) + received
             self._history_anchor = getattr(snapshot, "anchor", "") or ""
+            display_history = self._raw_history
+            native_session_id = (
+                snapshot.get("session_id", "")
+                if isinstance(snapshot, dict)
+                else getattr(snapshot, "session_id", "")
+            )
+            if native_session_id and display_history and display_history[0].get("role") == "user":
+                # Old resumed bases lost initialization metadata. Recover it
+                # from typed source records for display only; the daemon and
+                # raw mirror/anchor must remain byte-for-byte unchanged.
+                try:
+                    workspace = getattr(self, "workspace", None)
+                    first = await asyncio.to_thread(
+                        mark_system_initialization,
+                        get_conversations_dir(Path(workspace) if workspace else None),
+                        native_session_id,
+                        display_history[0],
+                    )
+                    if first is not display_history[0]:
+                        display_history = [first, *display_history[1:]]
+                except Exception as exc:
+                    logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
             # XML tool turns in the shape the web renders for native tools.
-            self.history = web_history(self._raw_history)
+            self.history = web_history(display_history)
             return self.history
 
     async def send_message(
