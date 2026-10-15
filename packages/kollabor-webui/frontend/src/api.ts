@@ -703,13 +703,13 @@ export class EngineApi {
 
   async checkForUpdate() {
     const response = await fetch("/api/update/check", { cache: "no-store" });
-    if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status);
+    if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateCheckResponse;
   }
 
   async applyUpdate() {
     const response = await fetch("/api/update/apply", { method: "POST" });
-    if (!response.ok) throw new ApiError(`Update failed: ${response.status}`, response.status);
+    if (!response.ok) throw new ApiError(`Update failed: ${response.status}`, response.status, undefined);
     return (await response.json()) as UpdateApplyResponse;
   }
 
