@@ -72,11 +72,12 @@ const agentLabel = (id: string) => {
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
-const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: string; children: ReactNode; footer?: ReactNode }> = ({
+const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: string; resolveAgent?: (id: string) => string; children: ReactNode; footer?: ReactNode }> = ({
   from,
   to,
   threadId,
   replyTo,
+  resolveAgent,
   children,
   footer,
 }) => {
@@ -96,7 +97,7 @@ const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: s
       />
       <div className="min-w-0 flex-1">
         <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
-          <span>{agentLabel(from)} → {to ? agentLabel(to) : "All"}</span>
+          <span>{(resolveAgent ?? agentLabel)(from)} → {to ? (resolveAgent ?? agentLabel)(to) : "All"}</span>
 
         </div>
         <div className="text-foreground wrap-break-word">{children}</div>
@@ -110,6 +111,11 @@ const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: s
 // these). One this agent only saw go by is dimmed, like the terminal's ◇.
 const HubNoteMessage: FC = () => {
   const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
+  const { remote: remoteAgents } = useContext(ComposerHubContext);
+  const resolveAgent = (id: string) => {
+    const match = remoteAgents.find((agent) => [agent.name, agent.handle].some((value) => String(value || "") === id));
+    return match ? `${match.name}@${match.device || "remote"}` : agentLabel(id);
+  };
   return (
     <MessagePrimitive.Root
       data-slot="kollab_hub-message"
@@ -119,7 +125,7 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo} resolveAgent={resolveAgent}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>
