@@ -38,7 +38,7 @@ jobs:
           - platform: macos-aarch64
             runner: macos-14
           - platform: macos-x86_64
-            runner: macos-15-intel
+            runner: macos-13
           - platform: linux-x86_64
             runner: ubuntu-24.04
           - platform: linux-aarch64
@@ -90,7 +90,7 @@ jobs:
           - platform: macos-x86_64
             binary_platform: macos-x86_64
             target: x86_64-apple-darwin
-            runner: macos-15-intel
+            runner: macos-13
     steps:
       - uses: actions/checkout@v6
 
