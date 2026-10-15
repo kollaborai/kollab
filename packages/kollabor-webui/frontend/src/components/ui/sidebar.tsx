@@ -48,6 +48,7 @@ type SidebarContextProps = {
   isMobile: boolean
   toggleSidebar: () => void
   setSidebarWidth: (width: number, persist?: boolean) => void
+  getSidebarWidth: (measuredWidth: number) => number
   isResizing: boolean
   setIsResizing: (resizing: boolean) => void
 }
@@ -87,14 +88,16 @@ function SidebarProvider({
     }
   })
   const [resizedWidth, setResizedWidth] = React.useState<{ initial: typeof styleWidth; width: number } | null>(null)
+  const requestedWidth = React.useRef<typeof resizedWidth>(null)
   const [isResizing, setIsResizing] = React.useState(false)
   const preferredWidth = resizedWidth && resizedWidth.initial === styleWidth
     ? resizedWidth.width
     : styleWidth ?? savedWidth ?? SIDEBAR_WIDTH
   const setSidebarWidth = React.useCallback((width: number, persist = true) => {
     const bounded = clampSidebarWidth(width, window.innerWidth)
+    requestedWidth.current = { initial: styleWidth, width: bounded }
     setSavedWidth(bounded)
-    setResizedWidth({ initial: styleWidth, width: bounded })
+    setResizedWidth(requestedWidth.current)
     if (persist) {
       try {
         window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(bounded))
@@ -102,6 +105,12 @@ function SidebarProvider({
         // Resizing still works when device storage is unavailable.
       }
     }
+  }, [styleWidth])
+  const getSidebarWidth = React.useCallback((measuredWidth: number) => {
+    // Repeated keys must use the requested width, not a CSS transition frame.
+    const requested = requestedWidth.current
+    return clampSidebarWidth(requested && requested.initial === styleWidth
+      ? requested.width : measuredWidth, window.innerWidth)
   }, [styleWidth])
 
   // This is the internal state of the sidebar.
@@ -158,10 +167,11 @@ function SidebarProvider({
       setOpenMobile,
       toggleSidebar,
       setSidebarWidth,
+      getSidebarWidth,
       isResizing,
       setIsResizing,
     }),
-    [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar, setSidebarWidth, isResizing]
+    [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar, setSidebarWidth, getSidebarWidth, isResizing]
   )
 
   return (
@@ -327,7 +337,7 @@ function SidebarTrigger({
 
 function SidebarRail({ className, ref: forwardedRef, onPointerDown, onPointerMove, onPointerUp,
   onPointerCancel, onLostPointerCapture, onKeyDown, onClick, ...props }: React.ComponentProps<"button">) {
-  const { open, setOpen, isMobile, setSidebarWidth, setIsResizing } = useSidebar()
+  const { open, setOpen, isMobile, setSidebarWidth, getSidebarWidth, setIsResizing } = useSidebar()
   const railRef = React.useRef<HTMLButtonElement | null>(null)
   const suppressClick = React.useRef(false)
   const setRailRef = React.useCallback((node: HTMLButtonElement | null) => {
@@ -452,7 +462,7 @@ function SidebarRail({ className, ref: forwardedRef, onPointerDown, onPointerMov
         onKeyDown?.(event)
         if (event.defaultPrevented || !open || event.altKey || event.ctrlKey || event.metaKey) return
         const panel = event.currentTarget.closest<HTMLElement>('[data-slot="sidebar-container"]')
-        const next = keyboardSidebarWidth(event.key, panel?.getBoundingClientRect().width ?? width,
+        const next = keyboardSidebarWidth(event.key, getSidebarWidth(panel?.getBoundingClientRect().width ?? width),
           panelSide(event.currentTarget), window.innerWidth, event.shiftKey)
         if (next === null) return
         event.preventDefault()
