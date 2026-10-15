@@ -12,6 +12,12 @@ export type HubNote = {
   /** Optional routing metadata, retained for presentation only. */
   threadId?: string;
   replyTo?: string;
+  /** Raw text before presentation cleaning, preserved for model/history. */
+  rawText?: string;
+  /** Whether this is a direct message to this agent (not an HUD observation). */
+  isDirect?: boolean;
+  /** Whether this note is an online notice (agent coming online). */
+  isOnlineNotice?: boolean;
 };
 
 export type HubMessageHeader = {
@@ -19,6 +25,26 @@ export type HubMessageHeader = {
   threadId?: string;
   replyTo?: string;
 };
+
+export type RosterEntry = {
+  name?: string;
+  identity?: string;
+  device?: string;
+  agent_id?: string;
+  id?: string;
+  device_id?: string;
+  handle?: string;
+  [key: string]: unknown;
+};
+
+export type RosterLookup =
+  | readonly RosterEntry[]
+  | {
+      agents?: readonly RosterEntry[];
+      remoteAgents?: readonly RosterEntry[];
+      roster?: readonly RosterEntry[];
+      [key: string]: unknown;
+    };
 
 /** Parse the stable human-readable hub prefix without mutating message text. */
 export function parseHubMessageHeader(text: string): HubMessageHeader | null {
@@ -29,6 +55,82 @@ export function parseHubMessageHeader(text: string): HubMessageHeader | null {
     ...(match[2] ? { threadId: match[2] } : {}),
     ...(match[3] ? { replyTo: match[3] } : {}),
   };
+}
+
+/** Resolve device IDs or agent IDs like d01769a1ed99 to agent@device from roster data. */
+export function resolveAgentSender(
+  sender: string,
+  roster?: RosterLookup,
+  contextText?: string,
+): string {
+  const trimmed = sender.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.includes("@")) return trimmed;
+
+  let entries: readonly RosterEntry[] = [];
+  if (Array.isArray(roster)) {
+    entries = roster;
+  } else if (roster && typeof roster === "object") {
+    const grouped = roster as Exclude<RosterLookup, readonly RosterEntry[]>;
+    entries = [
+      ...(Array.isArray(grouped.agents) ? grouped.agents : []),
+      ...(Array.isArray(grouped.remoteAgents) ? grouped.remoteAgents : []),
+      ...(Array.isArray(grouped.roster) ? grouped.roster : []),
+    ];
+  }
+
+  const match = entries.find((e) => {
+    return (
+      e.agent_id === trimmed ||
+      e.id === trimmed ||
+      e.device_id === trimmed ||
+      e.device === trimmed ||
+      e.handle === trimmed ||
+      e.name === trimmed ||
+      e.identity === trimmed
+    );
+  });
+
+  if (match) {
+    const name = match.name || match.identity;
+    const device = match.device;
+    if (name && device) {
+      return `${name}@${device}`;
+    }
+    if (match.handle) {
+      return match.handle;
+    }
+    if (name) {
+      return name;
+    }
+  }
+
+  // If not found in roster, check contextText for online notices
+  if (contextText) {
+    const onlineMatch = contextText.match(/agent\s+['"]?([^'"]+)['"]?\s+just came online/i);
+    if (onlineMatch?.[1]) {
+      const agentName = onlineMatch[1];
+      if (/^[0-9a-f]{8,}$/i.test(trimmed)) {
+        return `${agentName}@${trimmed}`;
+      }
+      return agentName;
+    }
+  }
+
+  return trimmed;
+}
+
+/** Strip trailing hub_msg / hub_reply instructions from prompt text for UI presentation. */
+export function stripReplyInstructions(text: string): string {
+  return text
+    .replace(/(?:\r?\n)*\s*respond back using:\s*<hub_(?:msg|reply)[^>]*>[\s\S]*?(?:<\/hub_(?:msg|reply)>|$)\s*$/i, "")
+    .replace(/(?:\r?\n)*\s*respond back using:\s*.*$/i, "")
+    .trim();
+}
+
+/** Detect if a message is an online notice from an agent coming online. */
+export function isOnlineNoticeText(text: string): boolean {
+  return /^agent\s+['"]?([^'"]+)['"]?\s+just came online/i.test(text.trim());
 }
 
 const AGENT_HUD = /^\s*<agent_hud>\n?([\s\S]*?)\n?<\/agent_hud>\s*/;
@@ -84,14 +186,36 @@ function hubNote(label: string, lines: string[]): HubNote | null {
 }
 
 /** The hub messages in a user turn's agent HUD, and the text after the HUD. */
-export function splitAgentHud(text: string): { notes: HubNote[]; rest: string } {
+export function splitAgentHud(text: string, roster?: RosterLookup): { notes: HubNote[]; rest: string } {
   const match = AGENT_HUD.exec(text);
   if (!match) {
     const newline = text.indexOf("\n");
     const header = parseHubMessageHeader(newline < 0 ? text : text.slice(0, newline));
     if (!header) return { notes: [], rest: text };
-    const body = newline < 0 ? "" : text.slice(newline + 1).trim();
-    return body ? { notes: [{ from: header.sender, to: "", text: body, observed: false, ...(header.threadId ? { threadId: header.threadId } : {}), ...(header.replyTo ? { replyTo: header.replyTo } : {}) }], rest: "" } : { notes: [], rest: text };
+    let body = newline < 0 ? "" : text.slice(newline + 1).trim();
+    if (!body) return { notes: [], rest: text };
+    const rawBody = body;
+    const cuts = TRAILERS.map((marker) => body.indexOf(marker)).filter((index) => index >= 0);
+    if (cuts.length) body = body.slice(0, Math.min(...cuts)).trim();
+    body = stripReplyInstructions(body);
+    const isOnline = isOnlineNoticeText(body);
+    const from = resolveAgentSender(header.sender, roster, rawBody);
+    return {
+      notes: [
+        {
+          from,
+          to: "",
+          text: body,
+          observed: false,
+          ...(header.threadId ? { threadId: header.threadId } : {}),
+          ...(header.replyTo ? { replyTo: header.replyTo } : {}),
+          rawText: text,
+          isDirect: true,
+          isOnlineNotice: isOnline,
+        },
+      ],
+      rest: "",
+    };
   }
   const notes: HubNote[] = [];
   let section: { name: string; label: string; lines: string[] } | null = null;
@@ -109,5 +233,30 @@ export function splitAgentHud(text: string): { notes: HubNote[]; rest: string } 
     }
   }
   flush();
-  return { notes, rest: text.slice(match[0].length) };
+
+  let rest = text.slice(match[0].length);
+  const restNewline = rest.indexOf("\n");
+  const restHeader = parseHubMessageHeader(restNewline < 0 ? rest : rest.slice(0, restNewline));
+  if (restHeader) {
+    let restBody = restNewline < 0 ? "" : rest.slice(restNewline + 1).trim();
+    const rawRestBody = restBody;
+    const cuts = TRAILERS.map((marker) => restBody.indexOf(marker)).filter((index) => index >= 0);
+    if (cuts.length) restBody = restBody.slice(0, Math.min(...cuts)).trim();
+    restBody = stripReplyInstructions(restBody);
+    const isOnline = isOnlineNoticeText(restBody);
+    const from = resolveAgentSender(restHeader.sender, roster, rawRestBody);
+    notes.push({
+      from,
+      to: "",
+      text: restBody,
+      observed: false,
+      ...(restHeader.threadId ? { threadId: restHeader.threadId } : {}),
+      ...(restHeader.replyTo ? { replyTo: restHeader.replyTo } : {}),
+      rawText: rest,
+      isDirect: true,
+      isOnlineNotice: isOnline,
+    });
+    rest = "";
+  }
+  return { notes, rest };
 }
