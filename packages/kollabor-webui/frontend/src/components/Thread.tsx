@@ -72,9 +72,11 @@ const agentLabel = (id: string) => {
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
-const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: ReactNode }> = ({
+const HubNoteView: FC<{ from: string; to: string; threadId?: string; replyTo?: string; children: ReactNode; footer?: ReactNode }> = ({
   from,
   to,
+  threadId,
+  replyTo,
   children,
   footer,
 }) => {
@@ -93,8 +95,9 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
         className="mt-0.5 shrink-0"
       />
       <div className="min-w-0 flex-1">
-        <div className="text-muted-foreground mb-1 text-xs font-medium">
-          {agentLabel(from)} → {to ? agentLabel(to) : "All"}
+        <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
+          <span>{agentLabel(from)} → {to ? agentLabel(to) : "All"}</span>
+
         </div>
         <div className="text-foreground wrap-break-word">{children}</div>
         {footer}
@@ -116,14 +119,14 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>
   );
 };
 
-type HubSendArgs = { to?: string; target?: string; message?: string; content?: string };
+type HubSendArgs = { to?: string; target?: string; message?: string; content?: string; thread?: string; thread_id?: string; reply_to?: string; replyTo?: string };
 
 // What this agent sent over the hub (native calls pass to/message, the XML
 // tags target/content), drawn like the messages it receives instead of as a
@@ -133,6 +136,8 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
   const text = String(props.args?.message ?? props.args?.content ?? "").trim();
   if (!gem || !text) return <ToolFallback {...props} />;
   const to = props.toolName === "hub_broadcast" ? "" : String(props.args?.to ?? props.args?.target ?? "");
+  const threadId = String(props.args?.thread_id ?? props.args?.thread ?? "") || undefined;
+  const replyTo = String(props.args?.reply_to ?? props.args?.replyTo ?? "") || undefined;
   return (
     <div
       data-slot="kollab_hub-sent"
@@ -141,6 +146,8 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
       <HubNoteView
         from={gem.name}
         to={to}
+        threadId={threadId}
+        replyTo={replyTo}
         footer={
           props.isError ? (
             <p className="text-destructive mt-1 text-xs">Not delivered: {toolErrorLine(props.result)}</p>

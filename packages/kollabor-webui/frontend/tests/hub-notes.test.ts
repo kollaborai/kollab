@@ -1,7 +1,6 @@
-// Run: node --test tests/hub-notes.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitAgentHud } from "../src/hub-notes.ts";
+import { parseHubMessageHeader, splitAgentHud } from "../src/hub-notes.ts";
 
 // Made by kollabor/llm/agent_hud.py (merge_agent_hud_with_user_message) from the
 // entries plugins/hub/plugin.py queues for incoming messages.
@@ -21,7 +20,7 @@ test("hub messages come out of the HUD; status entries and model guidance stay i
       text: "Yes, I can see your message.\n\nSecond paragraph.",
       observed: false,
     },
-    { from: "sapphire", to: "aquamarine", text: "build is green", observed: true },
+    { from: "sapphire", to: "aquamarine", threadId: "abcd1234", text: "build is green", observed: true },
     { from: "ruby", to: "", text: "hello everyone", observed: false },
   ]);
   assert.equal(rest, "what did they say?");
@@ -43,9 +42,29 @@ test("ACP observation batches replay as peer cards without a duplicate user bloc
     "[hub:sapphire->]\n+ [hub channel: sapphire -> * [thread:thread-2]]\n  Build passed.\n</agent_hud>";
   assert.deepEqual(splitAgentHud(batch), {
     notes: [
-      { from: "zircon", to: "nephrite", text: "The roster is available.\n\nSecond paragraph.", observed: false },
-      { from: "sapphire", to: "", text: "Build passed.", observed: false },
+      { from: "zircon", to: "nephrite", threadId: "thread-1", replyTo: "request-1", text: "The roster is available.\n\nSecond paragraph.", observed: false },
+      { from: "sapphire", to: "", threadId: "thread-2", text: "Build passed.", observed: false },
     ],
     rest: "",
   });
+});
+
+test("parses presentation-only Message from headers", () => {
+  assert.deepEqual(parseHubMessageHeader("Message from aquamarine [thread:thread-7]"), {
+    sender: "aquamarine",
+    threadId: "thread-7",
+  });
+  assert.deepEqual(parseHubMessageHeader("Message from lapis@devbox [thread:t] [reply-to:req-2]"), {
+    sender: "lapis@devbox",
+    threadId: "t",
+    replyTo: "req-2",
+  });
+});
+
+test("removes hidden hub thread and reply instructions", () => {
+  const result = splitAgentHud("<agent_hud>\n[hub:a->b [thread:t] [reply-to:r]]\n+ Message\n\n[hub thread instruction]\nsecret\n</agent_hud>\n\nhello");
+  assert.equal(result.notes[0]?.text, "Message");
+  assert.equal(result.notes[0]?.threadId, "t");
+  assert.equal(result.notes[0]?.replyTo, "r");
+  assert.equal(result.rest, "hello");
 });

@@ -674,7 +674,14 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const lastStatus = cardStatus ? harnessStatusLabels[cardStatus] : undefined;
   const turnEnded = status?.type === "incomplete" && status.reason === "cancelled"
     ? "Turn cancelled" : "Turn ended";
-  const detail = [kind, unfinished && parentEnded
+  let routeDetail = "";
+  try {
+    const parsed = argsText ? JSON.parse(argsText) as Record<string, unknown> : {};
+    const replyTo = parsed.reply_to ?? parsed.replyTo;
+    const threadId = parsed.thread_id ?? parsed.thread;
+    routeDetail = [threadId ? `Thread ${String(threadId)}` : "", replyTo ? `Replied-to ${String(replyTo)}` : ""].filter(Boolean).join(" · ");
+  } catch { /* malformed tool args remain presentation-only */ }
+  const detail = [kind, routeDetail, unfinished && parentEnded
     ? `${turnEnded} · Last reported: ${lastStatus}` : lastStatus].filter(Boolean).join(" · ");
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";

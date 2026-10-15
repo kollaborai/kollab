@@ -673,7 +673,11 @@ export function SessionToolbar({
                 Online agent status is unavailable. Refresh to try again.
               </p>
             ) : agents.length ? (
-              <ScrollArea className="max-h-56 rounded-md border p-2">
+              <details className="group rounded-md border">
+                <summary className="text-muted-foreground flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
+                  <span>Online agents</span><span className="group-open:rotate-180 transition-transform">⌄</span>
+                </summary>
+              <ScrollArea className="max-h-56 border-t p-2">
                 <div className="flex flex-col gap-1">
                   {agents.map((agent) => {
                     const identity = String(
@@ -706,6 +710,7 @@ export function SessionToolbar({
                   })}
                 </div>
               </ScrollArea>
+              </details>
             ) : (
               <p className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
                 No online agents are advertising a presence right now.

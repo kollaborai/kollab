@@ -34,7 +34,7 @@ import type {
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
-import { splitAgentHud, type HubNote } from "./hub-notes";
+import { parseHubMessageHeader, splitAgentHud, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
   historyTurnTiming,
@@ -128,6 +128,13 @@ function withHubNotes(content: ThreadMessageLike["content"]): {
 } {
   if (typeof content === "string") {
     const { notes, rest } = splitAgentHud(content);
+    // Direct ACP hub wrappers are presentation-only cards; parsing the stable
+    // prefix here keeps runtime conversion explicit while the model text stays
+    // available to the history layer.
+    if (!notes.length) {
+      const firstLine = content.split("\n", 1)[0] ?? "";
+      parseHubMessageHeader(firstLine);
+    }
     return { notes, content: rest };
   }
   const first = content.findIndex((part) => part.type === "text");
