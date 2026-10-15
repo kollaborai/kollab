@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
-import { Loader2, Plus } from "lucide-react";
+import { Loader2, MessageSquare, Plus, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
@@ -184,6 +184,9 @@ function RuntimeShell({
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
   const activity = useThreadActivity(Boolean(transportError));
+  const usageLabel = session.harness && session.acp_usage?.size !== undefined
+    ? `${formatContextTokens(session.acp_usage.used ?? 0)}/${formatContextTokens(session.acp_usage.size)} Tokens${session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}`
+    : null;
 
   useEffect(() => onActivity(activity), [activity, onActivity]);
   useEffect(() => () => onActivity(null), [onActivity]);
@@ -210,27 +213,22 @@ function RuntimeShell({
 
   return (
     <>
-      {/* One slim row; the controls wrap under the title on narrow screens. The
-          model picker shows model and profile, so the title carries no subtitle. */}
-      <ShellHeader className="bg-background sticky top-0 z-10 flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b px-3 py-1.5">
-        <SidebarTrigger className="-ml-1" />
-        <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
-        <span
-          className="min-w-0 truncate text-sm font-semibold tracking-tight"
-          title={`${formatSessionName(session.name, session.session_id)} · ${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
-        >
-          {sessionLabel}
-        </span>
-        <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 rounded border px-1.5 py-0.5 text-xs" />
-        {session.acp_waiting && (
-          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600" role="status">
-            Waiting for Approval
+      {/* Respond to the chat pane's width, including when its sidebar is resized. */}
+      <ShellHeader className="bg-background @container/shell-header sticky top-0 z-10 flex min-h-12 shrink-0 items-center gap-2 border-b px-3 py-1.5">
+        <SidebarTrigger className="-ml-1 shrink-0" />
+        <Separator orientation="vertical" className="mr-1 shrink-0 data-[orientation=vertical]:h-4" />
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span
+            className="min-w-0 truncate text-sm font-semibold tracking-tight"
+            title={`${sessionLabel} · ${formatSessionName(session.name, session.session_id)} · ${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
+          >
+            {sessionLabel}
           </span>
-        )}
-        {session.harness && session.acp_usage?.size !== undefined && (
-          <span className="text-muted-foreground text-xs" title="Current harness context usage">
-            {formatContextTokens(session.acp_usage.used ?? 0)}/{formatContextTokens(session.acp_usage.size)} Tokens
-            {session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}
+          <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 shrink-0 rounded border px-1.5 py-0.5 text-xs @max-[38rem]/shell-header:[&>span]:hidden" />
+        </div>
+        {usageLabel && (
+          <span className="text-muted-foreground hidden shrink-0 whitespace-nowrap text-xs @min-[56rem]/shell-header:block" title="Current harness context usage">
+            {usageLabel}
           </span>
         )}
         <div
@@ -242,36 +240,36 @@ function RuntimeShell({
             type="button"
             variant={view === "chat" ? "secondary" : "ghost"}
             size="xs"
+            aria-label="Chat"
+            title="Chat"
             aria-pressed={view === "chat"}
             data-testid="chat-tab"
             onClick={() => setView("chat")}
           >
-            Chat
+            <MessageSquare className="size-3.5" aria-hidden="true" />
+            <span className="hidden @min-[26rem]/shell-header:inline">Chat</span>
           </Button>
           <Button
             type="button"
             variant={view === "trajectory" ? "secondary" : "ghost"}
             size="xs"
+            aria-label="Trajectory"
+            title="Trajectory"
             aria-pressed={view === "trajectory"}
             data-testid="trajectory-tab"
             onClick={() => setView("trajectory")}
           >
-            Trajectory
+            <Waypoints className="size-3.5" aria-hidden="true" />
+            <span className="hidden @min-[26rem]/shell-header:inline">Trajectory</span>
           </Button>
         </div>
-        <span
-          className={
-            transportError
-              ? "text-destructive min-w-0 flex-1 truncate text-right text-xs"
-              : "text-muted-foreground min-w-0 flex-1 truncate text-right text-xs"
-          }
-        >
-          {status || transportError || null}
-        </span>
         <SessionToolbar
           api={api}
           session={session}
           profiles={profiles}
+          usage={usageLabel}
+          status={transportError || status}
+          statusError={Boolean(transportError)}
           onStatus={setStatus}
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
