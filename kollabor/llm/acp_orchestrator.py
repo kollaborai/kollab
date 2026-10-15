@@ -97,6 +97,20 @@ class ACPOrchestrator:
     def runner(self) -> ACPRunner | None:
         return self._runner
 
+    def advertised_config_options(self) -> list[dict[str, Any]]:
+        """Return config options advertised by the active ACP session."""
+        runner = self._runner
+        if runner is None or self._closed:
+            return []
+        return runner.advertised_config_options()
+
+    async def set_config_option(self, config_id: str, value: str | bool) -> list[dict[str, Any]]:
+        """Set an advertised ACP config option on the active session."""
+        runner = self._runner
+        if runner is None or self._closed:
+            raise ACPError("ACP session is not active")
+        return await runner.set_config_option(config_id, value)
+
     async def start(self, profile: LLMProfile, *, resume_conversation: str | None = None) -> None:
         if profile.provider != "acp":
             raise ValueError(f"profile {profile.name!r} is not an ACP profile")

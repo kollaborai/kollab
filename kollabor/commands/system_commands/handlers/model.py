@@ -58,6 +58,57 @@ class ModelCommandHandler(BaseCommandHandler):
             return None
         return self.event_bus.get_service("llm_service")
 
+    def _acp_service(self):
+        """Return the active ACP orchestrator, when the profile is ACP."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return None
+        return self.event_bus.get_service("acp_orchestrator")
+
+    def _acp_options(self) -> list[dict[str, Any]]:
+        service = self._acp_service()
+        getter = getattr(service, "advertised_config_options", None)
+        return getter() if callable(getter) else []
+
+    @staticmethod
+    def _acp_option(options: list[dict[str, Any]], category: str) -> dict[str, Any] | None:
+        category = category.lower()
+        for option in options:
+            if str(option.get("category") or "").lower() == category:
+                return option
+            if str(option.get("id") or "").lower() in {category, f"{category}_level"}:
+                return option
+        return None
+
+    @staticmethod
+    def _acp_option_values(option: dict[str, Any]) -> list[str]:
+        values: list[str] = []
+        for candidate in option.get("options") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if "value" in candidate:
+                values.append(str(candidate["value"]))
+            for nested in candidate.get("options") or []:
+                if isinstance(nested, dict) and "value" in nested:
+                    values.append(str(nested["value"]))
+        return values
+
+    async def _set_acp_option(self, category: str, value: str | bool) -> CommandResult:
+        options = self._acp_options()
+        option = self._acp_option(options, category)
+        if option is None:
+            return CommandResult(
+                success=False,
+                message=f"Active ACP harness does not advertise a {category} option.",
+                display_type="error",
+            )
+        service = self._acp_service()
+        try:
+            await service.set_config_option(str(option["id"]), value)
+        except Exception as exc:
+            return CommandResult(success=False, message=str(exc), display_type="error")
+        label = "model" if category == "model" else "reasoning effort"
+        return CommandResult(success=True, message=f"ACP {label} set to {value}.", display_type="success")
+
     async def _announce_hub_model_switch(
         self, profile: Any, previous_model: str | None = None
     ) -> None:
@@ -527,6 +578,25 @@ class ModelCommandHandler(BaseCommandHandler):
         provider = (active.get_provider() if active else "") or ""
         current = (active.get_model() if active else "") or ""
 
+        if provider == "acp":
+            options = self._acp_options()
+            model = self._acp_option(options, "model")
+            if model is None:
+                return CommandResult(
+                    success=False,
+                    message="Active ACP harness does not advertise a model option.",
+                    display_type="error",
+                )
+            values = self._acp_option_values(model)
+            return CommandResult(
+                success=True,
+                message=(
+                    "ACP models: " + ", ".join(values)
+                    + "\nSet with: /model set <model>"
+                ),
+                display_type="info",
+            )
+
         known = self._build_known_models(provider, current)
 
         stack_mgr = self._get_altview_stack_manager()
@@ -615,6 +685,38 @@ class ModelCommandHandler(BaseCommandHandler):
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
         provider = (profile.get_provider() or "").lower()
+        if provider == "acp":
+            option = self._acp_option(self._acp_options(), "thought_level")
+            if option is None:
+                option = self._acp_option(self._acp_options(), "effort")
+            if option is None:
+                return CommandResult(
+                    success=False,
+                    message="Active ACP harness does not advertise a reasoning-effort option.",
+                    display_type="error",
+                )
+            values = self._acp_option_values(option)
+            if not level:
+                return CommandResult(
+                    success=True,
+                    message=(
+                        f"ACP reasoning effort: {option.get('currentValue', '(default)')}\n"
+                        f"  Available: {', '.join(values)}\n"
+                        "  Set with: /model effort <level>"
+                    ),
+                    display_type="info",
+                )
+            requested = level.strip()
+            if requested.lower() in {value.lower() for value in values}:
+                requested = next(value for value in values if value.lower() == requested.lower())
+            else:
+                return CommandResult(
+                    success=False,
+                    message=f"Unknown ACP effort level: {level}\n  Available: {', '.join(values)}",
+                    display_type="error",
+                )
+            return await self._set_acp_option("thought_level", requested)
+
         if provider not in EFFORT_SUPPORTED_PROVIDERS:
             # Reporting success here would be a lie: the field is dropped when
             # the payload is built (Gemini has no effort parameter at all).
@@ -717,6 +819,11 @@ class ModelCommandHandler(BaseCommandHandler):
                 message="Profile manager not available",
                 display_type="error",
             )
+
+        get_active = getattr(profile_manager, "get_active_profile", None)
+        active_profile = get_active() if callable(get_active) else None
+        if active_profile and active_profile.get_provider() == "acp":
+            return await self._set_acp_option("model", model_name)
 
         # Find first profile with this model
         profiles = profile_manager.list_profiles()
