@@ -135,6 +135,11 @@ scripts/docker-runtime.sh smoke
    Unsigned macOS users must use Finder's Control-click > Open flow on first
    launch (see `desktop/README.md`). Apple signing/notarization preparation
    remains available without changing the unsigned release default.
+   Native Windows assets are blocked by the CLI producer, detached-agent
+   startup, Unix IPC, and Hub locking requirements documented in
+   [Kollab Desktop](../desktop/README.md#native-windows-release-blocker).
+   Do not add a Windows payload or count it in the manifest until the native
+   backend and installed-package acceptance gates there pass.
 6. Re-run the secret scan on the exact public commit.
 7. Install it locally (Release From Main, in Place, step 6) and check
    `kollab --version` inside and outside the repo.

@@ -106,8 +106,79 @@ checks rendered content, closes/reopens the window through a second launch,
 and quits while confirming the attached test runtime remains reachable. This
 checks the native package/window lifecycle; it does not prove a live model turn.
 
-Windows packages are deferred until a native Windows CLI and backend exist.
-This release path does not include WSL sidecars or Windows assets.
+Windows packages are blocked by the native backend requirements below. The
+release manifest contains Linux desktop packages and the four existing CLI
+platforms; it contains no Windows executable, installer, or WSL sidecar.
+
+## Native Windows release blocker
+
+The current backend cannot run the desktop app's agent workflow on native
+Windows. Producing a Tauri `.exe` alone would leave these failures:
+
+- **CLI producer:** `scripts/build_binary.py:platform_name()` accepts only
+  Darwin and Linux. A Windows/AMD64 platform probe exits with
+  `no kollab binary for Windows AMD64`. A native producer must package Python,
+  workspace packages, plugin/bundle data, and the built Web UI from the same
+  commit. It must also preserve interpreter re-execution: the `--web-ui`
+  handler in `kollabor/cli.py` starts the engine with `sys.executable -m
+  kollabor_engine` and the UI with `sys.executable -c ...`. Freezing only the
+  CLI entry point does not establish that contract.
+- **Agent startup:** `DaemonPool.spawn()` in
+  `packages/kollabor-engine/src/kollabor_engine/daemon_pool.py` launches
+  `kollab --detached --as <identity>`. The ordinary detached branch in
+  `kollabor/cli.py:cli_main()` calls `os.fork()` and `os.setsid()` without a
+  Windows path. Removing `os.fork` in a controlled local probe produced
+  `AttributeError` at that call, before an agent could start. Python documents
+  [`os.fork` as POSIX-only](https://docs.python.org/3.12/library/os.html#os.fork).
+- **Agent IPC:** `DaemonHandle.connect()` uses
+  `kollabor_rpc.open_unix_connection_with_large_buffer()`, whose transport
+  calls `loop.create_unix_connection()`. The other end is
+  `plugins/hub/messenger.py:AgentSocketServer.start()` using
+  `asyncio.start_unix_server()`. Python's Windows event loops
+  [do not implement these Unix connection/server methods](https://docs.python.org/3.12/library/asyncio-platforms.html#windows).
+  Switching event-loop policy does not supply them. Both ends need a native
+  transport with the current attach/RPC access controls and framing preserved.
+- **Hub locking:** importing `plugins.hub.plugin` imports
+  `plugins/hub/coordinator.py`, which unconditionally imports `fcntl`.
+  `messaging_bridge.py` and `task_ledger.py` also require it. Denying only
+  `fcntl` in a fresh local import probe reproduced `ModuleNotFoundError` in
+  `coordinator.py`. Python documents
+  [`fcntl` as Unix-only](https://docs.python.org/3.12/library/fcntl.html).
+  Native file locking must preserve election, poll ownership, and ledger
+  serialization; skipping the Hub plugin would not produce a working app.
+
+The local probes test individual missing-API conditions on macOS, not execution
+on a Windows runner. The TUI's `terminal_state.py` already guards its Windows
+console imports; its Unix `termios` branch is not evidence of a Windows startup
+failure. The blockers above remain even with those console guards.
+
+After the backend port, the desktop Rust owner still needs native Windows
+implementations for `spawn_webui`, child/tree ownership and graceful shutdown,
+and `quit_on_signals`. They currently depend on Unix `pre_exec`/`setsid`,
+`waitid(WNOWAIT)`, `killpg`, and `tokio::signal::unix`. The port must retain
+ownership of the whole spawned runtime and leave an attached runtime running.
+It must also resolve the real bundled `.exe`, use Windows CLI discovery, and
+make the bundled status-page URL/navigation policy agree with the Windows
+WebView origin. These changes have not been replaced by no-op cfg branches.
+
+Windows assets may enter the release manifest only after a native Windows x64
+CI job builds the CLI from this commit and proves all of the following:
+
+1. Outside the checkout and without a system Python, the CLI reports the
+   release version, imports the installed packages/Hub plugin, verifies HTTPS,
+   and runs its embedded interpreter's `-m` and `-c` child paths.
+2. `--web-ui` starts the engine/UI; creating a real agent session completes a
+   provider turn and tool call through native daemon startup and RPC.
+3. Native desktop tests and the installed unsigned package prove load/error/
+   Retry, render, close/reopen, second launch, owned-runtime shutdown, and
+   attached-runtime preservation.
+4. The selected `.exe`/`.msi` or archive and basename `.sha256` files are
+   downloaded from that job, flattened with the other release artifacts, and
+   verified against an explicitly updated exact manifest/count.
+
+No native Windows package, Windows runner smoke, or Windows model turn has
+been validated by this Linux packaging change. A compiler-only result or an
+HTTP fixture would not satisfy these gates.
 
 ## Startup
 
