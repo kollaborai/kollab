@@ -1,10 +1,14 @@
 # Kollab Desktop
 
-A macOS menu bar app that runs Kollab locally, like Ollama or Docker Desktop.
+A desktop tray app that runs Kollab locally, like Ollama or Docker Desktop.
 It ships its own `kollab` and opens the Kollab web UI in a native window. The
 app bundles no frontend: the window loads `http://127.0.0.1:<port>/`, served by
 `kollab --web-ui`. The frontend itself stays in `packages/kollabor-webui`.
 Built with Tauri 2.
+
+macOS uses the existing menu bar app. Linux x86_64 builds produce an AppImage
+and a Debian package from the same source; closing the window keeps its tray
+icon available. The four existing CLI release binaries are unchanged.
 
 ## Build
 
@@ -47,6 +51,48 @@ default is unsigned; it does not download sidecars, archive or publish assets.
 See [macOS signing and notarization](docs/apple-signing.md) for operator setup,
 cleanup guarantees, and validation limits.
 
+### Linux packages
+
+CI builds Linux desktop packages on Ubuntu 22.04 with WebKitGTK 4.1, GTK 3,
+Ayatana AppIndicator, librsvg, libxdo and patchelf. The desktop system-library
+baseline is separate from the unchanged CLI's glibc 2.28 baseline. Debian
+packages declare their runtime dependencies; AppImages still require a Linux
+desktop with compatible system libraries. External links use `xdg-open`.
+
+For a source build, first build the native CLI with
+`python scripts/build_binary.py --out dist/bin` from the repository root, then:
+
+```bash
+python scripts/desktop_release.py stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
+cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+cd desktop
+cargo tauri build --config src-tauri/tauri.release.json --bundles appimage,deb
+cd ..
+python scripts/desktop_release.py collect --platform linux-x86_64
+```
+
+The verified CLI becomes `src-tauri/binaries/kollab-x86_64-unknown-linux-gnu`;
+Tauri installs it next to the desktop executable as `kollab`. Staging restores
+its executable bit after an Actions artifact download and checks both its
+SHA-256 and reported version. The generated, ignored `tauri.release.json`
+uses the source version; a supplied release tag must agree with that source.
+
+Public Linux assets are:
+
+- `kollab-desktop-linux-x86_64-X.Y.Z.AppImage` and `.AppImage.sha256`
+- `kollab-desktop-linux-x86_64-X.Y.Z.deb` and `.deb.sha256`
+
+Download a payload and its checksum into one directory and run
+`sha256sum -c <asset>.sha256`. AppImages downloaded through a browser need
+their executable bit enabled before opening. These packages are unsigned;
+SHA-256 detects corruption and does not replace publisher authentication.
+
+The release job checks the exact flattened asset set and every checksum before
+uploading. It rejects missing files, unexpected names, symlinks, and changed
+payloads. The combined manifest has 20 release files: four CLI/checksum pairs,
+four macOS desktop/checksum pairs, and two Linux desktop/checksum pairs.
+The merged macOS packaging and Apple signing preparation are retained.
+
 ## Startup
 
 The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
@@ -62,7 +108,8 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
      `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 
    It compares `--version`. A tie goes to the bundled one. The child's output
-   goes to `~/Library/Logs/ai.kollabor.kollab/webui.log`.
+   goes to Tauri's platform app log directory as `webui.log`
+   (`~/Library/Logs/ai.kollabor.kollab/webui.log` on macOS).
 3. **Error:** if the UI doesn't answer within 30 s, or the child exits first,
    the app shows the last 40 lines of that output and a Retry button.
 4. **Install page:** this shows only if there is no bundled kollab and none

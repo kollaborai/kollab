@@ -9,14 +9,17 @@ on:
     branches: [main]
     paths:
       - .github/workflows/binaries.yml
+      - .github/workflows/publish.yml
       - scripts/build_binary.py
+      - scripts/desktop_release.py
+      - tests/unit/test_desktop_release.py
+      - desktop/**
       - install.sh
       - kollabor/binary.py
       - kollabor/updates/auto_update.py
       - pyproject.toml
       - packages/*/pyproject.toml
       - uv.lock
-      - desktop/**
   workflow_call:
     inputs:
       version:
@@ -152,5 +155,63 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: kollab-desktop-${{ matrix.platform }}
+          path: dist/desktop/*
+          if-no-files-found: error
+
+  desktop-linux:
+    name: desktop/linux-x86_64
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: kollab-linux-x86_64
+          path: dist/bin
+
+      - name: Verify and stage the Linux sidecar
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "2.12.0"
+
+      - name: Test Linux runtime ownership
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+
+      - name: Build Linux AppImage and Debian packages
+        working-directory: desktop
+        run: cargo tauri build --config src-tauri/tauri.release.json --bundles appimage,deb
+
+      - name: Check and collect Linux packages
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/desktop_release.py --version "$VERSION" collect --platform linux-x86_64
+          dpkg-deb --info dist/desktop/*.deb
+          dpkg-deb --contents dist/desktop/*.deb | grep '/usr/bin/kollab$'
+          (
+            cd dist/desktop
+            sha256sum -c ./*.sha256
+          )
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kollab-desktop-linux-x86_64
           path: dist/desktop/*
           if-no-files-found: error

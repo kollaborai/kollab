@@ -3,3 +3,4 @@ src-tauri/gen/
 node_modules/
 dist/
 src-tauri/binaries/
+src-tauri/tauri.release.json
