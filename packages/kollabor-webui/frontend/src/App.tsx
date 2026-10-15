@@ -49,8 +49,6 @@ import {
 } from "./runtime";
 import { sessionHeading } from "@/utils/session-display";
 
-const OPEN_SESSION_TIMEOUT_MS = 2_000;
-
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
     const finish = () => {
@@ -63,16 +61,6 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
     };
     timerRef.current = window.setTimeout(finish, delayMs);
     signal.addEventListener("abort", finish, { once: true });
-  });
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: number | null = null;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== null) window.clearTimeout(timer);
   });
 }
 
@@ -428,13 +416,12 @@ export default function App() {
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
+      // Opening never waits on the daemon: the engine answers from its warm
+      // mirror or the disk seed at once, reconciles in the background, and
+      // the history_updated event lands here as a reload. A prompt that
+      // arrives later comes as an event anyway.
       const [history, permissions] = await Promise.all([
-        withTimeout(
-          api.getHistory(sessionId),
-          OPEN_SESSION_TIMEOUT_MS,
-          "Timed out opening conversation. Try again while the agent is available.",
-        ),
-        // A prompt that arrives later comes as an event anyway: this read never stops a chat opening.
+        api.getHistory(sessionId),
         api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);
       return buildInitialState(
@@ -477,7 +464,11 @@ export default function App() {
             // waits for turn_complete, which reloads the whole turn.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (type === "hub_message" ? !midTurn : ["turn_complete", "error", "permission_request"].includes(type)) {
+            if (
+              type === "hub_message" || type === "history_updated"
+                ? !midTurn
+                : ["turn_complete", "error", "permission_request"].includes(type)
+            ) {
               void refreshActiveState(activeId);
             }
             if (type === "turn_complete") midTurn = false;
@@ -536,6 +527,26 @@ export default function App() {
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
     };
   }, [abortRecovery, loadSessions]);
+
+  // A page served from an older (or newer) bundle than the running engine can
+  // hit renamed API fields. Warn instead of failing; reload clears it.
+  const [versionMismatch, setVersionMismatch] = useState<string | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const config = await api.loadConfig();
+      if (!mounted) return;
+      const bundle = "0.15.7";
+      const engine = (config?.engine_version || "").trim();
+      if (!engine || !bundle || engine === bundle) return;
+      setVersionMismatch(
+        `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
+      );
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -895,6 +906,14 @@ export default function App() {
           />
         ) : null}
         <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
+          {versionMismatch ? (
+            <div
+              role="status"
+              className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-b px-4 py-2 text-sm"
+            >
+              {versionMismatch}
+            </div>
+          ) : null}
           {activeSession && initialState ? (
             <EngineRuntimeProvider
               key={`${activeId}:${runtimeEpoch}`}

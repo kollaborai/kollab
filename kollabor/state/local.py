@@ -17,6 +17,7 @@ Either way, there's exactly ONE place where the business logic lives.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -248,27 +249,63 @@ class LocalStateService(StateService):
         (ConversationSnapshot.tail).
         """
         history = getattr(self._llm_service, "conversation_history", None) or []
-        messages: list[MessageDto] = []
-        for m in history:
-            # Timestamp: datetime -> ISO string, fallback to str() or empty
+
+        def _wire(m: Any) -> dict[str, Any]:
+            """MessageDto.to_dict() shape, for anchor arithmetic."""
             timestamp_iso = ""
             ts = getattr(m, "timestamp", None)
             if isinstance(ts, datetime):
                 timestamp_iso = ts.isoformat()
             elif ts is not None:
                 timestamp_iso = str(ts)
+            return {
+                "role": getattr(m, "role", "") or "",
+                "content": getattr(m, "content", "") or "",
+                "timestamp": timestamp_iso,
+                "metadata": dict(getattr(m, "metadata", None) or {}),
+                "thinking": getattr(m, "thinking", None),
+            }
 
-            # Defensive copies of mutable fields
-            metadata = dict(getattr(m, "metadata", None) or {})
-            thinking = getattr(m, "thinking", None)
+        # The tail rule decides the cut BEFORE any DTO is built: a full
+        # re-render of a 10k-message history for a reader holding all of it
+        # is the busy-daemon cost this exists to avoid. The digest chain
+        # needs only cheap wire dicts; DTOs are built for the returned slice
+        # alone. Byte-for-byte the same anchor contract as snapshots.tail.
+        want = (
+            since
+            if isinstance(since, int) and not isinstance(since, bool) and since > 0
+            else None
+        )
+        digest = ""
+        prefix_digest = ""
+        cut = len(history)
+        matched = False
+        for index, m in enumerate(history):
+            if want is not None and index == want:
+                prefix_digest = digest
+            raw = json.dumps(
+                _wire(m), sort_keys=True, default=str, separators=(",", ":")
+            )
+            digest = hashlib.sha256((digest + raw).encode()).hexdigest()
+        if want is not None:
+            if want == len(history):
+                prefix_digest = digest
+            matched = (
+                isinstance(anchor, str) and bool(anchor) and prefix_digest == anchor
+            )
+            cut = want if matched else len(history)
+        kept = history[cut:] if matched else history
 
+        messages: list[MessageDto] = []
+        for m in kept:
+            wire = _wire(m)
             messages.append(
                 MessageDto(
-                    role=getattr(m, "role", "") or "",
-                    content=getattr(m, "content", "") or "",
-                    timestamp=timestamp_iso,
-                    metadata=metadata,
-                    thinking=thinking,
+                    role=wire["role"],
+                    content=wire["content"],
+                    timestamp=wire["timestamp"],
+                    metadata=wire["metadata"],
+                    thinking=wire["thinking"],
                 )
             )
 
@@ -283,13 +320,17 @@ class LocalStateService(StateService):
             started_at = conv_meta.get("started_at", "") or ""
             metadata = dict(conv_meta)
 
-        return ConversationSnapshot(
+        snapshot = ConversationSnapshot(
             messages=messages,
             session_id=session_id,
             started_at=started_at,
-            message_count=len(messages),
+            message_count=len(history),
             metadata=metadata,
-        ).tail(since, anchor)
+        )
+        snapshot.anchor = digest
+        if matched:
+            snapshot.since = want
+        return snapshot
 
     def get_conversation_uid(self) -> str | None:
         """Durable conversation identity for the goal layer (spec 6.5).

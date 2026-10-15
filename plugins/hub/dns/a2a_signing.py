@@ -8,6 +8,7 @@ to the Hub.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -282,6 +283,23 @@ def verify_agent_card(
         kid=expected_kid,
         public_key_hex=key_bytes.hex(),
         payload_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+async def verify_agent_card_async(
+    card: Mapping[str, Any],
+    *,
+    origin: str,
+    pinned_public_key: bytes | str | VerifyKey,
+) -> AgentCardVerification:
+    """verify_agent_card off the event loop.
+
+    JWS decode plus the Ed25519 check are CPU-bound; the resolver path calls
+    this per discovery, and a slow verification must not stall the relay's
+    other sessions. The sync form stays for synchronous callers and tests.
+    """
+    return await asyncio.to_thread(
+        verify_agent_card, card, origin=origin, pinned_public_key=pinned_public_key
     )
 
 

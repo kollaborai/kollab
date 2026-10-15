@@ -58,9 +58,7 @@ def _release_session_id(session_id: str) -> None:
         _pending_session_ids.discard(session_id)
 
 
-async def _shutdown_failed_session(
-    session: EngineSession, session_id: str
-) -> None:
+async def _shutdown_failed_session(session: EngineSession, session_id: str) -> None:
     """Best-effort cleanup for a session that never registered."""
     try:
         await session.shutdown()
@@ -91,7 +89,9 @@ class CreateSessionRequest(BaseModel):
     metadata: dict = {}
     credentials: Optional[Credentials] = None
     user_token: Optional[str] = None
-    session_id: Optional[str] = None  # caller-supplied ID (proxy pre-generates to enable token injection)
+    session_id: Optional[str] = (
+        None  # caller-supplied ID (proxy pre-generates to enable token injection)
+    )
 
 
 class SetProfileRequest(BaseModel):
@@ -172,10 +172,13 @@ def _resolve_agent(name: str) -> Optional[dict]:
         # Read mcp_servers from agent.json directly (not parsed by Agent.from_directory)
         mcp_servers: list = []
         hub = True
-        config_file = agent_obj.directory / "agent.json" if agent_obj.directory else None
+        config_file = (
+            agent_obj.directory / "agent.json" if agent_obj.directory else None
+        )
         if config_file and config_file.exists():
             try:
                 import json as _json
+
                 cfg = _json.loads(config_file.read_text())
                 mcp_servers = list(cfg.get("mcp_servers", []) or [])
                 hub = cfg.get("hub", True) is not False
@@ -206,7 +209,9 @@ async def create_session(body: CreateSessionRequest, request: Request):
     if body.agent:
         agent_data = _resolve_agent(body.agent)
         if agent_data is None:
-            raise HTTPException(status_code=404, detail=f"Agent '{body.agent}' not found")
+            raise HTTPException(
+                status_code=404, detail=f"Agent '{body.agent}' not found"
+            )
 
     # Determine effective system prompt:
     # agent system_prompt wins over caller-supplied (already rendered, safe to use as-is)
@@ -354,7 +359,10 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
         key
         for session in registry.values()
         if getattr(session, "solo", False) or getattr(session, "device", "")
-        for key in (session.session_id, getattr(getattr(session, "daemon", None), "pid", 0))
+        for key in (
+            session.session_id,
+            getattr(getattr(session, "daemon", None), "pid", 0),
+        )
         if key
     }
     answers: List[Dict[str, Any]] = []
@@ -365,15 +373,20 @@ async def _network_snapshot(registry: Dict[str, EngineSession]) -> Dict[str, Any
                 # kollabor.ai"); the memberships on disk know it as "home-net".
                 name = str(status.get("network") or "").split("  via ", 1)[0]
                 device = status.get("device") or fallback
-                if any((answer["network"] or answer["device"]) == (name or device) for answer in answers):
+                if any(
+                    (answer["network"] or answer["device"]) == (name or device)
+                    for answer in answers
+                ):
                     continue  # another agent here answered for this network
-                answers.append({
-                    "network": name,
-                    "device": device,
-                    "trust": status.get("trust") or "",
-                    "remote": status.get("agents") or [],
-                    "folder": row.get("workspace") or here,
-                })
+                answers.append(
+                    {
+                        "network": name,
+                        "device": device,
+                        "trust": status.get("trust") or "",
+                        "remote": status.get("agents") or [],
+                        "folder": row.get("workspace") or here,
+                    }
+                )
     except Exception as exc:
         logger.debug("Local daemon network read failed: %s", exc)
     if not answers:
@@ -418,7 +431,11 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
         cache = json.loads(path.read_text())
     except (OSError, ValueError):
         cache = {}
-    saved = cache.get("networks") if isinstance(cache, dict) and isinstance(cache.get("networks"), dict) else {}
+    saved = (
+        cache.get("networks")
+        if isinstance(cache, dict) and isinstance(cache.get("networks"), dict)
+        else {}
+    )
 
     def last_seen(row: Dict[str, Any]) -> float:
         return float(row.get("last_seen") or 0)
@@ -431,35 +448,63 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
         key = answer["network"] or answer["device"]
         before = saved.get(key) if isinstance(saved.get(key), dict) else {}
         # This computer under another name there: what the old name saw no longer applies.
-        same = before.get("device") == answer["device"] and isinstance(before.get("agents"), dict)
+        same = before.get("device") == answer["device"] and isinstance(
+            before.get("agents"), dict
+        )
         seen = before["agents"] if same else {}
         current = {}
         for row in answer["remote"]:
-            handle = row.get("handle") or f"{row.get('name', '')}@{row.get('device', '')}"
+            handle = (
+                row.get("handle") or f"{row.get('name', '')}@{row.get('device', '')}"
+            )
             was = last_seen(seen.get(handle) or {})
             # A minute's precision: the roster is written only when it changes.
-            current[handle] = {**row, "handle": handle, "last_seen": was if now - was < 60 else now}
+            current[handle] = {
+                **row,
+                "handle": handle,
+                "last_seen": was if now - was < 60 else now,
+            }
         kept = {
             handle: {**row, "state": "offline"}
             for handle, row in seen.items()
             if handle not in current and now - last_seen(row) < month
         }
         networks[key] = {
-            **{field: answer[field] for field in ("network", "device", "trust", "folder")},
+            **{
+                field: answer[field]
+                for field in ("network", "device", "trust", "folder")
+            },
             "agents": {**kept, **current},
             "remote": list(current.values()) + by_last_seen(kept.values()),
             "live": True,
         }
     for key, entry in saved.items():
-        if key in networks or not isinstance(entry, dict) or not isinstance(entry.get("agents"), dict):
+        if (
+            key in networks
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("agents"), dict)
+        ):
             continue
-        agents = {handle: row for handle, row in entry["agents"].items() if now - last_seen(row) < month}
+        agents = {
+            handle: row
+            for handle, row in entry["agents"].items()
+            if now - last_seen(row) < month
+        }
         if agents and entry.get("folder"):
-            networks[key] = {**entry, "agents": agents, "remote": by_last_seen(agents.values()), "live": False}
+            networks[key] = {
+                **entry,
+                "agents": agents,
+                "remote": by_last_seen(agents.values()),
+                "live": False,
+            }
 
     stored = {
         "networks": {
-            key: {field: value for field, value in entry.items() if field not in ("remote", "live")}
+            key: {
+                field: value
+                for field, value in entry.items()
+                if field not in ("remote", "live")
+            }
             for key, entry in networks.items()
         }
     }
@@ -470,7 +515,10 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
     except OSError as exc:
         logger.debug("Could not save the network roster: %s", exc)
 
-    blocks = [{field: value for field, value in entry.items() if field != "agents"} for entry in networks.values()]
+    blocks = [
+        {field: value for field, value in entry.items() if field != "agents"}
+        for entry in networks.values()
+    ]
     if not blocks:
         return {"device": live.get("device", ""), "remote": [], "live": False}
     remote: Dict[str, Dict[str, Any]] = {}
@@ -484,12 +532,19 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
         "networks": blocks,
     }
     if not view["live"]:
-        last = max(blocks, key=lambda block: max((last_seen(row) for row in block["remote"]), default=0))
+        last = max(
+            blocks,
+            key=lambda block: max(
+                (last_seen(row) for row in block["remote"]), default=0
+            ),
+        )
         view["device"], view["folder"] = last["device"], last["folder"]
     return view
 
 
-def _offline_agents(found: List[Dict[str, Any]], registry: Dict[str, EngineSession]) -> List[Dict[str, Any]]:
+def _offline_agents(
+    found: List[Dict[str, Any]], registry: Dict[str, EngineSession]
+) -> List[Dict[str, Any]]:
     """Agents that ran in this engine's folder and are not running now.
 
     The sidebar lists them as offline; opening one starts it again (its vault
@@ -502,9 +557,15 @@ def _offline_agents(found: List[Dict[str, Any]], registry: Dict[str, EngineSessi
     def in_here(folder: Any) -> bool:
         return bool(folder) and os.path.realpath(str(folder)) == here
 
-    running = {str(row.get("identity") or "") for row in found if in_here(row.get("workspace"))}
+    running = {
+        str(row.get("identity") or "") for row in found if in_here(row.get("workspace"))
+    }
     running.update(
-        str(getattr(getattr(s, "daemon", None), "identity", "") or getattr(s, "identity", "") or "")
+        str(
+            getattr(getattr(s, "daemon", None), "identity", "")
+            or getattr(s, "identity", "")
+            or ""
+        )
         for s in registry.values()
         if in_here(getattr(s, "workspace", None) or here)
     )
@@ -535,7 +596,8 @@ async def list_sessions():
     local_pids = {item.get("daemon_pid") for item in sessions} - {0, None}
     pool = get_daemon_pool()
     discovered = [
-        item for item in found
+        item
+        for item in found
         if item.get("session_id") not in local_ids
         and item.get("daemon_pid") not in local_pids
         and not pool.owns(item)
@@ -777,15 +839,21 @@ async def get_session_token(session_id: str, request: Request):
                 issuer="mentiko-web",
             )
             sub = claims.get("sub", sub)
-            ns  = claims.get("ns", ns)
+            ns = claims.get("ns", ns)
             org = claims.get("org", org)
         except Exception as e:
-            logger.error(f"Session {session_id}: JWT decode failed (possible forged token): {e}")
-            raise HTTPException(status_code=403, detail="Token signature verification failed")
+            logger.error(
+                f"Session {session_id}: JWT decode failed (possible forged token): {e}"
+            )
+            raise HTTPException(
+                status_code=403, detail="Token signature verification failed"
+            )
 
     internal_service_secret = os.environ.get("INTERNAL_SERVICE_SECRET", "")
     if not internal_service_secret:
-        raise HTTPException(status_code=503, detail="INTERNAL_SERVICE_SECRET not set in engine env")
+        raise HTTPException(
+            status_code=503, detail="INTERNAL_SERVICE_SECRET not set in engine env"
+        )
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -834,25 +902,11 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Refresh opportunistically; a busy daemon may not answer while a tool is
-    # running, in which case EngineSession returns its cached mirror promptly.
-    history = await session.refresh_history()
-    turn_error = session.last_turn_error
-    if limit:
-        if turn_error:
-            # Keep the error's place relative to the slice that is returned.
-            turn_error = {
-                **turn_error,
-                "history_length": max(
-                    0, turn_error["history_length"] - max(0, len(history) - limit)
-                ),
-            }
-        history = history[-limit:]
-    return {
-        "session_id": session_id,
-        "history": history,
-        "last_turn_error": turn_error,
-    }
+    # Never waits on the daemon: the warm mirror, or a disk seed, answers at
+    # once; the reconciling refresh runs in the background and its result
+    # arrives as a history_updated event. source says where the history came
+    # from and stale whether a refresh is still reconciling it.
+    return await session.get_history_nonblocking(limit)
 
 
 @router.delete("/{session_id}/history")
