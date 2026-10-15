@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,11 +13,74 @@ from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_events.data_models import ConversationMessage
 from kollabor.state.local import LocalStateService
 from kollabor_tui.display_tap import DisplayTap
+from plugins.hub.models import HubMessage
 
 
 @pytest.fixture(autouse=True)
 def isolated_bindings(tmp_path, monkeypatch):
     monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+
+
+@pytest.mark.asyncio
+async def test_peer_observations_keep_hub_history_without_echoing_as_human_input(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    display = MagicMock()
+    llm = SimpleNamespace(
+        conversation_manager=manager, conversation_logger=conversation_logger,
+        conversation_history=[], message_display_service=display,
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        # Replies and broadcasts that arrive during a turn share one bounded
+        # model prompt. Each was already rendered by Hub on arrival.
+        orchestrator.runner.is_processing = True
+        for index in range(22):
+            orchestrator.observe_notification(HubMessage(
+                action="message", from_agent=f"peer-id-{index}",
+                from_identity=f"peer-{index}", to="receiver" if index % 2 else "*",
+                content=f"PEER_NOTE_{index}\n\nDetails {index}",
+                thread_id=f"thread-{index}", reply_to=f"request-{index}" if index % 2 else "",
+            ))
+        orchestrator.runner.is_processing = False
+        orchestrator._flush_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        snapshot = await LocalStateService(llm, None).get_conversation()
+        inputs = [message for message in snapshot.messages if message.role == "user"]
+        assert len(inputs) == 1
+        context = inputs[0].content
+        assert context.startswith("<agent_hud>\n") and context.endswith("\n</agent_hud>")
+        assert "2 older observations omitted." in context
+        assert "PEER_NOTE_0\n" not in context and "PEER_NOTE_1\n" not in context
+        assert context.count("[hub channel:") == 20
+        assert "[hub:peer-2->]" in context
+        assert "[hub:peer-21->receiver]" in context
+        assert "[thread:thread-21] [reply-to:request-21]" in context
+        assert context.count("PEER_NOTE_21") == 1
+        display.display_user_message.assert_not_called()
+
+        # Human prose that resembles routing text must still display verbatim.
+        human = "Reply from sapphire [thread:example]\nThis is text I typed."
+        admission = orchestrator.admit(human, request_id="human-control", source="rpc")
+        await admission.future
+        await asyncio.gather(*orchestrator._completion_tasks)
+        display.display_user_message.assert_called_once_with(human)
+
+        restored = ConversationManager(configuration)
+        assert restored.load_session(conversation_logger.session_id)
+        restored_inputs = [message["content"] for message in restored.messages if message["role"] == "user"]
+        assert restored_inputs == [context, human]
+    finally:
+        await orchestrator.close()
 
 
 @pytest.mark.asyncio

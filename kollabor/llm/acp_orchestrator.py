@@ -29,6 +29,7 @@ from .acp_bridge import (
     ACPRunner,
 )
 from .acp_state import ACPBindingStore
+from .agent_hud import AgentHudEntry, format_agent_hud
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class ACPOrchestrator:
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
         self._binding_conversation_id: str | None = None
-        self._observations: deque[str] = deque(maxlen=20)
+        self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
 
     @property
@@ -218,8 +219,12 @@ class ACPOrchestrator:
         return admission
 
     def observe_notification(self, message: Any) -> None:
-        label = "Reply" if message.reply_to else "Broadcast"
-        self._observations.append(f"{label} from {message.from_identity} [thread:{message.thread_id}]\n{message.content}")
+        thread = f" [thread:{message.thread_id}]" if message.thread_id else ""
+        reply = f" [reply-to:{message.reply_to}]" if message.reply_to else ""
+        self._observations.append(AgentHudEntry(
+            section="hub", label=f"{message.from_identity}->{message.to}",
+            content=f"[hub channel: {message.from_identity} -> {message.to}{thread}{reply}]\n{message.content}",
+        ))
         self._observation_count += 1
         if not self.is_processing:
             self._flush_observations()
@@ -228,9 +233,10 @@ class ACPOrchestrator:
         if not self._observations or self._closed or self._runner is None:
             return
         discarded = self._observation_count - len(self._observations)
-        text = "\n\n".join(self._observations)
+        entries = list(self._observations)
         if discarded:
-            text = f"{discarded} older observations omitted.\n\n" + text
+            entries.insert(0, AgentHudEntry("status", "observations", f"{discarded} older observations omitted."))
+        text = format_agent_hud(entries)
         try:
             self.admit(text, request_id=f"observations-{uuid.uuid4().hex}", source="observation")
         except Exception:
@@ -274,7 +280,9 @@ class ACPOrchestrator:
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append(ConversationMessage(role="user", content=text, metadata=metadata))
         display = getattr(llm, "message_display_service", None)
-        if display is not None and source != "agent":
+        # Hub already drew incoming messages. The batched model context is
+        # persisted as a HUD for web/history replay, never echoed as user input.
+        if display is not None and source not in {"agent", "observation"}:
             display.display_user_message(text)
 
     async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:

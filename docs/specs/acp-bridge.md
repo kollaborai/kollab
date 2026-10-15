@@ -240,7 +240,11 @@ The runner admits one prompt at a time. Everything else waits in a queue, first
 in first out. Your input and each request run as a prompt of their own, so each
 of those turns has exactly one origin. Replies and broadcasts, which nobody
 waits on, run together: whatever is waiting when a turn ends becomes one prompt,
-the newest 20 with a count of any older ones. At most 10 requests wait; past
+the newest 20 with a count of any older ones. That internal batch is stored in
+the shared agent HUD format, including sender, thread and reply identity. Hub
+already renders each incoming message in the terminal; the batch is never
+echoed as human input. Web history and reload reconstruct the peer cards from
+the HUD without a second user block. At most 10 requests wait; past
 that, a new one gets "claude is busy" at once, with an end frame whose outcome
 is `busy`. A hub message is queued only when the hub's wake rule
 (`_decide_hub_wake`) would wake a kollab agent for it. Everything else is

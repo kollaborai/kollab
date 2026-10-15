@@ -36,3 +36,16 @@ test("a HUD of status only yields no messages and no text", () => {
   assert.deepEqual(notes, []);
   assert.equal(rest, "");
 });
+
+test("ACP observation batches replay as peer cards without a duplicate user block", () => {
+  const batch = "<agent_hud>\n[status:observations]\n+ 2 older observations omitted.\n\n" +
+    "[hub:zircon->nephrite]\n+ [hub channel: zircon -> nephrite [thread:thread-1] [reply-to:request-1]]\n  The roster is available.\n  \n  Second paragraph.\n\n" +
+    "[hub:sapphire->]\n+ [hub channel: sapphire -> * [thread:thread-2]]\n  Build passed.\n</agent_hud>";
+  assert.deepEqual(splitAgentHud(batch), {
+    notes: [
+      { from: "zircon", to: "nephrite", text: "The roster is available.\n\nSecond paragraph.", observed: false },
+      { from: "sapphire", to: "", text: "Build passed.", observed: false },
+    ],
+    rest: "",
+  });
+});
