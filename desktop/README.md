@@ -39,6 +39,14 @@ the downloaded archive, then Control-click `Kollab.app`, choose **Open**, and
 confirm **Open** in the dialog. If macOS still refuses it, run
 `xattr -dr com.apple.quarantine /path/to/Kollab.app` once and open it again.
 
+## Signing and notarization
+
+The reusable `scripts/sign-macos.sh` helper can wrap a CI Tauri build to sign,
+notarize and staple with explicitly configured Apple Developer secrets. Its
+default is unsigned; it does not download sidecars, archive or publish assets.
+See [macOS signing and notarization](docs/apple-signing.md) for operator setup,
+cleanup guarantees, and validation limits.
+
 ## Startup
 
 The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
