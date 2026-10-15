@@ -252,3 +252,44 @@ async def test_an_open_agent_keeps_the_name_of_its_current_conversation(monkeypa
 
     assert [item["name"] for item in result["sessions"]] == ["2610090000-quiet-heron"]
 
+
+
+@pytest.mark.asyncio
+async def test_adopt_does_not_await_slow_history_refresh(monkeypatch):
+    events = asyncio.Queue()
+
+    class SilentState:
+        async def get_conversation(self, **kwargs):
+            await asyncio.sleep(10)
+
+        async def get_active_profile(self):
+            return SimpleNamespace(name="p", model="m", provider="openai")
+
+        async def get_permission_state(self):
+            return SimpleNamespace(approval_mode="TRUST_ALL")
+
+    handle = SimpleNamespace(
+        alive=True,
+        launcher=None,
+        state=SilentState(),
+        subscribe=lambda: events,
+        unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
+    )
+
+    class Pool:
+        async def adopt(self, session_id, found):
+            return handle
+
+        async def stop(self, session_id):
+            return True
+
+    monkeypatch.setattr("kollabor_engine.session.get_daemon_pool", lambda: Pool())
+    started = asyncio.get_running_loop().time()
+    session = await EngineSession.adopt(_row(session_id="silent"))
+    elapsed = asyncio.get_running_loop().time() - started
+    try:
+        assert elapsed < 0.2
+        assert session._history_refresh_task is not None
+    finally:
+        await session.shutdown()

@@ -122,7 +122,8 @@ async def test_cold_open_seeds_from_disk_without_the_daemon(registry, conversati
     )
     state = SilentState()
     session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
-    session.created_at = None  # any on-disk log newer than "nothing" seeds
+    session.conversation_id = "conv-1"  # discovery supplies this validated log id
+    session.created_at = None
     session.daemon = _daemon(state)
     session._event_task = None  # no event monitoring in this test
     registry[session.session_id] = session
@@ -183,6 +184,7 @@ async def test_background_refresh_reconciles_and_emits_history_updated(
 
     state.get_conversation = get_conversation
     session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.conversation_id = "conv-1"
     session.created_at = None
     session.daemon = _daemon(state)
     session._event_task = None
@@ -343,3 +345,49 @@ async def test_coalesced_refresh_single_task(registry, conversations):
     await asyncio.wait_for(running, timeout=2)
     assert session._history_refresh_task is None
     assert first is None
+
+
+
+def test_disk_history_preserves_content_blocks_and_tool_metadata(tmp_path):
+    path = tmp_path / "conv.jsonl"
+    path.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}, {"type": "tool_use", "id": "t1"}],
+                "tool_calls": [{"id": "t1", "name": "terminal"}],
+                "metadata": {"acp": {"session": "s1"}},
+                "thinking": "plan",
+                "snapshot": {"turn": 3},
+            },
+            "timestamp": "t3",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    messages = read_history_from_disk(tmp_path, "conv")
+    assert messages[0]["content"] == "hello"
+    assert messages[0]["content_blocks"][1]["id"] == "t1"
+    assert messages[0]["tool_calls"][0]["name"] == "terminal"
+    assert messages[0]["metadata"]["acp"]["session"] == "s1"
+    assert messages[0]["snapshot"] == {"turn": 3}
+
+
+@pytest.mark.asyncio
+async def test_unchanged_refresh_does_not_emit_history_updated(registry, conversations):
+    _, workspace_root = conversations
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(SilentState())
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = asyncio.Queue()
+    session.daemon.fan_out = emitted.put_nowait
+
+    async def empty_refresh(*args, **kwargs):
+        return session.history
+
+    session.refresh_history = empty_refresh
+    session._schedule_refresh()
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(emitted.get(), timeout=0.05)

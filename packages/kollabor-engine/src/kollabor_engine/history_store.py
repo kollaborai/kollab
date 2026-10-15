@@ -33,7 +33,12 @@ def _snapshot_path(conversations_dir: Path, conversation_id: str) -> Path:
 
 
 def _wire_message(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """One JSONL log record -> the wire shape the engine mirror holds."""
+    """One JSONL log record -> the engine mirror wire shape.
+
+    Keep provider/display fields intact.  In particular, ACP/tool turns may
+    carry content blocks, tool calls, provenance, snapshots, and IDs that are
+    needed to reconstruct the chat after an engine restart.
+    """
     if not isinstance(raw, dict):
         return None
     # The conversation logger stores user turns as {"type": ..., "message":
@@ -42,22 +47,29 @@ def _wire_message(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     role = str(inner.get("role") or raw.get("type") or "")
     if role not in ("user", "assistant"):
         return None
+    message: Dict[str, Any] = dict(inner)
+    message["role"] = role
     content = inner.get("content")
-    if not isinstance(content, str):
-        content = "" if content is None else str(content)
-    message: Dict[str, Any] = {
-        "role": role,
-        "content": content,
-        "timestamp": str(raw.get("timestamp", "") or ""),
-        "metadata": {},
-        "thinking": None,
-    }
-    thinking = inner.get("thinking") or raw.get("thinking")
-    if isinstance(thinking, str) and thinking:
-        message["thinking"] = thinking
+    if isinstance(content, str):
+        message["content"] = content
+    elif isinstance(content, list):
+        # Preserve structured blocks while retaining the established display
+        # contract: plain text content is what older clients render.
+        message["content_blocks"] = list(content)
+        text_parts = [
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        message["content"] = "".join(text_parts)
+    elif content is None:
+        message["content"] = ""
+    else:
+        message["content"] = str(content)
+    message["timestamp"] = str(raw.get("timestamp", inner.get("timestamp", "")) or "")
     metadata = inner.get("metadata")
-    if isinstance(metadata, dict) and metadata:
-        message["metadata"] = metadata
+    message["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+    message["thinking"] = inner.get("thinking")
     return message
 
 
@@ -92,8 +104,6 @@ def _read_jsonl(path: Path, byte_limit: int) -> List[Dict[str, Any]]:
             handle.readline()  # discard the partial line the seek lands in
         chunk = handle.read()
     raw_lines = chunk.decode("utf-8", errors="replace").splitlines()
-    if size > byte_limit and raw_lines:
-        raw_lines = raw_lines[1:]  # the seek boundary line, usually torn
     messages: List[Dict[str, Any]] = []
     for line in raw_lines:
         line = line.strip()
@@ -129,16 +139,9 @@ def _read_snapshot(path: Path) -> List[Dict[str, Any]]:
         return []
     out: List[Dict[str, Any]] = []
     for raw in messages:
-        if isinstance(raw, dict) and raw.get("role") in ("user", "assistant"):
-            out.append(
-                {
-                    "role": raw["role"],
-                    "content": raw.get("content") or "",
-                    "timestamp": str(raw.get("timestamp", "") or ""),
-                    "metadata": dict(raw.get("metadata") or {}),
-                    "thinking": raw.get("thinking"),
-                }
-            )
+        shaped = _wire_message(raw) if isinstance(raw, dict) else None
+        if shaped is not None:
+            out.append(shaped)
     return out
 
 

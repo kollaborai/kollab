@@ -33,7 +33,7 @@ from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_provenance import mark_system_initialization
-from .history_store import read_history_from_disk_async
+from .history_store import anchor_digest, read_history_from_disk_async
 from .history_xml_tools import web_history
 
 logger = logging.getLogger(__name__)
@@ -330,7 +330,23 @@ class EngineSession:
         session.external = True
         session.display_name = str(found.get("name") or "")
         session.device = str(found.get("device") or "")
-        session.workspace = str(found.get("workspace") or "") or None
+        discovered_workspace = str(found.get("workspace") or "") or None
+        # Keep the discovered path for remote agents (it is meaningful on their
+        # host even when it is not mounted locally); session_log validation
+        # below prevents using an unrelated local cache.
+        session.workspace = discovered_workspace
+        # Hub discovery is the authority for an adopted conversation.  Accept
+        # a session_log only when it is an existing file under this workspace's
+        # project data directory; never guess by newest mtime.
+        session_log = str(found.get("session_log") or "")
+        if session_log and not session.device:
+            log_path = Path(session_log).expanduser()
+            try:
+                conversations_dir = Path(session._disk_conversation_dir() or "").resolve()
+                if log_path.is_file() and conversations_dir in log_path.resolve().parents:
+                    session.conversation_id = log_path.stem
+            except OSError:
+                pass
         if found.get("created_at"):
             started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
             session.created_at = started.replace(tzinfo=None)
@@ -346,7 +362,10 @@ class EngineSession:
             session._event_task = asyncio.create_task(
                 session._track_events(), name=f"session-track-{session_id}"
             )
-            await session.refresh_history()
+            # Adoption must not wait for a busy or silent daemon.  The first
+            # history response is served by the mirror/disk path; reconciliation
+            # runs after the HTTP open has returned.
+            session._schedule_refresh()
         except BaseException:
             if session.daemon is not None:
                 try:
@@ -375,7 +394,13 @@ class EngineSession:
             )
 
     async def shutdown(self) -> None:
-        for task in (self._facts_task, self._event_task):
+        tasks = (
+            self._facts_task,
+            self._event_task,
+            self._history_refresh_task,
+            self._active_turn_task,
+        )
+        for task in tasks:
             if task is None:
                 continue
             task.cancel()
@@ -383,6 +408,10 @@ class EngineSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        self._facts_task = None
+        self._event_task = None
+        self._history_refresh_task = None
+        self._active_turn_task = None
         if not self._borrowed_daemon:
             await get_daemon_pool().stop(self.session_id)
         self.daemon = None
@@ -537,26 +566,18 @@ class EngineSession:
         return Path(get_project_data_dir(Path(self.workspace))) / "conversations"
 
     def _disk_seed_id(self, conversations_dir: Path) -> str:
-        """Which saved conversation belongs to this session, without an RPC.
+        """Return only a validated daemon-provided conversation id.
 
-        Once the daemon answered once, its own snapshot id is exact. Before
-        that, the newest log in this workspace's folder is the candidate --
-        the engine created this session moments ago, so a log already here
-        belongs to it (the daemon resumed or adopted it). A wrong guess is
-        corrected on the next answered refresh: the seed only accelerates
-        the first open, the daemon's answer replaces it wholesale.
+        Never infer ownership from file mtime: a workspace can contain several
+        resumed agents and the newest log is not necessarily this session.
+        Discovery/adoption supplies the id from its validated ``session_log``;
+        otherwise the mirror waits for the daemon's first snapshot.
         """
-        if self.conversation_id:
-            return self.conversation_id
-        try:
-            newest = max(
-                conversations_dir.glob("*.jsonl"),
-                key=lambda p: p.stat().st_mtime,
-                default=None,
-            )
-        except OSError:
+        if not self.conversation_id:
             return ""
-        return newest.stem if newest else ""
+        candidate = conversations_dir / f"{self.conversation_id}.jsonl"
+        snapshot = conversations_dir / "snapshots" / f"{self.conversation_id}_snapshot.json"
+        return self.conversation_id if candidate.exists() or snapshot.exists() else ""
 
     async def get_history_nonblocking(
         self, limit: Optional[int] = None
@@ -571,7 +592,7 @@ class EngineSession:
         """
         stale = False
         source = "mirror"
-        if not self.history and self.alive:
+        if not self.history:
             conversations_dir = self._disk_conversation_dir()
             if conversations_dir is not None:
                 conversation_id = self._disk_seed_id(conversations_dir)
@@ -615,8 +636,11 @@ class EngineSession:
         self.history_syncing = True
 
         async def _run() -> None:
+            before = anchor_digest(self._raw_history)
+            changed = False
             try:
                 await self.refresh_history()
+                changed = anchor_digest(self._raw_history) != before
             except Exception as e:  # a background refresh never breaks a route
                 logger.debug(
                     "session %s background refresh failed: %s", self.session_id, e
@@ -624,7 +648,8 @@ class EngineSession:
             finally:
                 self.history_syncing = False
                 self._history_refresh_task = None
-                self._emit_event({"type": "history_updated"})
+                if changed:
+                    self._emit_event({"type": "history_updated"})
 
         self._history_refresh_task = asyncio.get_running_loop().create_task(
             _run(), name=f"session-history-{self.session_id}"
