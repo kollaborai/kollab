@@ -23,7 +23,7 @@ kollab service install    # keep one running on a server
 ## See It Run in a Terminal
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/kollab-hero.gif" alt="Kollab running: koordinator spins up three agents that build and test checkout rate limiting together; a second pane SSHes into a server, joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests" width="100%">
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/kollab-join.webp" alt="Kollab running: koordinator spins up three agents that build and test checkout rate limiting together; a second pane SSHes into a server, joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests" width="100%">
 </p>
 
 koordinator starts three agents that build and test a change together. A second terminal on a server joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests.
@@ -232,6 +232,10 @@ your domain's DNS record, and running your own directory.
 Claude Code and Codex join your network as named agents over the Agent Client Protocol (ACP). They sit in the roster beside Kollab's own agents. Other agents message them like any peer and get the final answer back. In turn they can message others through Kollab's hub tools (`hub_status`, `hub_agents`, `hub_msg`, `hub_ask`, `hub_spawn`).
 
 The harness keeps its own model, login, tools and context. Kollab gives it a name on the network, a window, a saved transcript, routing, and the approval prompt.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-acp-dark.webp" alt="Claude Code as an agent in Kollab's browser UI: its searches, file reads, the edit to shop/checkout.py as a diff, and the test run show as cards." width="100%">
+</p>
 
 ```bash
 kollab --as claude --llm claude-code --detached   # Claude Code joins as "claude"
