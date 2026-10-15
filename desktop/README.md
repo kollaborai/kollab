@@ -18,7 +18,8 @@ That folder is gitignored, because the binary is about 47 MB.
 cd desktop
 mkdir -p src-tauri/binaries
 cp ~/.local/bin/kollab src-tauri/binaries/kollab-aarch64-apple-darwin
-# or download the release asset kollab-macos-aarch64 from GitHub Releases
+# Intel Macs use kollab-x86_64-apple-darwin instead.
+# or download the matching kollab-macos-* release asset from GitHub Releases
 cargo tauri build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
@@ -26,6 +27,17 @@ cargo test --manifest-path src-tauri/Cargo.toml
 The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (unsigned,
 about 58 MB). To watch its log, run the binary from a terminal:
 `.../Kollab.app/Contents/MacOS/kollab-desktop`.
+
+Release builds publish one unsigned `.app.zip` and one `.dmg` for each supported
+macOS architecture (`aarch64` and `x86_64`), targeting macOS 11 or newer to
+match the bundled CLI, with a sibling `.sha256` file for
+each archive. The archives are attached to the GitHub Release alongside the
+CLI binaries and are named `kollab-desktop-macos-<arch>-<version>.*`.
+
+Because the app is unsigned, macOS Gatekeeper may block the first launch. Open
+the downloaded archive, then Control-click `Kollab.app`, choose **Open**, and
+confirm **Open** in the dialog. If macOS still refuses it, run
+`xattr -dr com.apple.quarantine /path/to/Kollab.app` once and open it again.
 
 ## Startup
 

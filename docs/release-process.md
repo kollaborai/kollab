@@ -122,10 +122,13 @@ scripts/docker-runtime.sh smoke
 2. Create the annotated release tag on the merge commit (Release From Main, in
    Place, step 5).
 3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`.
-4. Let the publish workflow build and check the binaries on all four platforms,
-   publish the packages, then create the GitHub Release with the binaries attached.
-5. Verify the package page, the release's four binaries and their `.sha256`
-   files, and the install path after publication.
+4. Let the publish workflow build and check the CLI binaries on all four
+   platforms, build unsigned Tauri desktop bundles for macOS arm64 and x86_64,
+   publish the packages, then create the GitHub Release with every asset attached.
+5. Verify the package page, the release's four CLI binaries and their `.sha256`
+   files, both `kollab-desktop-macos-*` `.app.zip` and `.dmg` archives, and each
+   desktop archive's `.sha256` file. Unsigned desktop users must use Finder's
+   Control-click > Open flow on first launch (see `desktop/README.md`).
 6. Re-run the secret scan on the exact public commit.
 7. Install it locally (Release From Main, in Place, step 6) and check
    `kollab --version` inside and outside the repo.
