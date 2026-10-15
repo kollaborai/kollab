@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-15
+
+### Added
+- Web: each agent and session shows a badge for the CLI it runs on (Claude, Codex or Gemini), and the session UI leads with the agent's name. (#188)
+- Web: the desktop sidebar is resizable. Drag its edge or use the keyboard, and the browser remembers the width. (#188)
+- Web: hide agents from the sidebar. The choice is kept in this browser. (#189)
+- Web: Hub and ACP messages between agents render as compact cards with the sender's name and device, instead of looking like your own messages. Online notices fold into small chips you can expand, and an agent's reply shows as "Replied to <agent>". (#189)
+
+### Changed
+- Web: the chat header folds its session controls into one menu, the active chat gem docks beside the input, and the README uses the new dark screenshots and product description. (#188, #189)
+- Web: when a harness diff already shows an edit, the raw tool arguments are hidden instead of shown twice, ACP context token counts are compact, and ACP peer observations are no longer shown twice. (#188)
+
+### Fixed
+- Web: opening a busy agent shows its history right away and never times out. History loads from disk without waiting on the agent, refreshes in the background, and the client open timeout is gone. Signature checks no longer block the event loop. (#183, #190)
+- Hub: a remote sender's name and device resolve from the local and remote rosters, and thread ids and reply instructions stay out of the visible message while the model still sees them. (#189)
+- Resumed sessions keep their initialization provenance. (#189)
+
+### macOS desktop app
+- The Kollab desktop app (`desktop/`, built with Tauri) is not code-signed or notarized yet, so macOS blocks it the first time with a message that it cannot be opened or verified. To open it, right-click (or Control-click) Kollab.app in Finder and choose Open, then choose Open again. Or try to open it once, then go to System Settings > Privacy & Security, scroll to Security, and click Open Anyway next to the Kollab message. You only need to do this once.
+
 ## [0.16.0] - 2026-10-14
 
 ### Added
