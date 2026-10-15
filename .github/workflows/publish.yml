@@ -163,6 +163,12 @@ jobs:
     needs: [binaries, publish]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Download the binaries
         uses: actions/download-artifact@v8
         with:
@@ -178,37 +184,10 @@ jobs:
         run: |
           # The in-app update check (VersionCheckService) and a binary's /upgrade
           # read /releases/latest, and install.sh downloads its binary from it.
-          # gh creates the release as a draft, uploads the binaries, desktop
-          # bundles, and checksums, then publishes it so the latest release is
-          # never missing a platform asset.
+          # Verify CLI, macOS desktop and Linux desktop payloads and checksums
+          # before uploading the complete release set.
+          python scripts/desktop_release.py --version "$TAG" verify dist/bin
           ls -l dist/bin
-          VERSION="${TAG#v}"
-          expected=(
-            "kollab-linux-x86_64" "kollab-linux-x86_64.sha256"
-            "kollab-linux-aarch64" "kollab-linux-aarch64.sha256"
-            "kollab-macos-aarch64" "kollab-macos-aarch64.sha256"
-            "kollab-macos-x86_64" "kollab-macos-x86_64.sha256"
-            "kollab-desktop-macos-aarch64-${VERSION}.app.zip"
-            "kollab-desktop-macos-aarch64-${VERSION}.app.zip.sha256"
-            "kollab-desktop-macos-aarch64-${VERSION}.dmg"
-            "kollab-desktop-macos-aarch64-${VERSION}.dmg.sha256"
-            "kollab-desktop-macos-x86_64-${VERSION}.app.zip"
-            "kollab-desktop-macos-x86_64-${VERSION}.app.zip.sha256"
-            "kollab-desktop-macos-x86_64-${VERSION}.dmg"
-            "kollab-desktop-macos-x86_64-${VERSION}.dmg.sha256"
-          )
-          test "${#expected[@]}" -eq 16
-          for asset in "${expected[@]}"; do
-            test -f "dist/bin/$asset" || {
-              echo "::error::missing release asset $asset"
-              exit 1
-            }
-          done
-          files=(dist/bin/*)
-          test "${#files[@]}" -eq "${#expected[@]}" || {
-            echo "::error::release artifact set contains unexpected files"
-            exit 1
-          }
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/bin/* --clobber
           else

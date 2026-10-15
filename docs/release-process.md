@@ -123,12 +123,28 @@ scripts/docker-runtime.sh smoke
    Place, step 5).
 3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`.
 4. Let the publish workflow build and check the CLI binaries on all four
-   platforms, build unsigned Tauri desktop bundles for macOS arm64 and x86_64,
-   publish the packages, then create the GitHub Release with every asset attached.
-5. Verify the package page, the release's four CLI binaries and their `.sha256`
-   files, both `kollab-desktop-macos-*` `.app.zip` and `.dmg` archives, and each
-   desktop archive's `.sha256` file. Unsigned desktop users must use Finder's
-   Control-click > Open flow on first launch (see `desktop/README.md`).
+   existing platforms, unsigned Tauri desktop bundles for macOS arm64 and
+   x86_64, and Linux x86_64 AppImage/Debian packages. Publish the packages, then
+   create the GitHub Release with every asset attached.
+5. Verify the package page, the four CLI binaries and their `.sha256` files,
+   both architectures' `kollab-desktop-macos-*` `.app.zip`/`.dmg` pairs,
+   both `kollab-desktop-linux-x86_64-X.Y.Z` packages and their checksums,
+   and the install path after publication. `scripts/desktop_release.py` enforces
+   the exact 20-file manifest and verifies every payload from the flattened
+   artifact download directory. Checksums contain basenames, not build paths.
+   The Binaries workflow checks this same combined set on pull requests and
+   manual runs. Each platform stages a hash/version-checked native CLI from
+   the same workflow; absent version inputs use `pyproject.toml`, while a
+   supplied tag must match it. macOS and Linux desktop asset names therefore
+   use the same source version in every workflow context.
+   Unsigned macOS users must use Finder's Control-click > Open flow on first
+   launch (see `desktop/README.md`). Apple signing/notarization preparation
+   remains available without changing the unsigned release default.
+   Native Windows assets are blocked by the CLI producer, detached-agent
+   startup, Unix IPC, and Hub locking requirements documented in
+   [Kollab Desktop](../desktop/README.md#native-windows-release-blocker).
+   Do not add a Windows payload or count it in the manifest until the native
+   backend and installed-package acceptance gates there pass.
 6. Re-run the secret scan on the exact public commit.
 7. Install it locally (Release From Main, in Place, step 6) and check
    `kollab --version` inside and outside the repo.

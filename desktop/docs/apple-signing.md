@@ -66,7 +66,11 @@ No certificate, key, identity, account, team or credential is supplied by this P
 
 ## Helper contract
 
-Run from the same working directory as the existing Tauri build:
+Run from the same working directory as the existing Tauri build.
+The repository examples below retain the generated release overlay from
+`scripts/desktop_release.py stage`; stage the matching native CLI first, as the
+macOS job does. Tauri 2.12 merges repeated `--config` arguments in order, keeping
+the version overlay and the additional hardened-runtime setting together.
 
 ```bash
 # Optional early gate; omitted mode uses APPLE_SIGNING_MODE, then unsigned.
@@ -76,7 +80,8 @@ bash scripts/sign-macos.sh preflight
 # The helper runs the command after -- with its arguments and directory intact.
 bash scripts/sign-macos.sh build "$APP_PATH" -- \
   cargo tauri build --target "$TARGET" --bundles app \
-  --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+  --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}' \
+  --config src-tauri/tauri.release.json
 
 # Safe, idempotent retry after the signed build's own EXIT/INT/TERM cleanup.
 bash scripts/sign-macos.sh cleanup
@@ -96,8 +101,9 @@ Python 3.9+, Bash, OpenSSL and the macOS/Xcode command-line tools must be availa
 
 ## Connect the existing macOS packaging job
 
-After #192 lands, add an explicit manual input to that workflow. Tag, push and
-reusable-workflow runs with no input continue to resolve to unsigned. No secret
+The macOS packaging job is in `binaries.yml`. To opt in, add an explicit manual
+input to that workflow. Tag, push and reusable-workflow runs with no input
+continue to resolve to unsigned. No secret
 should enable signing merely by existing in repository settings.
 
 ```yaml
@@ -115,7 +121,9 @@ The following is a job fragment, not a second packaging workflow. Keep the exist
 sidecar preparation, Rust tools, matrix and asset names. The caller exports `TARGET`
 and an absolute, fresh `CARGO_TARGET_DIR` and checks out main before selecting
 Developer ID mode. Retain all existing build/version/config arguments in **both**
-build commands below; the example adds only the hardened-runtime setting. Give the
+build commands below. The generated `src-tauri/tauri.release.json` from shared
+sidecar staging supplies the release version; keep that overlay in both paths.
+The signed path additionally enables hardened runtime. Give the
 job enough time for the build plus the 30-minute notary wait.
 
 ```yaml
@@ -135,7 +143,7 @@ steps:
   - name: Existing unsigned Tauri build
     if: env.APPLE_SIGNING_MODE == 'unsigned'
     working-directory: desktop
-    run: cargo tauri build --target "$TARGET" --bundles app
+    run: cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json
   - name: Optional Developer ID Tauri build
     if: env.APPLE_SIGNING_MODE == 'developer-id' && github.ref == 'refs/heads/main'
     working-directory: desktop
@@ -155,7 +163,8 @@ steps:
       printf 'APPLE_SIGNING_STATE_DIR=%s\n' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"
       bash scripts/sign-macos.sh build "$CARGO_TARGET_DIR/$TARGET/release/bundle/macos/Kollab.app" -- \
         cargo tauri build --target "$TARGET" --bundles app \
-        --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+        --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}' \
+        --config src-tauri/tauri.release.json
   - name: Retry cleanup of only this job's temporary keychain
     if: always() && env.APPLE_SIGNING_MODE == 'developer-id'
     run: bash desktop/scripts/sign-macos.sh cleanup
