@@ -32,6 +32,41 @@ SESSION_STAT_KEYS = (
 )
 
 
+def _is_system_initialization_record(record: Any) -> bool:
+    if not isinstance(record, dict) or record.get("type") != "user":
+        return False
+    intelligence = record.get("kollabor_intelligence")
+    context = intelligence.get("user_context") if isinstance(intelligence, dict) else None
+    return isinstance(context, dict) and context.get("type") == "system_initialization"
+
+
+def matches_system_initialization_provenance(
+    displayed_message: Any, saved_message: Any, logged_record: Any,
+) -> bool:
+    """Match one aligned history row to its explicitly typed original record.
+
+    A saved base retains UUIDs that the public history DTO omits. The caller
+    supplies the corresponding saved row, never a content-only search result.
+    This predicate changes no messages, roles, or persistent state.
+    """
+    if not all(isinstance(item, dict) for item in (displayed_message, saved_message, logged_record)):
+        return False
+    identifier = saved_message.get("uuid")
+    if not isinstance(identifier, str) or not identifier or logged_record.get("uuid") != identifier:
+        return False
+    if displayed_message.get("role") != "user" or saved_message.get("role") != "user":
+        return False
+    if not _is_system_initialization_record(logged_record):
+        return False
+    original = logged_record.get("message")
+    content = saved_message.get("content")
+    return (
+        isinstance(original, dict) and original.get("role") == "user"
+        and isinstance(content, str) and bool(content)
+        and displayed_message.get("content") == content == original.get("content")
+    )
+
+
 def _tool_use_line(block: Dict[str, Any]) -> str:
     """One display line for a logged tool_use block: ``[tool: name] {input}``."""
     args = block.get("input")
@@ -1008,6 +1043,11 @@ class ConversationManager:
                             ),
                             "session_id": session_file.stem.replace("session_", ""),
                         }
+                        # The logger stores initial system context as a user
+                        # record. Preserve that wire role and recover only its
+                        # explicit provenance, never classify by prompt text.
+                        if _is_system_initialization_record(data):
+                            message["metadata"]["system_initialization"] = True
                         if tool_uses:
                             # Browsers read these directly; resume promotes them
                             # to xml_tool_calls, which providers never receive.

@@ -194,6 +194,56 @@ reload. Invalid or blocked storage does not prevent resizing. An explicit provid
 user resize may change it within the same bounds. The mobile sheet retains its
 existing 18rem width and toggle behavior; it has no resize rail.
 
+The active and empty chat headers share `ShellHeader`. It publishes its complete
+border-box height to the sidebar wrapper's `--shell-header-height`; a resize
+observer updates it when the toolbar wraps or the sidebar width changes. The
+desktop logo header consumes that height with no added vertical padding, so both
+bottom borders meet at the divider. The mobile sheet uses its independent 3rem
+header. Unmount disconnects the observer and clears the measured height.
+
+Each local, offline or remote agent row offers **Hide Agent** in its action menu
+and right-click menu. Hiding changes browser-local visibility only: it does not
+select another chat, stop an agent, remove history or change Hub presence. The
+footer's **Hidden Agents** list can show one agent or **Show All**, including
+entries absent from the latest roster. Group counts reflect visible rows.
+Preferences use `kollab.sidebar.hidden-agents` in local storage; blocked or invalid
+storage still permits in-memory hiding. Open tabs synchronize storage changes.
+Local preferences follow identity plus workspace across running/offline transitions
+and session restarts; unnamed sessions use their session id. Remote preferences
+include network, device, workspace and identity, so hiding one agent does not hide
+an agent with the same name elsewhere.
+
+## Chat presentation
+
+The chat header stays on one row. Its labels adapt to the chat pane's container
+width, including sidebar resizing. **Session Controls** holds model/profile,
+approval mode, context usage, full status/errors, MCP servers, the online roster,
+settings and clear-history actions. Dialogs remain mounted when the popover closes;
+closing one returns focus to its control. Chat/Trajectory stay directly available.
+
+Once a chat has messages, its agent's live gem docks immediately beside the input
+bar and stays visible while the conversation scrolls. It shares the selected
+session's real activity with the sidebar (thinking, tools, speaking and errors),
+uses the same saved appearance, and opens Properties on click. The empty chat
+keeps its large welcome gem without a second composer gem. The input remains
+shrinkable beside the gem at narrow widths, including with a wide sidebar.
+
+Initialization records carry `metadata.system_initialization: true` and are omitted
+from Chat, while original context remains available to the model and Trajectory.
+Resume preserves explicit initialization provenance rather than classifying user
+messages by their headings. Existing resumed bases can recover that display flag
+through a bounded read-only match of their original initialization UUID and exact
+content; missing proof leaves the message visible. The raw history mirror and
+its incremental-sync anchor remain unchanged. Old ACP `Reply from … [thread:…]` batches are projected
+as individual peer messages only when persisted source is `observation`; human
+examples remain user text. Routing ids and raw prompt text stay in history without
+being printed in chat bubbles, and distinct replies are not deduplicated.
+
+Online notices are quiet, transparent activity rows with optional details, without
+a background or border. Markdown list-item containers use normal whitespace so
+the renderer's structural newlines do not put a marker on an empty first line;
+paragraph and fenced-code formatting remain intact.
+
 ## Auth
 
 Every engine route except `/health`, `/version`, `/status`, `/ready`, `/` needs

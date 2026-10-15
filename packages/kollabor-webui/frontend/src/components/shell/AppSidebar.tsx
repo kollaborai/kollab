@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { ChevronDown, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
@@ -7,17 +7,12 @@ import { titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
+import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
+import { HIDDEN_AGENTS_KEY, readHiddenAgents, sidebarAgentKey, type HiddenAgent } from "@/components/shell/hidden-agents";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
 import { Label } from "@/components/ui/label";
 import {
   Popover,
@@ -53,7 +48,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -186,6 +180,32 @@ export function AppSidebar({
   onProperties: (id: string, tab?: "chat") => void;
 }) {
   const { setOpenMobile } = useSidebar();
+  const [hiddenAgents, setHiddenAgents] = useState<HiddenAgent[]>(() => {
+    try { return readHiddenAgents(localStorage.getItem(HIDDEN_AGENTS_KEY)); }
+    catch { return []; }
+  });
+  useEffect(() => {
+    const sync = (event: StorageEvent) => {
+      if (event.key === HIDDEN_AGENTS_KEY || event.key === null) {
+        setHiddenAgents(readHiddenAgents(event.newValue));
+      }
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+  const changeHidden = (change: (previous: HiddenAgent[]) => HiddenAgent[]) => {
+    setHiddenAgents((previous) => {
+      const next = change(previous);
+      try { localStorage.setItem(HIDDEN_AGENTS_KEY, JSON.stringify(next)); }
+      catch { /* Hiding remains available when browser storage is blocked. */ }
+      return next;
+    });
+  };
+  const hide = (entry: HiddenAgent) => changeHidden((previous) => [
+    ...previous.filter((agent) => agent.key !== entry.key), entry,
+  ]);
+  const show = (key: string) => changeHidden((previous) => previous.filter((agent) => agent.key !== key));
+  const hiddenKeys = useMemo(() => new Set(hiddenAgents.map((agent) => agent.key)), [hiddenAgents]);
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
@@ -221,6 +241,19 @@ export function AppSidebar({
     () => groupNetworkTree(network.networks, network.device, network.remote),
     [network.networks, network.device, network.remote],
   );
+  const visibleNetworks = networkTree.map((net) => ({
+    ...net,
+    devices: net.devices.map((dev) => ({
+      ...dev,
+      workspaces: dev.workspaces.map((ws) => ({
+        ...ws,
+        agents: ws.agents.filter((agent) => !hiddenKeys.has(sidebarAgentKey({
+          name: agent.name, device: agent.device || dev.device,
+          workspace: agent.workspace || ws.label, network: agent.network || net.id,
+        }))),
+      })).filter((ws) => ws.agents.length),
+    })).filter((dev) => dev.workspaces.length),
+  }));
   // Groups the viewer folded away, remembered in this browser only.
   const [folded, setFolded] = useState<Record<string, boolean>>(() => {
     try {
@@ -242,6 +275,13 @@ export function AppSidebar({
     });
   // An agent opened on another computer is a session too; it stays in its computer's group.
   const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
+  const sessionKey = (session: Session) => sidebarAgentKey({
+    name: session.identity || session.agent, workspace: session.workspace || workspacePath,
+    sessionId: session.session_id,
+  });
+  const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
+  const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
+  const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
   const pickedGem = poolByName.get(selectedIdentity);
   const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
   const modelLabel =
@@ -261,8 +301,8 @@ export function AppSidebar({
   return (
     <Sidebar {...props}>
       {/* One row: the logo, then New Session and its options as icons. */}
-      <SidebarHeader className="border-b">
-        <div className="flex h-12 items-center gap-0.5 px-2">
+      <SidebarHeader className="h-[var(--shell-header-height,3rem)] shrink-0 justify-center border-b py-0">
+        <div className="flex h-8 shrink-0 items-center gap-0.5 px-2">
           <KollabLogo className="h-6 w-auto shrink-0" />
           <span className="sr-only">kollab</span>
           <Tooltip>
@@ -436,13 +476,13 @@ export function AppSidebar({
               ) : null}
             </>
           }
-          count={localSessions.length}
+          count={visibleSessions.length}
           open={!folded.local}
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
             <SidebarMenu>
-              {localSessions.map((session) => {
+              {visibleSessions.map((session) => {
                 const gem = session.identity || session.agent || "";
                 // Hub presence when the identity is live; otherwise the engine's
                 // own word on whether a daemon backs the session.
@@ -461,9 +501,14 @@ export function AppSidebar({
                   onProperties(session.session_id, tab);
                 };
                 return (
-                <ContextMenu key={session.session_id}>
-                  <ContextMenuTrigger asChild>
-                    <SidebarMenuItem>
+                <AgentSidebarRow
+                  key={session.session_id}
+                  name={sessionHeading(session)}
+                  onHide={() => hide({ key: sessionKey(session), label: sessionHeading(session), detail: session.workspace || workspacePath })}
+                  onProperties={session.identity ? () => openProperties("chat") : undefined}
+                  onDelete={session.external ? undefined : () => setPendingDelete(session)}
+                  busy={busy}
+                >
                       <SidebarMenuButton
                         isActive={session.session_id === activeId}
                         onClick={async () => {
@@ -526,43 +571,15 @@ export function AppSidebar({
                           {note?.error ? <OpenError text={note.error} /> : null}
                         </div>
                       </SidebarMenuButton>
-                      {/* The engine only detaches from an agent it did not start: no Delete. */}
-                      {session.external ? null : (
-                        <SidebarMenuAction
-                          onClick={() => setPendingDelete(session)}
-                          disabled={busy}
-                          showOnHover
-                          aria-label={`Delete ${sessionHeading(session)} session`}
-                        >
-                          <Trash2 />
-                        </SidebarMenuAction>
-                      )}
-                    </SidebarMenuItem>
-                  </ContextMenuTrigger>
-                  <ContextMenuContent className="w-44">
-                    <ContextMenuItem disabled={!session.identity} onSelect={() => openProperties("chat")}>
-                      <SlidersHorizontal />
-                      Properties
-                    </ContextMenuItem>
-                    {session.external ? null : (
-                      <>
-                        <ContextMenuSeparator />
-                        <ContextMenuItem
-                          variant="destructive"
-                          disabled={busy}
-                          onSelect={() => setPendingDelete(session)}
-                        >
-                          <Trash2 />
-                          Delete Session
-                        </ContextMenuItem>
-                      </>
-                    )}
-                  </ContextMenuContent>
-                </ContextMenu>
+                </AgentSidebarRow>
                 );
               })}
-              {offline.map((agent) => (
-                <SidebarMenuItem key={`offline:${agent.identity}`}>
+              {visibleOffline.map((agent) => (
+                <AgentSidebarRow
+                  key={`offline:${agent.workspace}:${agent.identity}`}
+                  name={titleCase(agent.identity)}
+                  onHide={() => hide({ key: offlineKey(agent), label: titleCase(agent.identity), detail: agent.workspace })}
+                >
                   <SidebarMenuButton
                     disabled={busy}
                     onClick={async () => {
@@ -592,17 +609,17 @@ export function AppSidebar({
                       </span>
                     </div>
                   </SidebarMenuButton>
-                </SidebarMenuItem>
+                </AgentSidebarRow>
               ))}
-              {!localSessions.length && !offline.length ? (
+              {!visibleSessions.length && !visibleOffline.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
-                  No sessions yet.
+                  {localSessions.length || offline.length ? "No visible agents." : "No sessions yet."}
                 </p>
               ) : null}
             </SidebarMenu>
           </SidebarGroupContent>
         </FoldGroup>
-        {networkTree.map((net) => (
+        {visibleNetworks.map((net) => (
           <FoldGroup
             key={net.id}
             label={
@@ -641,7 +658,14 @@ export function AppSidebar({
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
                           return (
-                          <SidebarMenuItem key={id || `${agent.name}@${agent.device}`}>
+                          <AgentSidebarRow
+                            key={id || `${agent.name}@${agent.device}`}
+                            name={`${titleCase(agent.name)} on ${agent.device}`}
+                            onHide={() => hide({
+                              key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
+                              label: titleCase(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
+                            })}
+                          >
                             <SidebarMenuButton
                               disabled={!id}
                               isActive={Boolean(id) && id === activeId}
@@ -686,7 +710,7 @@ export function AppSidebar({
                                 ) : null}
                               </div>
                             </SidebarMenuButton>
-                          </SidebarMenuItem>
+                          </AgentSidebarRow>
                           );
                         })}
                       </SidebarMenu>
@@ -742,6 +766,31 @@ export function AppSidebar({
 
       <SidebarFooter className="border-t p-2">
         <SidebarMenu>
+          {hiddenAgents.length ? (
+            <SidebarMenuItem>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenAgents.length})</span></SidebarMenuButton>
+                </PopoverTrigger>
+                <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
+                  <p className="text-sm font-semibold">Hidden Agents</p>
+                  <p className="text-muted-foreground mt-1 text-xs">Hidden in this browser.</p>
+                  <ul className="my-2 max-h-64 overflow-y-auto">
+                    {hiddenAgents.map((agent) => (
+                      <li key={agent.key} className="flex items-center gap-2 py-1.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm">{agent.label}</p>
+                          <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
+                        </div>
+                        <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
+                      </li>
+                    ))}
+                  </ul>
+                  <Button size="sm" variant="outline" className="w-full" onClick={() => changeHidden(() => [])}>Show All</Button>
+                </PopoverContent>
+              </Popover>
+            </SidebarMenuItem>
+          ) : null}
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={() => {

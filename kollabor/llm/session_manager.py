@@ -76,7 +76,9 @@ class SessionManager:
             # thread still captures keystrokes which render after completion.
             initial_message = self.prompt_builder.build()
 
-            add_message_fn(ConversationMessage(role="system", content=initial_message))
+            add_message_fn(ConversationMessage(
+                role="system", content=initial_message, metadata={"system_initialization": True}
+            ))
 
             # Log initial context message
             parent_uuid = await self.conversation_logger.log_user_message(
@@ -149,7 +151,9 @@ class SessionManager:
             # 7. Clear and reinitialize conversation history
             conversation_history.clear()
             initial_message = self.prompt_builder.build()
-            add_message_fn(ConversationMessage(role="system", content=initial_message))
+            add_message_fn(ConversationMessage(
+                role="system", content=initial_message, metadata={"system_initialization": True}
+            ))
 
             # 8. Log start of new conversation
             await self.conversation_logger.log_conversation_start()

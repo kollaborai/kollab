@@ -156,6 +156,7 @@ function summarizeTerminalCommand(command: string): string {
 export function humanizeToolName(toolName: string): string {
   const knownLabels: Record<string, string> = {
     hub_msg: "Hub Message",
+    hub_reply: "Hub Reply",
     hub_work: "Hub Work",
     file_read: "Read File",
     file_write: "Write File",
@@ -183,6 +184,13 @@ export function summarizeToolCall(toolName: string, argsText?: string): string {
 
   if (normalizedName === "terminal" && typeof args.command === "string") {
     return summarizeTerminalCommand(args.command);
+  }
+
+  if (normalizedName === "hub_reply" || (normalizedName === "hub_msg" && (args.reply_to || args.replyTo || args.is_reply))) {
+    const to = [args.to, args.target, args.recipient, args.agent].find(
+      (value): value is string => typeof value === "string" && value.trim() !== "",
+    );
+    return to ? `Replied to ${to.trim()}` : "Replied to agent";
   }
 
   // Native file tools name the target `file`; MCP filesystem tools use `path`.

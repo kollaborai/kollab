@@ -87,6 +87,8 @@ export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
  * `ToolFallback`.
  */
 export type ThreadComponents = {
+  /** Companion docked beside the input once the conversation has started. */
+  ComposerLeading?: ComponentType | undefined;
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
@@ -162,7 +164,7 @@ const ThreadRoot: FC<{
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   attachmentsEnabled: boolean;
 }> = ({ isEmpty, agents, commands, onOpenPanel, attachmentsEnabled }) => {
-  const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
 
   return (
     <ThreadPrimitive.Root
@@ -209,12 +211,15 @@ const ThreadRoot: FC<{
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer
-              agents={agents}
-              commands={commands}
-              onOpenPanel={onOpenPanel}
-              attachmentsEnabled={attachmentsEnabled}
-            />
+            <div data-slot="aui_composer-dock" className="flex min-w-0 items-end gap-2 sm:gap-3">
+              {!isEmpty && ComposerLeading ? <ComposerLeading /> : null}
+              <Composer
+                agents={agents}
+                commands={commands}
+                onOpenPanel={onOpenPanel}
+                attachmentsEnabled={attachmentsEnabled}
+              />
+            </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -647,7 +652,7 @@ const Composer: FC<{
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root
-        className="aui-composer-root group/composer relative flex w-full flex-col"
+        className="aui-composer-root group/composer relative flex min-w-0 flex-1 flex-col"
         data-mode={slotMode}
         onSubmit={handleComposerSubmit}
       >

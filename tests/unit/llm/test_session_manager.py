@@ -102,6 +102,7 @@ class TestSessionManager(unittest.TestCase):
         msg = add_message_fn.call_args[0][0]
         self.assertEqual(msg.role, "system")
         self.assertEqual(msg.content, "system prompt content")
+        self.assertIs(msg.metadata.get("system_initialization"), True)
         self.conversation_logger.log_user_message.assert_called_once()
 
     def test_initialize_conversation_clears_history(self):
@@ -150,6 +151,10 @@ class TestSessionManager(unittest.TestCase):
         self.conversation_manager.save_conversation.assert_called_once()
         self.api_service.set_session_id.assert_called_once_with("new-session-id")
         self.conversation_logger.log_conversation_start.assert_called_once()
+        initial_message = add_message_fn.call_args.args[0]
+        self.assertEqual(initial_message.role, "system")
+        self.assertEqual(initial_message.content, "system prompt content")
+        self.assertIs(initial_message.metadata.get("system_initialization"), True)
 
     def test_restart_session_resets_conversation_manager(self):
         """Test restart calls reset_session on conversation manager."""

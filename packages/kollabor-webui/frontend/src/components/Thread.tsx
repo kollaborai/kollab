@@ -1,4 +1,5 @@
 import { createContext, useContext, type FC, type ReactNode } from "react";
+import { ChevronDownIcon } from "lucide-react";
 import {
   makeAssistantToolUI,
   MessagePrimitive,
@@ -14,14 +15,20 @@ import {
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback, toolErrorLine } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/components/assistant-ui/tool-group";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
-import type { HubNote } from "@/hub-notes";
+import type { Activity } from "@/components/gems/gem-face";
+import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { titleCase } from "@/components/panels/panel-model";
 import { cn } from "@/lib/utils";
 
-type WelcomeGem = { name: string; pool?: AgentPoolEntry; onOpen?: () => void };
+type WelcomeGem = { name: string; pool?: AgentPoolEntry; activity?: Activity | null; onOpen?: () => void };
 
 const WelcomeContext = createContext<WelcomeGem | null>(null);
 const PoolContext = createContext<readonly AgentPoolEntry[]>([]);
@@ -64,6 +71,38 @@ const Welcome: FC = () => {
   );
 };
 
+const ComposerGem: FC = () => {
+  const gem = useContext(WelcomeContext);
+  const where = useContext(WhereContext);
+  if (!gem) return null;
+
+  return (
+    <button
+      type="button"
+      data-slot="kollab_composer-gem"
+      data-activity={gem.activity ?? undefined}
+      className="inline-flex shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label={`Open ${titleCase(gem.name)} Properties`}
+      title={`${titleCase(gem.name)} · Properties`}
+      onClick={gem.onOpen}
+      disabled={!gem.onOpen}
+    >
+      <GemAvatar
+        gem={gem.name}
+        where={where}
+        caste={gem.pool?.caste}
+        color={gem.pool?.color}
+        state={gem.pool?.active ? gem.pool.state : "idle"}
+        live
+        activity={gem.activity}
+        season="auto"
+        follow
+        size={56}
+      />
+    </button>
+  );
+};
+
 // "lapis@devbox" is lapis on another computer.
 const agentLabel = (id: string) => {
   const [name, device] = id.split("@");
@@ -72,15 +111,43 @@ const agentLabel = (id: string) => {
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
 // words, the way the terminal draws its hub box.
-const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: ReactNode }> = ({
+const HubNoteView: FC<{
+  from: string;
+  to: string;
+  threadId?: string;
+  replyTo?: string;
+  isReply?: boolean;
+  children: ReactNode;
+  footer?: ReactNode;
+}> = ({
   from,
   to,
+  threadId,
+  replyTo,
+  isReply = false,
   children,
   footer,
 }) => {
-  const sender = useContext(PoolContext).find((agent) => agent.name === from);
-  const [name, device] = from.split("@");
+  const pool = useContext(PoolContext);
+  const { remote: remoteAgents } = useContext(ComposerHubContext);
   const where = useContext(WhereContext);
+  const gem = useContext(WelcomeContext);
+
+  const resolvedFrom = resolveAgentSender(from, { agents: pool, remoteAgents });
+  const [name, device] = resolvedFrom.split("@");
+  const sender = pool.find((agent) => agent.name === name);
+
+  const resolvedTo = to ? resolveAgentSender(to, { agents: pool, remoteAgents }) : "";
+  const recipient = resolvedTo
+    ? agentLabel(resolvedTo)
+    : gem?.name
+      ? agentLabel(gem.name)
+      : "All";
+
+  const label = isReply
+    ? `Replied to ${recipient}`
+    : `${agentLabel(resolvedFrom)} → ${recipient}`;
+
   return (
     <div className="flex gap-3">
       <GemAvatar
@@ -93,8 +160,8 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
         className="mt-0.5 shrink-0"
       />
       <div className="min-w-0 flex-1">
-        <div className="text-muted-foreground mb-1 text-xs font-medium">
-          {agentLabel(from)} → {to ? agentLabel(to) : "All"}
+        <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
+          <span>{label}</span>
         </div>
         <div className="text-foreground wrap-break-word">{children}</div>
         {footer}
@@ -103,10 +170,75 @@ const HubNoteView: FC<{ from: string; to: string; children: ReactNode; footer?: 
   );
 };
 
+// Online announcements read as quiet activity; details remain available on demand.
+const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
+  const pool = useContext(PoolContext);
+  const { remote: remoteAgents } = useContext(ComposerHubContext);
+  const where = useContext(WhereContext);
+  const resolvedFrom = resolveAgentSender(
+    note.from,
+    { agents: pool, remoteAgents },
+    note.rawText || note.text,
+  );
+  const [name, device] = resolvedFrom.split("@");
+  const sender = pool.find((agent) => agent.name === name);
+
+  const lines = note.text.trim().split("\n");
+  const details = lines.slice(1).join("\n").trim();
+  const summary = (
+    <>
+      <GemAvatar
+        gem={name}
+        where={device || where}
+        caste={sender?.caste}
+        color={sender?.color}
+        state={sender?.active ? sender.state : "idle"}
+        size={18}
+        className="shrink-0"
+      />
+      <span className="min-w-0 truncate text-start">{titleCase(name)} came online</span>
+      {details ? <ChevronDownIcon className="size-3 shrink-0 transition-transform group-data-[state=open]/chip:rotate-180" /> : null}
+    </>
+  );
+
+  return (
+    <div data-slot="kollab_online-notice" className="my-1.5 w-full">
+      <Collapsible defaultOpen={false}>
+        <CollapsibleTrigger
+          data-slot="kollab_online-chip-trigger"
+          title={agentLabel(resolvedFrom)}
+          className="group/chip inline-flex max-w-full cursor-pointer items-center gap-2 rounded-sm py-1 text-xs text-muted-foreground transition-colors select-none hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {summary}
+        </CollapsibleTrigger>
+        {details ? (
+          <CollapsibleContent
+            data-slot="kollab_online-chip-content"
+            className="mt-1 max-h-48 overflow-y-auto pl-6 text-xs whitespace-pre-wrap text-muted-foreground"
+          >
+            {details}
+          </CollapsibleContent>
+        ) : null}
+      </Collapsible>
+    </div>
+  );
+};
+
 // Another agent's hub message (runtime.tsx turns the daemon's agent HUD into
 // these). One this agent only saw go by is dimmed, like the terminal's ◇.
 const HubNoteMessage: FC = () => {
   const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
+  if (note?.isOnlineNotice) {
+    return (
+      <MessagePrimitive.Root
+        data-slot="kollab_hub-message"
+        data-role="system"
+        className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150"
+      >
+        <OnlineNoticeChip note={note} />
+      </MessagePrimitive.Root>
+    );
+  }
   return (
     <MessagePrimitive.Root
       data-slot="kollab_hub-message"
@@ -116,14 +248,14 @@ const HubNoteMessage: FC = () => {
         note?.observed && "opacity-60",
       )}
     >
-      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""}>
+      <HubNoteView from={note?.from ?? ""} to={note?.to ?? ""} threadId={note?.threadId} replyTo={note?.replyTo}>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </HubNoteView>
     </MessagePrimitive.Root>
   );
 };
 
-type HubSendArgs = { to?: string; target?: string; message?: string; content?: string };
+type HubSendArgs = { to?: string; target?: string; message?: string; content?: string; thread?: string; thread_id?: string; reply_to?: string; replyTo?: string };
 
 // What this agent sent over the hub (native calls pass to/message, the XML
 // tags target/content), drawn like the messages it receives instead of as a
@@ -133,6 +265,9 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
   const text = String(props.args?.message ?? props.args?.content ?? "").trim();
   if (!gem || !text) return <ToolFallback {...props} />;
   const to = props.toolName === "hub_broadcast" ? "" : String(props.args?.to ?? props.args?.target ?? "");
+  const isReply = props.toolName === "hub_reply";
+  const threadId = String(props.args?.thread_id ?? props.args?.thread ?? "") || undefined;
+  const replyTo = String(props.args?.reply_to ?? props.args?.replyTo ?? "") || undefined;
   return (
     <div
       data-slot="kollab_hub-sent"
@@ -141,6 +276,9 @@ const HubSent: ToolCallMessagePartComponent<HubSendArgs, unknown> = (props) => {
       <HubNoteView
         from={gem.name}
         to={to}
+        threadId={threadId}
+        replyTo={replyTo}
+        isReply={isReply}
         footer={
           props.isError ? (
             <p className="text-destructive mt-1 text-xs">Not delivered: {toolErrorLine(props.result)}</p>
@@ -169,6 +307,8 @@ export const Thread: FC<{
   attachmentsEnabled?: boolean;
   /** The session's gem, which greets on the empty thread. */
   identity?: string;
+  /** The selected session's live activity, shared with its sidebar gem. */
+  activity?: Activity | null;
   /** Opens the session's Properties (double-click on the greeting gem). */
   onOpenGem?: () => void;
   /** Agents on the network's other computers, for the @ picker. */
@@ -179,14 +319,14 @@ export const Thread: FC<{
   device?: string;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
     <WelcomeContext.Provider
       value={
         identity
-          ? { name: identity, pool: agents.find((agent) => agent.name === identity), onOpen: onOpenGem }
+          ? { name: identity, pool: agents.find((agent) => agent.name === identity), activity, onOpen: onOpenGem }
           : null
       }
     >
@@ -198,7 +338,7 @@ export const Thread: FC<{
         ))}
         <ComposerLockContext.Provider value={locked}>
           <AssistantThread
-            components={{ Welcome, ToolGroup, SystemMessage: HubNoteMessage }}
+            components={{ Welcome, ComposerLeading: ComposerGem, ToolGroup, SystemMessage: HubNoteMessage }}
             agents={agents}
             commands={commands}
             onOpenPanel={onOpenPanel}
