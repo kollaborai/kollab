@@ -1,16 +1,25 @@
 # macOS signing and notarization
 
-The **Desktop macOS packaging** workflow builds the existing Tauri app for Apple
-Silicon and Intel. Its default mode is `unsigned`: no Apple secrets or account
-are needed. Tauri uses the ad-hoc identity `-`, which is not a Developer ID
-signature and does not remove Gatekeeper's unverified-developer warning.
-The existing CLI assets, release workflow and local desktop build stay unchanged.
+`desktop/scripts/sign-macos.sh` wraps a caller-supplied Tauri build, then validates,
+notarizes and staples its `Kollab.app` when explicitly requested. The caller keeps
+ownership of sidecar preparation, target/version settings, archives, checksums and
+publication. This helper can be merged against main independently of the desktop
+release workflow in [PR #192](https://github.com/kollaborai/kollab/pull/192).
 
-The optional `developer-id` mode signs **and** notarizes the app. It fails before
-building if required secrets are missing or authentication is ambiguous. It never
-silently falls back to an unsigned download. This mode can run only by manually
-dispatching the workflow from `main`; PRs run fixture/static validation without
-Apple secrets, keychain access or notarization.
+`APPLE_SIGNING_MODE` defaults to `unsigned`, which needs no Apple account or
+credentials. When the helper wraps an unsigned build it clears Apple credentials
+from the build environment and uses Tauri's ad-hoc identity `-`. This is not a
+Developer ID signature and does not remove Gatekeeper's unverified-developer warning.
+
+The optional `developer-id` mode is all-or-none: all four common secrets below
+plus exactly one complete notarization authentication set are required. Missing,
+partial or simultaneous authentication sets fail before any build or keychain
+operation. It never automatically enables signing or downgrades a requested
+signed build. Explicit unsigned mode ignores inherited Apple credentials.
+
+The **Apple signing helper checks** workflow runs fixture/static validation with
+no Apple secrets or keychain access. A release owner connects the block below to
+the macOS packaging job after #192 lands; no signing release job is enabled here.
 
 ## What Marco must create
 
@@ -33,7 +42,7 @@ Apple secrets, keychain access or notarization.
 All `developer-id` builds require these repository secrets:
 
 - `APPLE_CERTIFICATE`: base64 of the `.p12`, produced with
-  `openssl base64 -A -in <certificate.p12> -out <certificate-base64.txt>`.
+  `openssl base64 -A -in certificate.p12 -out certificate-base64.txt`.
 - `APPLE_CERTIFICATE_PASSWORD`: the export password chosen in Keychain Access.
 - `APPLE_SIGNING_IDENTITY`: the exact `Developer ID Application: <name> (<team>)`
   identity. Do not put an example identity into the workflow.
@@ -50,26 +59,123 @@ Then configure exactly one authentication set:
   downloaded `.p8` contents. Apple permits that private-key download only once.
   The helper creates `APPLE_SIGNING_STATE_DIR/notary-key.p8` privately and passes
   it through `notarytool --key`; do not configure a path from Marco's Mac as a
-  repository secret. An issuer-less individual API key is not this workflow's
+  repository secret. An issuer-less individual API key is not this helper's
   supported authentication set.
 
 No certificate, key, identity, account, team or credential is supplied by this PR.
 
-## Run and validate
+## Helper contract
 
-After this workflow is merged to main:
+Run from the same working directory as the existing Tauri build:
 
-1. Open Actions → Desktop macOS packaging → Run workflow. Leave mode `unsigned`
-   for the default path, or explicitly choose `developer-id` after configuring
-   the secrets above. Select `main` for Developer ID builds.
-2. Set `runtime_tag` to an existing published Kollab release, initially
-   `v0.16.1`. Each architecture downloads the existing `kollab-macos-<arch>` and
-   `.sha256` assets, verifies the checksum, and supplies the corresponding Tauri
-   `binaries/kollab-<target>` sidecar. No CLI release asset is replaced.
-3. Download `Kollab-macos-<arch>-<mode>` from that workflow run. It contains a
-   ZIP holding `Kollab.app` and the ZIP's checksum. This workflow does not create
-   a GitHub Release, upload public release assets, or configure Tauri updater
-   signatures. Those are separate release-owner actions.
+```bash
+# Optional early gate; omitted mode uses APPLE_SIGNING_MODE, then unsigned.
+bash scripts/sign-macos.sh preflight
+
+# APP_PATH must be absolute, end in /Kollab.app, and not already exist.
+# The helper runs the command after -- with its arguments and directory intact.
+bash scripts/sign-macos.sh build "$APP_PATH" -- \
+  cargo tauri build --target "$TARGET" --bundles app \
+  --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+
+# Safe, idempotent retry after the signed build's own EXIT/INT/TERM cleanup.
+bash scripts/sign-macos.sh cleanup
+```
+
+The caller sets `APP_PATH` to its actual build output, including the target/profile
+layout. Use a fresh output directory: rejecting an existing app prevents a successful
+command from accidentally validating stale output. The helper accepts the caller's
+Apple Silicon or Intel target and version/config flags without choosing its own.
+For signed builds enable `bundle.macOS.hardenedRuntime` in that same build config;
+verification rejects signatures missing it. Preserve existing version overrides
+when adding that setting instead of replacing the caller's complete config.
+
+Signed builds additionally need `RUNNER_TEMP` and `APPLE_SIGNING_STATE_DIR`. The
+latter must be a new direct child named `kollab-apple-signing-*` under the former.
+Python 3.9+, Bash, OpenSSL and the macOS/Xcode command-line tools must be available.
+
+## Connect the existing macOS packaging job
+
+After #192 lands, add an explicit manual input to that workflow. Tag, push and
+reusable-workflow runs with no input continue to resolve to unsigned. No secret
+should enable signing merely by existing in repository settings.
+
+```yaml
+"on":
+  workflow_dispatch:
+    inputs:
+      apple_signing_mode:
+        description: Optional Developer ID signing and notarization
+        type: choice
+        options: [unsigned, developer-id]
+        default: unsigned
+```
+
+The following is a job fragment, not a second packaging workflow. Keep the existing
+sidecar preparation, Rust tools, matrix and asset names. The caller exports `TARGET`
+and an absolute, fresh `CARGO_TARGET_DIR` and checks out main before selecting
+Developer ID mode. Retain all existing build/version/config arguments in **both**
+build commands below; the example adds only the hardened-runtime setting. Give the
+job enough time for the build plus the 30-minute notary wait.
+
+```yaml
+env:
+  APPLE_SIGNING_MODE: ${{ inputs.apple_signing_mode || 'unsigned' }}
+steps:
+  - name: Check the explicitly selected mode and trusted ref
+    shell: bash
+    run: |
+      case "$APPLE_SIGNING_MODE" in
+        unsigned) ;;
+        developer-id)
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo 'Developer ID builds require main.' >&2; exit 1; }
+          ;;
+        *) echo 'Unknown Apple signing mode.' >&2; exit 1 ;;
+      esac
+  - name: Existing unsigned Tauri build
+    if: env.APPLE_SIGNING_MODE == 'unsigned'
+    working-directory: desktop
+    run: cargo tauri build --target "$TARGET" --bundles app
+  - name: Optional Developer ID Tauri build
+    if: env.APPLE_SIGNING_MODE == 'developer-id' && github.ref == 'refs/heads/main'
+    working-directory: desktop
+    shell: bash
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+    run: |
+      export APPLE_SIGNING_STATE_DIR="$RUNNER_TEMP/kollab-apple-signing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      printf 'APPLE_SIGNING_STATE_DIR=%s\n' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"
+      bash scripts/sign-macos.sh build "$CARGO_TARGET_DIR/$TARGET/release/bundle/macos/Kollab.app" -- \
+        cargo tauri build --target "$TARGET" --bundles app \
+        --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+  - name: Retry cleanup of only this job's temporary keychain
+    if: always() && env.APPLE_SIGNING_MODE == 'developer-id'
+    run: bash desktop/scripts/sign-macos.sh cleanup
+  # Keep existing archive/checksum/upload steps after successful builds.
+```
+
+Use step-level secret injection only for the explicitly selected, main-only signed
+step. Keep checkout credentials unpersisted and workflow token permissions at
+`contents: read` unless an existing publication step requires its own write scope.
+Do not give secrets to PR jobs or use `pull_request_target` for this integration.
+The helper deliberately clears Tauri's automatic certificate/notary variables from
+the build subprocess: the temporary keychain provides signing and the helper owns
+the single notarization submission. Do not pass secrets in build arguments.
+
+Keep archive, checksum and upload steps success-only: no `always()` or
+`continue-on-error` on the build or publication path. Archive the **post-stapling**
+app at the same path only after the helper succeeds, then retain the existing
+release workflow's validation. Tauri updater signatures are a separate concern.
+
+## Validation and cleanup
 
 Developer ID packaging uses a new password-protected temporary keychain, verifies
 the imported identity, and preserves/restores the user's existing keychain search
@@ -79,21 +185,23 @@ an `always()` workflow step retries cleanup after errors or cancellation. The
 helper refuses cleanup of unowned directories or paths outside this job's
 `RUNNER_TEMP`. Use GitHub-hosted ephemeral macOS runners: a machine crash or hard
 kill can prevent any cleanup handler, so this is not a persistent self-hosted
-runner secret-management design. Only the final ZIP/checksum are uploaded.
+runner secret-management design. Configure the consuming workflow to upload only
+its final archive/checksum and exclude all temporary signing state.
 
 The signed path verifies the app and bundled `kollab` sidecar, expected team,
 hardened runtime and secure timestamp. It submits a ZIP with `notarytool --wait`
 (30-minute wait limit), requires JSON status **Accepted**, staples and validates
-the ticket, rechecks the signature, and runs Gatekeeper assessment. It creates
-the distributable ZIP only **after** stapling. Rejection, timeout, bad signatures,
-missing sidecars, staple or Gatekeeper errors prevent artifact upload. A timeout
+the ticket, rechecks the signature, and runs Gatekeeper assessment. It returns
+success only after all of those checks and cleanup succeed. Rejection, timeout,
+bad signatures, missing sidecars, staple or Gatekeeper errors return nonzero. A timeout
 does not cancel Apple's server-side submission; use its submission ID in Apple's
 notary history before deciding whether to retry.
 
-Before publishing a signed download, on a clean Mac extract it and run:
+Before publishing a signed download, on a clean Mac extract it, set `ARCHIVE` to
+the existing workflow's archive filename, and run:
 
 ```bash
-shasum -a 256 -c Kollab-macos-<arch>-developer-id.zip.sha256
+shasum -a 256 -c "$ARCHIVE.sha256"
 codesign --verify --deep --strict --verbose=2 Kollab.app
 xcrun stapler validate Kollab.app
 spctl --assess --type execute --verbose=2 Kollab.app
@@ -114,8 +222,8 @@ Apple/Rust tools with fixture executables and never access the real keychain.
 
 ```bash
 python3 -m unittest discover -s desktop/tests -p 'test_apple_signing.py' -v
-bash -n desktop/scripts/package-macos.sh
-shellcheck desktop/scripts/package-macos.sh
+bash -n desktop/scripts/sign-macos.sh
+shellcheck desktop/scripts/sign-macos.sh
 python3 -m json.tool desktop/src-tauri/tauri.conf.json > /dev/null
 git diff --check
 ```

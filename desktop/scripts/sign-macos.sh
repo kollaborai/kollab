@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI packaging only: no default/login keychain changes and no automatic publishing.
+# Wrap the caller's Tauri build; archive/upload remain the caller's responsibility.
 set +x
 set -euo pipefail
 umask 077
@@ -61,7 +61,7 @@ cleanup() {
     security delete-keychain "$APPLE_SIGNING_STATE_DIR/signing.keychain-db" || result=1
   fi
   # Even if keychain cleanup failed, remove the unencrypted import/key files.
-  python3 - "$APPLE_SIGNING_STATE_DIR" "$result" <<'PY'
+  python3 - "$APPLE_SIGNING_STATE_DIR" "$result" <<'PY' || result=1
 from pathlib import Path
 import shutil, sys
 state = Path(sys.argv[1])
@@ -148,9 +148,9 @@ with open(sys.argv[1]) as stream:
     result = json.load(stream)
 print("Notarization submission:", result.get("id", "unknown"), "status:", result.get("status", "unknown"))
 if sys.argv[2] != "0":
-    raise SystemExit("notarytool failed or timed out; no distributable archive was created")
+    raise SystemExit("notarytool failed or timed out; do not archive or publish this app")
 if result.get("status") != "Accepted":
-    raise SystemExit("Apple did not accept the submission; no distributable archive was created")
+    raise SystemExit("Apple did not accept the submission; do not archive or publish this app")
 PY
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
@@ -159,28 +159,30 @@ PY
 }
 
 command=${1:-}
+mode=${APPLE_SIGNING_MODE:-unsigned}
 case "$command" in
-  preflight) preflight "${2:-}"; exit 0 ;;
+  preflight)
+    [ "$#" -le 2 ] || fail 'usage: sign-macos.sh preflight [MODE]'
+    preflight "${2:-$mode}"
+    exit 0
+    ;;
   cleanup) cleanup; exit $? ;;
-  package) ;;
-  *) fail 'usage: package-macos.sh preflight MODE | package MODE TARGET | cleanup' ;;
+  build)
+    if [ "$#" -lt 4 ] || [ "${3:-}" != -- ]; then
+      fail 'usage: sign-macos.sh build /path/Kollab.app -- COMMAND [ARGS...]'
+    fi
+    app=$2
+    shift 3
+    ;;
+  *) fail 'usage: sign-macos.sh preflight [MODE] | build /path/Kollab.app -- COMMAND [ARGS...] | cleanup' ;;
 esac
-mode=${2:-}
-target=${3:-}
 preflight "$mode"
-case "$target" in
-  aarch64-apple-darwin) arch=aarch64 ;;
-  x86_64-apple-darwin) arch=x86_64 ;;
-  *) fail 'only the existing aarch64 and x86_64 macOS targets are supported' ;;
+case "$app" in
+  /*/Kollab.app) ;;
+  *) fail 'the expected app must be an absolute path ending in /Kollab.app' ;;
 esac
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/../.." && pwd)
-target_dir=${CARGO_TARGET_DIR:-"$repo_root/desktop/src-tauri/target"}
-artifact_dir=${APPLE_ARTIFACT_DIR:-"$repo_root/desktop/dist"}
-app="$target_dir/$target/release/bundle/macos/Kollab.app"
-archive="Kollab-macos-$arch-$mode.zip"
-if [ -e "$artifact_dir/$archive" ] || [ -e "$artifact_dir/$archive.sha256" ]; then
-  fail 'refusing to overwrite an existing distributable archive'
+if [ -e "$app" ] || [ -L "$app" ]; then
+  fail 'expected app path already exists; use a fresh build output directory'
 fi
 if [ "$mode" = developer-id ]; then prepare_keychain; fi
 
@@ -190,8 +192,8 @@ if [ "$mode" = developer-id ]; then prepare_keychain; fi
   unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY APPLE_API_KEY_PATH
   if [ "$mode" = unsigned ]; then APPLE_SIGNING_IDENTITY=-; fi
   export APPLE_SIGNING_IDENTITY
-  cd "$repo_root/desktop"
-  cargo tauri build --target "$target" --bundles app --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}'
+  # Preserve the caller's working directory and argument boundaries. Never eval.
+  "$@"
 )
 [ -d "$app" ] || fail 'Tauri did not produce Kollab.app at the expected target path'
 [ -f "$app/Contents/MacOS/kollab" ] || fail 'Kollab.app is missing its bundled kollab sidecar'
@@ -199,9 +201,7 @@ if [ "$mode" = developer-id ]; then
   verify_signature "$app"
   verify_signature "$app/Contents/MacOS/kollab"
   notarize "$app"
+  cleanup || fail 'signing cleanup incomplete; do not archive or publish this app'
+  trap - EXIT INT TERM
 fi
-mkdir -p "$artifact_dir"
-# This archive is created AFTER stapling, so the downloaded app carries its ticket.
-ditto -c -k --sequesterRsrc --keepParent "$app" "$artifact_dir/$archive"
-(cd "$artifact_dir" && shasum -a 256 "$archive" > "$archive.sha256")
-printf 'Prepared %s (%s)\n' "$archive" "$mode"
+printf 'Prepared %s (%s); the caller may now archive it\n' "$app" "$mode"
