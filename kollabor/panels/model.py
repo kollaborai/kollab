@@ -105,6 +105,29 @@ def _one_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
+def _acp_option_values(option: dict) -> list[str]:
+    values: list[str] = []
+    for candidate in option.get("options") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if "value" in candidate:
+            values.append(str(candidate["value"]))
+        for nested in candidate.get("options") or []:
+            if isinstance(nested, dict) and "value" in nested:
+                values.append(str(nested["value"]))
+    return values
+
+
+def _acp_option(options: list[dict], category: str) -> dict | None:
+    category = category.lower()
+    for option in options:
+        if str(option.get("category") or "").lower() == category:
+            return option
+        if str(option.get("id") or "").lower() in {category, f"{category}_level"}:
+            return option
+    return None
+
+
 class ModelPanel:
     """``/model``: pick the active provider's model; set reasoning effort."""
 
@@ -131,9 +154,38 @@ class ModelPanel:
             return base
         provider = active.get_provider() or ""
         if provider == "acp":
+            service = getattr(ctx, "_event_bus", None)
+            service = service.get_service("acp_orchestrator") if service is not None else None
+            getter = getattr(service, "advertised_config_options", None)
+            options = getter() if callable(getter) else []
+            model = _acp_option(options, "model")
+            effort = _acp_option(options, "thought_level") or _acp_option(options, "effort")
             base["title"] = "Harness Models"
-            base["notice"] = "Model and effort are managed by the active harness. Use Loadouts to change harnesses."
-            base["row_actions"] = base["toolbar_actions"] = []
+            base["notice"] = "Choose values advertised by the active ACP harness."
+            if model is not None:
+                values = _acp_option_values(model)
+                base["rows"] = [
+                    {
+                        "id": value,
+                        "label": value,
+                        "detail": "current" if value == model.get("currentValue") else "",
+                        "group": model.get("name", "Model"),
+                        "current": value == model.get("currentValue"),
+                        "badges": [],
+                    }
+                    for value in values
+                ]
+            if effort is not None:
+                base["controls"] = [{
+                    "id": "level",
+                    "type": "dropdown",
+                    "label": effort.get("name", "Reasoning Effort"),
+                    "action": "effort",
+                    "value": effort.get("currentValue", ""),
+                    "options": _acp_option_values(effort),
+                }]
+            if not base["rows"] and not base["controls"]:
+                base["notice"] = "The active ACP harness advertises no model or effort options."
             return base
         current = active.get_model() or ""
         handler = model_handler(ctx)
@@ -159,7 +211,28 @@ class ModelPanel:
         pm = getattr(ctx, "_profile_manager", None)
         active = pm.get_active_profile() if pm is not None else None
         if active is not None and active.get_provider() == "acp":
-            return error_result("Model and effort are managed by the active harness.")
+            handler = model_handler(ctx)
+            if action == "refresh":
+                return ok_result("ACP options refreshed.", panel=await self.describe(ctx, {}))
+            if action == "select":
+                model = str(payload.get("model") or payload.get("id") or "").strip()
+                if not model:
+                    raise PanelError("a model value is required", errors={"model": "Choose a model."})
+                outcome = await handler._set_acp_option("model", model)
+                if not outcome.success:
+                    return error_result(_one_line(outcome.message))
+                return ok_result(f"ACP model set to {model}.", panel=await self.describe(ctx, {}))
+            if action == "effort":
+                level = payload.get("level", payload.get("value", payload.get("effort")))
+                if not isinstance(level, str) or not level.strip():
+                    raise PanelError("an effort level is required", errors={"level": "Choose a level."})
+                outcome = await handler._set_acp_option("thought_level", level.strip())
+                if not outcome.success:
+                    outcome = await handler._set_acp_option("effort", level.strip())
+                if not outcome.success:
+                    return error_result(_one_line(outcome.message))
+                return ok_result(f"ACP reasoning effort set to {level.strip()}.", panel=await self.describe(ctx, {}))
+            return unknown_action(self.name, action)
         if action == "refresh":
             return ok_result("Catalog refreshed.", panel=await self.describe(ctx, {}))
         if action == "select":
