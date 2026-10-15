@@ -707,10 +707,13 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
       />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
-        <ToolFallbackArgs
-          argsText={argsText}
-          className={cn(isCancelled && "opacity-60")}
-        />
+        {/* A harness diff already shows the edit as Before/After; its raw args repeat it. */}
+        {!(Array.isArray(card?.content) && card.content.some((block) => asRecord(block)?.type === "diff")) && (
+          <ToolFallbackArgs
+            argsText={argsText}
+            className={cn(isCancelled && "opacity-60")}
+          />
+        )}
         {needsApproval && (
           <ToolFallbackApproval
             addResult={addResult}
