@@ -10,13 +10,10 @@ export function formatSessionName(
   return value.replace(/^\d{10}-/, "") || "session";
 }
 
-/** A chat's name where it is open (header, toolbar, Session settings). An agent
- * on another computer has no session name of its own, so it goes by its
- * identity, as its sidebar row does. */
-export function sessionHeading(session: Pick<Session, "name" | "session_id" | "identity" | "device">): string {
-  if (session.device) {
-    const identity = session.identity || session.name || "";
-    if (identity) return titleCase(identity);
-  }
+/** Agent identity leads everywhere; generated session names are a fallback. */
+export function sessionHeading(session: Pick<Session, "name" | "session_id" | "identity" | "device" | "agent">): string {
+  const identity = session.identity?.trim() || session.agent?.trim();
+  if (identity) return titleCase(identity);
+  if (session.device && session.name) return titleCase(session.name);
   return formatSessionName(session.name, session.session_id);
 }
