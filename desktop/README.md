@@ -29,7 +29,8 @@ about 58 MB). To watch its log, run the binary from a terminal:
 `.../Kollab.app/Contents/MacOS/kollab-desktop`.
 
 Release builds publish one unsigned `.app.zip` and one `.dmg` for each supported
-macOS architecture (`aarch64` and `x86_64`), with a sibling `.sha256` file for
+macOS architecture (`aarch64` and `x86_64`), targeting macOS 11 or newer to
+match the bundled CLI, with a sibling `.sha256` file for
 each archive. The archives are attached to the GitHub Release alongside the
 CLI binaries and are named `kollab-desktop-macos-<arch>-<version>.*`.
 
