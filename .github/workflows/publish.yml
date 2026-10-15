@@ -178,11 +178,15 @@ jobs:
         run: |
           # The in-app update check (VersionCheckService) and a binary's /upgrade
           # read /releases/latest, and install.sh downloads its binary from it.
-          # gh creates the release as a draft, uploads the binaries, then
-          # publishes it, so the latest release never lacks them.
+          # gh creates the release as a draft, uploads the binaries, desktop
+          # bundles, and checksums, then publishes it so the latest release is
+          # never missing a platform asset.
           ls -l dist/bin
           files=(dist/bin/*)
-          test "${#files[@]}" -eq 8 || { echo "::error::expected 4 binaries and 4 checksums"; exit 1; }
+          test "${#files[@]}" -eq 16 || {
+            echo "::error::expected 4 CLI binaries, 4 CLI checksums, 4 desktop archives, and 4 desktop checksums"
+            exit 1
+          }
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/bin/* --clobber
           else

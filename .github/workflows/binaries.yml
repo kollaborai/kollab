@@ -16,6 +16,7 @@ on:
       - pyproject.toml
       - packages/*/pyproject.toml
       - uv.lock
+      - desktop/**
   workflow_call:
     inputs:
       version:
@@ -73,4 +74,80 @@ jobs:
           path: |
             dist/bin/kollab-${{ matrix.platform }}
             dist/bin/kollab-${{ matrix.platform }}.sha256
+          if-no-files-found: error
+
+  desktop:
+    name: desktop/${{ matrix.platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            binary_platform: macos-aarch64
+            target: aarch64-apple-darwin
+            runner: macos-14
+          - platform: macos-x86_64
+            binary_platform: macos-x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download the CLI sidecar
+        uses: actions/download-artifact@v8
+        with:
+          name: kollab-${{ matrix.binary_platform }}
+          path: dist/bin
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      - name: Prepare the sidecar and release version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p desktop/src-tauri/binaries
+          cp "dist/bin/kollab-${{ matrix.binary_platform }}" \
+            "desktop/src-tauri/binaries/kollab-${{ matrix.target }}"
+          chmod +x "desktop/src-tauri/binaries/kollab-${{ matrix.target }}"
+          if [ -n "$VERSION" ]; then
+            VERSION="${VERSION#v}" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("desktop/src-tauri/tauri.conf.json")
+          config = json.loads(path.read_text())
+          config["version"] = os.environ["VERSION"]
+          path.write_text(json.dumps(config, indent=2) + "\n")
+          PY
+          fi
+
+      - name: Build unsigned Kollab.app
+        working-directory: desktop
+        run: cargo tauri build --bundles app
+
+      - name: Package unsigned desktop assets
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION:-dev}"
+          APP="desktop/src-tauri/target/release/bundle/macos/Kollab.app"
+          test -d "$APP"
+          mkdir -p dist/desktop
+          base="kollab-desktop-${{ matrix.platform }}-${VERSION}"
+          ditto -c -k --keepParent "$APP" "dist/desktop/${base}.app.zip"
+          hdiutil create -volname "Kollab" -srcfolder "$APP" \
+            -ov -format UDZO "dist/desktop/${base}.dmg"
+          for asset in dist/desktop/${base}.app.zip dist/desktop/${base}.dmg; do
+            shasum -a 256 "$asset" > "$asset.sha256"
+          done
+          ls -lh dist/desktop
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kollab-desktop-${{ matrix.platform }}
+          path: dist/desktop/*
           if-no-files-found: error
