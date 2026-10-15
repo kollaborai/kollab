@@ -213,6 +213,30 @@ and session restarts; unnamed sessions use their session id. Remote preferences
 include network, device, workspace and identity, so hiding one agent does not hide
 an agent with the same name elsewhere.
 
+## Chat presentation
+
+The chat header stays on one row. Its labels adapt to the chat pane's container
+width, including sidebar resizing. **Session Controls** holds model/profile,
+approval mode, context usage, full status/errors, MCP servers, the online roster,
+settings and clear-history actions. Dialogs remain mounted when the popover closes;
+closing one returns focus to its control. Chat/Trajectory stay directly available.
+
+Initialization records carry `metadata.system_initialization: true` and are omitted
+from Chat, while original context remains available to the model and Trajectory.
+Resume preserves explicit initialization provenance rather than classifying user
+messages by their headings. Existing resumed bases can recover that display flag
+through a bounded read-only match of their original initialization UUID and exact
+content; missing proof leaves the message visible. The raw history mirror and
+its incremental-sync anchor remain unchanged. Old ACP `Reply from … [thread:…]` batches are projected
+as individual peer messages only when persisted source is `observation`; human
+examples remain user text. Routing ids and raw prompt text stay in history without
+being printed in chat bubbles, and distinct replies are not deduplicated.
+
+Online notices are quiet, transparent activity rows with optional details, without
+a background or border. Markdown list-item containers use normal whitespace so
+the renderer's structural newlines do not put a marker on an empty first line;
+paragraph and fenced-code formatting remain intact.
+
 ## Auth
 
 Every engine route except `/health`, `/version`, `/status`, `/ready`, `/` needs
