@@ -500,7 +500,7 @@ class EngineSession:
                 if isinstance(snapshot, dict)
                 else getattr(snapshot, "session_id", "")
             ) or ""
-            if native_session_id and not self.conversation_id:
+            if native_session_id and not getattr(self, "conversation_id", ""):
                 self.conversation_id = native_session_id
             if native_session_id and display_history and display_history[0].get("role") == "user":
                 # Old resumed bases lost initialization metadata. Recover it
