@@ -201,6 +201,18 @@ desktop logo header consumes that height with no added vertical padding, so both
 bottom borders meet at the divider. The mobile sheet uses its independent 3rem
 header. Unmount disconnects the observer and clears the measured height.
 
+Each local, offline or remote agent row offers **Hide Agent** in its action menu
+and right-click menu. Hiding changes browser-local visibility only: it does not
+select another chat, stop an agent, remove history or change Hub presence. The
+footer's **Hidden Agents** list can show one agent or **Show All**, including
+entries absent from the latest roster. Group counts reflect visible rows.
+Preferences use `kollab.sidebar.hidden-agents` in local storage; blocked or invalid
+storage still permits in-memory hiding. Open tabs synchronize storage changes.
+Local preferences follow identity plus workspace across running/offline transitions
+and session restarts; unnamed sessions use their session id. Remote preferences
+include network, device, workspace and identity, so hiding one agent does not hide
+an agent with the same name elsewhere.
+
 ## Auth
 
 Every engine route except `/health`, `/version`, `/status`, `/ready`, `/` needs
