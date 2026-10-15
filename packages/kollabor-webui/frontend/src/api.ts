@@ -379,6 +379,8 @@ export type SessionState = {
 export type EngineConfig = {
   engine_url?: string;
   token?: string;
+  server_version?: string;
+  engine_version?: string;
 };
 
 export type SessionEvent = {
@@ -776,9 +778,14 @@ export class EngineApi {
 
   getHistory(sessionId: string, limit?: number) {
     const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-    return this.json<{ history: HistoryMessage[]; last_turn_error?: TurnError | null }>(
-      `/sessions/${encodeURIComponent(sessionId)}/history${query}`,
-    );
+    return this.json<{
+      history: HistoryMessage[];
+      last_turn_error?: TurnError | null;
+      /** Where the history came from: the engine's mirror or this disk. */
+      source?: "mirror" | "disk";
+      /** True when a background reconcile is still refreshing it. */
+      stale?: boolean;
+    }>(`/sessions/${encodeURIComponent(sessionId)}/history${query}`);
   }
 
   clearHistory(sessionId: string) {

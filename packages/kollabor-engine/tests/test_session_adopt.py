@@ -109,15 +109,21 @@ async def test_concurrent_requests_open_an_agent_once(monkeypatch, registry):
 def test_a_session_route_opens_the_agent_it_names(monkeypatch, registry):
     monkeypatch.setattr(HubBridge, "discover_sessions", lambda self, use_cache=False: [_row()])
 
-    async def refresh_history():
-        return [{"role": "user", "content": "from the terminal"}]
+    async def get_history_nonblocking(limit=None):
+        return {
+            "session_id": "a1b2c3",
+            "history": [{"role": "user", "content": "from the terminal"}],
+            "last_turn_error": None,
+            "source": "mirror",
+            "stale": False,
+        }
 
     async def adopt(found):
         return SimpleNamespace(
             session_id=found["session_id"],
             alive=True,
             last_turn_error=None,
-            refresh_history=refresh_history,
+            get_history_nonblocking=get_history_nonblocking,
         )
 
     monkeypatch.setattr(EngineSession, "adopt", staticmethod(adopt))

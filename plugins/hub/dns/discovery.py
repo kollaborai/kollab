@@ -272,6 +272,19 @@ def verify_manifest(payload: dict, target: DiscoveryTarget, *, now: float | None
         raise DiscoveryError("invalid_document", str(exc) or "signature verification failed") from exc
 
 
+async def verify_manifest_async(
+    payload: dict, target: DiscoveryTarget, *, now: float | None = None
+) -> DiscoveryResult:
+    """verify_manifest off the event loop.
+
+    RFC 8785 canonicalization plus the Ed25519 check are CPU-bound; the
+    resolver runs one per discovery, and on the loop that latency lands on
+    every session this process serves. The sync form stays for synchronous
+    callers and tests.
+    """
+    return await asyncio.to_thread(verify_manifest, payload, target, now=now)
+
+
 class _PublicResolver(aiohttp.abc.AbstractResolver):
     """Give the connector only validated numeric addresses; no second DNS lookup."""
 
@@ -354,7 +367,7 @@ async def _discover(value: str, *, ca: str, private_cidrs: tuple[str, ...]) -> D
                 raise DiscoveryError("invalid_txt", "u must select a same-origin HTTPS discovery document")
             target = selected
     target, payload = await _fetch_json(target, resolver, ca=ca, private_cidrs=private_cidrs)
-    result = verify_manifest(payload, target)
+    result = await verify_manifest_async(payload, target)
     if hint and hint.get("k") and hint["k"] != result.manifest["coordinator"]["public_key"]:
         raise DiscoveryError("key_conflict", "TXT key hint differs from document signer")
     return result
@@ -411,10 +424,12 @@ async def fetch_agent_card(result: DiscoveryResult, *, ca: str = "", private_cid
     pins. Missing Card means identity-only; no speculative endpoint is probed.
     Generic capabilities/interfaces live exclusively in the signed A2A Card.
     """
-    verified = verify_manifest(result.manifest, normalize_target(result.discovery_url))
+    verified = await verify_manifest_async(
+        result.manifest, normalize_target(result.discovery_url)
+    )
     if not verified.manifest["endpoints"].get("agent_card"):
         return None
-    from .a2a_signing import resolve_agent_card_url, verify_agent_card
+    from .a2a_signing import resolve_agent_card_url, verify_agent_card_async
 
     url = resolve_agent_card_url(verified.origin, verified.manifest["endpoints"].get("agent_card"))
     if url is None:
@@ -425,7 +440,7 @@ async def fetch_agent_card(result: DiscoveryResult, *, ca: str = "", private_cid
             _, payload = await _fetch_json(
                 target, dns.asyncresolver.Resolver(), ca=ca, private_cidrs=private_cidrs, card=True
             )
-            verification = verify_agent_card(
+            verification = await verify_agent_card_async(
                 payload,
                 origin=verified.origin,
                 pinned_public_key=verified.manifest["coordinator"]["public_key"],

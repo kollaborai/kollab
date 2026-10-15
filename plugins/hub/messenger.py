@@ -194,7 +194,7 @@ class PrivateDirectoryRemoteMessageAuthorizer:
         self._directory = directory
         self._target_uri = target_uri
 
-    def __call__(
+    async def __call__(
         self, peer_designation: str, peer_public_key: str, message: HubMessage
     ) -> bool:
         authorization = _remote_message_authorization(message)
@@ -202,7 +202,7 @@ class PrivateDirectoryRemoteMessageAuthorizer:
             return False
         try:
             body = remote_message_proof_body(message)
-            principal = self._directory.authorize_request(
+            principal = await self._directory.authorize_request_async(
                 authorization["credential_jws"],
                 authorization["grant_jws"],
                 authorization["proof_jws"],

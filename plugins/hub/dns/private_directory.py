@@ -13,6 +13,7 @@ revocations, and replay records; private keys remain with the calling device.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import hashlib
 import json
@@ -1146,6 +1147,34 @@ class PrivateDirectory:
             grant_expires_at=grant_claims["exp"],
         )
 
+
+    async def authorize_request_async(
+        self,
+        credential_jws: str,
+        grant_jws: str,
+        proof_jws: str,
+        *,
+        body: bytes,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> Any:
+        """authorize_request off the event loop.
+
+        Three JWS signature checks per request are CPU-bound (PyNaCl); the
+        relay's HTTP handlers await this so a burst of authorizations cannot
+        stall the event loop every session shares.
+        """
+        return await asyncio.to_thread(
+            self.authorize_request,
+            credential_jws,
+            grant_jws,
+            proof_jws,
+            body=body,
+            method=method,
+            path=path,
+            **kwargs,
+        )
     def revalidate(
         self,
         principal: AuthorizedPrincipal,
@@ -1471,6 +1500,16 @@ def _verify_jws(
     except (BadSignatureError, ValueError) as exc:
         raise CredentialError("invalid JWS signature") from exc
     return claims
+
+
+async def verify_pairing_proof_async(*args: Any, **kwargs: Any):
+    """verify_pairing_proof off the event loop.
+
+    PyNaCl's Ed25519 check is CPU-bound; the relay runs it per enrollment
+    and per pairing, and on the loop that latency lands on every session
+    this relay serves.
+    """
+    return await asyncio.to_thread(verify_pairing_proof, *args, **kwargs)
 
 
 def _verify_pairing_challenge(

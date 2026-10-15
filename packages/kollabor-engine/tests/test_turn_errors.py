@@ -43,6 +43,7 @@ def session():
         pid=1,
         subscribe=lambda: events,
         unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
         state=SimpleNamespace(
             get_conversation=AsyncMock(
                 return_value=SimpleNamespace(messages=conversation)
@@ -76,6 +77,13 @@ async def test_the_last_failed_turn_is_remembered_until_a_turn_succeeds(session)
 @pytest.mark.asyncio
 async def test_history_returns_the_turn_error_in_place(client, session):
     session.last_turn_error = {"message": "provider down", "history_length": 3}
+
+    body = (await client.get(f"/sessions/{session.session_id}/history")).json()
+    for _ in range(100):
+        if len(session.history) == 3:
+            break
+        await asyncio.sleep(0.02)
+    assert len(session.history) == 3
 
     body = (await client.get(f"/sessions/{session.session_id}/history")).json()
     assert len(body["history"]) == 3

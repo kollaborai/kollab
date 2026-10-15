@@ -33,6 +33,7 @@ from kollabor_events.permissions_models import ApprovalMode
 
 from .daemon_pool import DaemonHandle, get_daemon_pool
 from .history_provenance import mark_system_initialization
+from .history_store import read_history_from_disk_async
 from .history_xml_tools import web_history
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ def inline_profile_env(profile: Any) -> Dict[str, str]:
         for key, value in fields.items()
         if value not in (None, "")
     }
+
 
 _APPROVAL_MODE_MAP = {
     "confirm_all": ApprovalMode.CONFIRM_ALL,
@@ -178,6 +180,16 @@ class EngineSession:
         self._raw_history: List[Dict[str, Any]] = []
         self._history_anchor = ""
         self._history_lock = asyncio.Lock()
+
+        # The daemon's own conversation id (its conversations/<id>.jsonl
+        # name). Arrives with the first answered snapshot; before that, disk
+        # seeding falls back to the newest log in the workspace's folder.
+        self.conversation_id = ""
+        # The coalesced background refresh (get_history_nonblocking). One task
+        # at a time; a request that arrives while one runs reuses it.
+        self._history_refresh_task: Optional[asyncio.Task] = None
+        # True while a refresh is in flight, for the UI's syncing badge.
+        self.history_syncing = False
 
         self.total_turns = 0
         self.total_input_tokens = 0
@@ -358,7 +370,9 @@ class EngineSession:
                 # Its folder is on that computer: what its own daemon reports.
                 self.workspace = (await self.state.get_system_info()).cwd or None
         except Exception as e:
-            logger.debug("session %s: could not read its profile: %s", self.session_id, e)
+            logger.debug(
+                "session %s: could not read its profile: %s", self.session_id, e
+            )
 
     async def shutdown(self) -> None:
         for task in (self._facts_task, self._event_task):
@@ -418,7 +432,6 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-
     async def refresh_history(self) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
@@ -442,7 +455,9 @@ class EngineSession:
                 )
                 return self.history
             except Exception as e:
-                logger.debug("session %s history refresh failed: %s", self.session_id, e)
+                logger.debug(
+                    "session %s history refresh failed: %s", self.session_id, e
+                )
                 return self.history
 
             messages = getattr(snapshot, "messages", None)
@@ -484,7 +499,9 @@ class EngineSession:
                 snapshot.get("session_id", "")
                 if isinstance(snapshot, dict)
                 else getattr(snapshot, "session_id", "")
-            )
+            ) or ""
+            if native_session_id and not self.conversation_id:
+                self.conversation_id = native_session_id
             if native_session_id and display_history and display_history[0].get("role") == "user":
                 # Old resumed bases lost initialization metadata. Recover it
                 # from typed source records for display only; the daemon and
@@ -504,6 +521,120 @@ class EngineSession:
             # XML tool turns in the shape the web renders for native tools.
             self.history = web_history(display_history)
             return self.history
+
+    # --- nonblocking open path -------------------------------------------
+
+    def _disk_conversation_dir(self) -> Optional[Path]:
+        """Where this session's daemon writes its conversation, when known.
+
+        A daemon on another computer keeps its history there: disk seeding is
+        for this machine's agents only.
+        """
+        if self.device or not self.workspace:
+            return None
+        from kollabor_config.config_utils import get_project_data_dir
+
+        return Path(get_project_data_dir(Path(self.workspace))) / "conversations"
+
+    def _disk_seed_id(self, conversations_dir: Path) -> str:
+        """Which saved conversation belongs to this session, without an RPC.
+
+        Once the daemon answered once, its own snapshot id is exact. Before
+        that, the newest log in this workspace's folder is the candidate --
+        the engine created this session moments ago, so a log already here
+        belongs to it (the daemon resumed or adopted it). A wrong guess is
+        corrected on the next answered refresh: the seed only accelerates
+        the first open, the daemon's answer replaces it wholesale.
+        """
+        if self.conversation_id:
+            return self.conversation_id
+        try:
+            newest = max(
+                conversations_dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                default=None,
+            )
+        except OSError:
+            return ""
+        return newest.stem if newest else ""
+
+    async def get_history_nonblocking(
+        self, limit: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """The conversation without waiting on the daemon.
+
+        The warm mirror answers at once; a cold one is seeded from this
+        machine's disk. A background refresh (coalesced: one task, however
+        many requests arrive) reconciles with the daemon afterward, and the
+        ``history_updated`` event it emits when it lands brings late
+        replies to the page instead of throwing them away.
+        """
+        stale = False
+        source = "mirror"
+        if not self.history and self.alive:
+            conversations_dir = self._disk_conversation_dir()
+            if conversations_dir is not None:
+                conversation_id = self._disk_seed_id(conversations_dir)
+                if conversation_id:
+                    seeded = await read_history_from_disk_async(
+                        conversations_dir, conversation_id, limit
+                    )
+                    if seeded:
+                        self.history = seeded
+                        self._history_anchor = (
+                            ""  # seed is not anchor-safe: refetch whole
+                        )
+                        source, stale = "disk", True
+        history = self.history[-limit:] if limit else self.history
+        self._schedule_refresh()
+        turn_error = dict(self.last_turn_error) if self.last_turn_error else None
+        if turn_error and limit and history is not self.history:
+            turn_error = {
+                **turn_error,
+                "history_length": max(
+                    0, turn_error["history_length"] - max(0, len(self.history) - limit)
+                ),
+            }
+        return {
+            "session_id": self.session_id,
+            "history": history,
+            "last_turn_error": turn_error,
+            "source": source,
+            "stale": stale,
+        }
+
+    def _schedule_refresh(self) -> None:
+        """One background refresh, however many opens asked for it."""
+        if not self.alive:
+            return
+        if (
+            self._history_refresh_task is not None
+            and not self._history_refresh_task.done()
+        ):
+            return
+        self.history_syncing = True
+
+        async def _run() -> None:
+            try:
+                await self.refresh_history()
+            except Exception as e:  # a background refresh never breaks a route
+                logger.debug(
+                    "session %s background refresh failed: %s", self.session_id, e
+                )
+            finally:
+                self.history_syncing = False
+                self._history_refresh_task = None
+                self._emit_event({"type": "history_updated"})
+
+        self._history_refresh_task = asyncio.get_running_loop().create_task(
+            _run(), name=f"session-history-{self.session_id}"
+        )
+
+    def _emit_event(self, event: Dict[str, Any]) -> None:
+        """Fan an engine-generated event out to this session's subscribers."""
+        if self.daemon is None:
+            return
+        self.daemon.fan_out(event)
 
     async def send_message(
         self,
@@ -606,6 +737,13 @@ class EngineSession:
                         else None
                     )
                     turn_error = ""
+
+                elif etype in ("hub_message", "tool_result"):
+                    # Mid-turn conversation movement (a background message
+                    # landed, a tool wrote its result): keep the mirror warm
+                    # without a per-event RPC -- one coalesced refresh serves
+                    # any burst. turn_complete does its own awaited refresh.
+                    self._schedule_refresh()
 
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw

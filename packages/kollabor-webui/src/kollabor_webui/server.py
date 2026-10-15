@@ -83,10 +83,27 @@ def create_app(
     # server's /engine proxy instead.
     @app.get("/api/config")
     async def get_config(request: Request):
+        from importlib.metadata import version as pkg_version
+
         from kollabor_engine.auth import read_token_from_disk
 
         url = engine_url if _is_local(request) else f"{request.base_url}engine"
-        return {"engine_url": url, "token": read_token_from_disk()}
+        try:
+            engine_version = (await engine.get("/version")).json().get("version", "")
+        except httpx.HTTPError:
+            engine_version = ""
+        try:
+            server_version = pkg_version("kollabor-webui")
+        except Exception:
+            server_version = ""
+        return {
+            "engine_url": url,
+            "token": read_token_from_disk(),
+            # A page whose bundle predates (or postdates) the running engine
+            # warns in the UI instead of failing on renamed API fields.
+            "server_version": server_version,
+            "engine_version": engine_version,
+        }
 
     @app.api_route("/engine/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def engine_proxy(path: str, request: Request):
