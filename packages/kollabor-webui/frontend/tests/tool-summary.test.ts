@@ -29,3 +29,26 @@ test("shell commands say what ran", () => {
   assert.equal(run("make build"), "Run · make build");
   assert.equal(run("git status"), "Git Status");
 });
+
+test("outgoing hub reply tool row labels Replied to <agent>", () => {
+  assert.equal(
+    summarizeToolCall("hub_reply", JSON.stringify({ to: "lapis", message: "done" })),
+    "Replied to lapis",
+  );
+  assert.equal(
+    summarizeToolCall("hub_reply", JSON.stringify({ to: "nephrite@devbox" })),
+    "Replied to nephrite@devbox",
+  );
+  assert.equal(
+    summarizeToolCall("hub_reply", JSON.stringify({ target: "sapphire" })),
+    "Replied to sapphire",
+  );
+  assert.equal(
+    summarizeToolCall("hub_reply", "{}"),
+    "Replied to agent",
+  );
+  assert.equal(
+    summarizeToolCall("hub_msg", JSON.stringify({ to: "zircon", reply_to: "msg-1" })),
+    "Replied to zircon",
+  );
+});
