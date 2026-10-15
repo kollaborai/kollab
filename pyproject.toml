@@ -21,7 +21,7 @@ pythonpath = [
 [project]
 name = "kollab"
 version = "0.16.0"
-description = "Terminal AI workspace with hooks, plugins, providers, and multi-agent collaboration"
+description = "AI agents across your computers: named agents that keep their memory, message each other, and use any model."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

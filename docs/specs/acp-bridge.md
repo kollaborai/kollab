@@ -240,7 +240,11 @@ The runner admits one prompt at a time. Everything else waits in a queue, first
 in first out. Your input and each request run as a prompt of their own, so each
 of those turns has exactly one origin. Replies and broadcasts, which nobody
 waits on, run together: whatever is waiting when a turn ends becomes one prompt,
-the newest 20 with a count of any older ones. At most 10 requests wait; past
+the newest 20 with a count of any older ones. That internal batch is stored in
+the shared agent HUD format, including sender, thread and reply identity. Hub
+already renders each incoming message in the terminal; the batch is never
+echoed as human input. Web history and reload reconstruct the peer cards from
+the HUD without a second user block. At most 10 requests wait; past
 that, a new one gets "claude is busy" at once, with an end frame whose outcome
 is `busy`. A hub message is queued only when the hub's wake rule
 (`_decide_hub_wake`) would wake a kollab agent for it. Everything else is
@@ -334,7 +338,7 @@ claude@home-server` and `hub_ask` settle on it.
 | `agent_thought_chunk` | thinking; history |
 | `tool_call`, `tool_call_update` | tool cards merged by tool call id: title, kind, status, diff or output; history |
 | `plan` | the current plan, replaced by each update; not history |
-| `usage_update` | context use and cost in the status bar, replaced by each update, never added up |
+| `usage_update` | context use and cost in the status bar, replaced by each update, never added up; Web UI counts use thousands with at most one decimal, truncated (`137657/475000` → `137.6k/475k Tokens`) |
 | `user_message_chunk` | only inside a load replay, which is swallowed |
 | the rest | logged |
 

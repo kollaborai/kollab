@@ -6,6 +6,7 @@ import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
+import { CliBadge } from "@/components/shell/CliBadge";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSessionName } from "@/utils/session-display";
+import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { cliHarness } from "@/utils/cli-harness";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -94,7 +96,7 @@ function FoldGroup({
           className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground w-full cursor-pointer"
         >
           <CollapsibleTrigger>
-            {label}
+            <span className="flex min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap">{label}</span>
             <span className="ml-auto flex shrink-0 items-center gap-1 pl-2">
               {count === undefined ? null : <span className="tabular-nums">{count}</span>}
               <ChevronDown className="size-3.5 transition-transform group-data-[state=closed]/fold:-rotate-90" />
@@ -426,9 +428,9 @@ export function AppSidebar({
         <FoldGroup
           label={
             <>
-              This Computer
+              <span className="shrink-0 whitespace-nowrap">This Computer</span>
               {network.device ? (
-                <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal">
+                <span className="text-muted-foreground ml-1 min-w-0 truncate font-normal" title={network.device}>
                   {`· ${network.device}`}
                 </span>
               ) : null}
@@ -452,6 +454,7 @@ export function AppSidebar({
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
                 const folder = session.workspace?.split("/").filter(Boolean).pop();
+                const harness = cliHarness(session);
                 const note = opening?.id === session.session_id ? opening : null;
                 const openProperties = (tab?: "chat") => {
                   setOpenMobile(false);
@@ -468,11 +471,7 @@ export function AppSidebar({
                           // the row's Opening… and any reason it failed stay in view.
                           if (await onSelectSession(session.session_id)) setOpenMobile(false);
                         }}
-                        title={
-                          task
-                            ? `${titleCase(gem)}: ${task}`
-                            : (session.external && session.workspace) || session.session_id
-                        }
+                        title={[sessionHeading(session), formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
                         // overflow-visible: the gem canvas overhangs its box for hats and props.
                         className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                       >
@@ -494,31 +493,36 @@ export function AppSidebar({
                           />
                         </span>
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="truncate text-[0.8125rem] leading-tight font-medium">
-                            {formatSessionName(session.name, session.session_id)}
+                          <span className="truncate text-[0.8125rem] leading-tight font-semibold">
+                            {sessionHeading(session)}
                           </span>
-                          {session.harness && (
-                            <span className="text-muted-foreground truncate text-[0.6875rem]" title={session.harness}>
-                              {session.harness}{session.acp_waiting ? " · Waiting for Approval" : ""}
-                            </span>
-                          )}
-                          <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
+                          <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
                             {note && !note.error ? (
                               "Opening…"
+                            ) : harness ? (
+                              <CliBadge harness={harness} />
                             ) : task ? (
                               task
                             ) : session.external ? (
-                              [titleCase(session.identity || session.agent || ""), folder ? `In ${folder}` : "Running"]
-                                .filter(Boolean)
-                                .join(" · ")
+                              folder ? `In ${folder}` : "Running"
                             ) : (
                               <>
-                                {titleCase(session.identity || "") || session.agent || "Unassigned"} ·{" "}
                                 {pool?.active && pool.solo ? "Off Hub · " : ""}
                                 {session.model || session.profile || "default"}
                               </>
                             )}
                           </span>
+                          {task && harness ? (
+                            <span className="text-muted-foreground truncate text-[0.6875rem]" title={task}>{task}</span>
+                          ) : null}
+                          {session.acp_waiting && (
+                            <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
+                          )}
+                          {harness && ((pool?.active && pool.solo) || (session.external && folder)) ? (
+                            <span className="text-muted-foreground truncate text-[0.6875rem]">
+                              {[pool?.active && pool.solo ? "Off Hub" : "", session.external && folder ? `In ${folder}` : ""].filter(Boolean).join(" · ")}
+                            </span>
+                          ) : null}
                           {note?.error ? <OpenError text={note.error} /> : null}
                         </div>
                       </SidebarMenuButton>
@@ -528,7 +532,7 @@ export function AppSidebar({
                           onClick={() => setPendingDelete(session)}
                           disabled={busy}
                           showOnHover
-                          aria-label={`Delete session ${session.session_id}`}
+                          aria-label={`Delete ${sessionHeading(session)} session`}
                         >
                           <Trash2 />
                         </SidebarMenuAction>
@@ -676,10 +680,9 @@ export function AppSidebar({
                                           : "Online"}
                                 </span>
                                 {note?.error ? <OpenError text={note.error} /> : null}
-                                {agent.harness ? (
-                                  <span className="text-muted-foreground truncate text-[0.6875rem]" title={agent.harness}>
-                                    {agent.harness}{agent.acp_waiting && up ? " · Waiting for Approval" : ""}
-                                  </span>
+                                <CliBadge harness={cliHarness({ harness: agent.harness })} className="text-muted-foreground text-[0.6875rem]" />
+                                {agent.acp_waiting && up ? (
+                                  <span className="truncate text-[0.6875rem] text-amber-600">Waiting for Approval</span>
                                 ) : null}
                               </div>
                             </SidebarMenuButton>
@@ -787,10 +790,7 @@ export function AppSidebar({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete This Session?</AlertDialogTitle>
             <AlertDialogDescription>
-              {formatSessionName(
-                pendingDelete?.name,
-                pendingDelete?.session_id,
-              )}{" "}
+              {pendingDelete ? sessionHeading(pendingDelete) : "This session"}{" "}
               will be stopped and its conversation removed. This cannot be
               undone.
             </AlertDialogDescription>

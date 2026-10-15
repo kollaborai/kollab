@@ -21,6 +21,7 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
+import { CliBadge } from "@/components/shell/CliBadge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -47,7 +48,8 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { sessionHeading } from "@/utils/session-display";
+import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { cliHarness } from "@/utils/cli-harness";
 
 const OPEN_SESSION_TIMEOUT_MS = 2_000;
 
@@ -79,6 +81,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 const api = new EngineApi();
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
+
+/** Keep context counts compact without rounding up the amount used. */
+function formatContextTokens(value: number): string {
+  return value < 1_000 ? String(Math.trunc(value)) : `${Math.trunc(value / 100) / 10}k`;
+}
 
 /** Harness cost, same rule as the terminal status bar (`_fmt_cost` in core_widgets.py). */
 function formatCost(cost: { amount?: string | number; currency?: string }): string {
@@ -209,15 +216,11 @@ function RuntimeShell({
         <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
         <span
           className="min-w-0 truncate text-sm font-semibold tracking-tight"
-          title={`${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
+          title={`${formatSessionName(session.name, session.session_id)} · ${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
         >
           {sessionLabel}
         </span>
-        {session.harness && (
-          <span className="text-muted-foreground max-w-48 truncate rounded border px-1.5 py-0.5 text-xs" title={session.harness}>
-            {session.harness}
-          </span>
-        )}
+        <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 rounded border px-1.5 py-0.5 text-xs" />
         {session.acp_waiting && (
           <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600" role="status">
             Waiting for Approval
@@ -225,7 +228,7 @@ function RuntimeShell({
         )}
         {session.harness && session.acp_usage?.size !== undefined && (
           <span className="text-muted-foreground text-xs" title="Current harness context usage">
-            {session.acp_usage.used ?? 0}/{session.acp_usage.size} Tokens
+            {formatContextTokens(session.acp_usage.used ?? 0)}/{formatContextTokens(session.acp_usage.size)} Tokens
             {session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}
           </span>
         )}

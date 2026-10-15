@@ -170,6 +170,30 @@ The current UI is ugly but it does real work. Do not lose:
 - **history** — `GET /sessions/{id}/history`, `DELETE` to clear.
 - **cancel** — `POST /sessions/{id}/cancel`.
 
+### Shared sidebar presentation and resizing
+
+The local sidebar, chat header and settings identify a session by its agent/gem
+identity first. Generated conversation codenames stay in tooltips. Harness badges
+use the shared local SVG marks for Codex, Claude and Gemini; Antigravity uses the
+Google mark and other CLI profiles use the generic CLI badge. The device heading
+keeps `This Computer` together while the adjacent device name may truncate.
+
+The desktop divider uses the shared `SidebarProvider` width variable and
+`SidebarRail` separator. Pointer dragging captures the pointer, supports either
+sidebar side, and clamps the width to 220–480px while leaving at least 320px for
+chat. It disables width transitions and text selection during the drag, restoring
+selection/cursor styles and releasing capture on completion, cancellation, window
+blur, collapse or unmount. Arrow keys move the divider 8px, Shift uses 32px, and
+Home/End choose its current minimum/maximum. The focusable vertical separator
+announces its width and bounds. The existing trigger still collapses/expands; a
+collapsed rail restores the sidebar with click or Enter instead of starting a drag.
+
+The width is device-local (`localStorage`, key `kollab.sidebar.width`) and survives
+reload. Invalid or blocked storage does not prevent resizing. An explicit provider
+`--sidebar-width` style remains the initial width ahead of the saved default, and a
+user resize may change it within the same bounds. The mobile sheet retains its
+existing 18rem width and toggle behavior; it has no resize rail.
+
 ## Auth
 
 Every engine route except `/health`, `/version`, `/status`, `/ready`, `/` needs

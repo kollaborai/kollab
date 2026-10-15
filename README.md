@@ -2,66 +2,44 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/kollab)](https://pypi.org/project/kollab/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/kollaborai/kollab/blob/main/LICENSE)
+
+AI agents across your computers. Each one has a name and keeps its memory, they message each other, and you pick the model. MIT licensed.
 
 <p align="center">
-  <strong>A terminal AI workspace for people who want their agents, tools, providers, plugins, and workflows to share one inspectable runtime.</strong>
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/hero-dark.webp" alt="A Kollab chat where the koordinator agent has Claude Code fix a failing test and Lapis review the diff." width="100%">
 </p>
+
+```bash
+uv tool install kollab
+kollab                    # start an agent in this folder
+kollab service install    # keep one running on a server
+```
+
+[Docs](https://kollabor.ai/docs) · [Agent network](https://kollabor.ai/docs/network) · [Providers](https://kollabor.ai/docs/loadouts)
+
+**New:** Claude Code and Codex join the network as named agents, beside the ones Kollab runs itself. They sit in the same roster, other agents can message them, and their permission requests come to Kollab's approval prompt. Kollab itself can also run as an agent inside Zed and other ACP clients. [Details below.](https://github.com/kollaborai/kollab#bring-claude-code-and-codex)
+
+## See It Run in a Terminal
 
 <p align="center">
-  <a href="docs/getting-started.md">Getting Started</a> ·
-  <a href="docs/providers.md">Providers</a> ·
-  <a href="docs/features/loadouts.md">Models</a> ·
-  <a href="docs/features/agents.md">Agents</a> ·
-  <a href="packages/kollabor-webui/README.md">Web UI</a> ·
-  <a href="docs/plugins/overview.md">Plugins</a> ·
-  <a href="docs/guides/hub-quick-start.md">Hub</a>
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/kollab-hero.gif" alt="Kollab running: koordinator spins up three agents that build and test checkout rate limiting together; a second pane SSHes into a server, joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests" width="100%">
 </p>
 
-<p align="center">
-  <img src="docs/media/kollab-hero.gif" alt="Kollab running: koordinator spins up three agents that build and test checkout rate limiting together; a second pane SSHes into a server, joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests" width="100%">
-</p>
-
-Kollab is a terminal-native AI workspace for developers who want more than a
-single chat box. It brings interactive chat, slash commands, provider profiles,
-model loadouts, tool permissions, MCP servers, plugins, pipe mode, a local browser
-UI, and collaborating agents into one CLI.
-
-The point is not to hide the machinery. Kollab gives you a fast daily AI
-terminal, but it also exposes the runtime underneath it: every meaningful stage
-is hookable. User input, LLM requests, streamed responses, message display, tool
-calls, and post-tool results all move through an event pipeline that plugins can
-observe, transform, or block.
-
-That lets Kollab do things that are still unusual in a terminal AI app: multiple
-agents can discover each other without a central server, exchange hub messages,
-carry task ledgers across context compaction, keep vault-backed memory, receive
-scheduled prompts, search and load tools on demand, preserve oversized tool
-results as inspectable artifacts, and advertise identity, trust, and capabilities
-through an experimental Agent DNS layer.
-
-Kollab is still beta, and some of the ambitious pieces are being hardened. But
-the shape is already there: a local, inspectable AI workspace that can grow from
-one chat session into a small team of coordinated agents.
+koordinator starts three agents that build and test a change together. A second terminal on a server joins the network with a one-time code, receives the laptop's settings, pulls the pushed code and runs the tests.
 
 ## What Kollab Does
 
-- Chat with frontier, local, or OpenAI-compatible models from a fast terminal UI.
-- Switch providers and model profiles without leaving the session.
-- Browse the model registry and activate named loadouts for model, effort, sampling, and output-budget presets.
-- Use a ChatGPT subscription through OpenAI OAuth, or bring API keys for other providers.
-- Run one-shot prompts and shell pipelines with `kollab -p`.
-- Switch the session workspace at runtime so later file and terminal tools target a different project directory.
-- Connect MCP servers for filesystems, GitHub, databases, browsers, search, and custom tools.
-- Use built-in `web-search` and `web-fetch` tools with smart content extraction and bounded results.
+- Run named agents on all your computers. They find each other, message `agent@device`, and keep their memory between sessions. Each machine dials out on port 443, so nothing needs an open port.
+- Bring Claude Code and Codex onto that network as named agents, and use Kollab from Zed and other ACP clients with `kollab acp`.
+- Add MCP servers, CLI tools, and skills from one Apps screen: `/apps` in the terminal, the Apps button in the browser UI.
+- Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone.
+- Pick the model for each agent: Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint, with named loadouts for model, effort, and sampling. Switch with `/llm` without leaving the session.
+- Chat in a fast terminal UI, or run one-shot prompts and shell pipelines with `kollab -p`.
 - Gate shell, file, and MCP tool use through risk-aware approvals.
-- Search and load native or MCP tools on demand instead of injecting every schema into every request.
+- Load tools on demand instead of injecting every schema into every request, and keep oversized tool results as inspectable artifacts.
 - Launch specialized agents from bundled, global, or project-local definitions.
-- Coordinate multiple terminal agents through the hub: status, messages, task ledgers, vault memory, attach mode, and recurring prompts.
-- Keep long-running tasks alive across compaction with checkpoints, QA review, and reminder snoozes.
-- Resolve agents by identity, capability, and trust with the experimental Agent DNS layer.
-- Start the local engine and assistant-ui browser client together with `kollab --web-ui`.
-- Extend the runtime with Python plugins, slash commands, widgets, XML tool tags, and JSON config hooks.
+- Extend the runtime with Python plugins, slash commands, widgets, XML tool tags, and JSON config hooks. Every stage of a turn is hookable.
 - Save, resume, inspect, and compact conversations as work evolves.
 
 ## Why People Notice It
@@ -85,7 +63,7 @@ were approved, and which hooks or plugins changed the flow.
 | --- | --- |
 | Terminal chat | Streaming responses, command menu, status layout, themes, widgets, conversation history, and resume |
 | Providers and profiles | Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible endpoints |
-| OpenAI OAuth | `kollab --login openai` for ChatGPT subscription-backed usage without an API key |
+| OpenAI sign-in | `kollab --login openai` signs in with a browser instead of an API key |
 | Model registry and loadouts | Catalog metadata, context windows, pricing, provider-aware sampling, reasoning effort, and named `/llm` presets |
 | Pipe mode | `git diff \| kollab "review this" -p --timeout 5min` for scripts, CI, shell workflows, and automation |
 | Tool permissions | Approval modes, risk assessment, session/project approvals, blocked tools, trusted tools, and safe wildcard matching |
@@ -93,8 +71,10 @@ were approved, and which hooks or plugins changed the flow.
 | Context protection | Aggregate tool-output budgets with lossless `.output` artifacts and bounded previews when context gets large |
 | Agent system | Bundled agents (`bundles/agents/`), optional local/global agents, **[Agent Skills](https://agentskills.io/specification)** modules (`bundles/skills/` + `.kollab/skills/` + `~/.kollab/skills/`), and dynamic prompts |
 | Agent hub | Peer discovery, identity/bundle mapping, hub messages, broadcasts, task ledger, checkpoint/snooze/QA flows, output capture, vault memory, cron messages, Telegram bridge, and org launch files |
+| Harness agents (ACP) | Claude Code and Codex as named agents on the network, and `kollab acp` to use Kollab from Zed and other ACP clients |
 | Agent DNS | Experimental identity, trust, capability lookup, Ed25519 keys, AID-style TXT export, ARDP-style registration payloads, and DNS roster commands |
 | Plugin system | Event hooks, custom commands, startup info, config widgets, XML tags, context injection, and clean shutdown |
+| Apps | MCP servers, CLI tools, and skills from one `/apps` screen, with search across the official MCP Registry |
 | Engine, web UI, and attach mode | Local FastAPI engine, assistant-ui browser client, bearer-token wiring, RPC state services, multi-context daemons, and attach workflows |
 
 ## Agent Hub
@@ -183,14 +163,14 @@ machine can authenticate and deliver messages over the network. It is disabled
 by default, always requires the handshake, and refuses to bind a plaintext port
 without an explicit opt-in. This historical direct stream transport is separate
 from the WSS relay and the standard A2A workspace receiver. See the
-[direct endpoint reference](docs/specs/hub-remote-endpoint.md).
+[direct endpoint reference](https://github.com/kollaborai/kollab/blob/main/docs/specs/hub-remote-endpoint.md).
 
 ### Connect agents across machines
 
 `/connect` makes the agents on your other machines part of the same hub. A hub
 message to `agent@device` reaches that machine and wakes that agent; the rest of
 the network observes it, like the local hub. Start with the
-[connect guide](docs/guides/connect.md):
+[connect guide](https://github.com/kollaborai/kollab/blob/main/docs/guides/connect.md):
 
 ```text
 # on the machine that is already connected
@@ -211,8 +191,8 @@ Run your own directory on your own domain with one command, `kollab relay serve
 --domain agents.example.com`: it prints the DNS record and the proxy routes it still
 needs, and `--install` keeps it running as a systemd service (`kollab relay run
 --config` is the form for several workers). The
-[agent network contract](docs/specs/agent-network-simple-flow.md) is the design;
-the [public beacon contract](docs/specs/agent-public-beacon.md) covers the relay's
+[agent network contract](https://github.com/kollaborai/kollab/blob/main/docs/specs/agent-network-simple-flow.md) is the design;
+the [public beacon contract](https://github.com/kollaborai/kollab/blob/main/docs/specs/agent-public-beacon.md) covers the relay's
 routes, limits and key handling.
 
 ### How the network works
@@ -221,31 +201,65 @@ Both machines dial out to the directory on port 443, so nothing needs an open
 port. The directory relays frames by device key and can't open them.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/topology-dark.svg">
-  <img alt="Both machines' kollab daemons dial out to kollabor.ai on port 443; the relay forwards frames between them without opening them." src="docs/diagrams/agent-network/topology-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/topology-dark.svg">
+  <img alt="Both machines' kollab daemons dial out to kollabor.ai on port 443; the relay forwards frames between them without opening them." src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/topology-light.svg">
 </picture>
 
 Every message rides five layers deep. The directory reads the outer two; only
 your two daemons can open the rest.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/layers-dark.svg">
-  <img alt="One connection, five layers: the wss link and relay frame are visible to the directory; the NaCl Box, the mutual TLS 1.3 session and the hub message inside are readable only by your two daemons." src="docs/diagrams/agent-network/layers-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/layers-dark.svg">
+  <img alt="One connection, five layers: the wss link and relay frame are visible to the directory; the NaCl Box, the mutual TLS 1.3 session and the hub message inside are readable only by your two daemons." src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/layers-light.svg">
 </picture>
 
 <details>
 <summary>The join, step by step: a code, a sealed mailbox, one key press</summary>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/agent-network/join-dark.svg">
-  <img alt="The join in 27 steps between your Mac, kollabor.ai and a new VPS: the Mac makes a code, the VPS uses it to claim a mailbox offer, both prove keys through sealed envelopes, you accept on the Mac, the VPS receives its credential and profile, then both hold relay links and talk over TLS 1.3 inside Box frames." src="docs/diagrams/agent-network/join-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/join-dark.svg">
+  <img alt="The join in 27 steps between your Mac, kollabor.ai and a new VPS: the Mac makes a code, the VPS uses it to claim a mailbox offer, both prove keys through sealed envelopes, you accept on the Mac, the VPS receives its credential and profile, then both hold relay links and talk over TLS 1.3 inside Box frames." src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/diagrams/agent-network/join-light.svg">
 </picture>
 
 </details>
 
-The [agent network architecture](docs/architecture/agent-network.md) has the
+The [agent network architecture](https://github.com/kollaborai/kollab/blob/main/docs/architecture/agent-network.md) has the
 rest: what travels and what stays, keeping a device online, how `/connect` uses
 your domain's DNS record, and running your own directory.
+
+## Bring Claude Code and Codex
+
+Claude Code and Codex join your network as named agents over the Agent Client Protocol (ACP). They sit in the roster beside Kollab's own agents. Other agents message them like any peer and get the final answer back. In turn they can message others through Kollab's hub tools (`hub_status`, `hub_agents`, `hub_msg`, `hub_ask`, `hub_spawn`).
+
+The harness keeps its own model, login, tools and context. Kollab gives it a name on the network, a window, a saved transcript, routing, and the approval prompt.
+
+```bash
+kollab --as claude --llm claude-code --detached   # Claude Code joins as "claude"
+kollab --as codex --llm codex-cli --detached      # Codex joins as "codex"
+kollab --attach claude                            # open a window on it
+```
+
+Install the harness and its ACP adapter on that computer and sign in there first; `/llm` shows the exact install command. Both have been run through model, tool, permission, cancel, steering and resume checks, and Codex has answered a request across two devices. Gemini CLI has a built-in `gemini-cli` profile but is not qualified yet.
+
+### Use Kollab from Zed
+
+`kollab acp` makes Kollab an ACP agent for Zed and other ACP clients. On its own it starts a headless Kollab daemon in the client's folder and stops it when the client closes. `--attach lapis` connects to the agent `lapis` already running there instead, and leaves it running when the client closes. To attach from Zed, add this to its settings (drop `"--attach", "lapis"` to start a daemon instead):
+
+```json
+{
+  "agent_servers": {
+    "kollab": {
+      "type": "custom",
+      "command": "kollab",
+      "args": ["acp", "--attach", "lapis"]
+    }
+  }
+}
+```
+
+Zed Preview is the client it has been checked against. Prompts are text only, and a client shows its own turns; turns the mesh starts show in Kollab's own windows. See [ACP agents](https://github.com/kollaborai/kollab/blob/main/docs/features/acp.md) for the details.
+
+Claude Code, Codex and Zed are trademarks of their owners. Kollab is not affiliated with Anthropic, OpenAI or Zed Industries.
 
 ## Browser UI and Local Engine
 
@@ -262,10 +276,40 @@ The flag starts the local engine when needed, launches `kollabor-webui`, reuses 
 healthy engine on port `7433`, and cleans up child processes on exit. A second
 `kollab --web-ui` reuses the running UI; `kollab --web-ui --restart` stops it (and
 the engine it started) and starts both again, e.g. after an update. For separate
-development loops, see the [engine README](packages/kollabor-engine/README.md)
-and [web UI README](packages/kollabor-webui/README.md).
+development loops, see the [engine README](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-engine/README.md)
+and [web UI README](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-webui/README.md).
 
-The web UI's Settings dialog (Session, Configuration, Loadouts, Model, Setup, Network) does what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do; see [web settings panels](docs/features/web-settings-panels.md).
+The sidebar lists every agent on this computer and on the other computers of your network. Claude Code and Codex agents open like any other, with their tool calls and file changes as tool and diff cards. New Session has a folder picker, and the layout fits a phone.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-roster-dark.webp" alt="The Kollab sidebar: four agents on one computer (Koordinator, Claude Code, Codex, Lapis) with harness labels." width="53%">
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-mobile-dark.webp" alt="Kollab on a phone: the koordinator chat showing the diff review and the final test result." width="39%">
+</p>
+
+The web UI's Settings dialog (Session, Configuration, Loadouts, Model, Setup, Network) does what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do; see [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
+
+## Apps
+
+One place to give your agents more tools. Open **Apps** in the browser UI's sidebar, or run `/apps` in the terminal. Whatever you add is available to every agent on that computer, and the session you added it from uses it right away.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-apps-dark.webp" alt="The Apps screen in Kollab's browser UI: MCP servers, CLI tools and skills, each with an Add button" width="100%">
+</p>
+
+| You add | What Add does |
+| --- | --- |
+| MCP server | Saves it and connects it to the current session |
+| CLI tool | Installs it with a package manager you already have (brew, npm, uv or pipx) |
+| Skill | Downloads it from its GitHub repo into `~/.kollab/skills/` |
+
+```text
+/apps search <words>   every match, by name, description or tag
+/apps add context7     add an MCP server from the directory
+/apps add cli:gh       install a CLI tool
+/apps remove <id>      remove an MCP server or a skill added from Apps
+```
+
+Search also reaches the official MCP Registry (about 40,000 servers). Kollab has not reviewed those, so Add shows the exact command it will run first, and nothing is saved or started until you confirm. See [Apps](https://github.com/kollaborai/kollab/blob/main/docs/features/apps.md) for the rest.
 
 ## Why It Exists
 
@@ -290,8 +334,8 @@ core app.
 
 Kollab is beta software. The CLI, provider integrations, plugin APIs, and agent
 workflows are usable today, but some advanced runtime, engine, and integration
-paths are still being hardened. See [CHANGELOG.md](CHANGELOG.md) and
-[docs/release-process.md](docs/release-process.md) for release notes and release
+paths are still being hardened. See [CHANGELOG.md](https://github.com/kollaborai/kollab/blob/main/CHANGELOG.md) and
+[docs/release-process.md](https://github.com/kollaborai/kollab/blob/main/docs/release-process.md) for release notes and release
 gates.
 
 ## Install
@@ -313,14 +357,16 @@ elsewhere the installer falls back to the Python package below.
 Python package managers:
 
 ```bash
+uv tool install kollab
+# or
 pipx install kollab
 ```
 
-`pipx` is the recommended installer: it puts kollab in its own isolated
-virtualenv, which sidesteps a class of startup failure where obsolete
+`uv tool` and `pipx` are the recommended installers: each puts kollab in its own
+isolated virtualenv, which sidesteps a class of startup failure where obsolete
 stdlib-backport packages (`typing`, `asyncio`, `dataclasses`, `pathlib`, ...)
 left in a shared interpreter shadow the standard library and crash kollab on
-launch. `uv tool install kollab` isolates the same way.
+launch.
 
 `pip install kollab` also works, but installs into the active interpreter and so
 inherits whatever is already there:
@@ -345,7 +391,7 @@ by name in the current shell, activate the environment with
 
 Homebrew packaging is prepared separately after a release wheel is published and
 the formula SHA is available. Maintainer notes live in
-[homebrew-tap/README.md](homebrew-tap/README.md).
+[homebrew-tap/README.md](https://github.com/kollaborai/kollab/blob/main/homebrew-tap/README.md).
 
 ## Quick Start
 
@@ -353,7 +399,7 @@ New here? Launch Kollab and run **`/setup`** — a guided wizard walks you throu
 picking a provider, entering your API key, choosing a model, optionally testing
 the connection, and saving it as your active profile. No env vars or JSON
 required. (ChatGPT sign-in delegates to `/login`; Azure/advanced is configured
-in `config.json` — see [docs/providers.md](docs/providers.md).)
+in `config.json` — see [docs/providers.md](https://github.com/kollaborai/kollab/blob/main/docs/providers.md).)
 
 Prefer environment variables? Kollab also auto-detects common provider vars:
 
@@ -391,9 +437,9 @@ kollab
 ```
 
 Use `/llm` inside Kollab to switch models and presets. For more
-configuration options, see [docs/configuration.md](docs/configuration.md),
-[docs/providers.md](docs/providers.md), and
-[docs/reference/env-vars.md](docs/reference/env-vars.md).
+configuration options, see [docs/configuration.md](https://github.com/kollaborai/kollab/blob/main/docs/configuration.md),
+[docs/providers.md](https://github.com/kollaborai/kollab/blob/main/docs/providers.md), and
+[docs/reference/env-vars.md](https://github.com/kollaborai/kollab/blob/main/docs/reference/env-vars.md).
 
 You can also define profiles directly from environment variables:
 
@@ -437,14 +483,14 @@ Resolution order is:
 
 ## Common Workflows
 
-### Use ChatGPT OAuth
+### Sign In With OpenAI
 
 ```bash
 kollab --login openai
 ```
 
 Kollab opens a browser for authorization, stores the token in local user runtime
-state, and uses the Responses API with the subscription quota.
+state, and uses the Responses API with your OpenAI account.
 
 ### Run Pipe Mode
 
@@ -464,7 +510,7 @@ kollab --agent technical-writer --as sapphire --skill readme-writing
 
 Agents can be bundled with the project, installed globally, or defined inside a
 workspace under `.kollab/agents/`. `--agent` selects the bundle; `--as` selects
-the hub identity. See [docs/features/agents.md](docs/features/agents.md).
+the hub identity. See [docs/features/agents.md](https://github.com/kollaborai/kollab/blob/main/docs/features/agents.md).
 
 ### Coordinate Agents With The Hub
 
@@ -481,7 +527,7 @@ kollab --hub stop lapis
 Hub capabilities include identities, project-scoped memory, task ledger
 workflows, recurring hub messages, optional Telegram forwarding, organization
 launch files, and experimental DNS-style identity and trust commands. Start with
-[docs/guides/hub-quick-start.md](docs/guides/hub-quick-start.md).
+[docs/guides/hub-quick-start.md](https://github.com/kollaborai/kollab/blob/main/docs/guides/hub-quick-start.md).
 
 ### Manage Tools And MCP
 
@@ -505,18 +551,18 @@ Inside `/mcp`, press `g` to toggle the global MCP subsystem. Use Space to
 toggle the selected server, `a`/`d` to add or delete a configured server,
 `t` to test, `r` to reload, `/` to filter, and Esc to exit.
 
-See [docs/reference/commands.md](docs/reference/commands.md) for the complete
-slash-command reference and [docs/features/mcp.md](docs/features/mcp.md) for
+See [docs/reference/commands.md](https://github.com/kollaborai/kollab/blob/main/docs/reference/commands.md) for the complete
+slash-command reference and [docs/features/mcp.md](https://github.com/kollaborai/kollab/blob/main/docs/features/mcp.md) for
 configuration details.
 
 MCP tools run through the same approval system as native tools. See
-[docs/features/permissions.md](docs/features/permissions.md) and
-[docs/features/mcp.md](docs/features/mcp.md).
+[docs/features/permissions.md](https://github.com/kollaborai/kollab/blob/main/docs/features/permissions.md) and
+[docs/features/mcp.md](https://github.com/kollaborai/kollab/blob/main/docs/features/mcp.md).
 
 The built-in `tool-search` and `tool-load` tools let an agent discover a tool by
 keyword and load its full schema only when needed. Large tool results remain
 available as managed `.output` artifacts while the model receives a bounded
-preview; see [tool-output artifacts](docs/specs/tool-output-artifacts.md).
+preview; see [tool-output artifacts](https://github.com/kollaborai/kollab/blob/main/docs/specs/tool-output-artifacts.md).
 
 ### Extend Kollab
 
@@ -532,9 +578,9 @@ class MyPlugin(BasePlugin):
 ```
 
 Plugin entry points live under `plugins/`, and the plugin SDK lives in
-`packages/kollabor-plugins`. See [docs/plugins/overview.md](docs/plugins/overview.md),
-[docs/plugins/development.md](docs/plugins/development.md), and
-[docs/plugins/hooks-reference.md](docs/plugins/hooks-reference.md).
+`packages/kollabor-plugins`. See [docs/plugins/overview.md](https://github.com/kollaborai/kollab/blob/main/docs/plugins/overview.md),
+[docs/plugins/development.md](https://github.com/kollaborai/kollab/blob/main/docs/plugins/development.md), and
+[docs/plugins/hooks-reference.md](https://github.com/kollaborai/kollab/blob/main/docs/plugins/hooks-reference.md).
 
 ## Slash Commands
 
@@ -544,6 +590,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/model` | Quick model selection and reasoning effort (`/model effort max`) |
 | `/agent` | Switch agent definitions when available |
 | `/skill` | Load or unload agent skills when available |
+| `/apps` | Add MCP servers, CLI tools, and skills |
 | `/setup` | Guided provider/profile setup |
 | `/save` | Save conversation output |
 | `/hub` | Manage the agent hub |
@@ -582,18 +629,18 @@ packages.
 
 | Package | Role |
 | --- | --- |
-| [kollabor](kollabor) | CLI startup, application orchestration, commands, LLM coordination |
-| [packages/kollabor-ai](packages/kollabor-ai) | Providers, profiles, OAuth, prompt rendering, conversation state |
-| [packages/kollabor-agent](packages/kollabor-agent) | Tool execution, MCP, permissions, file/shell operations, agents |
-| [packages/kollabor-tui](packages/kollabor-tui) | Terminal rendering, input, widgets, fullscreen views, status UI |
-| [packages/kollabor-events](packages/kollabor-events) | Event bus, hook registry, executor, processor, event models |
-| [packages/kollabor-config](packages/kollabor-config) | Configuration loading and utilities |
-| [packages/kollabor-plugins](packages/kollabor-plugins) | Plugin framework and SDK |
-| [packages/kollabor-rpc](packages/kollabor-rpc) | RPC protocol and client helpers |
-| [packages/kollabor-engine](packages/kollabor-engine) | Local engine/backend service |
-| [packages/kollabor-webui](packages/kollabor-webui) | Web UI package |
-| [plugins](plugins) | Concrete built-in plugin implementations |
-| [bundles](bundles) | Bundled agents, skills, themes, layouts, and widgets |
+| [kollabor](https://github.com/kollaborai/kollab/tree/main/kollabor) | CLI startup, application orchestration, commands, LLM coordination |
+| [packages/kollabor-ai](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-ai) | Providers, profiles, OAuth, prompt rendering, conversation state |
+| [packages/kollabor-agent](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-agent) | Tool execution, MCP, permissions, file/shell operations, agents |
+| [packages/kollabor-tui](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-tui) | Terminal rendering, input, widgets, fullscreen views, status UI |
+| [packages/kollabor-events](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-events) | Event bus, hook registry, executor, processor, event models |
+| [packages/kollabor-config](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-config) | Configuration loading and utilities |
+| [packages/kollabor-plugins](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-plugins) | Plugin framework and SDK |
+| [packages/kollabor-rpc](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-rpc) | RPC protocol and client helpers |
+| [packages/kollabor-engine](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-engine) | Local engine/backend service |
+| [packages/kollabor-webui](https://github.com/kollaborai/kollab/tree/main/packages/kollabor-webui) | Web UI package |
+| [plugins](https://github.com/kollaborai/kollab/tree/main/plugins) | Concrete built-in plugin implementations |
+| [bundles](https://github.com/kollaborai/kollab/tree/main/bundles) | Bundled agents, skills, themes, layouts, and widgets |
 
 ## Development
 
@@ -618,46 +665,47 @@ uv run python -m ruff check --select E9,F63,F7,F82 kollabor packages plugins tes
 uv run python -m py_compile kollabor/cli.py kollabor_cli_main.py plugins/hub/plugin.py
 ```
 
-For contribution guidance, see [CONTRIBUTING.md](CONTRIBUTING.md). For agent and
-architecture guidance, see [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
-[docs/architecture/README.md](docs/architecture/README.md).
+For contribution guidance, see [CONTRIBUTING.md](https://github.com/kollaborai/kollab/blob/main/CONTRIBUTING.md). For agent and
+architecture guidance, see [AGENTS.md](https://github.com/kollaborai/kollab/blob/main/AGENTS.md), [CLAUDE.md](https://github.com/kollaborai/kollab/blob/main/CLAUDE.md), and
+[docs/architecture/README.md](https://github.com/kollaborai/kollab/blob/main/docs/architecture/README.md).
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Configuration](docs/configuration.md)
-- [Provider Profiles](docs/providers.md)
-- [Models and Loadouts](docs/features/loadouts.md)
-- [Reasoning Effort](docs/features/reasoning-effort.md)
-- [Setup Wizard](docs/features/setup-wizard.md)
-- [Agent System](docs/features/agents.md)
-- [ACP Agents](docs/features/acp.md) — harness agents and ACP clients; qualification pending
-- [Voice Mode](docs/features/voice-mode.md)
-- [Hub Quick Start](docs/guides/hub-quick-start.md)
-- [Tasks and Checkpoints](docs/features/tasks.md)
-- [Tool Calling](docs/features/tools.md)
-- [Attach Mode](docs/features/attach-mode.md)
-- [Agent Network Architecture](docs/architecture/agent-network.md)
-- [Command Reference](docs/reference/commands.md)
-- [Engine](packages/kollabor-engine/README.md) and [Web UI](packages/kollabor-webui/README.md)
-- [Tool-output Artifacts](docs/specs/tool-output-artifacts.md)
-- [Documentation Index](docs/README.md)
-- [Telegram Bridge Setup](docs/guides/telegram-bridge-setup.md)
-- [MCP](docs/features/mcp.md)
-- [Permissions](docs/features/permissions.md)
-- [Plugin Development](docs/plugins/development.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Release Process](docs/release-process.md)
+- [Getting Started](https://github.com/kollaborai/kollab/blob/main/docs/getting-started.md)
+- [Configuration](https://github.com/kollaborai/kollab/blob/main/docs/configuration.md)
+- [Provider Profiles](https://github.com/kollaborai/kollab/blob/main/docs/providers.md)
+- [Models and Loadouts](https://github.com/kollaborai/kollab/blob/main/docs/features/loadouts.md)
+- [Reasoning Effort](https://github.com/kollaborai/kollab/blob/main/docs/features/reasoning-effort.md)
+- [Setup Wizard](https://github.com/kollaborai/kollab/blob/main/docs/features/setup-wizard.md)
+- [Agent System](https://github.com/kollaborai/kollab/blob/main/docs/features/agents.md)
+- [ACP Agents](https://github.com/kollaborai/kollab/blob/main/docs/features/acp.md) — Claude Code and Codex as agents, Kollab inside Zed and other ACP clients; Gemini CLI qualification open
+- [Apps](https://github.com/kollaborai/kollab/blob/main/docs/features/apps.md)
+- [Voice Mode](https://github.com/kollaborai/kollab/blob/main/docs/features/voice-mode.md)
+- [Hub Quick Start](https://github.com/kollaborai/kollab/blob/main/docs/guides/hub-quick-start.md)
+- [Tasks and Checkpoints](https://github.com/kollaborai/kollab/blob/main/docs/features/tasks.md)
+- [Tool Calling](https://github.com/kollaborai/kollab/blob/main/docs/features/tools.md)
+- [Attach Mode](https://github.com/kollaborai/kollab/blob/main/docs/features/attach-mode.md)
+- [Agent Network Architecture](https://github.com/kollaborai/kollab/blob/main/docs/architecture/agent-network.md)
+- [Command Reference](https://github.com/kollaborai/kollab/blob/main/docs/reference/commands.md)
+- [Engine](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-engine/README.md) and [Web UI](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-webui/README.md)
+- [Tool-output Artifacts](https://github.com/kollaborai/kollab/blob/main/docs/specs/tool-output-artifacts.md)
+- [Documentation Index](https://github.com/kollaborai/kollab/blob/main/docs/README.md)
+- [Telegram Bridge Setup](https://github.com/kollaborai/kollab/blob/main/docs/guides/telegram-bridge-setup.md)
+- [MCP](https://github.com/kollaborai/kollab/blob/main/docs/features/mcp.md)
+- [Permissions](https://github.com/kollaborai/kollab/blob/main/docs/features/permissions.md)
+- [Plugin Development](https://github.com/kollaborai/kollab/blob/main/docs/plugins/development.md)
+- [Troubleshooting](https://github.com/kollaborai/kollab/blob/main/docs/troubleshooting.md)
+- [Release Process](https://github.com/kollaborai/kollab/blob/main/docs/release-process.md)
 
 ## Support and Security
 
 - Questions and bug reports: [GitHub Issues](https://github.com/kollaborai/kollab/issues)
-- Support expectations: [SUPPORT.md](SUPPORT.md)
-- Vulnerability reporting: [SECURITY.md](SECURITY.md)
+- Support expectations: [SUPPORT.md](https://github.com/kollaborai/kollab/blob/main/SUPPORT.md)
+- Vulnerability reporting: [SECURITY.md](https://github.com/kollaborai/kollab/blob/main/SECURITY.md)
 
 Do not post API keys, OAuth tokens, private conversation logs, raw transcripts,
 or local runtime data in public issues.
 
 ## License
 
-Kollab is licensed under the [MIT License](LICENSE).
+Kollab is licensed under the [MIT License](https://github.com/kollaborai/kollab/blob/main/LICENSE).
