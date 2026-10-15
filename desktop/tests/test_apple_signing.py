@@ -299,7 +299,7 @@ class SigningContractTests(unittest.TestCase):
         self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
         result = self.run_documented_step(self.doc_unsigned)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls(), [["cargo", ["tauri", "build", "--target", TARGET, "--bundles", "app"]]])
+        self.assertEqual(self.calls(), [["cargo", ["tauri", "build", "--target", TARGET, "--bundles", "app", "--config", "src-tauri/tauri.release.json"]]])
         self.assertTrue(self.app.is_dir())
         self.assertFalse(self.github_env.exists())
         self.assertFalse(self.state.exists())
@@ -319,6 +319,7 @@ class SigningContractTests(unittest.TestCase):
                 cargo_args = [args for tool, args in self.calls() if tool == "cargo"][-1]
                 config = json.loads(cargo_args[cargo_args.index("--config") + 1])
                 self.assertTrue(config["bundle"]["macOS"]["hardenedRuntime"])
+                self.assertIn("src-tauri/tauri.release.json", cargo_args)
                 self.apply_documented_environment()
                 cleanup = self.run_documented_step(self.doc_cleanup)
                 self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
@@ -482,7 +483,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", json.dumps(job))
         unsigned = next(step for step in job["steps"] if step.get("if") == "env.APPLE_SIGNING_MODE == 'unsigned'")
         self.assertNotIn("env", unsigned)
-        self.assertEqual(unsigned["run"], 'cargo tauri build --target "$TARGET" --bundles app')
+        self.assertEqual(unsigned["run"], 'cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json')
         cleanup = next(step for step in job["steps"] if step.get("run", "").endswith(" cleanup"))
         self.assertEqual(cleanup["if"], "always() && env.APPLE_SIGNING_MODE == 'developer-id'")
 

@@ -98,48 +98,42 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Test Apple signing helper and documented build commands
+        run: python desktop/tests/test_apple_signing.py
+
       - name: Download the CLI sidecar
         uses: actions/download-artifact@v8
         with:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked --version "^2"
+      - name: Install pinned Tauri CLI
+        run: cargo install tauri-cli --locked --version "2.12.0"
 
       - name: Prepare the sidecar and release version
         env:
           VERSION: ${{ inputs.version }}
-        run: |
-          mkdir -p desktop/src-tauri/binaries
-          cp "dist/bin/kollab-${{ matrix.binary_platform }}" \
-            "desktop/src-tauri/binaries/kollab-${{ matrix.target }}"
-          chmod +x "desktop/src-tauri/binaries/kollab-${{ matrix.target }}"
-          if [ -n "$VERSION" ]; then
-            VERSION="${VERSION#v}" python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          path = Path("desktop/src-tauri/tauri.conf.json")
-          config = json.loads(path.read_text())
-          config["version"] = os.environ["VERSION"]
-          path.write_text(json.dumps(config, indent=2) + "\n")
-          PY
-          fi
+        run: python scripts/desktop_release.py --version "$VERSION" stage --platform ${{ matrix.platform }} --source dist/bin/kollab-${{ matrix.binary_platform }}
 
       - name: Build unsigned Kollab.app
         working-directory: desktop
-        run: cargo tauri build --bundles app
+        run: cargo tauri build --config src-tauri/tauri.release.json --bundles app
 
       - name: Package unsigned desktop assets
         env:
-          VERSION: ${{ inputs.version }}
+          KOLLAB_NO_KEYRING: "1"
         run: |
-          VERSION="${VERSION#v}"
-          VERSION="${VERSION:-dev}"
+          VERSION="$(python -c 'import json; print(json.load(open("desktop/src-tauri/tauri.release.json"))["version"])')"
           APP="desktop/src-tauri/target/release/bundle/macos/Kollab.app"
           test -d "$APP"
+          test -x "$APP/Contents/MacOS/kollab"
+          shown="$("$APP/Contents/MacOS/kollab" --version)"
+          test "${shown##* }" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
           mkdir -p dist/desktop
           base="kollab-desktop-${{ matrix.platform }}-${VERSION}"
           ditto -c -k --keepParent "$APP" "dist/desktop/${base}.app.zip"
@@ -242,3 +236,25 @@ jobs:
 
       - name: Smoke the packaged Linux window and attached-runtime lifecycle
         run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage
+
+  release-manifest:
+    name: release/manifest
+    needs: [build, desktop, desktop-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kollab-*
+          path: dist/bin
+          merge-multiple: true
+
+      - name: Verify all CLI, macOS and Linux release assets
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" verify dist/bin

@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64")
+MACOS_TARGETS = {"macos-aarch64": "aarch64-apple-darwin", "macos-x86_64": "x86_64-apple-darwin"}
 TARGETS = {
     "linux-x86_64": ("x86_64-unknown-linux-gnu", (("appimage", "*.AppImage", ".AppImage"), ("deb", "*.deb", ".deb"))),
 }
@@ -66,8 +67,8 @@ def manifest(version: str) -> set[str]:
     payloads = [f"kollab-{platform}" for platform in CLI_PLATFORMS]
     payloads += [name for platform in TARGETS for name in desktop_names(platform, version)]
     payloads += [
-        f"kollab-desktop-macos-{arch}-{version}{suffix}"
-        for arch in ("aarch64", "x86_64") for suffix in (".app.zip", ".dmg")
+        f"kollab-desktop-{platform}-{version}{suffix}"
+        for platform in MACOS_TARGETS for suffix in (".app.zip", ".dmg")
     ]
     return {name + suffix for name in payloads for suffix in ("", ".sha256")}
 
@@ -87,7 +88,18 @@ def verify_manifest(directory: Path, version: str) -> None:
 
 def stage(platform: str, source: Path, version: str) -> Path:
     verify_checksum(source)
-    target, packages = TARGETS[platform]
+    if platform in MACOS_TARGETS:
+        target, bundle = MACOS_TARGETS[platform], {"targets": ["app"]}
+    else:
+        target, packages = TARGETS[platform]
+        # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a
+        # scie's appended archive. Keep the verified CLI opaque under usr/share.
+        files = {"/usr/share/kollab/runtime/kollab": f"binaries/kollab-{target}"}
+        bundle = {
+            "targets": [package[0] for package in packages],
+            "externalBin": [],
+            "linux": {"deb": {"files": files, "depends": ["xdg-utils"]}, "appimage": {"files": files}},
+        }
     destination = ROOT / "desktop/src-tauri/binaries" / f"kollab-{target}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
@@ -100,23 +112,7 @@ def stage(platform: str, source: Path, version: str) -> Path:
     if result.stdout.split()[-1:] != [version]:
         raise ValueError(f"sidecar reports {result.stdout!r}, expected {version}")
     config = ROOT / "desktop/src-tauri/tauri.release.json"
-    # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a scie's
-    # appended archive. Keep the verified CLI opaque under usr/share instead.
-    files = {"/usr/share/kollab/runtime/kollab": f"binaries/{destination.name}"}
-    config.write_text(
-        json.dumps(
-            {
-                "version": version,
-                "bundle": {
-                    "targets": [package[0] for package in packages],
-                    "externalBin": [],
-                    "linux": {"deb": {"files": files, "depends": ["xdg-utils"]}, "appimage": {"files": files}},
-                },
-            },
-            indent=2,
-        )
-        + "\n"
-    )
+    config.write_text(json.dumps({"version": version, "bundle": bundle}, indent=2) + "\n")
     print(f"staged {destination.name}: {result.stdout.strip()}")
     return destination
 
@@ -144,7 +140,7 @@ def main() -> int:
     parser.add_argument("--version", default="", help="release tag, or the source version for PR builds")
     commands = parser.add_subparsers(dest="command", required=True)
     staging = commands.add_parser("stage")
-    staging.add_argument("--platform", choices=TARGETS, required=True)
+    staging.add_argument("--platform", choices=(*TARGETS, *MACOS_TARGETS), required=True)
     staging.add_argument("--source", type=Path, required=True)
     collecting = commands.add_parser("collect")
     collecting.add_argument("--platform", choices=TARGETS, required=True)

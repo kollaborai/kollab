@@ -132,6 +132,11 @@ scripts/docker-runtime.sh smoke
    and the install path after publication. `scripts/desktop_release.py` enforces
    the exact 20-file manifest and verifies every payload from the flattened
    artifact download directory. Checksums contain basenames, not build paths.
+   The Binaries workflow checks this same combined set on pull requests and
+   manual runs. Each platform stages a hash/version-checked native CLI from
+   the same workflow; absent version inputs use `pyproject.toml`, while a
+   supplied tag must match it. macOS and Linux desktop asset names therefore
+   use the same source version in every workflow context.
    Unsigned macOS users must use Finder's Control-click > Open flow on first
    launch (see `desktop/README.md`). Apple signing/notarization preparation
    remains available without changing the unsigned release default.

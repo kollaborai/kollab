@@ -38,6 +38,14 @@ match the bundled CLI, with a sibling `.sha256` file for
 each archive. The archives are attached to the GitHub Release alongside the
 CLI binaries and are named `kollab-desktop-macos-<arch>-<version>.*`.
 
+macOS and Linux CI use the same verified sidecar staging helper. It checks the
+downloaded CLI's SHA-256 and reported version, restores executable permissions,
+and generates the ignored `tauri.release.json` overlay. Pull requests and manual
+builds derive the release version from `pyproject.toml`; a supplied release tag
+must match it. The committed base Tauri config is not rewritten during builds.
+The packaged macOS CLI and app metadata must report that version before the
+`.app.zip` and `.dmg` archives are collected.
+
 Because the app is unsigned, macOS Gatekeeper may block the first launch. Open
 the downloaded archive, then Control-click `Kollab.app`, choose **Open**, and
 confirm **Open** in the dialog. If macOS still refuses it, run
@@ -51,7 +59,7 @@ default is unsigned; it does not download sidecars, archive or publish assets.
 See [macOS signing and notarization](docs/apple-signing.md) for operator setup,
 cleanup guarantees, and validation limits.
 
-### Linux packages
+## Linux packages
 
 CI builds Linux desktop packages on Ubuntu 22.04 with WebKitGTK 4.1, GTK 3,
 Ayatana AppIndicator, librsvg, libxdo and patchelf. The desktop system-library
@@ -100,6 +108,8 @@ uploading. It rejects missing files, unexpected names, symlinks, and changed
 payloads. The combined manifest has 20 release files: four CLI/checksum pairs,
 four macOS desktop/checksum pairs, and two Linux desktop/checksum pairs.
 The merged macOS packaging and Apple signing preparation are retained.
+CI downloads and flattens the outputs of all seven native build jobs, then
+checks these 20 files and all ten SHA-256 pairs before a release can publish.
 
 CI also opens the packaged AppImage under Xvfb against an isolated test Web UI,
 checks rendered content, closes/reopens the window through a second launch,

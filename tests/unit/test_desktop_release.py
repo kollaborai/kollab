@@ -28,6 +28,7 @@ def complete_release(directory, version="1.2.3"):
 
 def test_source_and_tag_must_agree(source_root):
     assert release.release_version() == "1.2.3"
+    assert release.release_version("") == "1.2.3"
     assert release.release_version("v1.2.3") == "1.2.3"
     with pytest.raises(ValueError, match="differs from source"):
         release.release_version("v1.2.4")
@@ -35,7 +36,7 @@ def test_source_and_tag_must_agree(source_root):
         release.release_version("../other")
 
 
-def test_manifest_preserves_all_four_cli_pairs():
+def test_manifest_preserves_all_cli_macos_and_linux_pairs():
     names = release.manifest("1.2.3")
     assert len(names) == 20
     for platform in ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64"):
@@ -92,8 +93,13 @@ def test_symlink_cannot_substitute_for_a_release_payload(tmp_path):
         release.verify_checksum(asset)
 
 
-def test_stage_checks_hash_version_permissions_and_target_name(source_root, monkeypatch):
-    source = source_root / "kollab-linux-x86_64"
+@pytest.mark.parametrize("platform,target", [
+    ("linux-x86_64", "x86_64-unknown-linux-gnu"),
+    ("macos-aarch64", "aarch64-apple-darwin"),
+    ("macos-x86_64", "x86_64-apple-darwin"),
+])
+def test_stage_checks_hash_version_permissions_and_target_name(source_root, monkeypatch, platform, target):
+    source = source_root / f"kollab-{platform}"
     source.write_bytes(b"test CLI payload")
     source.chmod(0o644)  # Actions artifacts do not retain the executable bit.
     release.write_checksum(source)
@@ -104,12 +110,15 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
         return subprocess.CompletedProcess(command, 0, "kollab 1.2.3\n", "")
 
     monkeypatch.setattr(release.subprocess, "run", run)
-    staged = release.stage("linux-x86_64", source, "1.2.3")
-    assert staged.name == "kollab-x86_64-unknown-linux-gnu"
+    staged = release.stage(platform, source, "1.2.3")
+    assert staged.name == f"kollab-{target}"
     assert staged.stat().st_mode & 0o111
     assert calls[0][0] == [str(staged), "--version"]
     config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
     assert config["version"] == "1.2.3"
+    if platform.startswith("macos-"):
+        assert config["bundle"] == {"targets": ["app"]}
+        return
     assert config["bundle"]["targets"] == ["appimage", "deb"]
     assert config["bundle"]["externalBin"] == []
     expected = {"/usr/share/kollab/runtime/kollab": "binaries/kollab-x86_64-unknown-linux-gnu"}
