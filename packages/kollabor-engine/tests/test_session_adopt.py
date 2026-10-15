@@ -109,15 +109,21 @@ async def test_concurrent_requests_open_an_agent_once(monkeypatch, registry):
 def test_a_session_route_opens_the_agent_it_names(monkeypatch, registry):
     monkeypatch.setattr(HubBridge, "discover_sessions", lambda self, use_cache=False: [_row()])
 
-    async def refresh_history():
-        return [{"role": "user", "content": "from the terminal"}]
+    async def get_history_nonblocking(limit=None):
+        return {
+            "session_id": "a1b2c3",
+            "history": [{"role": "user", "content": "from the terminal"}],
+            "last_turn_error": None,
+            "source": "mirror",
+            "stale": False,
+        }
 
     async def adopt(found):
         return SimpleNamespace(
             session_id=found["session_id"],
             alive=True,
             last_turn_error=None,
-            refresh_history=refresh_history,
+            get_history_nonblocking=get_history_nonblocking,
         )
 
     monkeypatch.setattr(EngineSession, "adopt", staticmethod(adopt))
@@ -246,3 +252,44 @@ async def test_an_open_agent_keeps_the_name_of_its_current_conversation(monkeypa
 
     assert [item["name"] for item in result["sessions"]] == ["2610090000-quiet-heron"]
 
+
+
+@pytest.mark.asyncio
+async def test_adopt_does_not_await_slow_history_refresh(monkeypatch):
+    events = asyncio.Queue()
+
+    class SilentState:
+        async def get_conversation(self, **kwargs):
+            await asyncio.sleep(10)
+
+        async def get_active_profile(self):
+            return SimpleNamespace(name="p", model="m", provider="openai")
+
+        async def get_permission_state(self):
+            return SimpleNamespace(approval_mode="TRUST_ALL")
+
+    handle = SimpleNamespace(
+        alive=True,
+        launcher=None,
+        state=SilentState(),
+        subscribe=lambda: events,
+        unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
+    )
+
+    class Pool:
+        async def adopt(self, session_id, found):
+            return handle
+
+        async def stop(self, session_id):
+            return True
+
+    monkeypatch.setattr("kollabor_engine.session.get_daemon_pool", lambda: Pool())
+    started = asyncio.get_running_loop().time()
+    session = await EngineSession.adopt(_row(session_id="silent"))
+    elapsed = asyncio.get_running_loop().time() - started
+    try:
+        assert elapsed < 0.2
+        assert session._history_refresh_task is not None
+    finally:
+        await session.shutdown()

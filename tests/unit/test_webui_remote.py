@@ -26,7 +26,9 @@ async def test_a_remote_page_gets_the_proxy_and_a_local_one_the_engine(monkeypat
     remote = (await call(app, "10.8.0.2", "GET", "/api/config")).json()
     local = (await call(app, "127.0.0.1", "GET", "/api/config")).json()
 
-    assert remote == {"engine_url": "http://10.8.0.1:8080/engine", "token": "t0ken"}
+    assert remote["engine_url"] == "http://10.8.0.1:8080/engine"
+    assert remote["token"] == "t0ken"
+    assert set(remote) == {"engine_url", "token", "server_version", "engine_version"}
     assert local["engine_url"] == "http://127.0.0.1:7433"
 
 

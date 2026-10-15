@@ -375,10 +375,10 @@ def build_workspace_app(
         request._body = bytes(raw)
         return bytes(raw)
 
-    def authorize(
+    async def authorize(
         authorization: str, headers: dict[str, str], raw: bytes, path: str
     ) -> Any:
-        return directory.authorize_request(
+        return await directory.authorize_request_async(
             authorization[7:],
             headers["x-kollab-grant"],
             headers["x-kollab-proof"],
@@ -423,7 +423,7 @@ def build_workspace_app(
                 {"error": "Invalid workspace task request"}, status_code=400
             )
         try:
-            principal = authorize(authorization, headers, raw, RPC_PATH)
+            principal = await authorize(authorization, headers, raw, RPC_PATH)
         except ValueError:
             return JSONResponse(
                 {"error": "Request authorization denied"}, status_code=403
@@ -465,7 +465,7 @@ def build_workspace_app(
         try:
             if _decode_request(raw) != {} or request.url.query:
                 raise ValueError("Empty object required")
-            authorize(authorization, headers, raw, "/kollab/directory")
+            await authorize(authorization, headers, raw, "/kollab/directory")
         except (ValueError, RecursionError):
             return JSONResponse(
                 {"error": "Request authorization denied"}, status_code=403

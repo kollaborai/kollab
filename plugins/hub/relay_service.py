@@ -1801,15 +1801,24 @@ async def _consume_enrollment_request_rate(
         )
 
 
-def _verify_enrollment_request(
+async def _verify_enrollment_request(
     state: RelayState, request: web.Request, frame: dict[str, Any], key_field: str
 ) -> None:
     issued_at = frame["issued_at"]
     if abs(int(time.time()) - issued_at) > ENROLLMENT_TIMESTAMP_SKEW_SECONDS:
         raise _EnrollmentHTTPError(401, "invalid_contact")
-    if not verify_enrollment_request_signature(
-        frame[key_field], state.config.origin, request.method, request.path, frame
-    ):
+    # Ed25519 verification is CPU-bound (PyNaCl, tens of thousands of cycles
+    # per request): run it off the event loop so a burst of enrollment
+    # requests cannot stall every other session's traffic on this relay.
+    ok = await asyncio.to_thread(
+        verify_enrollment_request_signature,
+        frame[key_field],
+        state.config.origin,
+        request.method,
+        request.path,
+        frame,
+    )
+    if not ok:
         raise _EnrollmentHTTPError(401, "invalid_contact")
 
 
@@ -1832,7 +1841,7 @@ async def _consume_enrollment_nonce(
 async def _verify_enrollment_issuer(
     state: RelayState, request: web.Request, frame: dict[str, Any]
 ) -> None:
-    _verify_enrollment_request(state, request, frame, "issuer_key")
+    await _verify_enrollment_request(state, request, frame, "issuer_key")
     try:
         room_hash = room_digest(frame["room_capability"])
     except ValueError as exc:
@@ -1917,7 +1926,7 @@ async def enrollment_lookup_handler(request: web.Request) -> web.Response:
     """
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "lookup_offer")
-    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     lookup_hash = enrollment_lookup_hash(frame["lookup"])
     offer_id = await state.backend.find_enrollment_offer_by_lookup(lookup_hash)
@@ -1930,7 +1939,7 @@ async def enrollment_lookup_handler(request: web.Request) -> web.Response:
 async def enrollment_request_handler(request: web.Request) -> web.Response:
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "submit_request")
-    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     candidate_hash = enrollment_verifier_hash(frame["offer_id"], frame["code_verifier"])
     device_name = frame.get("device_name", "")
@@ -2022,7 +2031,7 @@ async def enrollment_challenge_handler(request: web.Request) -> web.Response:
 async def enrollment_proof_handler(request: web.Request) -> web.Response:
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "submit_proof")
-    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     digest = _content_digest(
         _phase_fields(
@@ -2090,7 +2099,7 @@ async def enrollment_decision_handler(request: web.Request) -> web.Response:
 async def enrollment_reply_poll_handler(request: web.Request) -> web.Response:
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "reply_poll")
-    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     result = await state.backend.poll_enrollment_reply(
         frame["offer_id"], destination_key=frame["destination_key"]
@@ -2104,7 +2113,7 @@ async def enrollment_reply_poll_handler(request: web.Request) -> web.Response:
 async def enrollment_install_ack_handler(request: web.Request) -> web.Response:
     state: RelayState = request.app["relay_state"]
     frame = await _read_enrollment_frame(request, "submit_install_ack")
-    _verify_enrollment_request(state, request, frame, "destination_key")
+    await _verify_enrollment_request(state, request, frame, "destination_key")
     await _consume_enrollment_nonce(state, frame, "destination_key")
     digest = _content_digest(
         {

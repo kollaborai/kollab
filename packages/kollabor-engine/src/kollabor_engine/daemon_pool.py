@@ -80,9 +80,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = (
             f"{tool_type}: {command}"
             if command
-            else f"{tool_type}: {file_path}"
-            if file_path
-            else tool_type
+            else f"{tool_type}: {file_path}" if file_path else tool_type
         )
 
     flat = {
@@ -240,6 +238,10 @@ class DaemonHandle:
                 logger.warning(
                     "dropping event for slow subscriber on session %s", self.session_id
                 )
+
+    def fan_out(self, event: Dict[str, Any]) -> None:
+        """Engine-generated event to every SSE subscriber of this session."""
+        self._fan_out(event)
 
     def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -612,9 +614,7 @@ class DaemonPool:
             # use_cache=False is essential: we are polling for an agent that
             # starts *after* the cached presence snapshot was taken, so a
             # cached lookup can never see it.
-            agent = self._bridge.get_agent_by_identity(
-                handle.identity, use_cache=False
-            )
+            agent = self._bridge.get_agent_by_identity(handle.identity, use_cache=False)
             if agent:
                 # Record the pid the moment presence reports it, before the
                 # socket check - otherwise a failure between here and connect()
