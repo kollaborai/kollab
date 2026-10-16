@@ -3,7 +3,7 @@
 One place to give your agents more tools: MCP servers, CLI tools and skills.
 
 - **Web UI**: the **Apps** button in the sidebar (above Settings).
-- **Terminal**: `/apps`.
+- **Terminal**: `/mcp`. The manager screen lists the catalog's MCP servers (`a` adds one); `/mcp browse` lists every kind as text.
 
 ## what you can add
 
@@ -17,7 +17,7 @@ Everything you add is available to every agent on this computer, and the
 session you added it from uses it right away (no restart).
 
 An MCP server that needs a key (a GitHub token, an API key) asks for it before
-it is saved. In the terminal, `/apps add` saves such a server turned off and
+it is saved. In the terminal, `/mcp add` saves such a server turned off and
 tells you to set the key with `/mcp setup`, so secrets never go through a
 slash command.
 
@@ -30,12 +30,12 @@ Word, Excel or PowerPoint skill installs OfficeCLI, then the skill.
 ## terminal
 
 ```text
-/apps                       a few of each kind, and how many more there are
-/apps search <words>        every match, by name, description or tag
-/apps add <id>              add (e.g. /apps add context7, /apps add cli:gh)
-/apps add registry:<name>   show what an MCP Registry server runs, and its code
-/apps add registry:<name> <code>   add exactly that
-/apps remove <id>           remove an MCP server or a skill added from Apps
+/mcp browse                       a few of each kind, and how many more there are
+/mcp search <words>        every match, by name, description or tag
+/mcp add <id>              add (e.g. /mcp add context7, /mcp add cli:gh)
+/mcp add registry:<name>   show what an MCP Registry server runs, and its code
+/mcp add registry:<name> <code>   add exactly that
+/mcp remove <id>           remove an MCP server or a skill added from Apps
 ```
 
 Ids are `<kind>:<id>` (`mcp:github`, `cli:gh`, `skill:pdf`); the bare id works
@@ -64,9 +64,9 @@ directory's own. Kollab has not reviewed these servers, so:
 
 The registry is sometimes slow: a search takes from under a second to about
 30 seconds, and its results are kept for 10 minutes. In the terminal,
-`/apps search <words>` lists registry matches after the directory's; it waits up
+`/mcp search <words>` lists registry matches after the directory's; it waits up
 to 10 seconds, and a slower search keeps going so the same search a moment later
-answers at once. `/apps add registry:<name>` shows the command and a code;
+answers at once. `/mcp add registry:<name>` shows the command and a code;
 nothing is saved until you run it again with the code.
 
 ## states

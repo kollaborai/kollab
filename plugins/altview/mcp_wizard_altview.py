@@ -41,6 +41,31 @@ def _servers(config: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return servers if isinstance(servers, dict) else {}
 
 
+def _catalog_servers() -> Dict[str, Dict[str, Any]]:
+    """The Apps catalog's MCP servers as templates, by id. Empty if the catalog can't load."""
+    try:
+        from kollabor.apps.catalog import load_catalog
+
+        apps = load_catalog()["apps"]
+    except Exception as exc:  # noqa: BLE001 - the manager still works from the example config
+        logger.debug("MCP manager: Apps catalog unavailable: %s", exc)
+        return {}
+    return {
+        app["id"]: {
+            "description": app["description"],
+            "command": app["mcp"]["command"],
+            "args": list(app["mcp"].get("args", [])),
+            "env": {
+                inp["name"]: ""
+                for inp in app["mcp"].get("inputs", [])
+                if inp.get("to", "env") == "env" and inp.get("required")
+            },
+        }
+        for app in apps
+        if app.get("kind") == "mcp" and app.get("mcp")
+    }
+
+
 def _snapshot_servers(runtime_state: Any) -> Dict[str, Dict[str, Any]]:
     if runtime_state is None:
         return {}
@@ -197,6 +222,7 @@ class McpWizardAltView(AltView):
         self._event_bus: Any = None
         self._app: Any = None
         self._global_enabled = True
+        self._catalog: Dict[str, Dict[str, Any]] = {}
         self.selected_servers: Dict[str, Dict[str, Any]] = {}
 
     def set_config(
@@ -260,6 +286,10 @@ class McpWizardAltView(AltView):
         self._global_enabled = self._read_global_enabled()
         if self._mcp_manager is not None:
             self._example_config = self._mcp_manager.load_example_config() or {}
+            self._catalog = _catalog_servers()
+            self._example_config = {
+                "servers": {**_servers(self._example_config), **self._catalog}
+            }
             self._current_config = self._mcp_manager.load_config() or {"servers": {}}
         if self._state_service is not None and hasattr(
             self._state_service, "get_mcp_state"
@@ -465,6 +495,9 @@ class McpWizardAltView(AltView):
         if entry.source == "configured":
             self._status_message = f"{entry.name} already configured"
             return
+        if entry.name in self._catalog:
+            await self._add_from_catalog(entry.name)
+            return
         config = self._load_current_config()
         template = copy.deepcopy(_servers(self._example_config).get(entry.name, {}))
         config.setdefault("servers", {})[entry.name] = template
@@ -472,6 +505,25 @@ class McpWizardAltView(AltView):
         self._status_message = f"added {entry.name}"
         await self._load_data()
         self._select_entry(entry.name)
+
+    async def _add_from_catalog(self, name: str) -> None:
+        """Add through the Apps service, the same path as /mcp add and the web Apps screen."""
+        from kollabor.apps.service import AppsService
+
+        try:
+            result = await AppsService(mcp_manager=self._mcp_manager).add(f"mcp:{name}")
+        except (ValueError, KeyError, OSError) as exc:
+            self._status_message = str(exc)
+            return
+        self._status_message = result["message"]
+        if result.get("mcp_changed"):
+            try:
+                await self._reload_runtime()
+            except Exception as exc:  # noqa: BLE001 - saved either way; the next start loads it
+                logger.warning("MCP manager: reload after add failed: %s", exc)
+                self._status_message += " Saved; restart to load it."
+        await self._load_data()
+        self._select_entry(name)
 
     async def _delete_selected(self) -> None:
         entry = self._current_entry()

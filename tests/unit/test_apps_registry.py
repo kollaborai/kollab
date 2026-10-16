@@ -1,4 +1,4 @@
-"""Tests for MCP Registry search in Apps: conversion, search, ranking, rows, Add, the panels and /apps search.
+"""Tests for MCP Registry search in Apps: conversion, search, ranking, rows, Add, the panels and /mcp search.
 
 The registry is a fake ``get`` serving canned pages. No network, no real home.
 """
@@ -8,17 +8,14 @@ import json
 import shutil
 import urllib.error
 import urllib.parse
-from types import SimpleNamespace
 
 import pytest
 
-import kollabor.commands.system_commands.handlers.apps as apps_command
+import kollabor.commands.mcp_apps as apps_command
 import kollabor.panels.apps as apps_panel
 from kollabor.apps import registry
 from kollabor.apps.service import AppsService
-from kollabor.commands.registry import SlashCommandRegistry
 from kollabor_agent import MCPManager
-from kollabor_events.models import SlashCommand
 
 
 def _server(name, **fields):
@@ -673,9 +670,7 @@ def test_install_form_still_asks_for_required_fields(panel_service):
 
 def _apps(svc, monkeypatch, *args):
     monkeypatch.setattr(apps_command, "_service", lambda: svc)
-    handler = apps_command.AppsCommandHandler(SlashCommandRegistry(), SimpleNamespace(get_service=lambda name: None))
-    command = SlashCommand(name="apps", args=list(args), raw_input="/apps " + " ".join(args))
-    return asyncio.run(handler.handle_apps(command))
+    return asyncio.run(apps_command.handle(list(args), None))
 
 
 def _search(svc, monkeypatch, *words):
@@ -689,7 +684,7 @@ def test_terminal_search_lists_registry_servers_after_the_directory(tmp_path, mo
         "No apps in the directory match 'acme'.",
         "MCP Registry",
         "  [available] Acme Notes (registry:io.github.acme/notes-mcp)",
-        "  Kollab has not reviewed these servers. /apps add <id> shows what one runs.",
+        "  Kollab has not reviewed these servers. /mcp add <id> shows what one runs.",
     ]
 
 
@@ -773,7 +768,7 @@ def test_add_saves_only_the_command_the_confirm_step_showed(tmp_path):
     refused = asyncio.run(svc.add("registry:io.github.x/tool", None, shown))
     assert refused["ok"] is False and "changed in the MCP Registry" in refused["message"]
     no_code = asyncio.run(svc.add("registry:io.github.x/tool"))
-    assert no_code["ok"] is False and "/apps add registry:io.github.x/tool shows the command" in no_code["message"]
+    assert no_code["ok"] is False and "/mcp add registry:io.github.x/tool shows the command" in no_code["message"]
     assert _servers(svc) == {}
 
 
@@ -788,7 +783,7 @@ def test_terminal_add_shows_the_command_and_adds_only_with_its_code(tmp_path, mo
         "  Runs: npx -y @acme/notes-mcp@1.2.0 --readonly",
         "  With: NOTES_REGION=us",
         "  Add saves it off. Set NOTES_TOKEN with /mcp setup, then turn it on.",
-        f"  To add it: /apps add registry:io.github.acme/notes-mcp {code}",
+        f"  To add it: /mcp add registry:io.github.acme/notes-mcp {code}",
     ]
     assert _servers(svc) == {}  # showing it saves nothing
     wrong = _apps(svc, monkeypatch, "add", "registry:io.github.acme/notes-mcp", "0" * 16)
@@ -924,14 +919,12 @@ def test_terminal_search_prints_without_waiting_for_a_slow_registry(tmp_path, mo
     svc = _service(tmp_path, Slow([NOTES]))
 
     async def search_twice():
-        handler = apps_command.AppsCommandHandler(SlashCommandRegistry(), SimpleNamespace(get_service=lambda n: None))
-        command = SlashCommand(name="apps", args=["search", "acme"], raw_input="/apps search acme")
         monkeypatch.setattr(apps_command, "_service", lambda: svc)
-        first = (await handler.handle_apps(command)).message
+        first = (await apps_command.handle(["search", "acme"], None)).message
         release.set()
         while apps_command._searches:  # the slow search finishes into the registry cache
             await asyncio.sleep(0.01)
-        return first, (await handler.handle_apps(command)).message
+        return first, (await apps_command.handle(["search", "acme"], None)).message
 
     first, again = asyncio.run(search_twice())
     assert first.endswith(

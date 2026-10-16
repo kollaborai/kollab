@@ -26,6 +26,8 @@ from kollabor_events.models import (
 )
 from kollabor_tui.status.mcp_status_view import MCPStatusView
 
+from . import mcp_apps
+
 IS_WINDOWS = sys.platform == "win32"
 
 if not IS_WINDOWS:
@@ -471,7 +473,7 @@ class MCPCommandHandler:
         # Register /mcp command with enhanced subcommands
         mcp_command = CommandDefinition(
             name="mcp",
-            description="Manage MCP (Model Context Protocol) servers and tools",
+            description="Manage MCP servers, and add MCP servers, CLI tools and skills",
             handler=self.handle_mcp,
             plugin_name=self.name,
             category=CommandCategory.SYSTEM,
@@ -491,6 +493,7 @@ class MCPCommandHandler:
                 SubcommandInfo("servers", "", "Show MCP status (alias for show)"),
                 SubcommandInfo("reload", "", "Reload MCP config and reconnect servers"),
                 SubcommandInfo("tools", "[server]", "Show available MCP tools"),
+                *mcp_apps.SUBCOMMANDS,
             ],
         )
         self.command_registry.register_command(mcp_command)
@@ -517,6 +520,8 @@ class MCPCommandHandler:
 
         subcommand = args[0].lower()
 
+        if subcommand in mcp_apps.VERBS:
+            return await mcp_apps.handle(args, self._get_state_service())
         if subcommand == "list":
             return await self._show_status()
         elif subcommand == "test":
@@ -962,6 +967,10 @@ class MCPCommandHandler:
 /mcp reload        - Reload MCP config and reconnect servers
 /mcp tools         - Show available MCP tools
 /mcp tools <x>     - Show tools from specific server
+/mcp browse        - Browse MCP servers, CLI tools and skills to add
+/mcp search <x>    - Find apps, and servers in the MCP Registry
+/mcp add <id>      - Add an app, e.g. mcp:context7 or cli:gh
+/mcp remove <id>   - Remove an MCP server or a skill added here
 
 Examples:
   /mcp                    - Open the MCP manager

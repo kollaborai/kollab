@@ -694,7 +694,7 @@ class AppsService:
             )
         # Save only what the confirm step showed: the registry can change in between.
         if not confirm:
-            return _result(False, f"{row['label']} needs its confirm step: /apps add {row['id']} shows the command.")
+            return _result(False, f"{row['label']} needs its confirm step: /mcp add {row['id']} shows the command.")
         if confirm != registry.fingerprint(app):
             return _result(False, "This server changed in the MCP Registry. Check the command again, then Add.")
         extra = {"registry": name, "title": app["name"], "homepage": app["homepage"], "version": app["version"]}
