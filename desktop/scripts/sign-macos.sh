@@ -129,8 +129,9 @@ PY
 check_runtime() {
   local runtime=${KOLLAB_APP_RUNTIME:-}
   [ -n "$runtime" ] || fail 'KOLLAB_APP_RUNTIME must name the staged app runtime (scripts/desktop_release.py stage)'
-  [ -f "$runtime/kollab" ] && [ -f "$runtime/runtime/bin/python3.12" ] && [ -f "$runtime/runtime/KOLLAB-APP" ] ||
+  if [ ! -f "$runtime/kollab" ] || [ ! -f "$runtime/runtime/bin/python3.12" ] || [ ! -f "$runtime/runtime/KOLLAB-APP" ]; then
     fail "KOLLAB_APP_RUNTIME is not a staged app runtime: $runtime"
+  fi
 }
 
 # NUL-separated Mach-O files under $1 (thin or universal), found by magic number.
