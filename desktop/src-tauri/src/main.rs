@@ -7,23 +7,27 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::{NewWindowResponse, PageLoadEvent};
 use tauri::{
-    ActivationPolicy, AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
+    AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, Wry,
 };
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ClassBuilder, Sel};
-use objc2::{class, msg_send, sel};
+#[cfg(target_os = "macos")]
+use objc2::{rc::Retained, runtime::{AnyObject, ClassBuilder, Sel}, class, msg_send, sel};
 use tauri_plugin_window_state::StateFlags;
 
 /// How long a spawned web UI gets to answer before the error page shows.
@@ -183,15 +187,26 @@ fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
         .collect()
 }
 
-/// The kollab shipped inside the app: the Tauri sidecar next to this executable.
+/// macOS ships an adjacent sidecar; Linux keeps the scie as opaque package data.
 fn bundled_kollab() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let path = linux_bundled_kollab(&std::env::current_exe().ok()?)?;
+    #[cfg(not(target_os = "linux"))]
     let path = std::env::current_exe().ok()?.with_file_name("kollab");
     path.is_file().then_some(path)
 }
 
+/// Debian and AppImage share the usr/bin + usr/share package layout. Keeping
+/// the scie outside linuxdeploy's ELF scan preserves its appended Python data.
+#[cfg(any(target_os = "linux", test))]
+fn linux_bundled_kollab(executable: &Path) -> Option<PathBuf> {
+    Some(executable.parent()?.parent()?.join("share/kollab/runtime/kollab"))
+}
+
 /// GUI apps don't get the shell's PATH: ask the login shell, then try the usual install spots.
 fn installed_kollab() -> Option<PathBuf> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let default_shell = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/sh" };
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_shell.into());
     let from_shell = Command::new(shell)
         .args(["-lc", "command -v kollab"])
         .stdin(Stdio::null())
@@ -207,6 +222,8 @@ fn installed_kollab() -> Option<PathBuf> {
         format!("{home}/.local/bin/kollab"),
         "/opt/homebrew/bin/kollab".into(),
         "/usr/local/bin/kollab".into(),
+        #[cfg(target_os = "linux")]
+        "/usr/bin/kollab".into(),
     ];
     from_shell
         .into_iter()
@@ -371,9 +388,14 @@ fn child_exited(child: &Child) -> std::io::Result<bool> {
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
     };
     if result != 0 { return Err(std::io::Error::last_os_error()); }
-    Ok(info.si_pid != 0)
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    #[cfg(target_os = "linux")]
+    let pid = unsafe { info.si_pid() };
+    Ok(pid != 0)
 }
 
+#[cfg(target_os = "macos")]
 fn group_has_peers(group: libc::pid_t) -> std::io::Result<bool> {
     const PROC_PGRP_ONLY: u32 = 2; // sys/proc_info.h; libc exposes the function, not this constant.
     // libproc returns bytes. A full buffer is inconclusive, so hold rather than
@@ -393,6 +415,33 @@ fn group_has_peers(group: libc::pid_t) -> std::io::Result<bool> {
     }
     Ok(pids[..bytes as usize / std::mem::size_of::<libc::pid_t>()]
         .iter().any(|pid| *pid > 0 && *pid != group))
+}
+
+/// Linux exposes process groups through /proc, not macOS libproc. The command
+/// name may contain spaces and parentheses, so read fields only after its end.
+#[cfg(any(target_os = "linux", test))]
+fn stat_process_group(stat: &str) -> std::io::Result<libc::pid_t> {
+    stat.rsplit_once(") ").and_then(|(_, fields)| fields.split_whitespace().nth(2))
+        .and_then(|group| group.parse().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid /proc process stat"))
+}
+
+#[cfg(target_os = "linux")]
+fn group_has_peers(group: libc::pid_t) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<libc::pid_t>().ok()) else {
+            continue;
+        };
+        if pid == group { continue; }
+        match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) if stat_process_group(&stat)? == group => return Ok(true),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {} // exited during the scan
+            Err(err) => return Err(err), // incomplete evidence must not release ownership
+        }
+    }
+    Ok(false)
 }
 
 fn signal_owned_group(child: &Child, signal: libc::c_int) -> std::io::Result<()> {
@@ -432,10 +481,15 @@ fn group_exited(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
 /// While the window is hidden the app lives in the menu bar only: an accessory
 /// app with no Dock icon, as Docker Desktop does.
 fn menu_bar_only(app: &AppHandle, on: bool) {
+    #[cfg(target_os = "macos")]
+    {
     let policy = if on { ActivationPolicy::Accessory } else { ActivationPolicy::Regular };
     if let Err(err) = app.set_activation_policy(policy) {
         eprintln!("kollab-desktop: could not change the activation policy: {err}");
     }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, on); // Linux/Windows keep their ordinary taskbar/tray policy.
 }
 
 fn show_window(app: &AppHandle) {
@@ -496,8 +550,10 @@ fn exit_now(app: &AppHandle) {
 }
 
 /// The app for the quit Apple Event handler, an Objective-C callback with no context.
+#[cfg(target_os = "macos")]
 static QUIT_APP: OnceLock<AppHandle> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 const fn four_char(code: &[u8; 4]) -> u32 {
     u32::from_be_bytes(*code)
 }
@@ -507,6 +563,7 @@ const fn four_char(code: &[u8; 4]) -> u32 {
 /// one when an app's last window closes (Vorssaint does, ~0.1 s after). Logout, restart and shutdown still
 /// quit; a quit while the window shows asks like Quit Kollab; a quit while the
 /// app sits in the menu bar is refused.
+#[cfg(target_os = "macos")]
 fn take_quit_event(app: &AppHandle) {
     unsafe extern "C-unwind" fn on_quit(_: &AnyObject, _: Sel, event: *mut AnyObject, reply: *mut AnyObject) {
         let Some(app) = QUIT_APP.get() else { return };
@@ -578,7 +635,13 @@ fn open_external(url: &Url) {
     if matches!(url.scheme(), "http" | "https" | "mailto") {
         eprintln!("kollab-desktop: opening {url} in the default browser");
         let url = url.to_string();
-        std::thread::spawn(move || Command::new("open").arg(url).status());
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(target_os = "linux")]
+        let opener = "xdg-open";
+        #[cfg(target_os = "windows")]
+        let opener = "explorer.exe";
+        std::thread::spawn(move || Command::new(opener).arg(url).status());
     }
 }
 
@@ -588,6 +651,7 @@ fn allowed_in_window(url: &Url) -> bool {
 }
 
 /// The macOS menu bar: the usual items, except that Quit goes through `request_quit`.
+#[cfg(target_os = "macos")]
 fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     Menu::with_items(
         app,
@@ -630,6 +694,25 @@ fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     )
 }
 
+#[cfg(not(target_os = "macos"))]
+fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    Menu::with_items(app, &[
+        &Submenu::with_items(app, "Kollab", true, &[
+            &MenuItem::with_id(app, "open", "Open Kollab", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "Quit Kollab", true, Some("CmdOrCtrl+Q"))?,
+        ])?,
+        &Submenu::with_items(app, "Edit", true, &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ])?,
+    ])
+}
+
 /// The menu bar (tray) icon: Open Kollab, Launch at Login, Quit Kollab.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let login_enabled = app.autolaunch().is_enabled().unwrap_or(false);
@@ -646,7 +729,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     app.manage(LoginItem(login));
     TrayIconBuilder::with_id("main")
         .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
-        .icon_as_template(true)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Kollab")
         .menu(&menu)
         .build(app)?;
@@ -655,6 +738,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// Test hook: presses the window's red close button. `performClose:` takes the
 /// same AppKit path as a click (windowShouldClose:), which `Window::close` skips.
+#[cfg(target_os = "macos")]
 fn press_close_button(app: &AppHandle) {
     let Some(ns_window) = app.get_webview_window("main").and_then(|win| win.ns_window().ok()) else {
         return;
@@ -663,6 +747,11 @@ fn press_close_button(app: &AppHandle) {
     unsafe {
         let () = msg_send![ns_window.cast::<AnyObject>(), performClose: sender];
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn press_close_button(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") { let _ = win.close(); }
 }
 
 #[tauri::command]
@@ -747,8 +836,9 @@ fn main() {
                 .build()?;
             build_tray(app)?;
             if hidden {
-                app.set_activation_policy(ActivationPolicy::Accessory);
+                menu_bar_only(app.handle(), true);
             }
+            #[cfg(target_os = "macos")]
             take_quit_event(app.handle());
             let handle = app.handle().clone();
             quit_on_signals(&handle);
@@ -758,6 +848,7 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Kollab")
         .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => show_window(app),
             // A menu bar app outlives its window: only an explicit exit (Quit, a signal) has a code.
             RunEvent::ExitRequested { code, api, .. } => {
@@ -920,6 +1011,23 @@ mod tests {
         assert!(runtime.finish_exit(true));
         assert!(runtime.exit_ready);
         assert_eq!(runtime.begin(), None);
+    }
+
+    #[test]
+    fn linux_stat_parser_handles_command_parentheses_and_rejects_partial_records() {
+        assert_eq!(stat_process_group("17 (a command (with) spaces) S 12 41 17 0").unwrap(), 41);
+        assert_eq!(stat_process_group("17 (closing) ) name) Z 12 41 17 0").unwrap(), 41);
+        assert!(stat_process_group("17 (truncated").is_err());
+        assert!(stat_process_group("17 (name) S 12 invalid").is_err());
+    }
+
+    #[test]
+    fn linux_sidecar_lookup_matches_debian_and_extracted_appimage_layouts() {
+        assert_eq!(linux_bundled_kollab(Path::new("/usr/bin/kollab-desktop")),
+            Some(PathBuf::from("/usr/share/kollab/runtime/kollab")));
+        assert_eq!(linux_bundled_kollab(Path::new("/tmp/Kollab.AppDir/usr/bin/kollab-desktop")),
+            Some(PathBuf::from("/tmp/Kollab.AppDir/usr/share/kollab/runtime/kollab")));
+        assert_eq!(linux_bundled_kollab(Path::new("kollab-desktop")), None);
     }
 
     /// These kernel tests create only private groups with short natural

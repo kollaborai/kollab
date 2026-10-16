@@ -1,0 +1,35 @@
+name: Apple signing helper checks
+
+"on":
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/desktop-macos-signing.yml
+      - desktop/scripts/sign-macos.sh
+      - desktop/tests/test_apple_signing.py
+      - desktop/docs/apple-signing.md
+      - desktop/src-tauri/tauri.conf.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Check signing contracts and shell syntax without Apple credentials
+        run: |
+          python -m unittest discover -s desktop/tests -p 'test_apple_signing.py' -v
+          bash -n desktop/scripts/sign-macos.sh
+          shellcheck desktop/scripts/sign-macos.sh
+          python -m json.tool desktop/src-tauri/tauri.conf.json > /dev/null

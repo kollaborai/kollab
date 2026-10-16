@@ -9,7 +9,12 @@ on:
     branches: [main]
     paths:
       - .github/workflows/binaries.yml
+      - .github/workflows/publish.yml
       - scripts/build_binary.py
+      - scripts/desktop_release.py
+      - scripts/check_desktop_package.py
+      - tests/unit/test_desktop_release.py
+      - desktop/**
       - install.sh
       - kollabor/binary.py
       - kollabor/updates/auto_update.py
@@ -35,7 +40,7 @@ jobs:
       matrix:
         include:
           - platform: macos-aarch64
-            runner: macos-14
+            runner: macos-15
           - platform: macos-x86_64
             runner: macos-15-intel
           - platform: linux-x86_64
@@ -74,3 +79,182 @@ jobs:
             dist/bin/kollab-${{ matrix.platform }}
             dist/bin/kollab-${{ matrix.platform }}.sha256
           if-no-files-found: error
+
+  desktop:
+    name: desktop/${{ matrix.platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            binary_platform: macos-aarch64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - platform: macos-x86_64
+            binary_platform: macos-x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Test Apple signing helper and documented build commands
+        run: python desktop/tests/test_apple_signing.py
+
+      - name: Download the CLI sidecar
+        uses: actions/download-artifact@v8
+        with:
+          name: kollab-${{ matrix.binary_platform }}
+          path: dist/bin
+
+      - name: Install pinned Tauri CLI
+        run: cargo install tauri-cli --locked --version "2.12.0"
+
+      - name: Prepare the sidecar and release version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" stage --platform ${{ matrix.platform }} --source dist/bin/kollab-${{ matrix.binary_platform }}
+
+      - name: Build unsigned Kollab.app
+        working-directory: desktop
+        run: cargo tauri build --config src-tauri/tauri.release.json --bundles app
+
+      - name: Package unsigned desktop assets
+        env:
+          KOLLAB_NO_KEYRING: "1"
+        run: |
+          VERSION="$(python -c 'import json; print(json.load(open("desktop/src-tauri/tauri.release.json"))["version"])')"
+          APP="desktop/src-tauri/target/release/bundle/macos/Kollab.app"
+          test -d "$APP"
+          test -x "$APP/Contents/MacOS/kollab"
+          shown="$("$APP/Contents/MacOS/kollab" --version)"
+          test "${shown##* }" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
+          mkdir -p dist/desktop
+          base="kollab-desktop-${{ matrix.platform }}-${VERSION}"
+          ditto -c -k --keepParent "$APP" "dist/desktop/${base}.app.zip"
+          hdiutil create -volname "Kollab" -srcfolder "$APP" \
+            -ov -format UDZO "dist/desktop/${base}.dmg"
+          (
+            cd dist/desktop
+            for asset in "${base}.app.zip" "${base}.dmg"; do
+              shasum -a 256 "$asset" > "$asset.sha256"
+            done
+          )
+          ls -lh dist/desktop
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kollab-desktop-${{ matrix.platform }}
+          path: dist/desktop/*
+          if-no-files-found: error
+
+  desktop-linux:
+    name: desktop/linux-x86_64
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      # A scie holds an appended Python archive. Keep its packaged bytes intact.
+      NO_STRIP: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf \
+            xvfb xauth dbus-x11 xdotool
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: kollab-linux-x86_64
+          path: dist/bin
+
+      - name: Verify and stage the Linux sidecar
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" stage --platform linux-x86_64 --source dist/bin/kollab-linux-x86_64
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Check pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.12.0 --version
+
+      - name: Test Linux runtime ownership
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+
+      - name: Build Linux AppImage and Debian packages
+        working-directory: desktop
+        run: npx --yes @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.json --bundles appimage,deb
+
+      - name: Check and collect Linux packages
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/desktop_release.py --version "$VERSION" collect --platform linux-x86_64
+          dpkg-deb --info dist/desktop/*.deb
+          dpkg-deb --contents dist/desktop/*.deb
+          dpkg-deb --extract dist/desktop/*.deb "$RUNNER_TEMP/kollab-deb-check"
+          test -x "$RUNNER_TEMP/kollab-deb-check/usr/bin/kollab-desktop"
+          test -x "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab"
+          cmp dist/bin/kollab-linux-x86_64 "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab"
+          "$RUNNER_TEMP/kollab-deb-check/usr/share/kollab/runtime/kollab" --version
+          dpkg-deb --field dist/desktop/*.deb Depends | grep -w xdg-utils
+          mkdir -p "$RUNNER_TEMP/kollab-appimage-check"
+          (
+            cd "$RUNNER_TEMP/kollab-appimage-check"
+            "$GITHUB_WORKSPACE"/dist/desktop/*.AppImage --appimage-extract > /dev/null
+            test -x squashfs-root/usr/bin/kollab-desktop
+            test -x squashfs-root/usr/share/kollab/runtime/kollab
+            cmp "$GITHUB_WORKSPACE/dist/bin/kollab-linux-x86_64" squashfs-root/usr/share/kollab/runtime/kollab
+            squashfs-root/usr/share/kollab/runtime/kollab --version
+          )
+          (
+            cd dist/desktop
+            sha256sum -c ./*.sha256
+          )
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kollab-desktop-linux-x86_64
+          path: dist/desktop/*
+          if-no-files-found: error
+
+      - name: Smoke the packaged Linux window and attached-runtime lifecycle
+        run: dbus-run-session -- xvfb-run -a python scripts/check_desktop_package.py dist/desktop/*.AppImage
+
+  release-manifest:
+    name: release/manifest
+    needs: [build, desktop, desktop-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kollab-*
+          path: dist/bin
+          merge-multiple: true
+
+      - name: Verify all CLI, macOS and Linux release assets
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python scripts/desktop_release.py --version "$VERSION" verify dist/bin

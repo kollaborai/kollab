@@ -59,7 +59,7 @@ Change a label there when this spec changes, then run it.
 | You can't | Why | Instead |
 |---|---|---|
 | Join a Claude Code window already open in a terminal | ACP starts its own agent process | start it under kollab; `/resume` picks up a stored session when the harness supports it |
-| Pick its model, effort or billing from kollab | they belong to the harness and its login | set them in the harness |
+| Pick its model, effort or billing from kollab | model/effort are available when the harness advertises ACP config options; billing remains harness-owned | use `/model` or the Model panel for advertised options; set billing in the harness |
 | Gate every tool it runs | it asks only where its own rules say to, and kollab's config hooks never see its tools | keep its allow list tight and use its own hooks |
 | Reuse an approval for a call it describes vaguely | kollab grants by exact command or file paths, never by a label | approve it once |
 | Give it kollab's system prompt, skills or memory | ACP has no system prompt field | a short preface opens each session; its `CLAUDE.md` or `AGENTS.md` still apply |
@@ -696,10 +696,11 @@ shape (SDK 0.12.1 accepts that request).
 
 A clean transcript is the bar on every live run.
 
-## 10. Open
+## 10. Follow-ups
 
-- Model choice: when an agent advertises its model as an ACP config option,
-  `/model` could set it through `session/set_config_option`.
+- Model choice and reasoning effort: when an agent advertises ACP `model` or
+  `thought_level` config options, `/model` and the Model panel list and set them
+  through `session/set_config_option`; unadvertised options are refused.
 - Notices: when an SDK release carries `session.notices`, advertise them
   outbound and send mesh-started turns to attached clients. They stay live
   only: never history, never replayed by load or resume, never in a harness

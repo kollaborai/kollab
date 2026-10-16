@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -74,6 +75,49 @@ def create_app(
         await engine.aclose()
 
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+    class _UpdateConfig:
+        def get(self, key: str, default=None):
+            return default
+
+    @app.get("/api/update/check")
+    async def check_update():
+        """Return the latest release and local changelog notes, if available."""
+        from kollabor.version import __version__
+        from kollabor.updates import VersionCheckService
+        from kollabor.updates.release_notes import load_recent_release_notes
+
+        service = VersionCheckService(_UpdateConfig(), __version__)
+        await service.initialize()
+        try:
+            release = await service.check_for_updates()
+        finally:
+            await service.close()
+        return {
+            "current_version": __version__,
+            "available": release is not None,
+            "release": ({
+                "version": release.version,
+                "tag_name": release.tag_name,
+                "name": release.name,
+                "url": release.url,
+                "is_prerelease": release.is_prerelease,
+            } if release else None),
+            "notes": [
+                {"version": item.version, "date": item.date,
+                 "sections": [{"title": s.title, "items": s.items} for s in item.sections]}
+                for item in load_recent_release_notes(limit=1)
+            ],
+        }
+
+    @app.post("/api/update/apply")
+    async def apply_update():
+        """Run the existing safe updater without blocking the web server."""
+        from kollabor.updates import run_auto_update
+        result = await asyncio.to_thread(run_auto_update)
+        return {"success": result.success, "changed": result.changed,
+                "message": result.message, "method": result.method}
+
 
     # API proxy config endpoint. Ships the engine's bearer token to the page so
     # the user does not have to paste it by hand. This server listens on

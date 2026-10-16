@@ -44,6 +44,16 @@ export type GemAppearance = {
   home?: string;
 };
 
+export type UpdateRelease = { version: string; tag_name: string; name: string; url: string; is_prerelease: boolean };
+export type UpdateCheckResponse = {
+  current_version: string;
+  available: boolean;
+  release: UpdateRelease | null;
+  notes: Array<{ version: string; date: string; sections: Array<{ title: string; items: string[] }> }>;
+};
+export type UpdateApplyResponse = { success: boolean; changed: boolean; message: string; method: string };
+
+
 export type HistoryMessage = {
   role: "system" | "user" | "assistant" | string;
   content?: unknown;
@@ -688,6 +698,19 @@ export class EngineApi {
 
   listSessions() {
     return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork }>("/sessions");
+  }
+
+
+  async checkForUpdate() {
+    const response = await fetch("/api/update/check", { cache: "no-store" });
+    if (!response.ok) throw new ApiError(`Update check failed: ${response.status}`, response.status, undefined);
+    return (await response.json()) as UpdateCheckResponse;
+  }
+
+  async applyUpdate() {
+    const response = await fetch("/api/update/apply", { method: "POST" });
+    if (!response.ok) throw new ApiError(`Update failed: ${response.status}`, response.status, undefined);
+    return (await response.json()) as UpdateApplyResponse;
   }
 
   getSession(sessionId: string) {

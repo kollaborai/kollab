@@ -418,6 +418,10 @@ class ACPRunner:
         self.state = "stopped"
         self.capabilities: dict[str, Any] = {}
         self.initialize_metadata: dict[str, Any] = {}
+        # ACP session configuration options advertised by the harness. Keep
+        # the wire-shaped dictionaries so callers can render and validate
+        # options without coupling UI code to the ACP schema classes.
+        self.config_options: list[dict[str, Any]] = []
         self.resolved_command: tuple[str, ...] = ()
         self.workspace = ""
         self.resume_mode = "fresh"
@@ -438,6 +442,51 @@ class ACPRunner:
             or self._cancel_hold
             or not self._active_done.is_set()
         )
+
+    @staticmethod
+    def _wire_config_options(result: Any) -> list[dict[str, Any]]:
+        """Return ACP config options as JSON-compatible dictionaries."""
+        options = getattr(result, "config_options", None)
+        if options is None and isinstance(result, dict):
+            options = result.get("configOptions") or result.get("config_options")
+        if not options:
+            return []
+        rows: list[dict[str, Any]] = []
+        for option in options:
+            if hasattr(option, "model_dump"):
+                row = option.model_dump(by_alias=True, exclude_none=True)
+            elif isinstance(option, dict):
+                row = dict(option)
+            else:
+                continue
+            rows.append(row)
+        return rows
+
+    def advertised_config_options(self) -> list[dict[str, Any]]:
+        """Return a copy of the active session's ACP config options."""
+        return [dict(option) for option in self.config_options]
+
+    async def set_config_option(self, config_id: str, value: str | bool) -> list[dict[str, Any]]:
+        """Set one advertised ACP option and return the refreshed option set."""
+        if self._connection is None or not self.session_id:
+            raise ACPError("ACP session is not active")
+        option = next((item for item in self.config_options if item.get("id") == config_id), None)
+        if option is None:
+            raise ACPError(f"ACP config option is not advertised: {config_id}")
+        if option.get("type") == "select":
+            values: set[str] = set()
+            for candidate in option.get("options") or []:
+                if isinstance(candidate, dict):
+                    if "value" in candidate:
+                        values.add(str(candidate["value"]))
+                    for nested in candidate.get("options") or []:
+                        if isinstance(nested, dict) and "value" in nested:
+                            values.add(str(nested["value"]))
+            if str(value) not in values:
+                raise ACPError(f"ACP config value is not advertised: {config_id}={value}")
+        result = await self._connection.set_config_option(config_id, self.session_id, value)
+        self.config_options = self._wire_config_options(result)
+        return self.advertised_config_options()
 
     async def _start_process(self) -> str:
         if self._live_owned_processes():
@@ -494,6 +543,7 @@ class ACPRunner:
         self.capabilities = dict(wire.get("agentCapabilities") or {})
         self.initialize_metadata = dict(wire.get("_meta") or {})
         self.state = "opening"
+        self.config_options = []
         binding = self._resume_binding
         self.resume_mode = "fresh"
         session_caps = self.capabilities.get("sessionCapabilities") or {}
@@ -502,16 +552,18 @@ class ACPRunner:
             self._replaying = True
             try:
                 if session_caps.get("resume") is not None:
-                    await asyncio.wait_for(self._connection.resume_session(
+                    resumed = await asyncio.wait_for(self._connection.resume_session(
                         session_id=binding.session_id, cwd=cwd,
                         mcp_servers=self.profile.sdk_mcp_servers(),
                     ), timeout=60)
+                    self.config_options = self._wire_config_options(resumed)
                     self.resume_mode = "resumed"
                 elif self.capabilities.get("loadSession"):
-                    await asyncio.wait_for(self._connection.load_session(
+                    loaded = await asyncio.wait_for(self._connection.load_session(
                         session_id=binding.session_id, cwd=cwd,
                         mcp_servers=self.profile.sdk_mcp_servers(),
                     ), timeout=60)
+                    self.config_options = self._wire_config_options(loaded)
                     self.resume_mode = "loaded"
             except Exception:
                 # A vanished session or changed login is recoverable with new
@@ -524,6 +576,7 @@ class ACPRunner:
                 cwd=cwd, mcp_servers=self.profile.sdk_mcp_servers(),
             ), timeout=60)
             self.session_id = str(result.sessionId)
+            self.config_options = self._wire_config_options(result)
         self._resume_binding = None
         self._preface_pending = self.resume_mode == "fresh"
         self.generation = self.generation + 1 if self.generation else 1
@@ -925,6 +978,8 @@ class ACPRunner:
             return
         payload = update.model_dump(by_alias=True) if hasattr(update, "model_dump") else {}
         kind = payload.get("sessionUpdate", payload.get("session_update", payload.get("type", "unknown")))
+        if kind == "config_option_update":
+            self.config_options = self._wire_config_options(payload)
         if kind == "agent_message_chunk":
             content = payload.get("content") or {}
             text = content.get("text", "") if isinstance(content, dict) else getattr(content, "text", "")

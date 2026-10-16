@@ -20,6 +20,7 @@ import type {
   SettingsTab,
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
+import { SetupGuide } from "@/setup/SetupGuide";
 import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -68,6 +69,15 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 }
 
 const api = new EngineApi();
+
+/** True until this browser recorded a guided-setup dismissal. */
+const noGuideYet = () => {
+  try {
+    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+  } catch {
+    return false;
+  }
+};
 type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
@@ -317,6 +327,7 @@ export default function App() {
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -534,6 +545,25 @@ export default function App() {
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
   const [versionMismatch, setVersionMismatch] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api.checkForUpdate().then((result) => { if (active && result.available) setUpdateInfo(result); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  const applyAvailableUpdate = async () => {
+    setUpdateBusy(true);
+    try {
+      const result = await api.applyUpdate();
+      if (result.success && result.changed) window.location.reload();
+      else window.alert(result.message);
+    } catch (error) {
+      window.alert(errorText(error));
+    } finally { setUpdateBusy(false); }
+  };
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -583,6 +613,9 @@ export default function App() {
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
+      } else if (noGuideYet()) {
+        // First run: nothing to restore and no dismissal on record.
+        setSetupGuideOpen(true);
       }
       setError(null);
     })()
@@ -875,6 +908,13 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        <SetupGuide
+          api={api}
+          open={setupGuideOpen}
+          onOpenChange={setSetupGuideOpen}
+          onOpenSettings={(tab) => openSettings({ tab })}
+          onStartSession={() => void createSession()}
+        />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -915,6 +955,16 @@ export default function App() {
               className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-b px-4 py-2 text-sm"
             >
               {versionMismatch}
+            </div>
+          ) : null}
+          {versionMismatch ? (
+            <div role="status" className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-b px-4 py-2 text-sm">{versionMismatch}</div>
+          ) : null}
+          {updateInfo?.release ? (
+            <div role="status" className="border-primary/20 bg-primary/5 flex flex-wrap items-center gap-2 border-b px-4 py-2 text-sm">
+              <span>Update available: v{updateInfo.release.version}</span>
+              <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
+              <button className="rounded border px-2 py-0.5 text-xs" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
             </div>
           ) : null}
           {activeSession && initialState ? (
@@ -980,14 +1030,26 @@ export default function App() {
                       ? busyMessage
                       : `Ready on ${selectedModelLabel}. Start a session to begin.`)}
                 </p>
-                <Button
-                  type="button"
-                  onClick={() => void createSession()}
-                  disabled={busy}
-                >
-                  {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {busy ? "Starting…" : "Start Session"}
-                </Button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={() => void createSession()}
+                    disabled={busy}
+                  >
+                    {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                    {busy ? "Starting…" : "Start Session"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    data-testid="guided-setup-open"
+                    onClick={() => setSetupGuideOpen(true)}
+                    disabled={busy}
+                  >
+                    <Waypoints className="size-4" />
+                    Guided setup
+                  </Button>
+                </div>
               </div>
             </>
           )}

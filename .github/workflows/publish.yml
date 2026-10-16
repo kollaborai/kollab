@@ -163,6 +163,12 @@ jobs:
     needs: [binaries, publish]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Download the binaries
         uses: actions/download-artifact@v8
         with:
@@ -178,11 +184,10 @@ jobs:
         run: |
           # The in-app update check (VersionCheckService) and a binary's /upgrade
           # read /releases/latest, and install.sh downloads its binary from it.
-          # gh creates the release as a draft, uploads the binaries, then
-          # publishes it, so the latest release never lacks them.
+          # Verify CLI, macOS desktop and Linux desktop payloads and checksums
+          # before uploading the complete release set.
+          python scripts/desktop_release.py --version "$TAG" verify dist/bin
           ls -l dist/bin
-          files=(dist/bin/*)
-          test "${#files[@]}" -eq 8 || { echo "::error::expected 4 binaries and 4 checksums"; exit 1; }
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/bin/* --clobber
           else
