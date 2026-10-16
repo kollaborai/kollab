@@ -683,6 +683,25 @@ fn open_external(url: &Url) {
     }
 }
 
+/// The web UI's background (`--background` in its always-dark theme, oklch(0.145 0 0)).
+const APP_BACKGROUND: tauri::window::Color = tauri::window::Color(10, 10, 10, 255);
+
+/// On macOS the title bar shows no title and takes the window's background, so it
+/// reads as part of the app while keeping native dragging.
+#[cfg(target_os = "macos")]
+fn blend_title_bar<'a, M: Manager<Wry>>(
+    builder: WebviewWindowBuilder<'a, Wry, M>,
+) -> WebviewWindowBuilder<'a, Wry, M> {
+    builder.title_bar_style(tauri::TitleBarStyle::Transparent).hidden_title(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn blend_title_bar<'a, M: Manager<Wry>>(
+    builder: WebviewWindowBuilder<'a, Wry, M>,
+) -> WebviewWindowBuilder<'a, Wry, M> {
+    builder
+}
+
 /// The window shows only the bundled status page and the web UI's own origin.
 fn allowed_in_window(url: &Url) -> bool {
     matches!(url.scheme(), "tauri" | "about" | "data" | "blob") || url.origin() == ui_url().origin()
@@ -835,10 +854,11 @@ fn main() {
         .setup(|app| {
             let hidden = std::env::args().any(|arg| arg == "--hidden"); // Launch at Login
             let handle = app.handle().clone();
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            blend_title_bar(WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into())))
                 .title("Kollab")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(390.0, 600.0)
+                .background_color(APP_BACKGROUND)
                 .visible(!hidden)
                 .on_navigation(move |url| {
                     // The web UI's update banner hands a Kollab.app update to the app.
