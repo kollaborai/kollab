@@ -187,9 +187,9 @@ fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
         .collect()
 }
 
-/// macOS and Linux keep the scie as opaque package data, never beside the app's
-/// executable: codesign cannot sign a scie (data follows its signature), so in
-/// Contents/MacOS it would leave the bundle unsealed and "damaged".
+/// macOS bundles a launcher beside an unpacked, signed Python runtime
+/// (scripts/desktop_release.py stage), since codesign cannot sign a scie.
+/// Linux keeps the scie as opaque package data outside linuxdeploy's reach.
 fn bundled_kollab() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let path = linux_bundled_kollab(&std::env::current_exe().ok()?)?;
@@ -200,7 +200,8 @@ fn bundled_kollab() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Kollab.app/Contents/MacOS/kollab-desktop -> Kollab.app/Contents/Resources/kollab
+/// Kollab.app/Contents/MacOS/kollab-desktop -> Kollab.app/Contents/Resources/kollab,
+/// the sh launcher that runs Resources/runtime/bin/python3.12 -m kollabor_cli_main.
 #[cfg(any(target_os = "macos", test))]
 fn macos_bundled_kollab(executable: &Path) -> Option<PathBuf> {
     Some(executable.parent()?.parent()?.join("Resources/kollab"))

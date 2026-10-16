@@ -244,3 +244,41 @@ async def test_hub_restart_execs_the_binary(binary, monkeypatch):
     await asyncio.sleep(0)
 
     assert plugin._self_restart_cmd == [str(binary), "--agent", "koordinator"]
+
+
+@pytest.fixture
+def app_runtime(tmp_path, monkeypatch):
+    """This process runs from Kollab.app's unpacked runtime: KOLLAB-APP in its prefix, kollab beside it."""
+    runtime = tmp_path / "Resources" / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "KOLLAB-APP").write_text("")
+    monkeypatch.setattr(sys, "prefix", str(runtime))
+    monkeypatch.delenv("SCIE", raising=False)
+    return tmp_path / "Resources" / "kollab"
+
+
+def test_the_app_runtime_restarts_through_its_launcher(app_runtime):
+    assert running_binary() is None
+    assert kollab_argv() == [str(app_runtime)]
+
+
+def test_the_app_runtime_never_updates_itself(app_runtime, monkeypatch):
+    monkeypatch.setattr(auto_update, "_run_cmd", lambda *args: pytest.fail("ran an installer inside Kollab.app"))
+    monkeypatch.setattr(auto_update, "_upgrade_binary", lambda binary: pytest.fail("swapped a file inside Kollab.app"))
+
+    result = auto_update.run_auto_update()
+
+    assert (result.success, result.changed, result.method) == (False, False, "app")
+    assert "Kollab.app" in result.message
+
+
+def test_app_agents_and_daemons_start_the_apps_kollab(app_runtime, monkeypatch):
+    from kollabor_engine import daemon_pool
+
+    from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
+    from plugins.deep_thought.orchestrator import ThoughtOrchestrator
+
+    monkeypatch.setattr(daemon_pool.shutil, "which", lambda name: "/elsewhere/kollab")
+    assert daemon_pool._kollab_command() == [str(app_runtime)]
+    assert AgentOrchestrator._find_kollab_command(object.__new__(AgentOrchestrator)) == [str(app_runtime)]
+    assert ThoughtOrchestrator._find_kollab_command(object.__new__(ThoughtOrchestrator)) == [str(app_runtime)]

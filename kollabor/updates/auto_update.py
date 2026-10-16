@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from ..binary import running_binary
+from ..binary import app_launcher, running_binary
 from .git_update import _current_source_root, pip_command, run_source_update
 from .version_comparator import is_newer_version
 
@@ -311,6 +311,12 @@ def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
     use the safe fast-forward updater. Installed packages are upgraded by the
     installer that owns the running interpreter.
     """
+    if app_launcher() is not None:
+        # Any write inside Kollab.app breaks its signature: the app updates whole.
+        return AutoUpdateResult(
+            False, "This Kollab runs inside Kollab.app; update it by installing the latest Kollab.app.", "app",
+            changed=False,
+        )
     binary = running_binary()
     if binary is not None:
         return _upgrade_binary(binary)

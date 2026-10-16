@@ -15,29 +15,31 @@ icon available. The four existing CLI release binaries are unchanged.
 Needs Rust and the Tauri 2 CLI (`cargo install tauri-cli --version "^2"`, or
 use `npx @tauri-apps/cli@2` in place of `cargo tauri`).
 
-First put the kollab release binary where the bundler expects the sidecar.
-That folder is gitignored, because the binary is about 47 MB.
+First unpack a kollab release binary into the app runtime. `stage` checks the
+binary against its `.sha256`, so use a release asset pair or build one from this
+checkout; the runtime lands in the gitignored `src-tauri/binaries/`.
 
 ```bash
+python scripts/build_binary.py --out dist/bin    # or download kollab-macos-* + .sha256
+python scripts/desktop_release.py stage --platform macos-aarch64 --source dist/bin/kollab-macos-aarch64
 cd desktop
-mkdir -p src-tauri/binaries
-cp ~/.local/bin/kollab src-tauri/binaries/kollab
-# or download the matching kollab-macos-* release asset from GitHub Releases
-cargo tauri build
-codesign --force --sign - src-tauri/target/release/bundle/macos/Kollab.app
+cargo tauri build --config src-tauri/tauri.release.json --bundles app
+KOLLAB_APP_RUNTIME="$PWD/src-tauri/binaries/app-runtime-aarch64-apple-darwin" \
+  bash scripts/sign-macos.sh seal "$PWD/src-tauri/target/release/bundle/macos/Kollab.app"
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (ad-hoc
-signed, about 58 MB). To watch its log, run the binary from a terminal:
+signed, about 175 MB on disk). To watch its log, run the binary from a terminal:
 `.../Kollab.app/Contents/MacOS/kollab-desktop`.
 
-The CLI goes in `Kollab.app/Contents/Resources/kollab`, not next to the app's
-executable. It is a pex scie: a launcher with its Python payload appended after
-the launcher's code signature, which `codesign` cannot sign. Beside the
-executable it counts as nested code, so the bundle cannot be sealed and a
-downloaded copy opens as "Kollab is damaged". As bundle data it is sealed with
-the rest of the app; `codesign --verify --deep --strict` must pass.
+The CLI is not a scie inside the app: `codesign` cannot sign a scie, and
+notarization rejects unsigned code. `stage` unpacks it into the scie's own
+CPython with kollab installed in it; `seal` copies that to
+`Kollab.app/Contents/Resources/` (`kollab` launcher, `runtime/`), signs every
+Mach-O in it, then the app, and `codesign --verify --deep --strict` must pass.
+The app updates whole: a kollab running from it never runs `/upgrade` in place.
+Details in [macOS signing and notarization](docs/apple-signing.md).
 
 Release builds publish one unsigned `.app.zip` and one `.dmg` for each supported
 macOS architecture (`aarch64` and `x86_64`), targeting macOS 11 or newer to
@@ -72,9 +74,10 @@ xattr -dr com.apple.quarantine /Applications/Kollab.app
 
 ## Signing and notarization
 
-The reusable `scripts/sign-macos.sh` helper can wrap a CI Tauri build to sign,
-notarize and staple with explicitly configured Apple Developer secrets. Its
-default is unsigned; it does not download sidecars, archive or publish assets.
+The reusable `scripts/sign-macos.sh` helper adds the staged runtime to a Tauri
+build and signs it: ad hoc by default, or with Developer ID, notarization and
+stapling from explicitly configured Apple Developer secrets. It does not
+download sidecars, archive or publish assets.
 See [macOS signing and notarization](docs/apple-signing.md) for operator setup,
 cleanup guarantees, and validation limits.
 

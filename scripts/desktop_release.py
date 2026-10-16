@@ -3,6 +3,15 @@
 
 Uses only the standard library so the publishing job needs no Kollab install.
 The CLI's existing macOS/Linux assets and names remain unchanged.
+
+macOS gets no scie: codesign cannot sign one (its jump keeps 15 bytes after
+LC_CODE_SIGNATURE), and notarization rejects any unsigned Mach-O. So `stage`
+unpacks the verified CLI scie into a plain tree, the scie's own CPython with
+kollab installed in its site-packages, which desktop/scripts/sign-macos.sh
+copies into Kollab.app and signs file by file:
+
+    Kollab.app/Contents/Resources/kollab     sh launcher (`kollab --version`, `--web-ui`)
+    Kollab.app/Contents/Resources/runtime/   bin/python3.12, lib/python3.12/..., KOLLAB-APP
 """
 
 from __future__ import annotations
@@ -20,6 +29,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64")
+# kollabor/binary.py reads this marker in sys.prefix: the app's runtime starts
+# again through the launcher beside it and never updates itself in place.
+APP_MARKER = "KOLLAB-APP"
+LAUNCHER = """#!/bin/sh
+# Kollab.app's kollab: the app's own Python, isolated (-I) from the caller's
+# Python settings, never writing bytecode (-B) into the sealed bundle.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+# -I ignores PYTHONUNBUFFERED, which the app sets so its log stays current.
+exec "$(dirname "$self")/runtime/bin/python3.12" -I -B ${PYTHONUNBUFFERED:+-u} -m kollabor_cli_main "$@"
+"""
+# What kollab never runs: Tcl/Tk, headers, pip (nothing installs into a signed
+# app), the embedding dylib (python3.12 links libpython statically) and the
+# scripts whose shebangs name the build machine. Fewer Mach-O files to sign.
+PRUNE = (
+    "include", "share", "lib/pkgconfig", "lib/libpython3.12.dylib", "lib/itcl*", "lib/libtcl*",
+    "lib/tcl9*", "lib/thread*", "lib/tk9*", "lib/python3.12/config-3.12-darwin", "lib/python3.12/ensurepip",
+    "lib/python3.12/idlelib", "lib/python3.12/tkinter", "lib/python3.12/turtle.py",
+    "lib/python3.12/turtledemo", "lib/python3.12/lib-dynload/_tkinter.*", "lib/python3.12/site-packages/pip*",
+)
 MACOS_TARGETS = {"macos-aarch64": "aarch64-apple-darwin", "macos-x86_64": "x86_64-apple-darwin"}
 TARGETS = {
     "linux-x86_64": ("x86_64-unknown-linux-gnu", (("appimage", "*.AppImage", ".AppImage"), ("deb", "*.deb", ".deb"))),
@@ -86,37 +118,96 @@ def verify_manifest(directory: Path, version: str) -> None:
     print(f"verified {len(expected)} release assets and {len(expected) // 2} SHA-256 pairs")
 
 
+def scie_env() -> dict[str, str]:
+    """This environment minus any scie identity, which would make a scie act as another."""
+    env = {key: val for key, val in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
+    env["KOLLAB_NO_KEYRING"] = "1"
+    return env
+
+
+def unpack_runtime(scie: Path, destination: Path) -> Path:
+    """The scie as a signable tree: its CPython, kollab in that Python's site-packages, a launcher."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    work = destination.with_name(destination.name + ".work")
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    # SCIE=split writes the scie's files, each checked against its lift manifest.
+    subprocess.run([str(scie), str(work / "split")], env={**scie_env(), "SCIE": "split"}, check=True)
+    lift = json.loads((work / "split/lift.json").read_text())["scie"]["lift"]
+    (python,) = [entry for entry in lift["files"] if entry.get("key") == "python-distribution"]
+    archive = work / "split" / python["name"]
+    if digest(archive) != python["hash"]:
+        raise ValueError(f"{archive.name} does not match the scie's manifest")
+    shutil.unpack_archive(archive, work / "cpython", "gztar")
+    runtime = destination / "runtime"
+    destination.mkdir(parents=True)
+    (work / "cpython/python").rename(runtime)
+    interpreter = runtime / "bin/python3.12"
+    # The pex's own tools lay out exactly the distributions the scie resolved.
+    subprocess.run(
+        [str(interpreter), str(work / "split/pex"), "venv", "--site-packages-copies", str(work / "venv")],
+        env={**scie_env(), "PEX_TOOLS": "1"}, check=True,
+    )
+    for pattern in PRUNE:
+        for path in runtime.glob(pattern):
+            shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+    for path in (runtime / "bin").iterdir():
+        if path != interpreter:
+            path.unlink()
+    site_packages = runtime / "lib/python3.12/site-packages"
+    shutil.copytree(work / "venv/lib/python3.12/site-packages", site_packages, dirs_exist_ok=True)
+    shutil.rmtree(work)
+    # Bytecode that never goes stale: -B stops writes, unchecked-hash stops
+    # recompiles, and a write inside the app would break its seal.
+    subprocess.run(
+        [str(interpreter), "-I", "-m", "compileall", "-q", "-j0", "--invalidation-mode", "unchecked-hash",
+         str(runtime / "lib/python3.12")],
+        env=scie_env(), check=False, stdout=subprocess.DEVNULL,
+    )
+    # Python children started without -B (sys.executable -m ...) write no bytecode either.
+    (site_packages / "kollab-app.pth").write_text("import sys; sys.dont_write_bytecode = True\n")
+    (runtime / APP_MARKER).write_text("Kollab.app runtime: update the app, not this tree.\n")
+    launcher = destination / "kollab"
+    launcher.write_text(LAUNCHER)
+    launcher.chmod(0o755)
+    return launcher
+
+
 def stage(platform: str, source: Path, version: str) -> Path:
     verify_checksum(source)
     if platform in MACOS_TARGETS:
-        # codesign cannot sign a scie, so it stays bundle data in Resources
-        # and the app seals it there instead of treating it as nested code.
+        # sign-macos.sh copies this tree into the built app and signs it.
         target = MACOS_TARGETS[platform]
-        bundle = {"targets": ["app"], "macOS": {"files": {"Resources/kollab": f"binaries/kollab-{target}"}}}
-    else:
-        target, packages = TARGETS[platform]
-        # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a
-        # scie's appended archive. Keep the verified CLI opaque under usr/share.
-        files = {"/usr/share/kollab/runtime/kollab": f"binaries/kollab-{target}"}
-        bundle = {
-            "targets": [package[0] for package in packages],
-            "externalBin": [],
-            "linux": {"deb": {"files": files, "depends": ["xdg-utils"]}, "appimage": {"files": files}},
-        }
+        launcher = unpack_runtime(source, ROOT / "desktop/src-tauri/binaries" / f"app-runtime-{target}")
+        return check_staged(launcher, version, {"version": version, "bundle": {"targets": ["app"]}})
+    target, packages = TARGETS[platform]
+    # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a
+    # scie's appended archive. Keep the verified CLI opaque under usr/share.
+    files = {"/usr/share/kollab/runtime/kollab": f"binaries/kollab-{target}"}
+    bundle = {
+        "targets": [package[0] for package in packages],
+        "externalBin": [],
+        "linux": {"deb": {"files": files, "depends": ["xdg-utils"]}, "appimage": {"files": files}},
+    }
     destination = ROOT / "desktop/src-tauri/binaries" / f"kollab-{target}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
     destination.chmod(0o755)
-    env = {key: val for key, val in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
-    env["KOLLAB_NO_KEYRING"] = "1"
+    return check_staged(destination, version, {"version": version, "bundle": bundle})
+
+
+def check_staged(destination: Path, version: str, release_config: dict) -> Path:
+    """The staged kollab reports `version`; then tauri.release.json is written."""
     result = subprocess.run(
-        [str(destination), "--version"], env=env, capture_output=True, text=True, timeout=600, check=True
+        [str(destination), "--version"], env=scie_env(), capture_output=True, text=True, timeout=600, check=True
     )
     if result.stdout.split()[-1:] != [version]:
         raise ValueError(f"sidecar reports {result.stdout!r}, expected {version}")
     config = ROOT / "desktop/src-tauri/tauri.release.json"
-    config.write_text(json.dumps({"version": version, "bundle": bundle}, indent=2) + "\n")
-    print(f"staged {destination.name}: {result.stdout.strip()}")
+    config.write_text(json.dumps(release_config, indent=2) + "\n")
+    print(f"staged {destination}: {result.stdout.strip()}")
     return destination
 
 

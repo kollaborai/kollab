@@ -27,10 +27,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0",
-      "files": {
-        "Resources/kollab": "binaries/kollab"
-      }
+      "minimumSystemVersion": "11.0"
     }
   }
 }

@@ -3536,13 +3536,14 @@ class HubPlugin(BasePlugin):
         # so we don't fork a second daemon layer.
         import sys
 
-        from kollabor.binary import running_binary
+        from kollabor.binary import own_launcher
 
-        # A binary restarts as its file (it may hold an upgrade since); anything
-        # else reruns this interpreter on sys.argv[0].
+        # A binary restarts as its file (it may hold an upgrade since) and
+        # Kollab.app through its launcher; anything else reruns this
+        # interpreter on sys.argv[0].
         argv = [a for a in sys.argv[1:] if a != "--detached"]
-        binary = running_binary()
-        exec_argv = [str(binary), *argv] if binary else [sys.executable, sys.argv[0], *argv]
+        launcher = own_launcher()
+        exec_argv = [str(launcher), *argv] if launcher else [sys.executable, sys.argv[0], *argv]
 
         self._self_restart_requested = True
         self._self_restart_cmd = exec_argv

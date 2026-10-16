@@ -1,8 +1,9 @@
 # macOS signing and notarization
 
-`desktop/scripts/sign-macos.sh` wraps a caller-supplied Tauri build, then validates,
-notarizes and staples its `Kollab.app` when explicitly requested. The caller keeps
-ownership of sidecar preparation, target/version settings, archives, checksums and
+`desktop/scripts/sign-macos.sh` wraps a caller-supplied Tauri build, adds the
+staged kollab runtime to its `Kollab.app`, signs every Mach-O in it, then
+notarizes and staples the app when explicitly requested. The caller keeps
+ownership of runtime staging, target/version settings, archives, checksums and
 publication. This helper can be merged against main independently of the desktop
 release workflow in [PR #192](https://github.com/kollaborai/kollab/pull/192).
 
@@ -16,6 +17,42 @@ plus exactly one complete notarization authentication set are required. Missing,
 partial or simultaneous authentication sets fail before any build or keychain
 operation. It never automatically enables signing or downgrades a requested
 signed build. Explicit unsigned mode ignores inherited Apple credentials.
+
+## The bundled kollab runtime
+
+Kollab.app ships no scie: `codesign` cannot sign one (every scie-jump keeps a
+15-byte trailer after `LC_CODE_SIGNATURE`) and notarization rejects any unsigned
+Mach-O. `scripts/desktop_release.py stage --platform macos-*` unpacks the
+verified CLI scie instead (`SCIE=split`): its own CPython 3.12, kollab and every
+dependency installed into that Python's `site-packages` by the pex's own tools,
+Tcl/Tk, headers and pip removed, all bytecode precompiled with
+`unchecked-hash`. It lands in `desktop/src-tauri/binaries/app-runtime-<target>/`:
+
+```text
+Kollab.app/Contents/Resources/kollab              sh launcher: python3.12 -I -B -m kollabor_cli_main
+Kollab.app/Contents/Resources/runtime/bin/python3.12
+Kollab.app/Contents/Resources/runtime/lib/python3.12/...   stdlib, site-packages (about 25 .so)
+Kollab.app/Contents/Resources/runtime/KOLLAB-APP           marker read by kollabor/binary.py
+```
+
+`KOLLAB_APP_RUNTIME` names that directory for the helper. After Tauri builds,
+the helper copies it into `Contents/Resources`, signs each Mach-O under
+`runtime/` and then the app, and runs `codesign --verify --deep --strict`.
+Nothing inside the app may be written later, or its seal breaks: the launcher
+passes `-B`, a `kollab-app.pth` sets `sys.dont_write_bytecode` for Python
+children, and `/upgrade` refuses to update a kollab running from the app
+(`kollabor/updates/auto_update.py`). Agents, daemons and restarts it starts run
+the launcher, not a `kollab` on PATH (`kollabor.binary.own_launcher`).
+`main.rs` still runs `Contents/Resources/kollab --web-ui`.
+
+Ad hoc signing leaves out hardened runtime on purpose. Hardened runtime turns on
+library validation, which loads an extension only when it shares the
+interpreter's Team ID, and ad hoc signatures have none: `pydantic_core` fails
+with "different Team IDs". A Developer ID signature gives every file the same
+Team ID, so the signed path needs no entitlements. Checked locally with ad hoc
+hardened runtime plus `disable-library-validation` on python3.12 standing in for
+the shared Team ID: kollab's imports, HTTPS, ctypes and cffi callbacks, PyNaCl
+and uvloop all run.
 
 The **Apple signing helper checks** workflow runs fixture/static validation with
 no Apple secrets or keychain access. A release owner connects the block below to
@@ -83,9 +120,15 @@ bash scripts/sign-macos.sh build "$APP_PATH" -- \
   --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}' \
   --config src-tauri/tauri.release.json
 
+# Unsigned: add the runtime to an existing Tauri build and seal it ad hoc.
+bash scripts/sign-macos.sh seal "$APP_PATH"
+
 # Safe, idempotent retry after the signed build's own EXIT/INT/TERM cleanup.
 bash scripts/sign-macos.sh cleanup
 ```
+
+`build` and `seal` both read `KOLLAB_APP_RUNTIME` and fail before any build when
+it does not name a staged runtime. `seal` refuses an app that already holds one.
 
 The caller sets `APP_PATH` to its actual build output, including the target/profile
 layout. Use a fresh output directory: rejecting an existing app prevents a successful
@@ -129,6 +172,7 @@ job enough time for the build plus the 30-minute notary wait.
 ```yaml
 env:
   APPLE_SIGNING_MODE: ${{ inputs.apple_signing_mode || 'unsigned' }}
+  KOLLAB_APP_RUNTIME: ${{ github.workspace }}/desktop/src-tauri/binaries/app-runtime-${{ matrix.target }}
 steps:
   - name: Check the explicitly selected mode and trusted ref
     shell: bash
@@ -143,7 +187,9 @@ steps:
   - name: Existing unsigned Tauri build
     if: env.APPLE_SIGNING_MODE == 'unsigned'
     working-directory: desktop
-    run: cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json
+    run: |
+      cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json
+      bash scripts/sign-macos.sh seal "$CARGO_TARGET_DIR/$TARGET/release/bundle/macos/Kollab.app"
   - name: Optional Developer ID Tauri build
     if: env.APPLE_SIGNING_MODE == 'developer-id' && github.ref == 'refs/heads/main'
     working-directory: desktop
@@ -197,16 +243,14 @@ kill can prevent any cleanup handler, so this is not a persistent self-hosted
 runner secret-management design. Configure the consuming workflow to upload only
 its final archive/checksum and exclude all temporary signing state.
 
-The signed path verifies the app's expected team, hardened runtime and secure
-timestamp. The bundled `kollab` sidecar (`Contents/Resources/kollab`) is a pex
-scie that `codesign` cannot sign, so it is sealed as bundle data rather than
-signed as nested code. Notarization checks every Mach-O in the bundle, so it is
-expected to reject that unsigned scie: a notarized build needs the CLI shipped
-as an unpacked Python tree whose binaries are each signed. It submits a ZIP with `notarytool --wait`
+The signed path verifies the expected team, hardened runtime and secure
+timestamp on the app and on every Mach-O under `Contents/Resources/runtime`,
+since `--deep` never reaches code in Resources and notarization checks all of
+it. It submits a ZIP with `notarytool --wait`
 (30-minute wait limit), requires JSON status **Accepted**, staples and validates
 the ticket, rechecks the signature, and runs Gatekeeper assessment. It returns
 success only after all of those checks and cleanup succeed. Rejection, timeout,
-bad signatures, missing sidecars, staple or Gatekeeper errors return nonzero. A timeout
+bad signatures, a missing runtime, staple or Gatekeeper errors return nonzero. A timeout
 does not cancel Apple's server-side submission; use its submission ID in Apple's
 notary history before deciding whether to retry.
 
@@ -222,11 +266,36 @@ spctl --assess --type execute --verbose=2 Kollab.app
 
 Open it through Finder with download quarantine intact, check the window/tray,
 launch the bundled runtime and exercise its normal agent/tool flow. Check both
-architectures before claiming signed release qualification. No extra entitlements
-or hardened-runtime exceptions are introduced here; the packaged Python/scie
-runtime still needs that real execution check. Do not weaken signing checks to
+architectures before claiming signed release qualification. No entitlements or
+hardened-runtime exceptions are introduced here; the signed Python runtime still
+needs that real execution check. Do not weaken signing checks to
 hide a failed smoke test. Certificate expiry/revocation and Apple service delays
 require operator attention; fixture tests do not prove Apple's acceptance.
+
+## What notarization still needs
+
+The layout and the signing order are in place and proven ad hoc; these steps
+need a Developer ID and have not run yet:
+
+1. Apple Developer Program enrollment, a **Developer ID Application**
+   certificate and the repository secrets above (see "What Marco must create").
+2. Wire the `developer-id` step from the fragment above into the macOS job of
+   `binaries.yml`, with `KOLLAB_APP_RUNTIME` and the hardened-runtime config.
+   Only the unsigned `seal` path is connected today.
+3. A first real submission for each architecture. If Apple rejects a file,
+   `xcrun notarytool log <id>` names it; every Mach-O under
+   `Contents/Resources/runtime` (about 25 `.so` plus `python3.12`, some of
+   them universal) must carry the team, hardened runtime and a timestamp.
+4. Run the notarized app with no entitlements first. ctypes and cffi callbacks,
+   PyNaCl, uvloop and TLS worked under hardened runtime locally; add
+   `com.apple.security.cs.allow-unsigned-executable-memory` only if a signed
+   run proves it is needed.
+5. Notarize and staple the `.dmg` as well as the app inside it, then run the
+   clean-Mac checks below on both downloads.
+6. Expect one Keychain prompt per stored secret after the switch: macOS knows
+   `python3.12` by its signature, and Developer ID replaces the ad hoc one.
+   From then on the requirement (team + identifier) stays the same across
+   updates, so later releases do not prompt again.
 
 ## Local validation without Apple credentials
 
