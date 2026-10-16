@@ -1,15 +1,15 @@
-"""Tests for the terminal /apps command: list, search, add and remove over the Apps service."""
+"""Tests for /mcp browse, search, add and remove over the Apps service."""
 
 import asyncio
 import sys
-from types import SimpleNamespace
 
 import pytest
 
 from kollabor.apps import registry
 from kollabor.apps.service import AppsService
+from kollabor.commands import mcp_apps as apps_command
+from kollabor.commands.mcp_command import MCPCommandHandler
 from kollabor.commands.registry import SlashCommandRegistry
-from kollabor.commands.system_commands.handlers import apps as apps_command
 from kollabor_agent import MCPManager
 from kollabor_events.models import SlashCommand
 
@@ -68,10 +68,11 @@ def service(tmp_path, monkeypatch):
 
 
 def _run(*args):
-    event_bus = SimpleNamespace(get_service=lambda name: None)  # no daemon: no MCP session to reload
-    handler = apps_command.AppsCommandHandler(SlashCommandRegistry(), event_bus)
-    command = SlashCommand(name="apps", args=list(args), raw_input="/apps " + " ".join(args))
-    return asyncio.run(handler.handle_apps(command))
+    # no daemon: no MCP session to reload
+    handler = MCPCommandHandler(SlashCommandRegistry(), mcp_integration=None)
+    args = list(args) or ["browse"]
+    command = SlashCommand(name="mcp", args=args, raw_input="/mcp " + " ".join(args))
+    return asyncio.run(handler.handle_mcp(command))
 
 
 def test_list_names_the_three_kinds(service):
@@ -145,8 +146,17 @@ def test_remove_of_a_cli_tool_is_refused(service):
     assert "can't be removed" in result.message
 
 
-def test_unknown_verb_prints_usage(service):
-    result = _run("frobnicate")
+def test_search_with_no_words_prints_usage(service):
+    result = _run("search")
 
     assert result.success is False
     assert result.message == apps_command.USAGE
+
+
+def test_mcp_lists_the_apps_verbs_and_apps_is_gone():
+    registry = SlashCommandRegistry()
+    MCPCommandHandler(registry, mcp_integration=None).register_commands()
+
+    names = {sub.name for sub in registry.get_command("mcp").subcommands}
+    assert {"browse", "search", "add", "remove", "list", "tools"} <= names
+    assert registry.get_command("apps") is None

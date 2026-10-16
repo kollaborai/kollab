@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Wrap the caller's Tauri build; archive/upload remain the caller's responsibility.
+# Wrap the caller's Tauri build, add the staged kollab runtime and sign it;
+# archive/upload remain the caller's responsibility.
 set +x
 set -euo pipefail
 umask 077
@@ -123,13 +124,67 @@ PY
   security list-keychains -d user -s "$keychain" "${original[@]}"
 }
 
+# KOLLAB_APP_RUNTIME: the tree `scripts/desktop_release.py stage` unpacks for
+# macOS, a kollab launcher beside runtime/ (the CLI's CPython with kollab in it).
+check_runtime() {
+  local runtime=${KOLLAB_APP_RUNTIME:-}
+  [ -n "$runtime" ] || fail 'KOLLAB_APP_RUNTIME must name the staged app runtime (scripts/desktop_release.py stage)'
+  if [ ! -f "$runtime/kollab" ] || [ ! -f "$runtime/runtime/bin/python3.12" ] || [ ! -f "$runtime/runtime/KOLLAB-APP" ]; then
+    fail "KOLLAB_APP_RUNTIME is not a staged app runtime: $runtime"
+  fi
+}
+
+# NUL-separated Mach-O files under $1 (thin or universal), found by magic number.
+macho_files() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import os, sys
+MAGIC = {bytes.fromhex(m) for m in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca")}
+for root, _, names in os.walk(sys.argv[1]):
+    for name in sorted(names):
+        path = Path(root, name)
+        if not path.is_symlink() and path.open("rb").read(4) in MAGIC:
+            sys.stdout.write(f"{path}\0")
+PY
+}
+
+# Copy the runtime into Resources, sign each of its Mach-O files, then the app.
+# codesign seals Resources as data and never signs code there itself, while
+# notarization requires every Mach-O to carry Developer ID, hardened runtime
+# and a timestamp. Ad hoc stays without hardened runtime: library validation
+# needs one Team ID across python3.12 and its extensions, which ad hoc lacks.
+seal_app() {
+  local app=$1 identity=$2 resources="$1/Contents/Resources" flags=() file
+  [ -d "$resources" ] || fail 'Kollab.app has no Contents/Resources'
+  if [ -e "$resources/kollab" ] || [ -e "$resources/runtime" ]; then
+    fail 'Kollab.app already holds a kollab runtime; seal a fresh Tauri build'
+  fi
+  cp -pR "$KOLLAB_APP_RUNTIME/kollab" "$KOLLAB_APP_RUNTIME/runtime" "$resources/"
+  if [ "$identity" = - ]; then flags=(--timestamp=none); else flags=(--options runtime --timestamp); fi
+  while IFS= read -r -d '' file; do
+    codesign --force --sign "$identity" "${flags[@]}" "$file"
+  done < <(macho_files "$resources/runtime")
+  codesign --force --sign "$identity" "${flags[@]}" "$app"
+  codesign --verify --deep --strict --verbose=2 "$app"
+}
+
 verify_signature() {
-  local details
+  local details file
   codesign --verify --deep --strict --verbose=2 "$1"
+  # --deep never reaches code in Resources; notarization checks all of it.
+  while IFS= read -r -d '' file; do
+    codesign --verify --strict "$file"
+    check_signature_details "$file"
+  done < <(macho_files "$1/Contents/Resources/runtime")
+  check_signature_details "$1"
+}
+
+check_signature_details() {
+  local details
   details=$(codesign --display --verbose=4 "$1" 2>&1)
-  printf '%s\n' "$details" | grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" || fail 'signature team does not match APPLE_TEAM_ID'
-  printf '%s\n' "$details" | grep -Eq 'flags=.*runtime' || fail 'signature has no hardened runtime'
-  printf '%s\n' "$details" | grep -Eq '^Timestamp=' || fail 'signature has no secure timestamp'
+  printf '%s\n' "$details" | grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" || fail "signature team does not match APPLE_TEAM_ID: $1"
+  printf '%s\n' "$details" | grep -Eq 'flags=.*runtime' || fail "signature has no hardened runtime: $1"
+  printf '%s\n' "$details" | grep -Eq '^Timestamp=' || fail "signature has no secure timestamp: $1"
 }
 
 notarize() {
@@ -167,6 +222,17 @@ case "$command" in
     exit 0
     ;;
   cleanup) cleanup; exit $? ;;
+  seal)
+    # The unsigned path: seal an existing Tauri build ad hoc. Developer ID
+    # signing needs the keychain the build command prepares.
+    [ "$#" -eq 2 ] || fail 'usage: sign-macos.sh seal /path/Kollab.app'
+    case "$2" in /*/Kollab.app) ;; *) fail 'the app must be an absolute path ending in /Kollab.app' ;; esac
+    [ -d "$2" ] || fail "no app at $2"
+    check_runtime
+    seal_app "$2" -
+    printf 'Sealed %s (ad hoc); the caller may now archive it\n' "$2"
+    exit 0
+    ;;
   build)
     if [ "$#" -lt 4 ] || [ "${3:-}" != -- ]; then
       fail 'usage: sign-macos.sh build /path/Kollab.app -- COMMAND [ARGS...]'
@@ -174,9 +240,10 @@ case "$command" in
     app=$2
     shift 3
     ;;
-  *) fail 'usage: sign-macos.sh preflight [MODE] | build /path/Kollab.app -- COMMAND [ARGS...] | cleanup' ;;
+  *) fail 'usage: sign-macos.sh preflight [MODE] | build /path/Kollab.app -- COMMAND [ARGS...] | seal /path/Kollab.app | cleanup' ;;
 esac
 preflight "$mode"
+check_runtime
 case "$app" in
   /*/Kollab.app) ;;
   *) fail 'the expected app must be an absolute path ending in /Kollab.app' ;;
@@ -184,22 +251,21 @@ esac
 if [ -e "$app" ] || [ -L "$app" ]; then
   fail 'expected app path already exists; use a fresh build output directory'
 fi
-if [ "$mode" = developer-id ]; then prepare_keychain; fi
+identity=-
+if [ "$mode" = developer-id ]; then prepare_keychain; identity=$APPLE_SIGNING_IDENTITY; fi
 
 (
   # Tauri signs only. Explicit notarytool/stapler checks below own notarization.
   unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
   unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY APPLE_API_KEY_PATH
-  if [ "$mode" = unsigned ]; then APPLE_SIGNING_IDENTITY=-; fi
-  export APPLE_SIGNING_IDENTITY
+  export APPLE_SIGNING_IDENTITY=$identity
   # Preserve the caller's working directory and argument boundaries. Never eval.
   "$@"
 )
 [ -d "$app" ] || fail 'Tauri did not produce Kollab.app at the expected target path'
-[ -f "$app/Contents/MacOS/kollab" ] || fail 'Kollab.app is missing its bundled kollab sidecar'
+seal_app "$app" "$identity"
 if [ "$mode" = developer-id ]; then
   verify_signature "$app"
-  verify_signature "$app/Contents/MacOS/kollab"
   notarize "$app"
   cleanup || fail 'signing cleanup incomplete; do not archive or publish this app'
   trap - EXIT INT TERM

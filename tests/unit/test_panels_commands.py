@@ -11,7 +11,7 @@ from kollabor.state.local import LocalStateService
 
 @pytest.mark.asyncio
 async def test_only_panel_commands_carry_a_panel_key():
-    names = [*COMMAND_PANELS, "version", "mcp"]
+    names = [*COMMAND_PANELS, "version", "hub"]
     registry = SimpleNamespace(
         get_all_commands=lambda: [
             SimpleNamespace(name=name, description=name, aliases=[]) for name in names
@@ -27,5 +27,5 @@ async def test_only_panel_commands_carry_a_panel_key():
     catalog = {entry["name"]: entry for entry in await service.list_commands()}
 
     assert {name: catalog[name]["panel"] for name in COMMAND_PANELS} == COMMAND_PANELS
-    assert "panel" not in catalog["version"] and "panel" not in catalog["mcp"]
+    assert "panel" not in catalog["version"] and "panel" not in catalog["hub"]
     assert all(get_panel(panel) for panel in COMMAND_PANELS.values())

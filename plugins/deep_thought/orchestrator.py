@@ -257,6 +257,13 @@ class ThoughtOrchestrator:
 
     def _find_kollab_command(self) -> List[str]:
         """Find the command to launch kollabor."""
+        from kollabor.binary import own_launcher
+
+        # The binary or Kollab.app this runs from, never another kollab on PATH.
+        launcher = own_launcher()
+        if launcher is not None:
+            return [str(launcher)]
+
         project_root = self._find_project_root()
         if project_root:
             main_py = project_root / "main.py"

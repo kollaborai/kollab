@@ -115,7 +115,7 @@ export const ComposerPalette: FC<ComposerPaletteProps> = ({
       char={char}
       adapter={adapter}
       aria-label={title}
-      className="bg-popover/98 border-border/80 absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-2xl border p-1.5 shadow-[0_20px_50px_-24px_rgba(0,0,0,0.8)] backdrop-blur-md"
+      className="bg-popover/98 absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-2xl p-1.5 shadow-[0_20px_50px_-24px_rgba(0,0,0,0.8)] backdrop-blur-md"
     >
       <ComposerPrimitive.Unstable_TriggerPopover.Directive
         formatter={formatter}
@@ -167,7 +167,7 @@ const PaletteContent: FC<{
     <>
       <div className="text-muted-foreground flex items-center justify-between px-3 py-2 text-[0.6875rem] font-medium tracking-[0.12em] uppercase">
         <span>{title}</span>
-        <span className="border-border/70 bg-muted/60 text-muted-foreground rounded-md border px-1.5 py-0.5 font-mono text-[0.625rem] normal-case tracking-normal">
+        <span className="bg-foreground/[0.06] text-muted-foreground rounded-md px-1.5 py-0.5 font-mono text-[0.625rem] normal-case tracking-normal">
           {char} to search
         </span>
       </div>
@@ -209,7 +209,7 @@ const PaletteContent: FC<{
                       className={cn(
                         "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground group flex w-full items-center gap-3 text-left transition-colors hover:bg-accent/70",
                         depth > 0
-                          ? "ml-2 rounded-lg border-l border-border/60 py-1.5 pl-2 pr-2 sm:ml-7"
+                          ? "ml-2 rounded-lg py-1.5 pl-2 pr-2 sm:ml-7"
                           : "rounded-xl px-2.5 py-2",
                       )}
                     >
@@ -267,21 +267,21 @@ const PaletteContent: FC<{
           )
         }
       </ComposerPrimitive.Unstable_TriggerPopoverItems>
-      <div className="text-muted-foreground/70 flex items-center gap-3 border-t border-border/50 px-3 py-1.5 text-[0.625rem]">
+      <div className="text-muted-foreground/70 bg-foreground/[0.03] mt-1 flex items-center gap-3 rounded-xl px-3 py-1.5 text-[0.625rem]">
         <span>
-          <kbd className="mr-0.5 rounded border border-border/70 px-1 font-mono">
+          <kbd className="bg-foreground/[0.06] mr-0.5 rounded px-1 font-mono">
             ↑↓
           </kbd>{" "}
           navigate
         </span>
         <span>
-          <kbd className="mr-0.5 rounded border border-border/70 px-1 font-mono">
+          <kbd className="bg-foreground/[0.06] mr-0.5 rounded px-1 font-mono">
             ↵
           </kbd>{" "}
           select
         </span>
         <span>
-          <kbd className="mr-0.5 rounded border border-border/70 px-1 font-mono">
+          <kbd className="bg-foreground/[0.06] mr-0.5 rounded px-1 font-mono">
             esc
           </kbd>{" "}
           close

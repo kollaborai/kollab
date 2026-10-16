@@ -16,8 +16,8 @@ export type HubNote = {
   rawText?: string;
   /** Whether this is a direct message to this agent (not an HUD observation). */
   isDirect?: boolean;
-  /** Whether this note is an online notice (agent coming online). */
-  isOnlineNotice?: boolean;
+  /** An agent's presence notice: it came online or is going offline. */
+  presence?: "online" | "offline";
 };
 
 export type HubMessageHeader = {
@@ -145,9 +145,11 @@ export function stripReplyInstructions(text: string): string {
     .trim();
 }
 
-/** Detect if a message is an online notice from an agent coming online. */
-export function isOnlineNoticeText(text: string): boolean {
-  return /^agent\s+['"]?([^'"]+)['"]?\s+just came online/i.test(text.trim());
+/** Whether a message is an agent's presence notice: it came online or is going offline. */
+export function presenceOf(text: string): HubNote["presence"] {
+  const notice = /^agent\s+['"]?[^'"]+['"]?\s+(just came online|is going offline)/i.exec(text.trim());
+  if (!notice) return undefined;
+  return notice[1].toLowerCase().startsWith("just") ? "online" : "offline";
 }
 
 const AGENT_HUD = /^\s*<agent_hud>\n?([\s\S]*?)\n?<\/agent_hud>\s*/;
@@ -197,9 +199,10 @@ function hubNote(label: string, lines: string[]): HubNote | null {
   const observed = body.includes("\n(this message was sent to ") || body.startsWith("(this message was sent to ");
   const cuts = TRAILERS.map((marker) => body.indexOf(marker)).filter((index) => index >= 0);
   if (cuts.length) body = body.slice(0, Math.min(...cuts));
-  const text = body.trim();
+  const text = stripReplyInstructions(body);
   if (!text) return null;
-  return { ...route, text, observed };
+  const presence = presenceOf(text);
+  return { ...route, text, observed, ...(presence ? { presence } : {}) };
 }
 
 /** The hub messages in a user turn's agent HUD, and the text after the HUD. */
@@ -215,7 +218,7 @@ export function splitAgentHud(text: string, roster?: RosterLookup): { notes: Hub
     const cuts = TRAILERS.map((marker) => body.indexOf(marker)).filter((index) => index >= 0);
     if (cuts.length) body = body.slice(0, Math.min(...cuts)).trim();
     body = stripReplyInstructions(body);
-    const isOnline = isOnlineNoticeText(body);
+    const presence = presenceOf(body);
     const from = resolveAgentSender(header.sender, roster, rawBody);
     return {
       notes: [
@@ -228,7 +231,7 @@ export function splitAgentHud(text: string, roster?: RosterLookup): { notes: Hub
           ...(header.replyTo ? { replyTo: header.replyTo } : {}),
           rawText: text,
           isDirect: true,
-          isOnlineNotice: isOnline,
+          ...(presence ? { presence } : {}),
         },
       ],
       rest: "",
@@ -260,7 +263,7 @@ export function splitAgentHud(text: string, roster?: RosterLookup): { notes: Hub
     const cuts = TRAILERS.map((marker) => restBody.indexOf(marker)).filter((index) => index >= 0);
     if (cuts.length) restBody = restBody.slice(0, Math.min(...cuts)).trim();
     restBody = stripReplyInstructions(restBody);
-    const isOnline = isOnlineNoticeText(restBody);
+    const presence = presenceOf(restBody);
     const from = resolveAgentSender(restHeader.sender, roster, rawRestBody);
     notes.push({
       from,
@@ -271,7 +274,7 @@ export function splitAgentHud(text: string, roster?: RosterLookup): { notes: Hub
       ...(restHeader.replyTo ? { replyTo: restHeader.replyTo } : {}),
       rawText: rest,
       isDirect: true,
-      isOnlineNotice: isOnline,
+      ...(presence ? { presence } : {}),
     });
     rest = "";
   }

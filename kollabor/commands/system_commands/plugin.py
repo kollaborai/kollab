@@ -250,9 +250,6 @@ class SystemCommandsPlugin:
 
     def register_all_commands(self):
         """Register all commands from all handlers."""
-        from .handlers.apps import AppsCommandHandler
-
-        AppsCommandHandler(self.command_registry, self.event_bus).register_commands()
         if self._artifact_handler:
             self._artifact_handler.register_commands()
         if self._agent_handler:

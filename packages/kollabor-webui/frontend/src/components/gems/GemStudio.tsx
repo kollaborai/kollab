@@ -52,8 +52,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
       aria-pressed={active}
       onClick={onClick}
       className={cn(
-        "rounded-md border px-2.5 py-1 text-xs transition-colors",
-        active ? "border-primary bg-primary text-primary-foreground" : "hover:bg-accent",
+        "border-b-2 px-1.5 pt-1 pb-0.5 text-xs transition-colors",
+        active ? "border-foreground text-foreground" : "text-muted-foreground hover:text-foreground border-transparent",
       )}
     >
       {children}
@@ -157,7 +157,7 @@ function StudioBody({
 
   return (
     <>
-      <DialogHeader className="border-b px-5 py-4 text-left">
+      <DialogHeader className="px-5 py-4 text-left">
         <DialogTitle>{focus ? titleCase(focus.gem) : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
@@ -178,7 +178,7 @@ function StudioBody({
           {focus ? null : (
             <nav
               aria-label="Gems"
-              className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 lg:min-h-0 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto lg:border-r lg:border-b-0"
+              className="bg-muted/20 flex shrink-0 gap-1 overflow-x-auto p-2 lg:min-h-0 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto"
             >
               {agents.map((agent) => (
                 <button
@@ -203,7 +203,7 @@ function StudioBody({
             </nav>
           )}
 
-          <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 border-b px-4 py-10 sm:px-6 lg:border-b-0">
+          <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 px-4 py-10 sm:px-6">
             {current ? (
               <GemAvatar
                 key={key}
@@ -243,7 +243,7 @@ function StudioBody({
             </Button>
           </section>
 
-          <aside className="flex shrink-0 flex-col lg:min-h-0 lg:border-l">
+          <aside className="bg-muted/20 flex shrink-0 flex-col lg:min-h-0">
             <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
               <TabsList className={cn("mx-3 mt-3 grid shrink-0", chat ? "grid-cols-4" : "grid-cols-3")}>
                 <TabsTrigger value="eyes">Eyes</TabsTrigger>
@@ -275,7 +275,7 @@ function StudioBody({
                         disabled={chat.hub === null}
                       />
                     </div>
-                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-t pt-3 text-xs">
+                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg bg-muted/40 p-3 text-xs">
                       <dt className="text-muted-foreground">Session</dt>
                       <dd className="truncate">
                         {formatSessionName(chat.session.name, chat.session.session_id)}
@@ -374,7 +374,7 @@ function StudioBody({
                         aria-label="Custom Color"
                         value={toHex(target.color ?? baseColor ?? [128, 128, 128])}
                         onChange={(event) => set({ color: fromHex(event.target.value) })}
-                        className="size-8 cursor-pointer rounded-md border bg-transparent p-0.5"
+                        className="size-8 cursor-pointer rounded-md bg-muted/60 p-0.5"
                       />
                       Custom
                     </label>
@@ -387,7 +387,7 @@ function StudioBody({
             </Tabs>
 
             {focus ? null : (
-              <div className="shrink-0 border-t p-3">
+              <div className="bg-muted/30 shrink-0 p-3">
                 <p className="text-muted-foreground mb-2 text-[0.6875rem] font-medium">Season · All Gems</p>
                 <div className="flex flex-wrap gap-1.5">
                   <Chip active={season === "auto"} onClick={() => setDraft((prev) => ({ ...prev, season: "auto" }))}>
@@ -412,7 +412,7 @@ function StudioBody({
         </div>
       </GemAppearancePreview>
 
-      <DialogFooter className="flex-row items-center gap-2 border-t px-5 py-3 sm:justify-between">
+      <DialogFooter className="bg-muted/30 flex-row items-center gap-2 px-5 py-3 sm:justify-between">
         <div className="min-w-0 flex-1">
           {error ? (
             <p className="text-destructive text-xs">{error}</p>
@@ -463,8 +463,8 @@ function EyeTile({
       aria-label={`${label} Eyes`}
       onClick={onClick}
       className={cn(
-        "flex flex-col items-center gap-1 rounded-lg border px-1 pt-3 pb-1.5 text-[0.6875rem] transition-colors",
-        active ? "border-primary bg-accent" : "border-transparent hover:bg-accent/50",
+        "flex flex-col items-center gap-1 rounded-lg px-1 pt-3 pb-1.5 text-[0.6875rem] transition-colors",
+        active ? "bg-accent" : "bg-muted/30 hover:bg-accent/50",
       )}
     >
       <GemAvatar
@@ -505,7 +505,7 @@ function Swatch({
       onClick={onClick}
       style={{ background: `rgb(${rgb.join(",")})` }}
       className={cn(
-        "aspect-square rounded-full border transition-transform hover:scale-110",
+        "aspect-square rounded-full transition-transform hover:scale-110",
         ring && "ring-muted-foreground/60 ring-2 ring-offset-2 ring-offset-background",
         active && "outline-primary outline-2 outline-offset-2",
       )}

@@ -3537,13 +3537,14 @@ class HubPlugin(BasePlugin):
         # so we don't fork a second daemon layer.
         import sys
 
-        from kollabor.binary import running_binary
+        from kollabor.binary import own_launcher
 
-        # A binary restarts as its file (it may hold an upgrade since); anything
-        # else reruns this interpreter on sys.argv[0].
+        # A binary restarts as its file (it may hold an upgrade since) and
+        # Kollab.app through its launcher; anything else reruns this
+        # interpreter on sys.argv[0].
         argv = [a for a in sys.argv[1:] if a != "--detached"]
-        binary = running_binary()
-        exec_argv = [str(binary), *argv] if binary else [sys.executable, sys.argv[0], *argv]
+        launcher = own_launcher()
+        exec_argv = [str(launcher), *argv] if launcher else [sys.executable, sys.argv[0], *argv]
 
         self._self_restart_requested = True
         self._self_restart_cmd = exec_argv
@@ -8779,8 +8780,10 @@ class HubPlugin(BasePlugin):
         # A launch prompt (`kollab "task"`, hub_spawn's task) is not the human
         # typing here: broadcasting it showed a spawner's task to every peer as
         # "<user> -> lapis". It never broadcast before ee60e38 routed it
-        # through USER_INPUT hooks.
-        if getattr(event, "source", None) == "cli_initial":
+        # through USER_INPUT hooks. Nor is a peer's message delivered as input
+        # (source "agent": an ACP agent's turn, an agent attached here): it
+        # came back to the sender as "<user> -> koordinator" plus its own text.
+        if getattr(event, "source", None) in {"cli_initial", "agent"}:
             return data
 
         user_content = content_to_text(data.get("message") or "").strip()

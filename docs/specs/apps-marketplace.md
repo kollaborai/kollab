@@ -15,7 +15,7 @@ can use: MCP servers, CLI tools and skills. Each row has an icon, a name, a
 one-line description and an **Add** button (or **✓ Added**). Adding does the
 real work: an MCP server lands in the MCP config and connects to the session, a
 CLI tool is installed with a package manager already on the machine, a skill is
-downloaded into the skill library. `/apps` is the same directory in the
+downloaded into the skill library. `/mcp browse` is the same directory in the
 terminal.
 
 Reference look: a dark "Marketplace" modal (title + "16 installed >" with
@@ -33,7 +33,7 @@ stacked icons, a full-width rounded search bar, sections "For You",
 | `kollabor/apps/service.py` | row state, add/remove/enable, installers |
 | `kollabor/apps/registry.py` | MCP Registry search, ranking, and a registry server as an MCP entry |
 | `kollabor/panels/apps.py` | `apps` (picker), `apps-registry` (picker) and `apps-install` (form) panels |
-| `kollabor/commands/...` | `/apps` slash command (terminal text mode) |
+| `kollabor/commands/mcp_apps.py` | `/mcp browse`, `search`, `add`, `remove` (terminal text mode) |
 | `packages/kollabor-agent/src/kollabor_agent/mcp_manager.py` | `upsert_server(name, definition)` / `remove_server(name)` (the one place that writes `mcp_settings.json`) |
 | `packages/kollabor-webui/frontend/src/components/apps/AppsDialog.tsx` | the modal |
 | `packages/kollabor-webui/frontend/src/components/shell/AppSidebar.tsx` | the **Apps** button |
@@ -204,19 +204,23 @@ empty; only a field left out falls back to its default. For a registry server
 the form also has a **Command** section first and its context carries the
 fingerprint (see MCP Registry).
 
-## terminal: `/apps`
+## terminal: `/mcp`
 
 Text mode, works in pipe mode and over attach:
 
-- `/apps` — sections and rows: `[added] GitHub (mcp:github) — Issues, pull…`
-- `/apps search <words>`
-- `/apps add <row id or id>` — an MCP entry with a required secret is added
+- `/mcp browse` — sections and rows: `[added] GitHub (mcp:github) — Issues, pull…`
+- `/mcp search <words>`
+- `/mcp add <row id or id>` — an MCP entry with a required secret is added
   **off** with an empty key and the reply says how to set it (`/mcp`); secrets
   never travel in a slash command.
-- `/apps remove <row id or id>`
+- `/mcp remove <row id or id>`
 
-`COMMAND_PANELS["apps"] = "apps"`; the web opens the Apps modal for it, not a
-Settings tab. `PANEL_LOCATIONS["apps"] = "Apps (sidebar)"`.
+Bare `/mcp` in the terminal opens the MCP manager screen, which lists the
+catalog's MCP servers beside the example config; `a` adds one through
+`AppsService.add`, the same path as `/mcp add`. There is no `/apps`.
+
+`COMMAND_PANELS["mcp"] = "apps"`: bare `/mcp` from the web answers that it opens
+in `PANEL_LOCATIONS["apps"] = "Apps (sidebar)"`.
 
 ## web UI
 
@@ -290,8 +294,8 @@ latest servers, too many to sync).
   The form context carries `fingerprint(app)` (sha256 of name, command, args
   and inputs, 16 hex). `AppsService.add(id, values, confirm)` loads the server
   again and saves only when the fingerprint matches; no code, no add. The
-  terminal shows the command and the code with `/apps add registry:<name>` and
-  adds with `/apps add registry:<name> <code>`.
+  terminal shows the command and the code with `/mcp add registry:<name>` and
+  adds with `/mcp add registry:<name> <code>`.
 - **Panels.** `apps-registry` (picker) describes `{query}` into one section of
   rows (`id` `registry:<name>`, `server` the saved key, badges `["Registry"]`)
   plus `note`; its row actions go through `apps`.
@@ -339,7 +343,7 @@ the code had to decide something the table above leaves open.
 - **Unavailable rows** carry `actions: []`. The UI draws the disabled Add from
   `state` and `note`.
 
-Panels, `/apps` and the coordinator's review:
+Panels, `/mcp browse` and the coordinator's review:
 
 - **Library skills have their own sections.** `Your Skills` (Local) and
   `Built-in Skills` (bundled) come after the catalog's `Skills`, so the skills
@@ -351,8 +355,8 @@ Panels, `/apps` and the coordinator's review:
 - **Long installs.** `RemoteStateService.PANEL_ACTION_TIMEOUTS` gives `apps`
   and `apps-install` actions 630 s (the RPC default is 40 s), so a brew install
   is not cut off while it still runs in the daemon.
-- **Terminal list.** `/apps` shows 4 catalog rows per kind plus a count of the
-  rest and of the library skills; `/apps search` shows every match.
+- **Terminal list.** `/mcp browse` shows 4 catalog rows per kind plus a count of the
+  rest and of the library skills; `/mcp search` shows every match.
 - **Keys** are set with `/mcp setup`; the reply to a terminal Add says so.
 - **Skill archives** are checked only under the skill's own path: a link
   elsewhere in the repo is never extracted, so it does not block the install.

@@ -1,26 +1,100 @@
 /**
  * How a gem is dressed and what floats around it: hats (everyday, Halloween,
  * Christmas), seasonal dressing (holiday lights, bats, a dangling spider,
- * snow) and activity effects (thought bubble, steam, zzz, music notes). The
+ * snow) and activity effects (thought bubble, alert badges, zzz, notes). The
  * Steven Universe touches live here too: a resting gem sits in a bubble, a
  * gem that drops offline poofs first, and a booting gem regenerates in a
  * column of light.
  */
 
-import { TAU, WHITE, hue, mix, rgba, star, workPhase, type FaceFrame } from "./gem-face";
+import { TAU, WHITE, hue, mix, rgba, star, workPhase, type FaceFrame, type HatStyle } from "./gem-face";
 
-export function drawHat(f: FaceFrame) {
+/**
+ * Where a hat goes, in canvas pixels (the engine reads it off the head's
+ * silhouette, gem-engine.ts fitHat): the middle of its band, the head's up
+ * direction and the hat's scale.
+ */
+export type HatFit = {
+  x: number;
+  y: number;
+  /** Radians the head's up leans from the canvas's. */
+  angle: number;
+  /** Pixels per hat unit. */
+  k: number;
+  /** Below 1 when a tall hat is pressed down to stay inside the layout box. */
+  squash: number;
+  /** The head's sides at ear height and its crown, for headphones. */
+  ears: { lx: number; ly: number; rx: number; ry: number; tx: number; ty: number };
+};
+
+/**
+ * Each hat's band half-width in its own units, the share of the head's widest
+ * half-width the band opens to (a beanie pulls down over the crown, a top hat
+ * perches), and how far the hat rises above its band.
+ */
+export const HAT_SIZES: Record<Exclude<HatStyle, "none">, { band: number; fit: number; rise: number }> = {
+  party: { band: 0.15, fit: 0.36, rise: 0.41 },
+  top: { band: 0.125, fit: 0.42, rise: 0.27 },
+  beanie: { band: 0.21, fit: 0.84, rise: 0.25 },
+  crown: { band: 0.19, fit: 0.46, rise: 0.24 },
+  wizard: { band: 0.17, fit: 0.42, rise: 0.48 },
+  cap: { band: 0.18, fit: 0.8, rise: 0.15 },
+  headphones: { band: 0.3, fit: 1, rise: 0.06 },
+  hardhat: { band: 0.2, fit: 0.84, rise: 0.17 },
+  beret: { band: 0.21, fit: 0.74, rise: 0.12 },
+  witch: { band: 0.15, fit: 0.4, rise: 0.5 },
+  horns: { band: 0.15, fit: 0.56, rise: 0.21 },
+  pumpkin: { band: 0.17, fit: 0.4, rise: 0.26 },
+  santa: { band: 0.19, fit: 0.78, rise: 0.34 },
+  antlers: { band: 0.14, fit: 0.56, rise: 0.31 },
+  elf: { band: 0.17, fit: 0.6, rise: 0.44 },
+};
+
+function headphones(f: FaceFrame, fit: HatFit) {
+  const { ctx } = f;
+  const { lx, ly, rx, ry, ty } = fit.ears;
+  const w = Math.hypot(rx - lx, ry - ly);
+  const cup = w * 0.13;
+  // The band arcs over the crown from cup to cup.
+  ctx.strokeStyle = "#1b1c22";
+  ctx.lineWidth = Math.max(1.2, w * 0.06);
+  ctx.beginPath();
+  ctx.moveTo(lx, ly - cup * 0.9);
+  ctx.bezierCurveTo(lx - cup * 0.2, ty - cup * 1.2, rx + cup * 0.2, ty - cup * 1.2, rx, ry - cup * 0.9);
+  ctx.stroke();
+  for (const [x, y, side] of [[lx, ly, -1], [rx, ry, 1]] as const) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(fit.angle);
+    ctx.fillStyle = "#16171c";
+    ctx.beginPath();
+    ctx.roundRect(-cup * 0.55 + side * cup * 0.12, -cup * 0.95, cup * 1.1, cup * 1.9, cup * 0.45);
+    ctx.fill();
+    ctx.strokeStyle = rgba(mix(f.rgb, WHITE, 0.4));
+    ctx.lineWidth = Math.max(0.8, cup * 0.16);
+    ctx.beginPath();
+    ctx.roundRect(-cup * 0.38 + side * cup * 0.12, -cup * 0.75, cup * 0.76, cup * 1.5, cup * 0.32);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+export function drawHat(f: FaceFrame, fit: HatFit) {
   if (f.hat === "none") return;
-  const { ctx, box, anchor, shift } = f;
-  const s = box.s;
-  const k = s * anchor.hatScale;
+  const { ctx } = f;
+  if (f.hat === "headphones") {
+    headphones(f, fit);
+    return;
+  }
+  const k = fit.k;
   const accent = `hsl(${(hue(f.rgb) + 150) % 360}, 82%, 58%)`;
   ctx.save();
-  ctx.translate(box.x + 0.5 * s + shift.x, box.y + anchor.hatY * s + shift.y);
-  ctx.rotate(f.activity === "dance" ? Math.sin(f.t * 8) * 0.2 : -0.12);
+  ctx.translate(fit.x, fit.y);
+  ctx.rotate(fit.angle);
+  ctx.scale(1, fit.squash);
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  ctx.lineWidth = Math.max(0.8, s * 0.008);
+  ctx.lineWidth = Math.max(0.8, k * 0.012);
   ctx.strokeStyle = "rgba(0,0,0,0.35)";
   switch (f.hat) {
     case "party": {
@@ -139,25 +213,6 @@ export function drawHat(f: FaceFrame) {
       ctx.beginPath();
       ctx.arc(0, -0.14 * k, 0.022 * k, 0, TAU);
       ctx.fill();
-      break;
-    }
-    case "headphones": {
-      ctx.strokeStyle = "#1b1c22";
-      ctx.lineWidth = 0.05 * k;
-      ctx.beginPath();
-      ctx.arc(0, 0.16 * k, 0.32 * k, 1.08 * Math.PI, 1.92 * Math.PI);
-      ctx.stroke();
-      for (const side of [-1, 1]) {
-        ctx.fillStyle = "#16171c";
-        ctx.beginPath();
-        ctx.roundRect(side * 0.31 * k - 0.055 * k, 0.12 * k, 0.11 * k, 0.17 * k, 0.04 * k);
-        ctx.fill();
-        ctx.strokeStyle = rgba(mix(f.rgb, WHITE, 0.4));
-        ctx.lineWidth = Math.max(0.8, 0.018 * k);
-        ctx.beginPath();
-        ctx.roundRect(side * 0.31 * k - 0.04 * k, 0.14 * k, 0.08 * k, 0.13 * k, 0.03 * k);
-        ctx.stroke();
-      }
       break;
     }
     case "hardhat": {
@@ -335,7 +390,8 @@ export function drawSeasonBody(f: FaceFrame) {
   const bulbs = ["#ff4d4d", "#ffd23f", "#3ddc84", "#4da3ff", "#ff7ad9"];
   for (let i = 0; i < 6; i += 1) {
     const [x, y] = at((i + 0.5) / 6);
-    const on = f.still || Math.sin(t * 3 + i * 1.9) > -0.3;
+    // A slow chase, not a flicker.
+    const on = f.still || Math.sin(t * 1.3 - i * 1.1) > -0.4;
     const color = bulbs[i % bulbs.length];
     if (on) {
       const glow = ctx.createRadialGradient(x, y + s * 0.018, 0, x, y + s * 0.018, s * 0.045);
@@ -496,6 +552,24 @@ const SUMMON_TARGET: Partial<Record<FaceFrame["activity"], [number, number]>> = 
   tasking: [0.5, 0.78],
 };
 
+/** A round badge by the gem's head: amber "?" for a question, red "!" for an error. */
+function badge(f: FaceFrame, x: number, y: number, fill: string, ink: string, glyph: string) {
+  const { ctx, box } = f;
+  const s = box.s;
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = "rgba(0,0,0,0.22)";
+  ctx.lineWidth = Math.max(0.8, s * 0.008);
+  ctx.beginPath();
+  ctx.arc(x, y, s * 0.085, 0, TAU);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = ink;
+  ctx.font = `800 ${Math.round(s * 0.12)}px ui-sans-serif, system-ui`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(glyph, x, y + s * 0.006);
+}
+
 export function drawEffects(f: FaceFrame) {
   const { ctx, box, t, activity, since } = f;
   const s = box.s;
@@ -503,24 +577,24 @@ export function drawEffects(f: FaceFrame) {
   const ry = box.y + 0.06 * s;
   const cx = box.x + (0.5 - 0.11 * f.desk) * s;
   const cy = box.y + 0.5 * s;
-  const work = workPhase(activity, since);
+  const work = workPhase(activity, f.atDesk);
   ctx.save();
   ctx.lineCap = "round";
 
   // A tool summoned out of the gem: a flash at its core and a streak of light.
-  const target = SUMMON_TARGET[activity] ?? (work.laptop ? [0.9, 0.8] : null);
-  const start = activity === "tasking" ? 1.3 : activity === "thinking" ? 4 : 0;
+  const target = SUMMON_TARGET[activity] ?? (work.laptop && !f.atDesk ? [0.9, 0.8] : null);
+  const start = activity === "tasking" ? 1.3 : 0;
   const ps = (since - start) / 0.45;
   if (target && ps >= 0 && ps < 1 && !f.still) {
     const fade = 1 - ps;
     const flash = ctx.createRadialGradient(cx, cy, 0, cx, cy, s * 0.35);
-    flash.addColorStop(0, `rgba(255,255,255,${(0.7 * fade).toFixed(3)})`);
+    flash.addColorStop(0, `rgba(255,255,255,${(0.6 * fade).toFixed(3)})`);
     flash.addColorStop(1, "rgba(255,255,255,0)");
     ctx.fillStyle = flash;
     ctx.fillRect(cx - s * 0.35, cy - s * 0.35, s * 0.7, s * 0.7);
     const tx = box.x + target[0] * s;
     const ty = box.y + target[1] * s;
-    ctx.strokeStyle = `rgba(255,255,255,${(0.85 * fade).toFixed(3)})`;
+    ctx.strokeStyle = `rgba(255,255,255,${(0.8 * fade).toFixed(3)})`;
     ctx.lineWidth = Math.max(1, s * 0.02 * fade);
     ctx.beginPath();
     ctx.moveTo(cx, cy);
@@ -541,9 +615,10 @@ export function drawEffects(f: FaceFrame) {
     ctx.translate(ox, oy);
     ctx.scale(grow, grow);
     ctx.translate(-ox, -oy);
+    // An outline strong enough to hold the white bubble on a light page.
     ctx.fillStyle = "rgba(255,255,255,0.95)";
-    ctx.strokeStyle = "rgba(0,0,0,0.25)";
-    ctx.lineWidth = Math.max(0.6, s * 0.006);
+    ctx.strokeStyle = "rgba(40,44,60,0.4)";
+    ctx.lineWidth = Math.max(0.8, s * 0.008);
     for (const [dx, dy, r] of [[-0.14, 0.2, 0.025], [-0.08, 0.12, 0.04]]) {
       ctx.beginPath();
       ctx.arc(rx + dx * s, ry + dy * s, r * s, 0, TAU);
@@ -555,83 +630,117 @@ export function drawEffects(f: FaceFrame) {
       ctx.moveTo(rx + dx * s + r * s, ry + dy * s);
       ctx.arc(rx + dx * s, ry + dy * s, r * s, 0, TAU);
     }
+    ctx.stroke();
     ctx.fill();
     ctx.fillStyle = "#3b3f4a";
     for (let i = -1; i <= 1; i += 1) {
-      const bounce = f.still ? 0 : Math.max(0, Math.sin(t * 6 - i * 0.9)) * s * 0.02;
+      const bounce = f.still ? 0 : Math.max(0, Math.sin(t * 5 - i * 0.9)) * s * 0.018;
       ctx.beginPath();
       ctx.arc(rx + i * s * 0.045, ry - bounce, s * 0.016, 0, TAU);
       ctx.fill();
     }
     ctx.restore();
   }
+  drawActivityEffects(f, 1);
+  if (f.big) drawSeasonAmbient(f);
+  ctx.restore();
+}
+
+/**
+ * What an activity puts around the gem. The engine draws a finished
+ * activity's again at a falling `alpha`, so a badge or the zzz fades out
+ * instead of vanishing.
+ */
+export function drawActivityEffects(f: FaceFrame, alpha: number) {
+  const { ctx, box, t, activity, since } = f;
+  const s = box.s;
+  const rx = box.x + 0.86 * s;
+  const ry = box.y + 0.06 * s;
+  const cx = box.x + (0.5 - 0.11 * f.desk) * s;
+  const cy = box.y + 0.5 * s;
+  if (alpha <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha *= alpha;
   if (activity === "error") {
-    // Anger mark and steam puffs.
-    ctx.strokeStyle = "#ff3b30";
-    ctx.lineWidth = Math.max(1.2, s * 0.025);
-    const m = s * 0.05 * (1 + Math.sin(t * 10) * 0.12);
-    for (const [qx, qy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-      ctx.beginPath();
-      ctx.moveTo(rx + qx * m * 0.3, ry + qy * m * 1.2);
-      ctx.quadraticCurveTo(rx + qx * m * 0.35, ry + qy * m * 0.35, rx + qx * m * 1.2, ry + qy * m * 0.3);
-      ctx.stroke();
-    }
-    for (const side of [-1, 1]) {
-      const p = (t * 0.9 + (side > 0 ? 0.5 : 0)) % 1;
-      ctx.fillStyle = `rgba(235,235,240,${(0.75 * (1 - p)).toFixed(3)})`;
-      ctx.beginPath();
-      ctx.arc(box.x + (0.5 + side * 0.3) * s, box.y + (0.12 - p * 0.18) * s, s * (0.03 + p * 0.05), 0, TAU);
-      ctx.fill();
+    // A red alert, and a few puffs of steam as it lands, then quiet.
+    const pop = f.still ? 1 : Math.min(1, since / 0.25);
+    const k = 1 + 0.25 * Math.sin(Math.min(1, pop) * Math.PI);
+    ctx.save();
+    ctx.translate(rx, ry);
+    ctx.scale(k * pop, k * pop);
+    badge(f, 0, 0, "#e5383b", "#ffffff", "!");
+    ctx.restore();
+    const steam = f.still ? 0 : 1 - Math.min(1, Math.max(0, (since - 1.6) / 0.8));
+    if (steam > 0) {
+      const base = ctx.globalAlpha;
+      for (const side of [-1, 1]) {
+        const p = (t * 0.9 + (side > 0 ? 0.5 : 0)) % 1;
+        ctx.globalAlpha = base * steam * 0.75 * (1 - p);
+        ctx.fillStyle = "rgb(235,235,240)";
+        ctx.beginPath();
+        ctx.arc(box.x + (0.5 + side * 0.3) * s, box.y + (0.12 - p * 0.18) * s, s * (0.03 + p * 0.05), 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = base;
     }
   }
   if (activity === "dreaming") {
-    ctx.fillStyle = "rgba(220,226,240,0.9)";
+    // Pale with a dark edge, so they read on a dark page and a light one.
+    ctx.fillStyle = "rgba(200,208,232,0.95)";
+    ctx.strokeStyle = "rgba(30,34,52,0.45)";
+    ctx.lineWidth = Math.max(0.6, s * 0.006);
+    ctx.lineJoin = "round";
+    const base = ctx.globalAlpha;
     for (let i = 0; i < 3; i += 1) {
-      const p = (t * 0.35 + i / 3) % 1;
-      ctx.globalAlpha = Math.sin(p * Math.PI);
+      const p = f.still ? 0.3 + i * 0.2 : (t * 0.25 + i / 3) % 1;
+      ctx.globalAlpha = base * Math.sin(p * Math.PI);
       ctx.font = `700 ${Math.round(s * (0.08 + p * 0.06))}px ui-sans-serif, system-ui`;
-      ctx.fillText("z", rx - s * 0.06 + p * s * 0.12, ry + s * 0.1 - p * s * 0.2);
+      const x = rx - s * 0.06 + p * s * 0.12;
+      const y = ry + s * 0.1 - p * s * 0.2;
+      ctx.strokeText("z", x, y);
+      ctx.fillText("z", x, y);
     }
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = base;
   }
   if (activity === "waiting") {
-    const bob = f.still ? 0 : Math.sin(t * 4) * s * 0.02;
-    ctx.fillStyle = "rgba(255,255,255,0.95)";
-    ctx.beginPath();
-    ctx.arc(rx, ry + bob, s * 0.075, 0, TAU);
-    ctx.fill();
-    ctx.fillStyle = "#e0a100";
-    ctx.font = `800 ${Math.round(s * 0.11)}px ui-sans-serif, system-ui`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("?", rx, ry + bob + s * 0.005);
+    const bob = f.still ? 0 : Math.sin(t * 2.4) * s * 0.014;
+    badge(f, rx, ry + bob, "#ffc021", "#2b2100", "?");
   }
-  if (activity === "dance") {
+  if (activity === "dance" && !f.still) {
+    // Notes rise in turn, one side then the other, all inside the dance.
     ctx.fillStyle = rgba(mix(f.rgb, WHITE, 0.45));
     ctx.font = `700 ${Math.round(s * 0.13)}px ui-sans-serif, system-ui`;
-    for (let i = 0; i < 2; i += 1) {
-      const p = (t * 0.6 + i * 0.5) % 1;
-      ctx.globalAlpha = Math.sin(p * Math.PI);
-      const side = i === 0 ? -1 : 1;
-      ctx.fillText(i === 0 ? "♪" : "♫", box.x + (0.5 + side * 0.42) * s, box.y + (0.3 - p * 0.3) * s);
+    const base = ctx.globalAlpha;
+    for (let i = 0; i < 3; i += 1) {
+      const p = Math.min(1, Math.max(0, (since - 0.1 - i * 0.4) / 0.85));
+      if (p <= 0 || p >= 1) continue;
+      ctx.globalAlpha = base * Math.sin(p * Math.PI);
+      const side = i === 1 ? 1 : -1;
+      const drift = 0.04 * Math.sin(p * Math.PI * 2);
+      ctx.fillText(i === 1 ? "♫" : "♪", box.x + (0.5 + side * (0.42 + drift)) * s, box.y + (0.32 - p * 0.3) * s);
     }
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = base;
   }
-  if (activity === "booting" && !f.still) {
-    // Regenerating: a column of light with sparkles rising through it.
+  if (activity === "booting") {
+    // Regenerating: a column of light with sparkles rising through it, in
+    // the gem's own color so it shows on a light page too.
+    const light = mix(f.rgb, WHITE, 0.45);
     const col = ctx.createLinearGradient(cx - s * 0.3, 0, cx + s * 0.3, 0);
-    col.addColorStop(0, "rgba(255,255,255,0)");
-    col.addColorStop(0.5, "rgba(255,255,255,0.22)");
-    col.addColorStop(1, "rgba(255,255,255,0)");
+    col.addColorStop(0, rgba(light, 0));
+    col.addColorStop(0.5, rgba(light, 0.3));
+    col.addColorStop(1, rgba(light, 0));
     ctx.fillStyle = col;
     ctx.fillRect(cx - s * 0.3, box.y - s * 0.25, s * 0.6, s * 1.5);
-    ctx.fillStyle = "#ffffff";
-    for (let i = 0; i < 7; i += 1) {
-      const p = (t * 0.7 + i / 7) % 1;
-      ctx.globalAlpha = Math.sin(p * Math.PI);
-      star(ctx, cx + Math.sin(i * 2.4 + t * 1.3) * s * 0.22, box.y + (1.05 - p * 1.2) * s, s * 0.03 * (1 - p * 0.5));
+    if (!f.still) {
+      ctx.fillStyle = rgba(mix(f.rgb, WHITE, 0.7));
+      const base = ctx.globalAlpha;
+      for (let i = 0; i < 7; i += 1) {
+        const p = (t * 0.6 + i / 7) % 1;
+        ctx.globalAlpha = base * Math.sin(p * Math.PI);
+        star(ctx, cx + Math.sin(i * 2.4 + t * 1.1) * s * 0.22, box.y + (1.05 - p * 1.2) * s, s * 0.03 * (1 - p * 0.5));
+      }
+      ctx.globalAlpha = base;
     }
-    ctx.globalAlpha = 1;
   }
   if (activity === "offline") {
     const fresh = f.prev !== "offline" && !f.still;
@@ -651,7 +760,8 @@ export function drawEffects(f: FaceFrame) {
     const appear = fresh ? Math.min(1, Math.max(0, (since - 0.35) / 0.4)) : 1;
     if (appear > 0) {
       const r = s * 0.52;
-      ctx.globalAlpha = appear;
+      const base = ctx.globalAlpha;
+      ctx.globalAlpha = base * appear;
       const shell = ctx.createRadialGradient(cx, cy, r * 0.55, cx, cy, r);
       shell.addColorStop(0, "rgba(255,170,220,0)");
       shell.addColorStop(0.85, "rgba(255,170,220,0.16)");
@@ -672,9 +782,8 @@ export function drawEffects(f: FaceFrame) {
       ctx.beginPath();
       ctx.arc(cx - r * 0.35, cy - r * 0.62, Math.max(0.8, s * 0.015), 0, TAU);
       ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = base;
     }
   }
-  drawSeasonAmbient(f);
   ctx.restore();
 }

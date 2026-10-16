@@ -2,7 +2,7 @@ import { StrictMode, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "../styles.css";
 import { GemAvatar } from "@/components/gems/GemAvatar";
-import { GEM_MOTIONS, type GemMotion } from "@/components/gems/gem-engine";
+import { GEM_MOTIONS, gemEngine, type GemMotion } from "@/components/gems/gem-engine";
 import {
   EYE_STYLES,
   HAT_STYLES,
@@ -14,7 +14,8 @@ import {
 } from "@/components/gems/gem-face";
 
 // Dev-only gem studio (vite serves /gem-lab.html; the build only takes
-// index.html): compare eye styles, hats, seasons, motions and activities on the pool.
+// index.html): compare eye styles, hats, seasons, motions and activities on the
+// pool. Crowd puts the pool four times over at sidebar size, to watch the frame rate.
 const POOL: [string, number[], string][] = [
   ["lapis", [30, 90, 180], "communication"], ["sapphire", [15, 82, 186], "communication"],
   ["aquamarine", [100, 200, 235], "communication"], ["zircon", [70, 130, 200], "communication"],
@@ -30,6 +31,11 @@ const POOL: [string, number[], string][] = [
   ["cobalt", [70, 100, 200], "leadership"], ["coral", [255, 130, 170], "leadership"],
 ];
 const SHOWCASE = ["diamond", "sapphire", "ruby", "peridot", "lapis", "amethyst"];
+// ?only=lapis,ruby narrows the pool, so a motion trace runs at full speed.
+const ONLY = new URLSearchParams(location.search).get("only")?.split(",");
+const SHOWN = ONLY ? POOL.filter(([name]) => ONLY.includes(name)) : POOL;
+// The engine, for motion traces from the console or a test script.
+Object.assign(window, { gemEngine });
 const ACTIVITIES: Activity[] = [
   "idle", "thinking", "typing", "reading", "speaking", "searching", "messaging",
   "tasking", "error", "waiting", "dreaming", "dance", "booting", "offline",
@@ -70,11 +76,11 @@ function Lab() {
   const [motion, setMotion] = useState<GemMotion | null>(null);
   const [group, setGroup] = useState("All");
   const [light, setLight] = useState(false);
-  const [view, setView] = useState<"styles" | "pool">("styles");
-  const gem = (name: string, style: EyeStyle) => {
+  const [view, setView] = useState<"styles" | "pool" | "crowd">("styles");
+  const gem = (name: string, style: EyeStyle, key: string = name, gemSize = size) => {
     const [, color, caste] = POOL.find(([n]) => n === name)!;
     return (
-      <div key={name} className="flex flex-col items-center gap-2">
+      <div key={key} className="flex flex-col items-center gap-2">
         <GemAvatar
           gem={name}
           color={color}
@@ -86,9 +92,9 @@ function Lab() {
           activity={activity === "offline" || activity === "booting" ? null : activity}
           state={activity === "booting" ? "booting" : activity === "offline" ? "" : "working"}
           live={activity !== "offline"}
-          size={size}
+          size={gemSize}
         />
-        <span className="text-muted-foreground text-[11px] capitalize">{name}</span>
+        {view === "crowd" ? null : <span className="text-muted-foreground text-[11px] capitalize">{name}</span>}
       </div>
     );
   };
@@ -99,8 +105,9 @@ function Lab() {
         <Row label="View">
           <Chip active={view === "styles"} onClick={() => setView("styles")}>Eye Styles</Chip>
           <Chip active={view === "pool"} onClick={() => setView("pool")}>Whole Pool</Chip>
+          <Chip active={view === "crowd"} onClick={() => setView("crowd")}>Crowd</Chip>
           <span className="mx-2" />
-          {[40, 64, 96, 140].map((s) => (
+          {[28, 40, 64, 96, 140].map((s) => (
             <Chip key={s} active={s === size} onClick={() => setSize(s)}>{s}px</Chip>
           ))}
           <Chip active={light} onClick={() => setLight((v) => !v)}>Light</Chip>
@@ -133,7 +140,7 @@ function Lab() {
             </span>
           ))}
         </Row>
-        {view === "pool" ? (
+        {view !== "styles" ? (
           <Row label="Eyes">
             {EYE_STYLES.map((o) => (
               <Chip key={o.id} active={o.id === face} onClick={() => setFace(o.id)}>{o.label}</Chip>
@@ -149,7 +156,7 @@ function Lab() {
         {view === "styles" ? (
           <div className="mt-8 flex flex-col gap-10">
             {styles.map((style) => (
-              <div key={style.id} className="flex items-center gap-8">
+              <div key={style.id} className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:gap-8">
                 <div className="w-24 shrink-0">
                   <div className="text-sm font-medium">{style.label}</div>
                   <div className="text-muted-foreground text-[10px] uppercase tracking-wide">{style.group}</div>
@@ -158,16 +165,23 @@ function Lab() {
               </div>
             ))}
           </div>
+        ) : view === "crowd" ? (
+          <div className="flex flex-wrap gap-3 pt-6">
+            {[0, 1, 2, 3].flatMap((round) => SHOWN.map(([name]) => gem(name, face, `${name}-${round}`, 28)))}
+          </div>
         ) : (
-          <div className="grid grid-cols-6 gap-x-6 gap-y-12 pt-6">{POOL.map(([name]) => gem(name, face))}</div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-x-6 gap-y-12 pt-6">{SHOWN.map(([name]) => gem(name, face))}</div>
         )}
       </div>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
+const root = createRoot(document.getElementById("root")!);
+root.render(
   <StrictMode>
     <Lab />
   </StrictMode>,
 );
+
+if (import.meta.hot) import.meta.hot.dispose(() => root.unmount());

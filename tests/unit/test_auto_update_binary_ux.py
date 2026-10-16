@@ -373,3 +373,21 @@ def test_sigterm_handler_is_restored_after_the_upgrade(tmp_path, monkeypatch):
     before = signal.getsignal(signal.SIGTERM)
     auto_update._upgrade_binary(target)
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_upgrade_from_a_worker_thread_succeeds_quietly(tmp_path, monkeypatch, capfd):
+    """/upgrade, the startup auto-update and the web UI run it via asyncio.to_thread."""
+    import asyncio
+
+    response = FakeResponse([b"fine" * (1 << 20)])
+    target, _, *_ = _upgrade_env(tmp_path, monkeypatch, response)
+
+    before = signal.getsignal(signal.SIGTERM)
+    result = asyncio.run(asyncio.to_thread(auto_update._upgrade_binary, target))
+
+    assert result.success is True, result.message
+    assert result.changed is True
+    assert signal.getsignal(signal.SIGTERM) is before
+    captured = capfd.readouterr()
+    assert captured.err == ""  # the app's screen is not written to
+    assert captured.out == ""

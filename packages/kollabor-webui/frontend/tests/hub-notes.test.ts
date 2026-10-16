@@ -86,7 +86,7 @@ test("removes hidden hub thread and reply instructions", () => {
 
 test("marks online system notices for compact chip rendering", () => {
   const result = splitAgentHud("Message from nephrite [thread:online-1]\nagent 'nephrite' just came online\n  cwd: /workspace\n  model: test");
-  assert.equal(result.notes[0]?.isOnlineNotice, true);
+  assert.equal(result.notes[0]?.presence, "online");
   assert.equal(result.notes[0]?.from, "nephrite");
 });
 
@@ -99,7 +99,7 @@ test("direct Message from wrappers become styled hub cards without user bubbles"
   assert.equal(result.notes[0]?.text, "Implement the Web UI bug");
   assert.equal(result.notes[0]?.rawText, turn);
   assert.equal(result.notes[0]?.isDirect, true);
-  assert.equal(result.notes[0]?.isOnlineNotice, false);
+  assert.equal(result.notes[0]?.presence, undefined);
   assert.equal(result.rest, ""); // rest is empty, so no user bubble is generated
 });
 
@@ -152,6 +152,27 @@ test("hides thread IDs and literal hub_msg reply instructions while preserving r
   assert.ok(note?.text.includes("agent 'nephrite' just came online in project /workspace."));
   assert.ok(note?.text.includes("current hub roster:"));
   assert.equal(note?.rawText, rawPrompt);
-  assert.equal(note?.isOnlineNotice, true);
+  assert.equal(note?.presence, "online");
   assert.equal(result.rest, "");
+});
+
+test("online notices inside the HUD fold into chips without the reply instruction", () => {
+  const hud = "<agent_hud>\n[hub:apps-preview->aquamarine]\n+ [hub channel: apps-preview -> aquamarine]\n" +
+    "  agent 'apps-preview' just came online in project /tmp/p.\n  cwd: /tmp/p\n  model: test\n  current hub roster:\n" +
+    "    - aquamarine: idle\n  if you need help with anything, let them know.\n" +
+    "  respond back using: <hub_msg to=\"apps-preview\">your message</hub_msg>\n  \n" +
+    "  [hub wake instruction]\n  classification: wake (actionable).\n</agent_hud>";
+  const [note] = splitAgentHud(hud).notes;
+  assert.equal(note?.presence, "online");
+  assert.equal(note?.from, "apps-preview");
+  assert.ok(note?.text.startsWith("agent 'apps-preview' just came online"));
+  assert.ok(!note?.text.includes("respond back using"));
+});
+
+test("offline notices fold into chips too", () => {
+  const [note] = splitAgentHud("<agent_hud>\n[hub:bismuth->peridot]\n+ agent 'bismuth' is going offline.\n</agent_hud>").notes;
+  assert.equal(note?.presence, "offline");
+  assert.equal(note?.from, "bismuth");
+  const direct = splitAgentHud("Message from zircon\nagent 'zircon' is going offline.").notes[0];
+  assert.equal(direct?.presence, "offline");
 });

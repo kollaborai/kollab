@@ -301,7 +301,7 @@ export function AppSidebar({
   return (
     <Sidebar {...props}>
       {/* One row: the logo, then New Session and its options as icons. */}
-      <SidebarHeader className="h-[var(--shell-header-height,3rem)] shrink-0 justify-center border-b py-0">
+      <SidebarHeader className="h-[var(--shell-header-height,3rem)] shrink-0 justify-center py-0">
         <div className="flex h-8 shrink-0 items-center gap-0.5 px-2">
           <KollabLogo className="h-6 w-auto shrink-0" />
           <span className="sr-only">kollab</span>
@@ -345,7 +345,7 @@ export function AppSidebar({
               collisionPadding={16}
               className="w-80 p-0"
             >
-              <div className="flex items-center gap-3 border-b px-4 py-3">
+              <div className="bg-foreground/[0.04] flex items-center gap-3 px-4 py-3">
                 <GemAvatar
                   gem={selectedIdentity}
                   caste={pickedGem?.caste}
@@ -438,11 +438,11 @@ export function AppSidebar({
                 <WorkspacePicker api={api} value={workspacePath} onChange={onWorkspaceChange} />
               </div>
               {creationError ? (
-                <div role="alert" className="text-destructive border-t px-4 py-3 text-xs leading-relaxed break-words whitespace-pre-wrap">
+                <div role="alert" className="text-destructive bg-destructive/10 px-4 py-3 text-xs leading-relaxed break-words whitespace-pre-wrap">
                   {creationError}
                 </div>
               ) : null}
-              <div className="flex items-center justify-between gap-2 border-t px-3 py-2.5">
+              <div className="bg-foreground/[0.04] flex items-center justify-between gap-2 px-3 py-2.5">
                 <Button
                   type="button"
                   variant="ghost"
@@ -764,7 +764,7 @@ export function AppSidebar({
         ) : null}
       </SidebarContent>
 
-      <SidebarFooter className="border-t p-2">
+      <SidebarFooter className="p-2">
         <SidebarMenu>
           {hiddenAgents.length ? (
             <SidebarMenuItem>

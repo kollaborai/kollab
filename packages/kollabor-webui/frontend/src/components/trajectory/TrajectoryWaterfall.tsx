@@ -47,7 +47,7 @@ function SpanRow() {
       aria-selected={selectedId === id}
       onClick={select}
       onKeyDown={handleKeyDown}
-      className={`${GRID} group min-h-9 cursor-pointer border-b border-border/45 pr-3 text-sm transition-colors outline-none hover:bg-accent/45 focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-inset aria-selected:bg-primary/[0.08] data-[span-type=turn]:border-t-2 data-[span-type=turn]:border-t-primary/40 data-[span-type=turn]:font-medium`}
+      className={`${GRID} group min-h-9 cursor-pointer pr-3 text-sm transition-colors outline-none hover:bg-accent/45 focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-inset aria-selected:bg-primary/[0.1] data-[span-type=turn]:bg-muted/[0.16] data-[span-type=turn]:font-medium`}
     >
       <SpanPrimitive.Indent
         baseIndent={10}
@@ -63,7 +63,7 @@ function SpanRow() {
           </SpanPrimitive.CollapseToggle>
         </span>
         <SpanPrimitive.StatusIndicator className="size-1.5 shrink-0 rounded-full bg-emerald-500/80 data-[span-status=failed]:bg-destructive data-[span-status=running]:animate-pulse data-[span-status=running]:bg-amber-400" />
-        <SpanPrimitive.TypeBadge className="text-muted-foreground hidden shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem] sm:inline">
+        <SpanPrimitive.TypeBadge className="text-muted-foreground hidden shrink-0 font-mono text-[0.625rem] sm:inline">
           {type === "turn" ? "Turn" : formatKind(type)}
         </SpanPrimitive.TypeBadge>
         <SpanPrimitive.Name className="min-w-0 truncate group-data-[span-status=failed]:text-destructive" />
@@ -72,7 +72,7 @@ function SpanRow() {
         {formatDuration(latencyMs === null ? null : latencyMs / 1000)}
       </span>
       <div className="relative h-5">
-        <span className="absolute inset-x-0 top-1/2 h-px bg-border/60" />
+        <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-muted/40" />
         <SpanPrimitive.TimelineBar
           timeRange={trace.ranges.get(id)}
           className="top-1/2 h-2 -translate-y-1/2 rounded-full bg-violet-500/70 [--span-timeline-min-width:3px] data-[span-status=failed]:bg-destructive/80 data-[span-type=tool]:bg-amber-500/75 data-[span-type=tool-batch]:bg-amber-500/75 data-[span-type=turn]:bg-primary/35 data-[span-type=system]:bg-slate-400/60 data-[span-type=message]:bg-slate-400/60"
@@ -130,7 +130,7 @@ export function TrajectoryWaterfall({
         <LoadEarlierBanner loading={loadingEarlier} onLoad={onLoadEarlier} />
       )}
       <div
-        className={`${GRID} bg-muted/55 text-muted-foreground shrink-0 border-b py-2.5 pr-3 pl-3 text-[0.625rem] font-semibold tracking-[0.1em] uppercase sm:tracking-[0.14em] backdrop-blur`}
+        className={`${GRID} bg-muted/40 text-muted-foreground shrink-0 py-2.5 pr-3 pl-3 text-[0.625rem] font-semibold tracking-[0.1em] uppercase sm:tracking-[0.14em]`}
       >
         <span>Span</span>
         <span className="text-right">Duration</span>
@@ -159,7 +159,7 @@ export function TrajectoryWaterfall({
           </div>
         ) : (
           <div className="text-muted-foreground flex min-h-56 flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="bg-muted/70 text-muted-foreground flex size-10 items-center justify-center rounded-xl">
+            <div className="text-muted-foreground flex size-10 items-center justify-center">
               <Clock className="size-5" />
             </div>
             <div>

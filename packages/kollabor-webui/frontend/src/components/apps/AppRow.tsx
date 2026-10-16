@@ -39,7 +39,7 @@ export function AppRowItem({
   const control = (): ReactNode => {
     if (pending) {
       return (
-        <Button type="button" size="sm" variant="secondary" className="rounded-full" disabled>
+        <Button type="button" size="sm" variant="secondary" disabled>
           <Loader2 className="animate-spin" />
           {PENDING_LABEL[pending] ?? "Working…"}
         </Button>
@@ -51,7 +51,6 @@ export function AppRowItem({
           type="button"
           size="sm"
           variant="secondary"
-          className="rounded-full"
           aria-label={`Add ${row.label}`}
           onClick={() => onAction("add")}
         >
@@ -65,7 +64,6 @@ export function AppRowItem({
           type="button"
           size="sm"
           variant="secondary"
-          className="rounded-full"
           aria-label={`Turn on ${row.label}`}
           onClick={() => onAction("enable")}
         >
@@ -88,7 +86,6 @@ export function AppRowItem({
           type="button"
           size="sm"
           variant={armed ? "destructive" : "ghost"}
-          className="rounded-full"
           onClick={() => {
             if (!armed) {
               setArmed(true);
@@ -124,7 +121,6 @@ export function AppRowItem({
         type="button"
         size="sm"
         variant="secondary"
-        className="rounded-full"
         disabled
         aria-label={`Add ${row.label}`}
       >
@@ -136,7 +132,7 @@ export function AppRowItem({
       <Tooltip>
         <TooltipTrigger asChild>
           {/* A disabled button takes no pointer or focus, so the tooltip sits on this wrapper. */}
-          <span tabIndex={0} className="inline-flex rounded-full">
+          <span tabIndex={0} className="inline-flex rounded-md">
             {add}
           </span>
         </TooltipTrigger>
@@ -179,7 +175,7 @@ function AppDetail({ row }: { row: AppRow }) {
   // Web links only. The catalog is data, and a javascript: URL must never render as a link.
   const homepage = row.homepage && /^https?:\/\//.test(row.homepage) ? row.homepage : null;
   return (
-    <div className="bg-muted/40 mx-2 mb-2 flex min-w-0 flex-col gap-2 rounded-lg border p-3 text-sm">
+    <div className="bg-muted/40 mx-2 mb-2 flex min-w-0 flex-col gap-2 rounded-lg p-3 text-sm">
       {row.publisher ? (
         <p className="break-words">
           <span className="text-muted-foreground">Publisher: </span>
@@ -197,7 +193,7 @@ function AppDetail({ row }: { row: AppRow }) {
         </a>
       ) : null}
       {row.preview ? (
-        <code className="bg-background block min-w-0 rounded-md border px-2 py-1.5 font-mono text-xs break-all">
+        <code className="bg-background block min-w-0 rounded-md px-2 py-1.5 font-mono text-xs break-all">
           {row.preview}
         </code>
       ) : null}

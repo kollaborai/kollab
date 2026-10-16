@@ -95,8 +95,6 @@ def test_symlink_cannot_substitute_for_a_release_payload(tmp_path):
 
 @pytest.mark.parametrize("platform,target", [
     ("linux-x86_64", "x86_64-unknown-linux-gnu"),
-    ("macos-aarch64", "aarch64-apple-darwin"),
-    ("macos-x86_64", "x86_64-apple-darwin"),
 ])
 def test_stage_checks_hash_version_permissions_and_target_name(source_root, monkeypatch, platform, target):
     source = source_root / f"kollab-{platform}"
@@ -116,15 +114,89 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
     assert calls[0][0] == [str(staged), "--version"]
     config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
     assert config["version"] == "1.2.3"
-    if platform.startswith("macos-"):
-        assert config["bundle"] == {"targets": ["app"]}
-        return
     assert config["bundle"]["targets"] == ["appimage", "deb"]
     assert config["bundle"]["externalBin"] == []
     expected = {"/usr/share/kollab/runtime/kollab": "binaries/kollab-x86_64-unknown-linux-gnu"}
     assert config["bundle"]["linux"]["deb"]["files"] == expected
     assert config["bundle"]["linux"]["appimage"]["files"] == expected
     assert "xdg-utils" in config["bundle"]["linux"]["deb"]["depends"]
+
+
+# A stand-in python3.12: the pex's venv tool, compileall, and kollab --version.
+FAKE_PYTHON = """#!/bin/sh
+case "$*" in
+  *" venv --site-packages-copies "*)
+    for last; do :; done
+    mkdir -p "$last/lib/python3.12/site-packages/kollabor"
+    : > "$last/lib/python3.12/site-packages/kollabor/__init__.py" ;;
+  *"-m compileall"*) : ;;
+  *"-m kollabor_cli_main --version") echo "kollabor_cli_main.py 1.2.3" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+
+def fake_scie(path):
+    """A scie that SCIE=split unpacks: a CPython archive (with things to prune), a pex, lift.json."""
+    import hashlib
+    import io
+    import tarfile
+
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        for name, body, mode in (("python/bin/python3.12", FAKE_PYTHON.encode(), 0o755),
+                                 ("python/bin/pip3", b"#!/build/machine/python", 0o755),
+                                 ("python/include/python3.12/Python.h", b"", 0o644),
+                                 ("python/lib/libtcl9.0.dylib", b"", 0o644),
+                                 ("python/lib/python3.12/os.py", b"", 0o644),
+                                 ("python/lib/python3.12/tkinter/__init__.py", b"", 0o644),
+                                 ("python/lib/python3.12/site-packages/pip/__init__.py", b"", 0o644)):
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(body), mode
+            archive.addfile(info, io.BytesIO(body))
+    name = "cpython-3.12.15+20261009-aarch64-apple-darwin-install_only_stripped.tar.gz"
+    lift = {"scie": {"lift": {"files": [
+        {"name": name, "key": "python-distribution", "hash": hashlib.sha256(payload.getvalue()).hexdigest()},
+        {"name": "pex"},
+    ]}}}
+    path.write_text(f"""#!{sys.executable}
+import os, pathlib, sys
+assert os.environ["SCIE"] == "split"
+out = pathlib.Path(sys.argv[1])
+out.mkdir(parents=True)
+(out / "lift.json").write_text({json.dumps(lift)!r})
+(out / "pex").write_bytes(b"")
+(out / {name!r}).write_bytes(bytes.fromhex({payload.getvalue().hex()!r}))
+""")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("platform,target", [
+    ("macos-aarch64", "aarch64-apple-darwin"),
+    ("macos-x86_64", "x86_64-apple-darwin"),
+])
+def test_macos_stage_unpacks_the_scie_into_a_signable_runtime(source_root, platform, target):
+    source = source_root / f"kollab-{platform}"
+    fake_scie(source)
+    release.write_checksum(source)
+
+    launcher = release.stage(platform, source, "1.2.3")
+
+    destination = source_root / f"desktop/src-tauri/binaries/app-runtime-{target}"
+    runtime = destination / "runtime"
+    assert launcher == destination / "kollab" and launcher.stat().st_mode & 0o111
+    assert "-I -B" in launcher.read_text() and "-m kollabor_cli_main" in launcher.read_text()
+    assert (runtime / "KOLLAB-APP").is_file()
+    assert sorted(p.name for p in (runtime / "bin").iterdir()) == ["python3.12"]
+    site_packages = runtime / "lib/python3.12/site-packages"
+    assert (site_packages / "kollabor/__init__.py").is_file()
+    assert "dont_write_bytecode = True" in (site_packages / "kollab-app.pth").read_text()
+    assert (runtime / "lib/python3.12/os.py").is_file()
+    for pruned in ("include", "lib/libtcl9.0.dylib", "lib/python3.12/tkinter", "lib/python3.12/site-packages/pip"):
+        assert not (runtime / pruned).exists(), pruned
+    assert not destination.with_name(destination.name + ".work").exists()
+    config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
+    assert config == {"version": "1.2.3", "bundle": {"targets": ["app"]}}
 
 
 def test_stage_never_executes_a_corrupted_sidecar(source_root, monkeypatch):

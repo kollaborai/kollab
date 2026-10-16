@@ -194,6 +194,7 @@ class TestListCommands(unittest.IsolatedAsyncioTestCase):
                             "description": "Show one server",
                         }
                     ],
+                    "panel": "apps",
                 }
             ],
         )

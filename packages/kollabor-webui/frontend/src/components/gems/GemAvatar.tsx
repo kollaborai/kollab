@@ -28,14 +28,15 @@ export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
  */
 export function GemAvatar({ size = 32, className, label, where, ...own }: GemAvatarProps) {
   // The Gem Studio's saved look fills what the caller left open: an explicit
-  // face or hat wins (studio tiles, the dev lab), an "auto" season follows the
-  // user's pick, and a picked color replaces the pool's. Each agent has its
-  // own look, so a koordinator per project never wears another's.
+  // face or hat wins (studio tiles, the dev lab), an "auto" or unset season
+  // follows the user's pick, and a picked color replaces the pool's. Each agent
+  // has its own look, so a koordinator per project never wears another's.
   const key = useLookKey(own.gem, where);
   const look = useGemLook(key);
-  const season = own.season === "auto" ? ((look.season as Season | "auto" | undefined) ?? "auto") : own.season;
+  const asked = own.season ?? "auto";
+  const season = asked === "auto" ? ((look.season as Season | "auto" | undefined) ?? "auto") : asked;
   // A seasonal costume covers the hat a gem was born with, not one the user picked.
-  const inSeason = (season === "auto" ? seasonFor() : (season ?? "none")) !== "none";
+  const inSeason = (season === "auto" ? seasonFor() : season) !== "none";
   const gem: Omit<GemProps, "size"> = {
     ...own,
     face: own.face ?? (look.face as EyeStyle | undefined),

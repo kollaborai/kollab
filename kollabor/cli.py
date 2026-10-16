@@ -2061,22 +2061,51 @@ def _stop_webui(port: int, timeout: float = 20.0) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
-def _pick_engine_port(
-    version: str, engine_version, port: int = 7433, tries: int = 10
-) -> tuple[int, bool]:
-    """Return (port, reuse): the first port with this version's engine, or none.
+def _engine_is_ours(port: int) -> bool:
+    """True when the engine listening on ``port`` runs from this install.
 
-    ``engine_version(port)`` is None when no engine answers there. An engine of
-    another version is left running, since other clients may use it, and
-    skipped: reusing it silently served a 0.10 engine to a 0.12 web UI.
+    The launcher starts its engine as ``sys.executable -m kollabor_engine``, so
+    an engine on another interpreter (the desktop app's runtime, a test build,
+    another checkout's venv) is one this launcher would not have started, and
+    its owner stops it whenever that owner exits.
+    """
+    import psutil
+
+    for proc in psutil.process_iter(["cmdline"]):
+        cmdline = proc.info["cmdline"] or []
+        if not any("kollabor_engine" in part or "kollabor-engine" in part for part in cmdline):
+            continue
+        try:
+            # psutil < 6 names it connections().
+            conns = getattr(proc, "net_connections", proc.connections)(kind="tcp")
+        except psutil.Error:
+            continue
+        if any(c.status == psutil.CONN_LISTEN and c.laddr.port == port for c in conns):
+            return os.path.dirname(cmdline[0]) == os.path.dirname(sys.executable)
+    return False
+
+
+def _pick_engine_port(
+    version: str, engine_version, ours, port: int = 7433, tries: int = 10
+) -> tuple[int, bool]:
+    """Return (port, reuse): the first port with this install's engine, or none.
+
+    ``engine_version(port)`` is None when no engine answers there; ``ours(port)``
+    says whether that engine runs from this install. Any other engine is left
+    running, since other clients may use it, and skipped: reusing one of
+    another version served a 0.10 engine to a 0.12 web UI, and reusing a test
+    build's put this web UI on an engine its owner then stopped.
     """
     for candidate in range(port, port + tries):
         running = engine_version(candidate)
         if running is None:
             return candidate, False
-        if running == version:
+        if running != version:
+            print(f"  (engine on {candidate} is {running}, not {version}; leaving it running)")
+        elif not ours(candidate):
+            print(f"  (engine on {candidate} runs from another kollab install; leaving it running)")
+        else:
             return candidate, True
-        print(f"  (engine on {candidate} is {running}, not {version}; leaving it running)")
     raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
 
 
@@ -2128,7 +2157,10 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     # The UI keeps its port while it runs, so a second launch reuses it rather
     # than die binding the port. Anything else on the port is not ours to reuse.
     if webui_running(webui_port):
+        from kollabor_webui import rebuild_stale_bundle
+
         print(f"\n  kollab web ui already running\n  ui:     http://127.0.0.1:{webui_port}\n")
+        rebuild_stale_bundle()
         return
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", webui_port)) == 0:
@@ -2139,7 +2171,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             sys.exit(1)
 
     try:
-        engine_port, reuse = _pick_engine_port(__version__, engine_version)
+        engine_port, reuse = _pick_engine_port(__version__, engine_version, _engine_is_ours)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

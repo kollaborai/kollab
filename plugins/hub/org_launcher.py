@@ -262,7 +262,11 @@ class OrgLauncher:
         # Build the command (--detached forces interactive mode with piped stdin)
         import shutil
 
-        kollab_bin = shutil.which("kollab")
+        from kollabor.binary import own_launcher
+
+        # The binary or Kollab.app this runs from, then a kollab on PATH.
+        launcher = own_launcher()
+        kollab_bin = str(launcher) if launcher else shutil.which("kollab")
         if kollab_bin:
             cmd = [kollab_bin]
         else:
