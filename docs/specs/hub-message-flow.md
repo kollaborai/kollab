@@ -59,6 +59,14 @@ not "koordinator" (the agent). this is correct -- it identifies
 WHO typed, not WHERE they typed. the source_agent metadata tells
 receivers which window it came from.
 
+only the human's own typing is broadcast. skipped: slash commands,
+injected `<sys_msg>` / `[message from` text, attach-mode input, a
+launch prompt (event source `cli_initial`) and a peer's message
+delivered as input (source `agent`: an ACP agent's turn, an agent
+attached to another's chat). without that last skip, a delegation
+to an ACP agent came back to the sender as "<user> -> koordinator"
+with the sender's own text.
+
 
 ## flow 2: LLM emits <hub_msg> tag
 

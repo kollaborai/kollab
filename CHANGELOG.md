@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `/upgrade` in a binary install no longer fails with "signal only works in main thread", and its download progress no longer prints over the app's screen.
+- A delegation to Claude Code or Codex over ACP no longer echoes back into the sender's chat as "<you> → Koordinator". An agent that takes a peer's message as its input stopped rebroadcasting it to every agent as if you had typed it.
 
 ## [0.16.1] - 2026-10-15
 

@@ -585,3 +585,32 @@ async def test_launch_prompt_is_not_broadcast_as_the_human():
         {"message": "typed by the human"}, SimpleNamespace(source="user")
     )
     hub._deliver_to_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_peer_message_input_is_not_broadcast_as_the_human():
+    """A delegation an ACP agent takes as input must not echo back as '<user> -> koordinator'."""
+    from unittest.mock import AsyncMock
+
+    hub = HubPlugin()
+    hub._started = True
+    hub._identity = SimpleNamespace(state="idle", identity="claude")
+    hub._presence = SimpleNamespace(
+        discover_agents_async=AsyncMock(
+            return_value=[SimpleNamespace(identity="koordinator")]
+        )
+    )
+    hub._cli_args = None
+    hub._deliver_to_agent = AsyncMock()
+
+    await hub._broadcast_user_input(
+        {"message": "fix the failing checkout test"}, SimpleNamespace(source="agent")
+    )
+    hub._deliver_to_agent.assert_not_awaited()
+
+    # A person typing through an attached window is still the human.
+    await hub._broadcast_user_input(
+        {"message": "typed in an attached window"},
+        SimpleNamespace(source="hub_attachment"),
+    )
+    hub._deliver_to_agent.assert_awaited_once()
