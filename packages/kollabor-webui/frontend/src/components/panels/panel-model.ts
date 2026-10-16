@@ -7,7 +7,8 @@ export type SettingsTab =
   | "model"
   | "setup"
   | "network"
-  | "voice";
+  | "voice"
+  | "prompts";
 export type PanelTab = Exclude<SettingsTab, "session">;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
@@ -44,6 +45,11 @@ export const SETTINGS_TABS: readonly {
   },
   { id: "network", label: "Network", scope: "This device's agent network" },
   { id: "voice", label: "Voice", scope: "Saved for every chat on the device running Kollab" },
+  {
+    id: "prompts",
+    label: "Prompts",
+    scope: "Per-bundle section overrides, saved next to the agent bundles",
+  },
 ];
 
 /** The daemon panel behind each non-session tab (key == slash command). */
@@ -54,6 +60,7 @@ export const PANEL_NAME: Record<PanelTab, string> = {
   setup: "setup",
   network: "connect",
   voice: "voice",
+  prompts: "prompts",
 };
 
 const TAB_FOR_PANEL: Record<string, PanelTab> = {
@@ -63,6 +70,7 @@ const TAB_FOR_PANEL: Record<string, PanelTab> = {
   setup: "setup",
   connect: "network",
   voice: "voice",
+  prompts: "prompts",
 };
 
 const BARE_COMMAND = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)(?:[ \t]+([A-Za-z]+))?$/;

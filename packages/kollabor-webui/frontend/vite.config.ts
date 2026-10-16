@@ -25,6 +25,12 @@ export default defineConfig({
       "/profiles": "http://127.0.0.1:7433",
       "/mcp": "http://127.0.0.1:7433",
       "/hub": "http://127.0.0.1:7433",
+      "/prompts": "http://127.0.0.1:7433",
     },
+  },
+  test: {
+    // The System Prompts page suite; the older tests stay on `node --test`.
+    include: ["tests/prompts-page.test.ts"],
+    environment: "node",
   },
 });

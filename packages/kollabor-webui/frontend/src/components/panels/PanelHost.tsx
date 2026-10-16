@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, CheckCircle2, RefreshCw } from "lucide-react";
 import type {
   EngineApi,
@@ -27,6 +27,8 @@ import { cn } from "@/lib/utils";
 import { serializeDraft, type Draft } from "./FieldRenderer";
 import { FormPanel } from "./FormPanel";
 import { PickerList } from "./PickerList";
+import { PromptsPage } from "@/components/prompts/PromptsPage";
+import { PromptsApi } from "@/prompts-api";
 import { SessionSettings } from "./SessionSettings";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
@@ -70,6 +72,7 @@ const freshTabs = (): TabMap => ({
   setup: IDLE,
   network: IDLE,
   voice: IDLE,
+  prompts: IDLE,
 });
 const newView = (panel: PanelDescription): View => ({
   panel,
@@ -182,6 +185,8 @@ export function PanelHost({
 }) {
   const isMobile = useIsMobile();
   const sessionId = session.session_id;
+  // The Prompts tab renders fully client-side against the prompt-section API.
+  const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);
   const [busy, setBusy] = useState(false);
   const [reveal, setReveal] = useState<Reveal | null>(null);
@@ -253,7 +258,12 @@ export function PanelHost({
 
   // Fetch a tab the first time it is shown.
   useEffect(() => {
-    if (open && tab !== "session" && tabs[tab].status === "idle") {
+    if (
+      open &&
+      tab !== "session" &&
+      tab !== "prompts" &&
+      tabs[tab].status === "idle"
+    ) {
       void loadRoot(tab);
     }
   }, [open, tab, tabs, loadRoot]);
@@ -440,14 +450,14 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" ? null : tabs[tab];
+  const state = tab === "session" || tab === "prompts" ? null : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = () => {
-    if (tab === "session") return;
+    if (tab === "session" || tab === "prompts") return;
     if (
       dirtyCount > 0 &&
       !window.confirm("Reloading discards your unsaved changes. Continue?")
@@ -457,7 +467,7 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session") return;
+    if (tab === "session" || tab === "prompts") return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -466,7 +476,7 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session") return null;
+    if (!state || tab === "session" || tab === "prompts") return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -660,7 +670,17 @@ export function PanelHost({
               onSessionUpdated={onSessionUpdated}
             />
           </div>
-          {tab !== "session" ? (
+          <div
+            role="tabpanel"
+            aria-label="Prompts"
+            className={cn(
+              "min-h-0 flex-1 flex-col",
+              tab === "prompts" ? "flex" : "hidden",
+            )}
+          >
+            <PromptsPage api={promptsApi} />
+          </div>
+          {tab !== "session" && tab !== "prompts" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}
