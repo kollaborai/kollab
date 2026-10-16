@@ -90,8 +90,8 @@ CONVERTED = {
     ),
     "hub_capture": (
         "<hub_capture {attrs}/>",
-        {"name": "lapis", "lines": "20"},
-        {"cap_name": "lapis", "cap_lines": "20"},
+        {"name": "lapis", "lines": "20", "format": "terminal"},
+        {"cap_name": "lapis", "cap_lines": "20", "cap_format": "terminal"},
     ),
     "crystal_search": (
         "<crystal_search {attrs}/>",
@@ -245,6 +245,7 @@ def test_a_tag_without_its_required_attribute_is_not_matched(tag, missing):
         ("hub_spawn", "name", ""),
         ("hub_capture", "name", ""),
         ("hub_capture", "lines", "many"),
+        ("hub_capture", "format", "UPPER"),
         ("task_snooze", "id", ""),
         ("task_snooze", "minutes", "soon"),
         ("crystal_search", "limit", "some"),

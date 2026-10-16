@@ -320,13 +320,13 @@ hub_agents = ToolDefinition(
 
 hub_capture = ToolDefinition(
     name="hub-capture",
-    description="View an agent's recent output.",
+    description="View an agent's recent output (plain text by default).",
     category="hub",
     risk_level="low",
     requires_permission=False,
     xml_tag="hub_capture",
     xml_form="attributes",
-    xml_attributes=["name", "lines"],
+    xml_attributes=["name", "lines", "format"],
     parameters=[
         ToolParameter(
             name="name",
@@ -340,15 +340,27 @@ hub_capture = ToolDefinition(
             description="Number of recent lines to capture (default: 50)",
             required=False,
         ),
+        ToolParameter(
+            name="format",
+            type="string",
+            description=(
+                "Output format: 'plain' (default, strips ANSI escape codes) "
+                "or 'terminal' for raw terminal rendering"
+            ),
+            required=False,
+        ),
     ],
     examples=[
         '<hub_capture name="lapis" lines="100" />',
+        '<hub_capture name="lapis" format="terminal" />',
     ],
-    result_format="Recent output from the agent.",
+    result_format="Recent output from the agent as plain text (default) or raw terminal lines.",
     key_rules=[
         "useful for checking what another agent is working on before assigning new tasks",
         "default 50 lines — increase if you need more context",
         "only captures recent output, not full history",
+        "output defaults to plain text (ANSI escape codes stripped); "
+        "pass format='terminal' only when raw rendering is explicitly needed",
     ],
 )
 
