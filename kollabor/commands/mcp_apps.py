@@ -1,4 +1,4 @@
-"""Terminal ``/apps``: the Apps directory as text. ``list``, ``search``, ``add`` and ``remove``.
+"""The Apps directory inside ``/mcp``: ``browse``, ``search``, ``add`` and ``remove``.
 
 Same service and same MCP reload as the Apps panel. An MCP add that needs a
 secret is saved off, and the reply says how to set the key. ``search`` also
@@ -11,20 +11,19 @@ import asyncio
 from kollabor.apps.registry import NOT_REVIEWED, fingerprint
 from kollabor.apps.service import AppsService, required_unset
 from kollabor.panels.apps import apply_change, mcp_runtime
-from kollabor_events.models import (
-    CommandCategory,
-    CommandDefinition,
-    CommandResult,
-    SlashCommand,
-    SubcommandInfo,
-)
+from kollabor_events.models import CommandResult, SubcommandInfo
 
-from ..base import BaseCommandHandler
-
-USAGE = "usage: /apps [list | search <words> | add <id> | remove <id>]"
+VERBS = ("browse", "search", "add", "remove")
+SUBCOMMANDS = [
+    SubcommandInfo("browse", "", "Browse MCP servers, CLI tools and skills to add"),
+    SubcommandInfo("search", "<words>", "Find apps, and servers in the MCP Registry"),
+    SubcommandInfo("add", "<id>", "Add an app, e.g. mcp:context7, or show a registry server"),
+    SubcommandInfo("remove", "<id>", "Remove an MCP server or a marketplace skill"),
+]
+USAGE = "usage: /mcp [browse | search <words> | add <id> | remove <id>]"
 KIND_IDS = {"mcp", "cli", "skill"}
 LIBRARY_IDS = {"your-skills", "built-in"}  # skills already in the library: counted, not listed
-LIST_ROWS = 4  # rows per kind in /apps list, so the list fits a terminal; search shows every match
+LIST_ROWS = 4  # rows per kind in /mcp browse, so the list fits a terminal; search shows every match
 # A search prints after this long at most. A slower registry search keeps going and fills the
 # registry cache, so the same search a moment later answers at once.
 REGISTRY_WAIT_SECONDS = 10
@@ -56,7 +55,7 @@ def _listing(service: AppsService, rows: list[dict], limit: int | None = None) -
         elif section["id"] in LIBRARY_IDS:
             count = len(section["ids"])
             lines.append(section["title"])
-            lines.append(f"  {count} skill{'' if count == 1 else 's'}. /apps search <words> finds them.")
+            lines.append(f"  {count} skill{'' if count == 1 else 's'}. /mcp search <words> finds them.")
             continue
         else:
             continue
@@ -64,7 +63,7 @@ def _listing(service: AppsService, rows: list[dict], limit: int | None = None) -
         lines.extend(_line(by_id[row_id]) for row_id in shown)
         hidden = len(section["ids"]) - len(shown)
         if hidden:
-            lines.append(f"  … {hidden} more. /apps search <words> finds them.")
+            lines.append(f"  … {hidden} more. /mcp search <words> finds them.")
     return "\n".join(lines)
 
 
@@ -75,7 +74,7 @@ def _registry_listing(found: dict) -> str:
     if found["note"]:
         lines.append(f"  {found['note']}")
     if any(row["state"] == "available" for row in found["rows"]):
-        lines.append("  Kollab has not reviewed these servers. /apps add <id> shows what one runs.")
+        lines.append("  Kollab has not reviewed these servers. /mcp add <id> shows what one runs.")
     return "\n".join(lines)
 
 
@@ -91,12 +90,12 @@ def _registry_confirm(row: dict, app: dict | None) -> str:
     unset = required_unset(inputs, {})
     needs = [inp["name"] for inp in unset if not inp.get("secret")]
     if needs:
-        lines.append(f"  It needs {', '.join(needs)}, which /apps can't ask for. Add it from Apps in the web UI.")
+        lines.append(f"  It needs {', '.join(needs)}, which /mcp can't ask for. Add it from Apps in the web UI.")
         return "\n".join(lines)
     secrets = [inp["name"] for inp in unset if inp.get("secret")]
     if secrets:
         lines.append(f"  Add saves it off. Set {', '.join(secrets)} with /mcp setup, then turn it on.")
-    lines.append(f"  To add it: /apps add {row['id']} {fingerprint(app)}")
+    lines.append(f"  To add it: /mcp add {row['id']} {fingerprint(app)}")
     return "\n".join(lines)
 
 
@@ -105,80 +104,54 @@ def _matches(row: dict, words: list[str]) -> bool:
     return all(word in haystack for word in words)
 
 
-class AppsCommandHandler(BaseCommandHandler):
-    """Handle the ``/apps`` text commands."""
+async def handle(args: list[str], state) -> CommandResult:
+    """Run one Apps verb. ``args[0]`` is the verb; ``state`` is the state service, or None."""
+    verb = args[0].lower() if args else "browse"
+    rest = args[1:]
+    service = _service()
 
-    def register_commands(self) -> None:
-        self.command_registry.register_command(
-            CommandDefinition(
-                name="apps",
-                description="Browse, add and remove MCP servers, CLI tools and skills",
-                category=CommandCategory.SYSTEM,
-                plugin_name="system",
-                handler=self.handle_apps,
-                subcommands=[
-                    SubcommandInfo("list", "", "Show every app and its state"),
-                    SubcommandInfo("search", "<words>", "Find apps, and servers in the MCP Registry"),
-                    SubcommandInfo("add", "<id>", "Add an app, e.g. mcp:context7, or show a registry server"),
-                    SubcommandInfo("remove", "<id>", "Remove an MCP server or a marketplace skill"),
-                ],
+    if verb == "browse" and not rest:
+        rows = service.rows(await mcp_runtime(state))
+        return CommandResult(success=True, message=_listing(service, rows, limit=LIST_ROWS))
+
+    if verb == "search" and rest:
+        words = [word.casefold() for word in rest]
+        runtime = await mcp_runtime(state)
+        rows = [row for row in service.rows(runtime) if _matches(row, words)]
+        directory = _listing(service, rows) if rows else f"No apps in the directory match '{' '.join(rest)}'."
+        search = asyncio.ensure_future(service.registry_rows(" ".join(rest), runtime))
+        _searches.add(search)
+        search.add_done_callback(_searches.discard)
+        done, _ = await asyncio.wait({search}, timeout=REGISTRY_WAIT_SECONDS)
+        if done:
+            found = _registry_listing(search.result())
+        else:
+            found = (
+                "MCP Registry\n  Still searching: the MCP Registry is slow right now. Run this search again soon."
             )
+        return CommandResult(success=True, message=f"{directory}\n{found}")
+
+    registry_id = verb == "add" and bool(rest) and rest[0].startswith("registry:")
+    if registry_id and len(rest) == 1:
+        try:
+            row, app = await service.form_target(rest[0])
+        except ValueError as exc:
+            return CommandResult(success=False, message=str(exc), display_type="error")
+        return CommandResult(success=True, message=_registry_confirm(row, app))
+
+    if verb in ("add", "remove") and (len(rest) == 1 or (registry_id and len(rest) == 2)):
+        try:
+            if verb == "add":
+                result = await service.add(rest[0], confirm=rest[1] if len(rest) == 2 else None)
+            else:
+                result = await service.remove(rest[0])
+        except (ValueError, KeyError, OSError) as exc:
+            return CommandResult(success=False, message=str(exc), display_type="error")
+        await apply_change(state, result)
+        return CommandResult(
+            success=result["ok"],
+            message=result["message"],
+            display_type="success" if result["ok"] else "error",
         )
 
-    def _state_service(self):
-        if self.event_bus is None or not hasattr(self.event_bus, "get_service"):
-            return None
-        return self.event_bus.get_service("state_service")
-
-    async def handle_apps(self, command: SlashCommand) -> CommandResult:
-        args = command.args or []
-        verb = args[0].lower() if args else "list"
-        rest = args[1:]
-        service = _service()
-        state = self._state_service()
-
-        if verb == "list" and not rest:
-            rows = service.rows(await mcp_runtime(state))
-            return CommandResult(success=True, message=_listing(service, rows, limit=LIST_ROWS))
-
-        if verb == "search" and rest:
-            words = [word.casefold() for word in rest]
-            runtime = await mcp_runtime(state)
-            rows = [row for row in service.rows(runtime) if _matches(row, words)]
-            directory = _listing(service, rows) if rows else f"No apps in the directory match '{' '.join(rest)}'."
-            search = asyncio.ensure_future(service.registry_rows(" ".join(rest), runtime))
-            _searches.add(search)
-            search.add_done_callback(_searches.discard)
-            done, _ = await asyncio.wait({search}, timeout=REGISTRY_WAIT_SECONDS)
-            if done:
-                found = _registry_listing(search.result())
-            else:
-                found = (
-                    "MCP Registry\n  Still searching: the MCP Registry is slow right now. Run this search again soon."
-                )
-            return CommandResult(success=True, message=f"{directory}\n{found}")
-
-        registry_id = verb == "add" and bool(rest) and rest[0].startswith("registry:")
-        if registry_id and len(rest) == 1:
-            try:
-                row, app = await service.form_target(rest[0])
-            except ValueError as exc:
-                return CommandResult(success=False, message=str(exc), display_type="error")
-            return CommandResult(success=True, message=_registry_confirm(row, app))
-
-        if verb in ("add", "remove") and (len(rest) == 1 or (registry_id and len(rest) == 2)):
-            try:
-                if verb == "add":
-                    result = await service.add(rest[0], confirm=rest[1] if len(rest) == 2 else None)
-                else:
-                    result = await service.remove(rest[0])
-            except (ValueError, KeyError, OSError) as exc:
-                return CommandResult(success=False, message=str(exc), display_type="error")
-            await apply_change(state, result)
-            return CommandResult(
-                success=result["ok"],
-                message=result["message"],
-                display_type="success" if result["ok"] else "error",
-            )
-
-        return CommandResult(success=False, message=USAGE, display_type="error")
+    return CommandResult(success=False, message=USAGE, display_type="error")

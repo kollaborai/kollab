@@ -1,8 +1,8 @@
 {
-  "name": "apps-command",
-  "description": "/apps lists the Apps directory in three kinds (MCP Servers, CLI Tools, Skills), /apps search finds one row and lists the MCP Registry after the directory, and /apps add registry:<name> shows the command and its code without saving anything. Throwaway HOME, --no-daemon, no keyring. The registry steps need the network.",
+  "name": "mcp-apps",
+  "description": "/mcp browse lists the Apps directory in three kinds (MCP Servers, CLI Tools, Skills), /mcp search finds one row and lists the MCP Registry after the directory, and /mcp add registry:<name> shows the command and its code without saving anything. Bare /mcp opens the manager with the catalog's MCP servers, and a adds one through Apps. Throwaway HOME, --no-daemon, no keyring. The registry steps need the network.",
   "config": {
-    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-apps-command\"; cd \"$H\"; KOLLAB_NO_KEYRING=1 HOME=\"$H\" PYTHONPATH=\"$R:$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-webui/src:$R/packages/kollabor-voice/src\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "command": "bash -lc 'R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-mcp-apps\"; cd \"$H\"; KOLLAB_NO_KEYRING=1 HOME=\"$H\" PYTHONPATH=\"$R:$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-webui/src:$R/packages/kollabor-voice/src\" \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 10,
     "show_captures": false,
     "term_width": 120,
@@ -14,7 +14,7 @@
     {
       "action": "shell",
       "description": "Throwaway HOME: an empty MCP config (no npx example servers), one fake provider profile, and a plugins link",
-      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-apps-command\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab/mcp\"; ln -sfn \"$PWD/plugins\" \"$H/plugins\"; printf '%s' '{\"servers\": {}}' > \"$H/.kollab/mcp/mcp_settings.json\"; printf '%s' '{\"kollabor\": {\"llm\": {\"active_profile\": \"anthropic\", \"profiles\": {\"anthropic\": {\"provider\": \"anthropic\", \"model\": \"claude-opus-5-5\", \"api_key\": \"sk-fake-apps-command-spec\"}}}, \"updates\": {\"check_enabled\": false}}, \"plugins\": {\"hub\": {\"enabled\": false}}}' > \"$H/.kollab/config.json\"; echo \"fixture ready\"",
+      "command": "H=\"${TMPDIR:-/tmp}/kollab-spec-mcp-apps\"; rm -rf \"$H\"; mkdir -p \"$H/.kollab/mcp\"; ln -sfn \"$PWD/plugins\" \"$H/plugins\"; printf '%s' '{\"servers\": {}}' > \"$H/.kollab/mcp/mcp_settings.json\"; printf '%s' '{\"kollabor\": {\"llm\": {\"active_profile\": \"anthropic\", \"profiles\": {\"anthropic\": {\"provider\": \"anthropic\", \"model\": \"claude-opus-5-5\", \"api_key\": \"sk-fake-apps-command-spec\"}}}, \"updates\": {\"check_enabled\": false}}, \"application\": {\"setup_completed\": true}, \"plugins\": {\"hub\": {\"enabled\": false}}}' > \"$H/.kollab/config.json\"; echo \"fixture ready\"",
       "assert_contains": "fixture ready"
     }
   ],
@@ -34,7 +34,7 @@
     },
     {
       "action": "type",
-      "text": "/apps search ripgrep"
+      "text": "/mcp search ripgrep"
     },
     {
       "action": "sleep",
@@ -69,7 +69,7 @@
     },
     {
       "action": "type",
-      "text": "/apps search notion"
+      "text": "/mcp search notion"
     },
     {
       "action": "sleep",
@@ -104,7 +104,7 @@
     },
     {
       "action": "type",
-      "text": "/apps add registry:com.notion/mcp"
+      "text": "/mcp add registry:com.notion/mcp"
     },
     {
       "action": "sleep",
@@ -116,7 +116,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "To add it: /apps add registry:com\\.notion/mcp [0-9a-f]{16}",
+      "pattern": "To add it: /mcp add registry:com\\.notion/mcp [0-9a-f]{16}",
       "timeout": 45,
       "description": "the confirm step painted"
     },
@@ -136,16 +136,16 @@
     {
       "action": "shell",
       "description": "showing it saved nothing",
-      "command": "python3 -c \"import json,os; print('servers:', json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'kollab-spec-apps-command/.kollab/mcp/mcp_settings.json')))['servers'])\"",
+      "command": "python3 -c \"import json,os; print('servers:', json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'kollab-spec-mcp-apps/.kollab/mcp/mcp_settings.json')))['servers'])\"",
       "assert_contains": "servers: {}"
     },
     {
       "action": "section",
-      "title": "/apps lists the three kinds"
+      "title": "/mcp browse lists the three kinds"
     },
     {
       "action": "type",
-      "text": "/apps"
+      "text": "/mcp browse"
     },
     {
       "action": "sleep",
@@ -178,6 +178,87 @@
       "action": "assert_not_contains",
       "pattern": "Traceback|Exception",
       "description": "no error text"
+    },
+    {
+      "action": "section",
+      "title": "bare /mcp lists the catalog's MCP servers and a adds one"
+    },
+    {
+      "action": "type",
+      "text": "/mcp"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "MCP Manager",
+      "timeout": 10,
+      "description": "the manager screen opened"
+    },
+    {
+      "action": "type",
+      "text": "/context7"
+    },
+    {
+      "action": "send_keys",
+      "keys": "Enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "context7 \\[available\\]",
+      "description": "a catalog server the example config does not have"
+    },
+    {
+      "action": "type",
+      "text": "a"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Added Context7",
+      "timeout": 15,
+      "description": "added through the Apps service"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "context7 \\[",
+      "description": "still listed after the add"
+    },
+    {
+      "action": "shell",
+      "description": "context7 saved, marked as added by Apps",
+      "command": "python3 -c \"import json,os; s=json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'kollab-spec-mcp-apps/.kollab/mcp/mcp_settings.json')))['servers']; print('context7:', s['context7']['added_by'])\"",
+      "assert_contains": "context7: apps"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Traceback|Exception",
+      "description": "no error text after the manager"
     }
   ]
 }
