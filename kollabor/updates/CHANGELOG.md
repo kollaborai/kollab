@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Desktop: Kollab.app updates itself on macOS. It asks when a newer release is out (and from Check for Updates… in the menu bar), checks the download's SHA-256 and signature, swaps the app in one step and reopens it. The web UI's update banner inside the app hands the update to the app.
+
 ## [0.16.1] - 2026-10-15
 
 ### Added

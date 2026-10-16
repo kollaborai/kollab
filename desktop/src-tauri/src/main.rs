@@ -30,6 +30,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use objc2::{rc::Retained, runtime::{AnyObject, ClassBuilder, Sel}, class, msg_send, sel};
 use tauri_plugin_window_state::StateFlags;
 
+mod updater;
+
 /// How long a spawned web UI gets to answer before the error page shows.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -52,6 +54,10 @@ const REPORT_JS: &str = r#"(() => {
   new MutationObserver(report).observe(root, { childList: true });
   setTimeout(report, 10000);
 })();"#;
+
+/// Tells the web UI it runs in this window, so its update banner can hand a
+/// Kollab.app update to `kollab-desktop://update` instead of failing.
+const DESKTOP_JS: &str = "window.kollabDesktop = { update: 'kollab-desktop://update' };";
 
 /// Startup and Retry share one operation. Spawn admission and publishing happen
 /// under this same lock, so closing it cannot leave a late, untracked child.
@@ -625,6 +631,27 @@ fn toggle_launch_at_login(app: &AppHandle) {
     let _ = app.state::<LoginItem>().0.set_checked(autolaunch.is_enabled().unwrap_or(false));
 }
 
+/// An update install stops the owned runtime the way Quit does. On Err the app
+/// carries on as it was (the runtime that could not stop is still owned).
+fn stop_for_update(app: &AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<Spawned>();
+        let mut runtime = state.0.lock().unwrap();
+        if runtime.closing { return Err("Kollab is quitting.".into()); }
+        runtime.close();
+        runtime.exit_worker = true;
+    }
+    let stopped = stop_spawned(app);
+    if app.state::<Spawned>().0.lock().unwrap().finish_exit(stopped) { return Ok(()); }
+    Err("Some owned processes could not be stopped safely, so the update was not installed.".into())
+}
+
+/// The swap failed after the runtime stopped: the old app is back, start it again.
+fn resume_after_update(app: &AppHandle) {
+    app.state::<Spawned>().0.lock().unwrap().finish_exit(false);
+    start_boot(app, true);
+}
+
 /// Ctrl+C, `kill` or a closed terminal quit through the same exit path as
 /// Quit (without the question), so a spawned web UI is never orphaned.
 fn quit_on_signals(app: &AppHandle) {
@@ -673,6 +700,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 true,
                 &[
                     &PredefinedMenuItem::about(app, None, None)?,
+                    &MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::hide(app, None)?,
                     &PredefinedMenuItem::hide_others(app, None)?,
@@ -724,7 +752,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     ])
 }
 
-/// The menu bar (tray) icon: Open Kollab, Launch at Login, Quit Kollab.
+/// The menu bar (tray) icon: Open Kollab, Launch at Login, Check for Updates, Quit Kollab.
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let login_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let login = CheckMenuItem::with_id(app, "login", "Launch at Login", true, login_enabled, None::<&str>)?;
@@ -733,6 +761,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         &[
             &MenuItem::with_id(app, "open", "Open Kollab", true, None::<&str>)?,
             &login,
+            &MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit Kollab", true, None::<&str>)?,
         ],
@@ -785,11 +814,13 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
         .manage(Spawned::default())
+        .manage(updater::Updater::default())
         .menu(app_menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_window(app),
             "quit" => request_quit(app),
             "login" => toggle_launch_at_login(app),
+            "update" => updater::check(app, true),
             _ => {}
         })
         .on_window_event(|window, event| {
@@ -810,6 +841,11 @@ fn main() {
                 .min_inner_size(390.0, 600.0)
                 .visible(!hidden)
                 .on_navigation(move |url| {
+                    // The web UI's update banner hands a Kollab.app update to the app.
+                    if url.scheme() == "kollab-desktop" && url.host_str() == Some("update") {
+                        updater::check(&handle, true);
+                        return false;
+                    }
                     if url.scheme() == "kollab-desktop" {
                         let report: Vec<_> = url.query_pairs().collect();
                         eprintln!("kollab-desktop: page report: {report:?}");
@@ -839,7 +875,7 @@ fn main() {
                     if matches!(payload.event(), PageLoadEvent::Finished)
                         && payload.url().origin() == ui_url().origin()
                     {
-                        if let Err(err) = win.eval(REPORT_JS) {
+                        if let Err(err) = win.eval(format!("{DESKTOP_JS}\n{REPORT_JS}")) {
                             eprintln!("kollab-desktop: could not run the page report: {err}");
                         }
                     }
@@ -854,6 +890,7 @@ fn main() {
             let handle = app.handle().clone();
             quit_on_signals(&handle);
             start_boot(&handle, false);
+            updater::watch(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())

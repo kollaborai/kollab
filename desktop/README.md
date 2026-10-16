@@ -238,7 +238,7 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 ## Menu bar and quitting
 
 - **Tray menu:** Open Kollab, Launch at Login (off by default; when on, the app
-  starts at login, hidden in the menu bar), Quit Kollab.
+  starts at login, hidden in the menu bar), Check for Updates…, Quit Kollab.
 - **Closing the window:** the window hides and the app keeps running in the
   menu bar. While the window is hidden the Dock icon goes away too (an
   accessory app, as Docker Desktop does); Open Kollab or a second launch
@@ -259,6 +259,35 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
   same version, just as it does in a terminal. The app didn't start that
   engine, so it is left running.
 
+## Updates
+
+The app updates itself on macOS (`src-tauri/src/updater.rs`). 30 s after launch
+and every 6 hours it reads the latest GitHub release; when it is newer than the
+app and carries `kollab-desktop-macos-<arch>-<version>.app.zip` plus its
+`.sha256`, it asks "Kollab X.Y.Z is available" (Install / Later). Later quiets
+the background check for that version until the next launch. Check for
+Updates… (tray and app menu) always asks, and says when Kollab is up to date.
+
+Install downloads beside the running app (a hidden `.Kollab-update-<pid>`
+folder on the same volume), and checks the zip against the release's
+SHA-256, `codesign --verify --deep --strict`, and that the bundle identifier
+matches and `CFBundleShortVersionString` is the release's version. Only then
+does it stop the runtime it started (as Quit does), swap the bundles in one
+`renamex_np(RENAME_SWAP)` (two renames with rollback off APFS), verify the
+installed app again (rolling back on failure) and reopen the new app once this
+one has exited. Any failure leaves the old app running and names the release
+page. A folder Kollab cannot write to (or a translocated app) gets the same
+message. The app is signed ad hoc, so the release checksum is the integrity
+check, as for the CLI binary's `/upgrade`.
+
+The web UI's update banner asks the running kollab to update; inside Kollab.app
+that answers method `app`, and in the app's window the banner then opens
+`kollab-desktop://update`, which runs Check for Updates. Linux packages are not
+updated in place: the prompt offers the release page instead.
+
+`KOLLAB_DESKTOP_RELEASE_URL` points the updater at another release JSON
+(`file://` works), for testing.
+
 ## Window behavior
 
 - Links to other origins and `target="_blank"` links open in the default
@@ -276,7 +305,8 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 
 | Path | What it is |
 | --- | --- |
-| `src-tauri/src/main.rs` | All app logic |
+| `src-tauri/src/main.rs` | App logic: runtime, window, menus, quitting |
+| `src-tauri/src/updater.rs` | Self-update from the latest GitHub release |
 | `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar (bundled as `Contents/Resources/kollab`) |
 | `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |

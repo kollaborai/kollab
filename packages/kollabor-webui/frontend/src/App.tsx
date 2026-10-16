@@ -558,7 +558,10 @@ export default function App() {
     setUpdateBusy(true);
     try {
       const result = await api.applyUpdate();
-      if (result.success && result.changed) window.location.reload();
+      const desktop = (window as { kollabDesktop?: { update?: string } }).kollabDesktop;
+      // Kollab.app updates whole: inside its window the app installs the update.
+      if (result.method === "app" && desktop?.update) window.location.href = desktop.update;
+      else if (result.success && result.changed) window.location.reload();
       else window.alert(result.message);
     } catch (error) {
       window.alert(errorText(error));
