@@ -539,7 +539,7 @@ export default function App() {
     (async () => {
       const config = await api.loadConfig();
       if (!mounted) return;
-      const bundle = "0.15.7";
+      const bundle = "0.16.0";
       const engine = (config?.engine_version || "").trim();
       if (!engine || !bundle || engine === bundle) return;
       setVersionMismatch(
