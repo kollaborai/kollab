@@ -32,7 +32,7 @@ koordinator starts three agents that build and test a change together. A second 
 
 - Run named agents on all your computers. They find each other, message `agent@device`, and keep their memory between sessions. Each machine dials out on port 443, so nothing needs an open port.
 - Bring Claude Code and Codex onto that network as named agents, and use Kollab from Zed and other ACP clients with `kollab acp`.
-- Add MCP servers, CLI tools, and skills from one Apps screen: `/apps` in the terminal, the Apps button in the browser UI.
+- Add MCP servers, CLI tools, and skills from `/mcp` in the terminal or the Apps button in the browser UI.
 - Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone.
 - Pick the model for each agent: Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint, with named loadouts for model, effort, and sampling. Switch with `/llm` without leaving the session.
 - Chat in a fast terminal UI, or run one-shot prompts and shell pipelines with `kollab -p`.
@@ -74,7 +74,7 @@ were approved, and which hooks or plugins changed the flow.
 | Harness agents (ACP) | Claude Code and Codex as named agents on the network, and `kollab acp` to use Kollab from Zed and other ACP clients |
 | Agent DNS | Experimental identity, trust, capability lookup, Ed25519 keys, AID-style TXT export, ARDP-style registration payloads, and DNS roster commands |
 | Plugin system | Event hooks, custom commands, startup info, config widgets, XML tags, context injection, and clean shutdown |
-| Apps | MCP servers, CLI tools, and skills from one `/apps` screen, with search across the official MCP Registry |
+| Apps | MCP servers, CLI tools, and skills from `/mcp` or the Apps screen, with search across the official MCP Registry |
 | Engine, web UI, and attach mode | Local FastAPI engine, assistant-ui browser client, bearer-token wiring, RPC state services, multi-context daemons, and attach workflows |
 
 ## Agent Hub
@@ -277,7 +277,8 @@ kollab --web-ui
 ```
 
 The flag starts the local engine when needed, launches `kollabor-webui`, reuses a
-healthy engine on port `7433`, and cleans up child processes on exit. A second
+healthy engine on port `7433` when it is this version from this install (any other
+engine keeps running and the next port is used), and cleans up child processes on exit. A second
 `kollab --web-ui` reuses the running UI; `kollab --web-ui --restart` stops it (and
 the engine it started) and starts both again, e.g. after an update. For separate
 development loops, see the [engine README](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-engine/README.md)
@@ -294,7 +295,7 @@ The web UI's Settings dialog (Session, Configuration, Loadouts, Model, Setup, Ne
 
 ## Apps
 
-One place to give your agents more tools. Open **Apps** in the browser UI's sidebar, or run `/apps` in the terminal. Whatever you add is available to every agent on that computer, and the session you added it from uses it right away.
+One place to give your agents more tools. Open **Apps** in the browser UI's sidebar, or run `/mcp` in the terminal (the manager lists the catalog's MCP servers; `a` adds one). Whatever you add is available to every agent on that computer, and the session you added it from uses it right away.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-apps-dark.webp" alt="The Apps screen in Kollab's browser UI: MCP servers, CLI tools and skills, each with an Add button" width="100%">
@@ -307,10 +308,10 @@ One place to give your agents more tools. Open **Apps** in the browser UI's side
 | Skill | Downloads it from its GitHub repo into `~/.kollab/skills/` |
 
 ```text
-/apps search <words>   every match, by name, description or tag
-/apps add context7     add an MCP server from the directory
-/apps add cli:gh       install a CLI tool
-/apps remove <id>      remove an MCP server or a skill added from Apps
+/mcp search <words>   every match, by name, description or tag
+/mcp add context7     add an MCP server from the directory
+/mcp add cli:gh       install a CLI tool
+/mcp remove <id>      remove an MCP server or a skill added from Apps
 ```
 
 Search also reaches the official MCP Registry (about 40,000 servers). Kollab has not reviewed those, so Add shows the exact command it will run first, and nothing is saved or started until you confirm. See [Apps](https://github.com/kollaborai/kollab/blob/main/docs/features/apps.md) for the rest.
@@ -594,7 +595,6 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/model` | Quick model selection and reasoning effort (`/model effort max`) |
 | `/agent` | Switch agent definitions when available |
 | `/skill` | Load or unload agent skills when available |
-| `/apps` | Add MCP servers, CLI tools, and skills |
 | `/setup` | Guided provider/profile setup |
 | `/save` | Save conversation output |
 | `/hub` | Manage the agent hub |
@@ -603,7 +603,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/terminal` | Manage terminal sessions |
 | `/permissions` | Configure tool approval modes |
 | `/login` | Run provider login flows |
-| `/mcp` | Open the MCP manager |
+| `/mcp` | Open the MCP manager; `browse`, `search`, `add`, `remove` for MCP servers, CLI tools, and skills |
 | `/resume` | Resume a previous conversation |
 | `/config` | Open the settings editor |
 | `/updates` | Browse recent release notes in the terminal |
