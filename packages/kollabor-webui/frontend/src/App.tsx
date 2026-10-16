@@ -25,7 +25,6 @@ import { SessionToolbar } from "@/components/shell/SessionToolbar";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import {
   SidebarInset,
   SidebarProvider,
@@ -212,9 +211,8 @@ function RuntimeShell({
   return (
     <>
       {/* Respond to the chat pane's width, including when its sidebar is resized. */}
-      <ShellHeader className="bg-background @container/shell-header sticky top-0 z-10 flex min-h-12 shrink-0 items-center gap-2 border-b px-3 py-1.5">
+      <ShellHeader className="bg-background @container/shell-header sticky top-0 z-10 flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5">
         <SidebarTrigger className="-ml-1 shrink-0" />
-        <Separator orientation="vertical" className="mr-1 shrink-0 data-[orientation=vertical]:h-4" />
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span
             className="min-w-0 truncate text-sm font-semibold tracking-tight"
@@ -222,44 +220,34 @@ function RuntimeShell({
           >
             {sessionLabel}
           </span>
-          <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 shrink-0 rounded border px-1.5 py-0.5 text-xs @max-[38rem]/shell-header:[&>span]:hidden" />
+          <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 shrink-0 text-xs @max-[38rem]/shell-header:[&>span]:hidden" />
         </div>
         {usageLabel && (
           <span className="text-muted-foreground hidden shrink-0 whitespace-nowrap text-xs @min-[56rem]/shell-header:block" title="Current harness context usage">
             {usageLabel}
           </span>
         )}
-        <div
-          className="bg-muted flex shrink-0 rounded-md p-0.5"
-          role="group"
-          aria-label="Session view"
-        >
-          <Button
-            type="button"
-            variant={view === "chat" ? "secondary" : "ghost"}
-            size="xs"
-            aria-label="Chat"
-            title="Chat"
-            aria-pressed={view === "chat"}
-            data-testid="chat-tab"
-            onClick={() => setView("chat")}
-          >
-            <MessageSquare className="size-3.5" aria-hidden="true" />
-            <span className="hidden @min-[26rem]/shell-header:inline">Chat</span>
-          </Button>
-          <Button
-            type="button"
-            variant={view === "trajectory" ? "secondary" : "ghost"}
-            size="xs"
-            aria-label="Trajectory"
-            title="Trajectory"
-            aria-pressed={view === "trajectory"}
-            data-testid="trajectory-tab"
-            onClick={() => setView("trajectory")}
-          >
-            <Waypoints className="size-3.5" aria-hidden="true" />
-            <span className="hidden @min-[26rem]/shell-header:inline">Trajectory</span>
-          </Button>
+        <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Session view">
+          {([
+            ["chat", "Chat", MessageSquare],
+            ["trajectory", "Trajectory", Waypoints],
+          ] as const).map(([id, label, Icon]) => (
+            <button
+              key={id}
+              type="button"
+              aria-label={label}
+              title={label}
+              aria-pressed={view === id}
+              data-testid={`${id}-tab`}
+              onClick={() => setView(id)}
+              className={`flex items-center gap-1.5 border-b-2 px-1.5 pt-1 pb-0.5 text-xs font-medium transition-colors ${
+                view === id ? "border-foreground text-foreground" : "text-muted-foreground hover:text-foreground border-transparent"
+              }`}
+            >
+              <Icon className="size-3.5" aria-hidden="true" />
+              <span className="hidden @min-[26rem]/shell-header:inline">{label}</span>
+            </button>
+          ))}
         </div>
         <SessionToolbar
           api={api}
@@ -275,7 +263,7 @@ function RuntimeShell({
         />
       </ShellHeader>
       {session.harness && Boolean(session.acp_plan?.entries?.length) && (
-        <details className="border-b px-3 py-2 text-xs">
+        <details className="bg-muted/30 px-3 py-2 text-xs">
           <summary className="cursor-pointer font-medium">Harness Plan</summary>
           <ol className="mt-2 space-y-1">
             {session.acp_plan?.entries?.map((entry, index) => (
@@ -955,19 +943,16 @@ export default function App() {
           {versionMismatch ? (
             <div
               role="status"
-              className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-b px-4 py-2 text-sm"
+              className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm"
             >
               {versionMismatch}
             </div>
           ) : null}
-          {versionMismatch ? (
-            <div role="status" className="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-b px-4 py-2 text-sm">{versionMismatch}</div>
-          ) : null}
           {updateInfo?.release ? (
-            <div role="status" className="border-primary/20 bg-primary/5 flex flex-wrap items-center gap-2 border-b px-4 py-2 text-sm">
+            <div role="status" className="bg-primary/5 flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
               <span>Update available: v{updateInfo.release.version}</span>
               <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
-              <button className="rounded border px-2 py-0.5 text-xs" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
+              <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
             </div>
           ) : null}
           {activeSession && initialState ? (
@@ -996,9 +981,8 @@ export default function App() {
             </EngineRuntimeProvider>
           ) : (
             <>
-              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3">
                 <SidebarTrigger className="-ml-1" />
-                <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
                 <span className="text-muted-foreground text-sm">No session</span>
               </ShellHeader>
               {/* The next free gem greets here, as it will once its session starts. */}

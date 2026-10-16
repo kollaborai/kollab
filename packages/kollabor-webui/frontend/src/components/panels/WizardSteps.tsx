@@ -91,7 +91,7 @@ export function WizardSteps({
             Step {index + 1} of {steps.length}: {current.title}
           </h3>
         </div>
-        <div className="divide-y">
+        <div>
           {current.fields.map((field) => (
             <FieldRenderer
               key={field.path}
@@ -104,7 +104,7 @@ export function WizardSteps({
           ))}
         </div>
       </div>
-      <footer className="flex shrink-0 flex-col-reverse gap-2 border-t px-4 py-3 sm:flex-row sm:justify-end sm:px-6">
+      <footer className="bg-muted/30 flex shrink-0 flex-col-reverse gap-2 px-4 py-3 sm:flex-row sm:justify-end sm:px-6">
         {index > 0 ? (
           <Button
             type="button"

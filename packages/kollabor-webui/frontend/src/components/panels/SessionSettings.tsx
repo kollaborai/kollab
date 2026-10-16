@@ -191,7 +191,7 @@ export function SessionSettings({
             className="font-mono text-xs"
           />
         </div>
-        <div className="bg-muted/30 rounded-md border p-3 text-xs">
+        <div className="bg-muted/30 rounded-md p-3 text-xs">
           {settingsBusy ? (
             <span className="text-muted-foreground">
               Refreshing…
@@ -230,7 +230,7 @@ export function SessionSettings({
           )}
         </div>
       </div>
-      <footer className="flex shrink-0 flex-col gap-2 border-t px-4 py-3 sm:px-6">
+      <footer className="bg-muted/30 flex shrink-0 flex-col gap-2 px-4 py-3 sm:px-6">
         {message ? (
           <p
             role="status"

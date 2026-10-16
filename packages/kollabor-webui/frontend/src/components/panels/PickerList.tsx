@@ -70,13 +70,13 @@ export function PickerList({
   return (
     <div className="flex min-w-0 flex-col gap-3">
       {panel.notice ? (
-        <p className="bg-muted/40 rounded-md border px-3 py-2 text-sm break-words">
+        <p className="bg-muted/40 rounded-md px-3 py-2 text-sm break-words">
           {panel.notice}
         </p>
       ) : null}
 
       {summary.length ? (
-        <dl className="bg-muted/30 grid grid-cols-[minmax(0,8.5rem)_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg border p-3 text-sm">
+        <dl className="bg-muted/30 grid grid-cols-[minmax(0,8.5rem)_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg p-3 text-sm">
           {summary.map((row, index) => (
             <Fragment key={`${row.label}-${index}`}>
               <dt className="text-muted-foreground break-words">{row.label}</dt>
@@ -87,7 +87,7 @@ export function PickerList({
       ) : null}
 
       {panel.controls?.length ? (
-        <div className="divide-y rounded-lg border px-3">
+        <div className="rounded-lg bg-muted/30 px-3">
           {panel.controls.map((control) => (
             <FieldRenderer
               key={control.path}
@@ -146,7 +146,7 @@ export function PickerList({
               <li
                 key={row.id}
                 data-current={row.current ? "true" : undefined}
-                className="flex min-w-0 flex-col gap-2 rounded-lg border p-3 data-[current=true]:border-primary/50 sm:flex-row sm:items-center sm:justify-between"
+                className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/30 p-3 data-[current=true]:bg-accent/60 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -202,14 +202,14 @@ export function PickerList({
           <h3 className="text-muted-foreground text-xs font-semibold tracking-wide capitalize">
             {entry.group}
           </h3>
-          <p className="text-muted-foreground rounded-lg border border-dashed px-3 py-2 text-sm break-words">
+          <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-2 text-sm break-words">
             {entry.reason}
           </p>
         </section>
       ))}
 
       {!groups.length && !emptyGroups.length ? (
-        <p className="text-muted-foreground rounded-lg border border-dashed px-3 py-6 text-center text-sm">
+        <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
           {q ? "Nothing matches your search." : "Nothing to show here yet."}
         </p>
       ) : null}

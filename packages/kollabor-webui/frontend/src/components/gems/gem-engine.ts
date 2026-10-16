@@ -1,6 +1,16 @@
-import { Color, Mesh, PerspectiveCamera, SRGBColorSpace, Scene, Vector3, Vector4, WebGLRenderer, type ShaderMaterial } from "three";
-import { HOME_SHAPE, SHAPES, bodyGeometry, bodyMaterial, bodyPoint, faceHeight, paintBody, type Shape } from "./gem-blob";
-import { drawEffects, drawHat, drawSeasonBody } from "./gem-dress";
+import { Color, Mesh, PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type ShaderMaterial } from "three";
+import {
+  SHAPES,
+  bodyGeometry,
+  bodyMaterial,
+  bodyPoint,
+  faceHeight,
+  homeWeights,
+  paintBody,
+  setShapeWeights,
+  type Shape,
+} from "./gem-blob";
+import { HAT_SIZES, drawActivityEffects, drawEffects, drawHat, drawSeasonBody, type HatFit } from "./gem-dress";
 import {
   autoHat,
   drawFace,
@@ -18,9 +28,20 @@ import {
   type Season,
 } from "./gem-face";
 import { drawn } from "./gem-look";
-import { drawBackProps, drawHeld, drawProps } from "./gem-props";
+import { HOLDS, drawHeld, drawProps } from "./gem-props";
 import { gemMood, gemSpec, type GemMood, type GemSpec } from "./gem-specs";
-import { fitPaintCanvas, nextFrameAt, Spring } from "./gem-animation";
+import {
+  BLINK,
+  DANCE,
+  blinkOpen,
+  breathCurve,
+  dance,
+  danceClock,
+  fitPaintCanvas,
+  frameInterval,
+  nextFrameAt,
+  Spring,
+} from "./gem-animation";
 
 /**
  * One WebGL context renders every gem avatar on the page.
@@ -30,15 +51,20 @@ import { fitPaintCanvas, nextFrameAt, Spring } from "./gem-animation";
  * each visible avatar in turn and blits the pixels into that avatar's own 2D
  * canvas, which then gets a 2D pass: halo, glints, and the personality layer
  * from gem-face.ts. The gem and its hat sit inside the layout box (FIT, SINK);
- * the canvas is GEM_PAD times the box so laptops, thought bubbles and flying
- * keyboards have room around the stone.
- * Idle gems repaint at 30fps, active motion at up to 60fps, offline gems once.
- * Hidden gems do no work. Simulation advances only for frames actually drawn.
+ * the canvas is GEM_PAD times the box so the laptop and thought bubble have
+ * room around the stone.
  *
- * The body is a soft gem (gem-blob.ts) that is always moving: it breathes,
- * turns toward the pointer a beat after its eyes do, and morphs its shape in
- * the way its motion says (GemMotion). The face is seated on the surface each
- * frame, so it turns, squashes and wobbles with the body.
+ * Pacing (gem-animation.ts frameInterval): a working or changing gem repaints
+ * at up to 60fps, an idle one at 20 to 30 by its size, an offline one only
+ * until its poof settles, and with reduced motion only when something
+ * changes. Hidden gems do no work. Simulation advances only for frames drawn.
+ *
+ * At rest a gem breathes at its own pace, blinks on an uneven rhythm (now and
+ * then twice), holds its gaze and glances elsewhere, and turns toward the
+ * pointer a beat after its eyes do. Each activity has a posture, a face and a
+ * prop that read at a glance; a change eases over with a blink, and a long
+ * stretch of work that lands ends in a short dance. The face and hat are
+ * seated on the body every frame, so they turn, squash and breathe with it.
  */
 
 export const GEM_PAD = 1.6;
@@ -53,11 +79,10 @@ const FIT = 0.84;
 const SINK = 0.13;
 
 /**
- * How a gem's body moves: "mood" takes a shape for what it is doing (a cloud
- * while thinking, round while talking, sharp on an error), "jelly" keeps its
- * cut but wobbles and goes blobby when the pointer flies, "cycle" drifts
- * through shapes on its own and snaps back to its cut when the pointer comes
- * close. Each agent is born with one, drawn from its look key.
+ * How a gem's body moves on top of its activity's mood shape: "mood" leans
+ * into it fully, "jelly" keeps its cut but goes blobby when the pointer flies,
+ * "cycle" strolls into another shape now and then and comes home when the
+ * pointer comes close. Each agent is born with one, drawn from its look key.
  */
 export type GemMotion = "mood" | "jelly" | "cycle";
 export const GEM_MOTIONS: readonly GemMotion[] = ["mood", "jelly", "cycle"];
@@ -96,17 +121,30 @@ type Avatar = {
   spec: GemSpec;
   base: Color;
   rgb: [number, number, number];
+  /** Dark enough that its face is drawn in light ink. */
+  dark: boolean;
   mood: GemMood;
   motion: GemMotion;
-  /** The shape its cut rests in, as an index into SHAPES. */
-  home: number;
+  /** The shape mix its cut rests in (gem-blob.ts homeWeights). */
+  home: number[];
   activity: Activity;
   activitySince: number;
   prev: Activity;
-  danceUntil: number;
+  /** When the current stretch of work began. */
+  busySince: number;
+  /** When the dance after a long stretch of work started. */
+  danceAt: number;
+  /** Thinking between two tool calls: it stays at the laptop. */
+  atDesk: boolean;
   px: number;
   gemPx: number;
   seed: number;
+  /** Radians its hat sits askew. */
+  tilt: number;
+  /** Radians the hat tips this frame while it dances. */
+  jig: number;
+  /** Radians of the booting whirl; once booted it winds on to face front. */
+  whirl: number;
   visible: boolean;
   dirty: boolean;
   lastRender: number;
@@ -115,18 +153,27 @@ type Avatar = {
   boundsAt: number;
   glow: number;
   burst: number;
+  /** Where it is in a breath (0..1), the pace it eases toward, how deep it breathes, and how full it is now. */
+  breath: number;
+  tempo: number;
+  depth: number;
+  inhale: number;
+  /** Pitch, roll, lift and squash, eased toward the activity's posture. */
+  pose: Spring[];
   bob: number;
   slide: number;
-  roll: number;
-  /** Extra yaw from a dance twist or spin; the face wraps around with it. */
-  spin: number;
-  stretch: number;
   /** 0..1: turned side-on to the laptop. */
   desk: number;
   /** 0..1: how far the thought bubble is open. */
   bubble: number;
+  /** When the next blink starts (or the current one started), when the last one did, and whether a second follows. */
   blinkAt: number;
+  blinked: number;
+  twice: boolean;
   blink: number;
+  /** Where the eyes rest when nothing calls them, and when they next look elsewhere. */
+  glance: { x: number; y: number };
+  glanceAt: number;
   /** Where the pupils look, -1..1, on springs so a dart overshoots. */
   look: { x: number; y: number };
   /** Last measured pointer influence; distant gems keep their idle cadence. */
@@ -135,6 +182,9 @@ type Avatar = {
   /** Where the body is turning to: the eyes' target, a beat late. */
   lead: { x: number; y: number };
   turn: [Spring, Spring];
+  /** A smile for the pointer arriving: until when, and when it may smile again. */
+  greetUntil: number;
+  greetAgain: number;
   /** The weight of each body shape (SHAPES). */
   shape: Spring[];
   /** Pill eye and shared mouth shape mixes (gem-face.ts eyeShape, mouthShape). */
@@ -142,12 +192,14 @@ type Avatar = {
   lid: number;
   mouth: Spring[];
   mouthOpen: number;
-  /** When the next passing smile starts. */
-  cheerAt: number;
   /** 0..1: how stirred up a jelly gem is. */
-  energy: number;
-  /** A cycling gem holds its cut until then. */
-  focusUntil: number;
+  stir: number;
+  /** A cycling gem's next stroll into another shape, and that shape. */
+  strollAt: number;
+  stroll: number;
+  /** 0..1, eased toward offline and toward an error, so neither switches. */
+  rest: number;
+  anger: number;
   wob: number;
   shear: number;
   talk: number;
@@ -158,14 +210,29 @@ type Avatar = {
 /** An affine from face pixels to canvas pixels, and 0..1 for how squarely the patch faces the camera. */
 type Seat = { a: number; b: number; c: number; d: number; e: number; f: number; vis: number };
 
+/** What a gem's 2D pass needs from its 3D one (render3d), held until the atlas is read back. */
+type Pending = {
+  avatar: Avatar;
+  frame: FaceFrame;
+  /** Its slot in the atlas, canvas pixels from the top left. */
+  sx: number;
+  sy: number;
+  glow: number;
+  /** Null when it draws no face. */
+  seat: Seat | null;
+  hat: HatFit | null;
+  faceScale: number;
+  /** The face's stretch along a fast dart. */
+  stretch: [number, number];
+};
+
 const FOV = 28;
 const CAMERA_DISTANCE = 4.7;
 // World units across the frame: a unit-radius gem fills ~85% of it.
 const FRAME = 2 * Math.tan(((FOV / 2) * Math.PI) / 180) * CAMERA_DISTANCE;
-// The body renders across the whole padded canvas, so a hop or the scoot to
+// The body renders across the whole padded canvas, so a dance or the scoot to
 // the laptop never clips it at the box's edge.
 const CANVAS_FOV = (2 * Math.atan(Math.tan(((FOV / 2) * Math.PI) / 180) * GEM_PAD) * 180) / Math.PI;
-const WORLD_TO_FRAME = 1 / FRAME;
 const MAX_PIXEL_RATIO = 2;
 // Milliseconds of drawing per frame. Past it the remaining gems wait a frame,
 // so a crowded page animates a little slower instead of freezing input.
@@ -180,12 +247,8 @@ const VIEW = {
   y0: -FRAME_TOP / FIT,
   y1: (1 - FRAME_TOP) / FIT,
 };
-/** Where the face, hat and props sit on the soft gem, as fractions of its box. */
-const ANCHOR: FaceAnchor = { x: 0.5, y: 0.5, gap: 1.15, hatY: 0.15, hatScale: 0.66, view: VIEW };
-// The hat is seated this far toward the face from the crown (body-local, of its height), so a
-// turn, lean or hop carries it sideways the way it carries the face. 0 is the pole, which a turn
-// never moves; past about 0.9 the hat slides down onto the brow and tilts off the head.
-const HAT_FWD = 0.75;
+/** Where the face and props sit on the soft gem, as fractions of its box. */
+const ANCHOR: FaceAnchor = { x: 0.5, y: 0.5, gap: 1.15, view: VIEW };
 /** How big the face is drawn against the body. */
 const FACE_SCALE = 1.24;
 const BUSY: ReadonlySet<Activity> = new Set([
@@ -197,19 +260,64 @@ const BUSY: ReadonlySet<Activity> = new Set([
   "messaging",
   "tasking",
 ]);
+/** Seconds of work before landing it earns the dance; a quick reply does not. */
+const CELEBRATE_AFTER = 2.5;
+const TAU = Math.PI * 2;
 const shapeOf = (shape: Shape) => SHAPES.indexOf(shape);
-/** Mood motion: the shape for what the gem is doing; anything else rests in its cut. */
-const MOOD_SHAPES: Partial<Record<Activity, number>> = {
-  thinking: shapeOf("cloud"),
-  booting: shapeOf("cloud"),
-  speaking: shapeOf("dome"),
-  messaging: shapeOf("dome"),
-  dance: shapeOf("dome"),
-  waiting: shapeOf("dome"),
-  dreaming: shapeOf("pebble"),
+/** How far an activity pulls the body toward a mood shape: a thought cloud, round while talking, sharp on an error. */
+const MOOD_MORPH: Partial<Record<Activity, readonly [Shape, number]>> = {
+  thinking: ["cloud", 0.4],
+  booting: ["cloud", 0.5],
+  speaking: ["dome", 0.3],
+  messaging: ["dome", 0.3],
+  dance: ["dome", 0.35],
+  waiting: ["dome", 0.25],
+  error: ["octa", 0.5],
 };
+/** Breathing pace against rest: quicker at work, slower asleep. */
+const TEMPO: Partial<Record<Activity, number>> = {
+  thinking: 1.35,
+  reading: 1.2,
+  typing: 1.35,
+  speaking: 1.25,
+  searching: 1.3,
+  messaging: 1.25,
+  tasking: 1.3,
+  error: 1.6,
+  waiting: 1.1,
+  dreaming: 0.7,
+  dance: 1.4,
+};
+type Posture = readonly [pitch: number, roll: number, lift: number, squash: number];
+/**
+ * Each activity's posture: pitch (nodding down), roll (a head tilt), lift and
+ * squash (wider and shorter). Small on purpose: the face and prop say what
+ * the gem is doing, the posture only leans into it.
+ */
+const POSE: Partial<Record<Activity, Posture>> = {
+  thinking: [-0.06, 0.06, 0.015, 0],
+  reading: [0.06, 0, 0, 0],
+  typing: [0.1, 0, 0, 0.01],
+  speaking: [-0.03, 0, 0.01, 0],
+  searching: [0.02, -0.04, 0, 0],
+  messaging: [-0.02, 0.03, 0, 0],
+  tasking: [0.06, 0, 0, 0],
+  waiting: [-0.05, 0.05, 0.015, 0],
+  dreaming: [0.12, 0.08, -0.03, 0.05],
+  error: [0.04, 0, 0, -0.03],
+  booting: [0, 0, 0.03, -0.02],
+  offline: [0.05, 0, -0.02, 0.04],
+};
+const REST_POSE: Posture = [0, 0, 0, 0];
+/** Standing to attention for the salute that opens a task. */
+const SALUTE_POSE: Posture = [-0.06, 0, 0, -0.01];
+/** Hats that close over the crown, so a head rising inside one is hidden by it. Crowns, horns, antlers and headphones leave the top bare. */
+const COVERS: ReadonlySet<HatStyle> = new Set(["party", "top", "beanie", "wizard", "cap", "hardhat", "beret", "witch", "pumpkin", "santa", "elf"]);
+/** Sparkles a second; working gems use 0.5. */
+const GLINTS: Partial<Record<Activity, number>> = { dance: 3, waiting: 0.25, dreaming: 0.1, idle: 0.12, booting: 1.5 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const luminance = (c: Color) => c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
 
 function colorFrom(props: GemProps, spec: GemSpec): Color {
   const rgb = props.color;
@@ -256,20 +364,85 @@ function activityFor(props: GemProps, mood: GemMood): Activity {
 
 const whose = (props: GemProps) => props.lookKey || props.gem || "unassigned";
 const motionFor = (props: GemProps): GemMotion => props.motion ?? drawn(whose(props), "motion", GEM_MOTIONS) ?? "mood";
-const homeFor = (spec: GemSpec) => shapeOf(HOME_SHAPE[spec.cut] ?? "brilliant");
 
-// Scratch space for seating the face.
+// Scratch space for seating the face and hat.
 const P = new Vector3();
 const U = new Vector3();
 const V = new Vector3();
 const Q = new Vector3();
 const N = new Vector3();
+const H = new Vector3();
 const c0 = { x: 0, y: 0 };
 const c1 = { x: 0, y: 0 };
 const c2 = { x: 0, y: 0 };
 const weights = new Float32Array(SHAPES.length);
 const tint = new Color();
 const haloTint = new Color();
+
+/**
+ * Where a hat goes on a head (body-local, before the build is applied): its
+ * band's half-width and height, the sides at eye height (for headphones) and
+ * the top of the crown.
+ */
+type Head = { bx: number; by: number; ex: number; ey: number; top: number };
+const heads = new Map<string, Head>();
+
+/**
+ * Reads a head off its front silhouette, from the crown down the side. The
+ * band opens to `fit` of the head's widest half-width, but never down a wall
+ * (a hopper's step) or over the brows, so a hat rests where it would on that
+ * head. Cached by the shape mix in steps of 0.05, so a morph passes through
+ * a few dozen heads, each read once.
+ */
+function headFor(w: ArrayLike<number>, build: readonly [number, number], fit: number): Head {
+  let key = `${fit}|${build[0]}|${build[1]}`;
+  for (let i = 0; i < w.length; i += 1) key += `|${Math.round(w[i] * 20)}`;
+  const known = heads.get(key);
+  if (known) return known;
+  const [bw, bh] = build;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i <= 32; i += 1) {
+    const a = (i / 32) * Math.PI * 0.75;
+    bodyPoint(w, Math.sin(a), Math.cos(a), 0, 0, 0, 0, H);
+    xs.push(H.x * bw);
+    ys.push(H.y * bh);
+  }
+  const widest = Math.max(...xs);
+  const top = Math.max(...ys);
+  bodyPoint(w, 0, faceHeight(w) + 0.1, 1, 0, 0, 0, H);
+  const eye = H.y * bh;
+  const brow = eye + 0.3 * bh;
+  const target = fit * widest;
+  let bx = xs[0];
+  let by = ys[0];
+  for (let i = 1; i < xs.length; i += 1) {
+    const [x0, y0, x, y] = [xs[i - 1], ys[i - 1], xs[i], ys[i]];
+    if (y < brow) break;
+    if (x0 > 0.15 * widest && x > x0 && (y0 - y) / (x - x0) > 2.2) break;
+    if (x >= target) {
+      const u = x > x0 ? (target - x0) / (x - x0) : 1;
+      bx = target;
+      by = y0 + (y - y0) * u;
+      break;
+    }
+    bx = x;
+    by = y;
+  }
+  bx = Math.max(bx, 0.12 * widest);
+  let ex = widest;
+  for (let i = 1; i < xs.length; i += 1) {
+    if (ys[i] <= eye) {
+      const u = (ys[i - 1] - eye) / (ys[i - 1] - ys[i] || 1);
+      ex = xs[i - 1] + (xs[i] - xs[i - 1]) * u;
+      break;
+    }
+  }
+  const head = { bx: bx / bw, by: by / bh, ex: ex / bw, ey: eye / bh, top: top / bh };
+  if (heads.size > 512) heads.clear();
+  heads.set(key, head);
+  return head;
+}
 
 class GemEngine {
   private renderer: WebGLRenderer | null = null;
@@ -285,7 +458,12 @@ class GemEngine {
   private pointer = { x: 0, y: 0, at: -Infinity };
   /** Pointer speed in px/s, smoothed; it stirs jelly gems. */
   private speed = 0;
-  private bufferPx = 0;
+  /** Side of the square WebGL buffer each frame's gems are rendered into, side by side. */
+  private atlas = 1024;
+  /** The atlas read back once a frame; each gem's 2D pass copies its body from here. */
+  private atlasCopy: CanvasRenderingContext2D | null = null;
+  /** Smoothed milliseconds of one gem's 2D pass, counted against the frame budget. */
+  private paintCost = 0.2;
   private raf = 0;
   private lastTick = 0;
   /** Where the next frame starts, so skipped gems go first. */
@@ -311,6 +489,8 @@ class GemEngine {
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = false;
       renderer.outputColorSpace = SRGBColorSpace;
+      renderer.setSize(this.atlas, this.atlas, false);
+      renderer.setScissorTest(true);
       canvas.addEventListener("webglcontextlost", (event) => {
         event.preventDefault();
         this.lost = true;
@@ -341,7 +521,9 @@ class GemEngine {
         this.still = event.matches;
         this.avatars.forEach((avatar) => {
           avatar.dirty = true;
-          avatar.danceUntil = 0;
+          avatar.danceAt = -Infinity;
+          avatar.jig = 0;
+          avatar.whirl = 0;
         });
         this.kick();
       });
@@ -402,28 +584,38 @@ class GemEngine {
     if (!this.ensureRenderer()) return false;
     const ctx = canvas.getContext("2d");
     if (!ctx) return false;
-    const spec = gemSpec(props.gem, props.caste);
-    const base = colorFrom(props, spec);
-    const mood = gemMood(props.state, props.live !== false);
     const now = performance.now() / 1000;
-    const home = homeFor(spec);
+    const spec = gemSpec(props.gem, props.caste);
+    const mood = gemMood(props.state, props.live !== false);
+    const activity = activityFor(props, mood);
+    const home = homeWeights(spec.cut);
+    const seed = hashSeed(whose(props));
+    const work = workPhase(activity);
+    const offline = activity === "offline";
     const avatar: Avatar = {
       canvas,
       ctx,
       props,
       spec,
-      base,
-      rgb: srgb(base),
+      base: new Color(),
+      rgb: [0, 0, 0],
+      dark: false,
       mood,
-      motion: motionFor(props),
+      motion: "mood",
       home,
-      activity: activityFor(props, mood),
-      activitySince: now,
-      prev: activityFor(props, mood),
-      danceUntil: 0,
+      activity,
+      // Already in its state when the page opens, so no entrance replays.
+      activitySince: now - 10,
+      prev: activity,
+      busySince: now,
+      danceAt: -Infinity,
+      atDesk: false,
       px: 0,
       gemPx: 0,
-      seed: hashSeed(whose(props)),
+      seed,
+      tilt: 0,
+      jig: 0,
+      whirl: 0,
       visible: false,
       dirty: true,
       lastRender: 0,
@@ -432,34 +624,46 @@ class GemEngine {
       boundsAt: 0,
       glow: 0,
       burst: 0,
+      // Out of step with its neighbours from the first frame.
+      breath: seed / (Math.PI * 2),
+      tempo: TEMPO[activity] ?? 1,
+      depth: offline ? 0 : 1,
+      inhale: 0,
+      pose: (POSE[activity] ?? REST_POSE).map((v) => new Spring(v)),
       bob: 0,
       slide: 0,
-      roll: 0,
-      spin: 0,
-      stretch: 0,
-      desk: 0,
-      bubble: 0,
+      desk: work.laptop ? 1 : 0,
+      bubble: work.bubble ? 1 : 0,
       blinkAt: now + 1 + Math.random() * 3,
+      blinked: now,
+      twice: false,
       blink: 1,
+      glance: { x: 0, y: 0 },
+      glanceAt: now + 1 + Math.random() * 3,
       look: { x: 0, y: 0 },
       attention: 0,
       gaze: [new Spring(0), new Spring(0)],
       lead: { x: 0, y: 0 },
       turn: [new Spring(0), new Spring(0)],
-      shape: SHAPES.map((_, i) => new Spring(i === home ? 1 : 0)),
-      eyes: [1, 0, 0, 0].map((w) => new Spring(w)),
-      lid: 0,
-      mouth: [1, 0, 0, 0, 0].map((w) => new Spring(w)),
+      greetUntil: 0,
+      greetAgain: 0,
+      shape: home.map((w) => new Spring(w)),
+      eyes: eyeShape(activity).map((w) => new Spring(w)),
+      lid: activity === "error" ? 0.5 : 0,
+      mouth: mouthShape(activity, now, 0).mix.map((w) => new Spring(w)),
       mouthOpen: 0,
-      cheerAt: now + 4 + Math.random() * 4,
-      energy: 0,
-      focusUntil: 0,
+      stir: 0,
+      strollAt: now + 8 + Math.random() * 10,
+      stroll: shapeOf("dome"),
+      rest: offline ? 1 : 0,
+      anger: activity === "error" ? 1 : 0,
       wob: 0,
       shear: 0,
       talk: 0,
       glints: [],
       glintCarry: 0,
     };
+    this.identify(avatar, props);
     this.resize(avatar);
     this.avatars.add(avatar);
     this.byCanvas.set(canvas, avatar);
@@ -473,26 +677,9 @@ class GemEngine {
     const now = performance.now() / 1000;
     const mood = gemMood(props.state, props.live !== false);
     const activity = activityFor(props, mood);
-    if (activity !== avatar.activity) {
-      // A finished turn earns a flash and a little dance.
-      if (!this.still && BUSY.has(avatar.activity) && activity === "idle") {
-        avatar.burst = 1;
-        avatar.danceUntil = now + 2.4;
-      }
-      avatar.prev = avatar.activity;
-      avatar.activity = activity;
-      // Thinking between two tool calls stays at the laptop: the thought
-      // bubble opens a turn, else the gem flips away and back on every call.
-      avatar.activitySince = activity === "thinking" && avatar.desk > 0.5 ? now - 4 : now;
-    }
+    if (activity !== avatar.activity) this.changeActivity(avatar, activity, now);
     avatar.mood = mood;
-    avatar.props = props;
-    avatar.spec = gemSpec(props.gem, props.caste);
-    avatar.home = homeFor(avatar.spec);
-    avatar.motion = motionFor(props);
-    avatar.seed = hashSeed(whose(props));
-    avatar.base = colorFrom(props, avatar.spec);
-    avatar.rgb = srgb(avatar.base);
+    this.identify(avatar, props);
     avatar.dirty = true;
     this.resize(avatar);
     this.kick();
@@ -511,6 +698,39 @@ class GemEngine {
     }
   }
 
+  /** Who the gem is: its cut, color, motion and the quirks drawn from its name. */
+  private identify(avatar: Avatar, props: GemProps) {
+    avatar.props = props;
+    avatar.spec = gemSpec(props.gem, props.caste);
+    avatar.home = homeWeights(avatar.spec.cut);
+    avatar.motion = motionFor(props);
+    avatar.seed = hashSeed(whose(props));
+    // Each gem wears its hat a little askew its own way.
+    avatar.tilt = 0.08 * Math.sin(avatar.seed * 5.3);
+    avatar.base = colorFrom(props, avatar.spec);
+    avatar.rgb = srgb(avatar.base);
+    avatar.dark = luminance(avatar.base) < 0.12;
+  }
+
+  private changeActivity(avatar: Avatar, activity: Activity, now: number) {
+    const was = avatar.activity;
+    if (BUSY.has(activity) && !BUSY.has(was)) avatar.busySince = now;
+    // A real stretch of work that lands earns a short dance; a quick reply does not.
+    if (!this.still && BUSY.has(was) && activity === "idle" && now - avatar.busySince >= CELEBRATE_AFTER) {
+      avatar.danceAt = now;
+      avatar.burst = 0.6;
+      avatar.glintCarry += 3;
+    }
+    // Thinking between two tool calls stays at the laptop instead of turning away and back.
+    avatar.atDesk = activity === "thinking" && avatar.desk > 0.5;
+    avatar.prev = was;
+    avatar.activity = activity;
+    avatar.activitySince = now;
+    // A blink marks the change, unless one just happened.
+    const blinking = now >= avatar.blinkAt && now < avatar.blinkAt + BLINK;
+    if (!blinking && now - avatar.blinked > 1.2) avatar.blinkAt = now;
+  }
+
   private resize(avatar: Avatar) {
     const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
     const gemPx = Math.max(8, Math.round(avatar.props.size * ratio));
@@ -521,8 +741,8 @@ class GemEngine {
       avatar.canvas.height = px;
     }
     avatar.gemPx = gemPx;
-    if (px > this.bufferPx && this.renderer) {
-      this.bufferPx = px;
+    if (px > this.atlas && this.renderer) {
+      this.atlas = px;
       this.renderer.setSize(px, px, false);
     }
   }
@@ -531,9 +751,36 @@ class GemEngine {
     if (!this.raf && this.avatars.size && !document.hidden) this.raf = requestAnimationFrame(this.tick);
   }
 
-  /** The activity being shown: a short dance takes over after a finished turn. */
+  /** The activity being shown: the short dance takes over idle after a long stretch of work. */
   private shownActivity(avatar: Avatar, t: number): Activity {
-    return avatar.activity === "idle" && t < avatar.danceUntil ? "dance" : avatar.activity;
+    return avatar.activity === "idle" && t - avatar.danceAt < DANCE ? "dance" : avatar.activity;
+  }
+
+  /** Seconds into the dance on show: the one after a long turn, or the Dance state's loop. */
+  private danceSince(avatar: Avatar, t: number): number {
+    return danceClock(avatar.activity === "dance", t - avatar.activitySince, t - avatar.danceAt);
+  }
+
+  /** An offline gem that has finished going to rest: nothing about it moves. */
+  private settled(avatar: Avatar, activity: Activity, t: number): boolean {
+    return activity === "offline" && avatar.rest > 0.995 && t - avatar.activitySince > 1.2;
+  }
+
+  /** Working, changing, celebrating or under the pointer: worth full frames. */
+  private lively(avatar: Avatar, activity: Activity, t: number): boolean {
+    return (
+      BUSY.has(activity) ||
+      activity === "dance" ||
+      activity === "booting" ||
+      avatar.whirl > 0 ||
+      activity === "offline" ||
+      t - avatar.activitySince < 1.4 ||
+      (avatar.desk > 0 && avatar.desk < 1) ||
+      (avatar.bubble > 0 && avatar.bubble < 1) ||
+      avatar.burst > 0.01 ||
+      t < avatar.greetUntil ||
+      (t - this.pointer.at < 0.25 && avatar.attention > 0.1 && avatar.props.follow !== false)
+    );
   }
 
   private tick = (now: number) => {
@@ -550,30 +797,24 @@ class GemEngine {
     let animating = false;
     let painted = 0;
     let resume = -1;
+    // Due gems are rendered into the atlas in shelves, then painted together.
+    const batch: Pending[] = [];
+    let x = 0;
+    let y = 0;
+    let shelf = 0;
     for (let i = 0; i < list.length; i += 1) {
       const index = (offset + i) % list.length;
       const avatar = list[index];
       if (!avatar.visible) continue;
       const activity = this.shownActivity(avatar, t);
-      // Transitions (a poof, a summon, the turn to the laptop) get full frames.
-      const recent =
-        t - avatar.activitySince < 1.4 ||
-        (avatar.desk > 0 && avatar.desk < 1) ||
-        (avatar.bubble > 0 && avatar.bubble < 1);
-      const busy =
-        activity !== "idle" && activity !== "offline" && activity !== "dreaming" && activity !== "waiting";
-      const lively = busy || recent || avatar.burst > 0.01 ||
-        (t - this.pointer.at < 0.25 && avatar.attention > 0.1 && avatar.props.follow !== false);
+      // Reduced motion and a settled offline gem repaint only when something changes.
       const interval =
-        // Reduced motion: repaint only when something changes.
-        activity === "offline" || this.still
+        this.still || this.settled(avatar, activity, t)
           ? Infinity
-          : lively
-            ? strained ? 1 / 30 : 1 / 60
-            : strained ? 1 / 15 : 1 / 30;
+          : frameInterval(avatar.props.size, this.lively(avatar, activity, t), strained);
       if (interval !== Infinity) animating = true;
       if (!avatar.dirty && (interval === Infinity || t + 0.001 < avatar.nextRender)) continue;
-      if (painted > 0 && performance.now() - started > FRAME_BUDGET_MS) {
+      if (painted > 0 && performance.now() - started + batch.length * this.paintCost > FRAME_BUDGET_MS) {
         if (resume < 0) resume = index;
         animating = true;
         continue;
@@ -581,86 +822,136 @@ class GemEngine {
       // A skipped frame does no physics or layout work. Each avatar integrates
       // its own elapsed time when its turn comes, bounded after long absences.
       this.advance(avatar, activity, t, avatar.lastRender ? Math.min(0.1, t - avatar.lastRender) : 1 / 60);
-      this.draw(avatar, activity, t);
+      const px = avatar.px;
+      if (x + px > this.atlas) {
+        x = 0;
+        y += shelf;
+        shelf = 0;
+      }
+      if (y + px > this.atlas) {
+        this.flush(batch);
+        x = 0;
+        y = 0;
+        shelf = 0;
+      }
+      const pending = this.render3d(avatar, activity, t, x, y);
+      if (pending) batch.push(pending);
+      x += px;
+      shelf = Math.max(shelf, px);
       avatar.nextRender = nextFrameAt(avatar.dirty ? 0 : avatar.nextRender, t, interval);
       avatar.lastRender = t;
       avatar.dirty = false;
       painted += 1;
     }
+    this.flush(batch);
     this.cursor = resume >= 0 ? resume : offset;
     this.cost += (performance.now() - started - this.cost) * 0.1;
     if (animating) this.raf = requestAnimationFrame(this.tick);
   };
 
-  /** Per-frame state: glow easing, the finish flash, blinks, gaze, the body's springs, glints. */
+  /** Per-frame state: breath, glow, blinks, glances, gaze, posture, the body's springs, glints. */
   private advance(avatar: Avatar, activity: Activity, t: number, dt: number) {
     const s = avatar.seed;
-    const still = this.still || activity === "offline";
-    let target = 0;
-    if (BUSY.has(activity)) {
-      // Breathing plus a faster flicker: a flashlight moving behind the stone.
-      target = this.still ? 0.55 : 0.5 + 0.12 * Math.sin(t * 2.6 + s) + 0.04 * Math.sin(t * 7.3 + s * 3);
-    } else if (activity === "error") {
-      target = this.still ? 0.55 : 0.5 + 0.14 * Math.sin(t * 8);
-    } else if (activity === "booting") {
-      target = 0.6;
-    } else if (activity === "dance") {
-      target = 0.38 + 0.14 * Math.sin(t * 6);
-    } else if (activity === "waiting") {
-      target = this.still ? 0.28 : 0.24 + 0.1 * Math.sin(t * 1.6 + s);
-    } else if (activity === "dreaming") {
-      target = this.still ? 0.16 : 0.14 + 0.07 * Math.sin(t * 0.7 + s);
-    } else if (activity === "idle") {
-      target = 0.06;
-    }
-    avatar.glow = still ? target : avatar.glow + (target - avatar.glow) * (1 - Math.exp(-dt * 7));
-    avatar.burst = still ? 0 : avatar.burst * Math.exp(-dt * 3.2);
+    const still = this.still;
+    const { energy, pace } = avatar.spec;
+    const offline = activity === "offline";
+    const since = t - avatar.activitySince;
+    const ease = (from: number, to: number, rate: number) => {
+      const v = still ? to : from + (to - from) * (1 - Math.exp(-dt * rate));
+      return Math.abs(v - to) < 0.002 ? to : v;
+    };
+
+    // Going offline and an error both ease in rather than switching.
+    avatar.rest = ease(avatar.rest, offline ? 1 : 0, 5);
+    avatar.anger = ease(avatar.anger, activity === "error" ? 1 : 0, 6);
+
+    // Breathing. The phase integrates its pace, so quickening for work or
+    // slowing into a dream never jumps; an offline gem stops breathing.
+    avatar.tempo = ease(avatar.tempo, TEMPO[activity] ?? 1, 1.5);
+    avatar.depth = ease(avatar.depth, still || offline ? 0 : activity === "dreaming" ? 1.5 : 1, 2);
+    avatar.breath = (avatar.breath + (dt * avatar.tempo) / pace) % 1;
+    const full = still ? 0.5 : breathCurve(avatar.breath);
+    avatar.inhale = full * avatar.depth;
+
+    // The glow inside: calm, and breathing with the gem rather than flickering.
+    const target = BUSY.has(activity)
+      ? 0.42 + 0.08 * full
+      : activity === "error"
+        ? 0.5 + 0.08 * full
+        : activity === "booting"
+          ? 0.55
+          : activity === "dance"
+            ? 0.4 + 0.12 * Math.abs(Math.sin((4 * Math.PI * this.danceSince(avatar, t)) / DANCE))
+            : activity === "waiting"
+              ? 0.24 + 0.06 * full
+              : activity === "dreaming"
+                ? 0.12 + 0.05 * full
+                : activity === "idle"
+                  ? 0.06
+                  : 0;
+    avatar.glow = ease(avatar.glow, target, 4);
+    avatar.burst = still ? 0 : avatar.burst * Math.exp(-dt * 4);
     if (avatar.burst < 0.01) avatar.burst = 0;
 
-    // Turning side-on to the laptop and back, and the thought bubble, ease.
-    const work = workPhase(activity, t - avatar.activitySince);
-    const desk = work.laptop ? 1 : 0;
-    avatar.desk = still ? desk : avatar.desk + (desk - avatar.desk) * (1 - Math.exp(-dt * 6));
-    if (Math.abs(avatar.desk - desk) < 0.005) avatar.desk = desk;
-    const bubble = work.bubble ? 1 : 0;
-    avatar.bubble = still ? bubble : avatar.bubble + (bubble - avatar.bubble) * (1 - Math.exp(-dt * 6));
-    if (Math.abs(avatar.bubble - bubble) < 0.005) avatar.bubble = bubble;
-
-    // Blinks, sometimes twice.
-    if (t > avatar.blinkAt + 0.16) {
-      const calm = BUSY.has(activity) ? 3.5 : 2.4;
-      avatar.blinkAt = t + (Math.random() < 0.15 ? 0.1 : calm + Math.random() * 3.6);
+    // Booting: a slow whirl. Once booted it winds on to the next full turn,
+    // slowing as it comes round, and lands facing front instead of snapping back.
+    if (activity === "booting" && !still) avatar.whirl = (avatar.whirl + dt * 2.4) % TAU;
+    else if (avatar.whirl > 0) {
+      const left = TAU - avatar.whirl;
+      avatar.whirl = still || left < 0.01 ? 0 : Math.min(TAU, avatar.whirl + dt * Math.min(2.4, 0.4 + 3 * left));
     }
-    const phase = t - avatar.blinkAt;
-    avatar.blink = !still && phase >= 0 && phase <= 0.16 ? Math.abs(Math.cos((Math.PI * phase) / 0.16)) : 1;
 
-    // Gaze: toward the pointer when it moved recently, else a slow wander.
-    let tx = 0;
-    let ty = 0;
+    // Turning side-on to the laptop and back, and the thought bubble, ease.
+    const work = workPhase(activity, avatar.atDesk);
+    avatar.desk = ease(avatar.desk, work.laptop ? 1 : 0, 6);
+    avatar.bubble = ease(avatar.bubble, work.bubble ? 1 : 0, 6);
+
+    // Blinks on an uneven rhythm, now and then twice, fewer while reading.
+    if (t >= avatar.blinkAt + BLINK) {
+      avatar.blinked = avatar.blinkAt;
+      avatar.twice = !avatar.twice && Math.random() < 0.12;
+      const focus = activity === "reading" || activity === "typing" ? 1.3 : 1;
+      avatar.blinkAt = t + (avatar.twice ? 0.12 : (5.2 - 2.6 * energy) * (0.75 + 0.5 * Math.random()) * focus);
+    }
+    avatar.blink = still || offline ? 1 : blinkOpen(t - avatar.blinkAt);
+
+    // At rest the eyes hold a spot, then glance elsewhere, often back to the
+    // middle; a restless gem glances more often.
+    if (t >= avatar.glanceAt) {
+      const center = Math.random() < 0.45;
+      avatar.glance.x = center ? 0 : (Math.random() * 2 - 1) * 0.5;
+      avatar.glance.y = center ? 0 : (Math.random() * 2 - 1) * 0.3;
+      avatar.glanceAt = t + (2.5 + (1 - energy) * 5) * (0.6 + 0.8 * Math.random());
+    }
+    let tx = still ? 0 : avatar.glance.x;
+    let ty = still ? 0 : avatar.glance.y;
     let near = false;
     let attention = 0;
-    if (!still) {
-      tx = Math.sin(t * 0.37 + s) * 0.24;
-      ty = Math.sin(t * 0.29 + s * 2) * 0.14;
-      if (avatar.props.follow !== false && t - this.pointer.at < 4) {
-        // Refresh occasionally for layout shifts, immediately after a scroll or resize.
-        if (!avatar.bounds || t - avatar.boundsAt > 0.15) {
-          avatar.bounds = avatar.canvas.getBoundingClientRect();
-          avatar.boundsAt = t;
-        }
-        const rect = avatar.bounds;
-        const dx = this.pointer.x - (rect.left + rect.width / 2);
-        const dy = this.pointer.y - (rect.top + rect.height / 2);
-        const dist = Math.hypot(dx, dy) || 1;
-        const reach = Math.min(1, dist / 160);
-        attention = (1 - clamp((dist - 80) / Math.max(220, rect.width * 3), 0, 1)) *
-          (1 - clamp((t - this.pointer.at - 2.5) / 1.5, 0, 1));
-        tx += ((dx / dist) * reach - tx) * attention;
-        ty += ((dy / dist) * reach - ty) * attention;
-        near = dist < Math.max(90, rect.width);
+    if (!still && !offline && avatar.props.follow !== false && t - this.pointer.at < 4) {
+      // Refresh occasionally for layout shifts, immediately after a scroll or resize.
+      if (!avatar.bounds || t - avatar.boundsAt > 0.15) {
+        avatar.bounds = avatar.canvas.getBoundingClientRect();
+        avatar.boundsAt = t;
       }
+      const rect = avatar.bounds;
+      const dx = this.pointer.x - (rect.left + rect.width / 2);
+      const dy = this.pointer.y - (rect.top + rect.height / 2);
+      const dist = Math.hypot(dx, dy) || 1;
+      const reach = Math.min(1, dist / 160);
+      attention = (1 - clamp((dist - 80) / Math.max(220, rect.width * 3), 0, 1)) *
+        (1 - clamp((t - this.pointer.at - 2.5) / 1.5, 0, 1));
+      tx += ((dx / dist) * reach - tx) * attention;
+      ty += ((dy / dist) * reach - ty) * attention;
+      near = dist < Math.max(90, rect.width);
+    }
+    // A smile when the pointer arrives, not every time it wanders by.
+    if (activity === "idle" && attention > 0.65 && avatar.attention <= 0.65 && t > avatar.greetAgain) {
+      avatar.greetUntil = t + 1.4;
+      avatar.greetAgain = t + 14;
     }
     avatar.attention = attention;
+    const cheer = activity === "idle" && t < avatar.greetUntil ? 1 : 0;
+
     // The eyes dart on a stiff spring; the body follows a beat later.
     if (still) avatar.gaze.forEach((spring) => spring.set(0));
     avatar.look.x = avatar.gaze[0].to(tx, 300, 26, dt);
@@ -672,46 +963,41 @@ class GemEngine {
     if (still) {
       avatar.turn.forEach((spring) => spring.set(0));
     } else {
-      // Looking up turns further than looking down, which would hide the face.
-      avatar.turn[0].to(avatar.lead.x * 0.42, 55, 14, dt);
-      avatar.turn[1].to(avatar.lead.y * (avatar.lead.y > 0 ? 0.16 : 0.32), 55, 14, dt);
+      // Close to critically damped: a composed gem turns slowly and settles,
+      // a restless one turns quicker. Looking up turns further than looking
+      // down, which would hide the face.
+      const k = 40 + 30 * energy;
+      const c = 1.8 * Math.sqrt(k);
+      avatar.turn[0].to(avatar.lead.x * 0.42, k, c, dt);
+      avatar.turn[1].to(avatar.lead.y * (avatar.lead.y > 0 ? 0.16 : 0.32), k, c, dt);
     }
 
     // Syllable-ish mouth movement while streaming text.
-    const talkTarget =
-      (activity === "speaking" || activity === "messaging") && !still
-        ? Math.abs(Math.sin(t * 11.5)) * (0.55 + 0.45 * Math.sin(t * 3.3 + s))
-        : 0;
+    const talking = (activity === "speaking" || activity === "messaging") && !still;
+    const talkTarget = talking ? Math.abs(Math.sin(t * 11.5)) * (0.55 + 0.45 * Math.sin(t * 3.3 + s)) : 0;
     avatar.talk = still ? 0 : avatar.talk + (Math.max(0, talkTarget) - avatar.talk) * (1 - Math.exp(-dt * 25));
 
-    // The body's shape, the pill eyes and the mouth morph on springs.
-    avatar.energy += (clamp(this.speed / 1600, 0, 1) * attention + (BUSY.has(activity) ? 0.2 : 0) - avatar.energy) * (1 - Math.exp(-dt * 4));
+    // The body's shape, the pill eyes, the mouth and the posture morph on springs.
+    avatar.stir += (clamp(this.speed / 1600, 0, 1) * attention + (BUSY.has(activity) ? 0.2 : 0) - avatar.stir) *
+      (1 - Math.exp(-dt * 4));
     const goal = this.shapeGoal(avatar, activity, t, near);
-    const [k, c] = avatar.motion === "jelly" ? [45, 10] : [70, 14];
+    const [k, c] = avatar.motion === "jelly" ? [45, 10] : [60, 14];
     avatar.shape.forEach((spring, i) => (still ? spring.set(goal[i]) : spring.to(goal[i], k, c, dt)));
-    if (t > avatar.cheerAt + 0.8) avatar.cheerAt = t + 4 + Math.random() * 5;
-    const cheer = activity === "idle" && t > avatar.cheerAt && !still;
-    const eyes = eyeShape(activity, t, cheer);
+    const eyes = eyeShape(activity, cheer);
     avatar.eyes.forEach((spring, i) => (still ? spring.set(eyes[i]) : spring.to(eyes[i], 170, 19, dt)));
-    const lid = activity === "error" ? 0.5 : work.furious ? 0.3 : 0;
-    avatar.lid = still ? lid : avatar.lid + (lid - avatar.lid) * (1 - Math.exp(-dt * 12));
+    avatar.lid = ease(avatar.lid, activity === "error" ? 0.5 : 0, 12);
     const mouth = mouthShape(activity, t, avatar.talk, cheer);
     avatar.mouth.forEach((spring, i) => (still ? spring.set(mouth.mix[i]) : spring.to(mouth.mix[i], 150, 17, dt)));
     avatar.mouthOpen = mouth.open;
+    const posture = activity === "tasking" && since < 1.3 ? SALUTE_POSE : (POSE[activity] ?? REST_POSE);
+    avatar.pose.forEach((spring, i) => (still ? spring.set(posture[i]) : spring.to(posture[i], 30, 11, dt)));
 
     if (still) {
       avatar.glints.length = 0;
       avatar.glintCarry = 0;
     }
-    const rate = still
-      ? 0
-      : BUSY.has(activity)
-        ? 1
-        : ({ dance: 2, error: 0, waiting: 0.5, dreaming: 0.2, idle: 0.12, booting: 2, offline: 0 } as Record<
-            string,
-            number
-          >)[activity] ?? 0.35;
-    avatar.glintCarry += rate * dt + (avatar.burst > 0.9 ? 5 : 0);
+    const rate = still || offline || activity === "error" ? 0 : BUSY.has(activity) ? 0.5 : (GLINTS[activity] ?? 0.12);
+    avatar.glintCarry += rate * dt;
     while (avatar.glintCarry >= 1) {
       avatar.glintCarry -= 1;
       const angle = Math.random() * Math.PI * 2;
@@ -730,29 +1016,37 @@ class GemEngine {
     avatar.glints = avatar.glints.filter((glint) => glint.age < glint.ttl);
   }
 
-  /** The shape mix the body is heading for, by its motion. */
+  /** The shape mix the body is heading for: its cut, leaning into its activity's mood shape and its motion. */
   private shapeGoal(avatar: Avatar, activity: Activity, t: number, near: boolean): number[] {
-    const goal = SHAPES.map(() => 0);
-    const home = avatar.home;
-    const mood = () =>
-      activity === "error"
-        ? home === shapeOf("octa") ? shapeOf("brilliant") : shapeOf("octa")
-        : MOOD_SHAPES[activity] ?? home;
-    if (activity === "offline" || (this.still && avatar.motion !== "mood")) {
-      // Reduced motion keeps only the mood shapes, which snap: they say what the gem is doing.
-      goal[home] = 1;
-    } else if (avatar.motion === "jelly") {
-      // A fast pointer or a busy turn stirs it out of its cut into a blob.
-      const e = Math.min(1, avatar.energy);
-      goal[home] += 1 - e * 0.6;
-      goal[shapeOf("dome")] += e * 0.35;
-      goal[shapeOf("cloud")] += e * 0.25;
+    const goal = avatar.home.slice();
+    const pull = (shape: number, amount: number) => {
+      for (let i = 0; i < goal.length; i += 1) goal[i] *= 1 - amount;
+      goal[shape] += amount;
+    };
+    if (activity === "offline") return goal;
+    const morph = MOOD_MORPH[activity];
+    if (morph) {
+      let shape = shapeOf(morph[0]);
+      // An octahedron's error goes brilliant: it has to change to read.
+      if (activity === "error" && avatar.home[shape] > 0.5) shape = shapeOf("brilliant");
+      pull(shape, avatar.motion === "mood" ? morph[1] : morph[1] * 0.6);
+    }
+    // Reduced motion keeps only the mood shapes, which say what the gem is doing.
+    if (this.still) return goal;
+    if (avatar.motion === "jelly") {
+      const e = Math.min(1, avatar.stir);
+      pull(shapeOf("dome"), e * 0.3);
+      pull(shapeOf("cloud"), e * 0.2);
     } else if (avatar.motion === "cycle" && activity === "idle") {
-      if (near) avatar.focusUntil = t + 1.5;
-      const loop = [home, shapeOf("dome"), shapeOf("cloud"), home === shapeOf("brilliant") ? shapeOf("crystal") : shapeOf("brilliant")];
-      goal[t < avatar.focusUntil ? home : loop[Math.floor(t / 5.2 + avatar.seed) % loop.length]] = 1;
-    } else {
-      goal[mood()] = 1;
+      // Now and then it strolls into another shape for a few seconds, and
+      // comes home early when the pointer arrives.
+      if (t > avatar.strollAt && (near || t > avatar.strollAt + 3)) {
+        avatar.strollAt = t + 14 + 10 * Math.random();
+        const crystal = avatar.home[shapeOf("crystal")] > 0.5;
+        const options = [shapeOf("dome"), shapeOf("cloud"), shapeOf(crystal ? "brilliant" : "crystal")];
+        avatar.stroll = options[Math.floor(Math.random() * options.length)];
+      }
+      if (t >= avatar.strollAt) pull(avatar.stroll, 0.7);
     }
     return goal;
   }
@@ -783,7 +1077,7 @@ class GemEngine {
    * and the mouth, so the face turns, foreshortens, squashes and wobbles with
    * the body and the far eye wraps toward the edge instead of hanging off it.
    */
-  private seat(avatar: Avatar, fx: number, fy: number, eye: number, t: number, px: number, g: number): Seat {
+  private seat(avatar: Avatar, fx: number, fy: number, eye: number, t: number, px: number, g: number, scale: number): Seat {
     const { wob, shear } = avatar;
     const body = this.body;
     // Face pixels to surface directions: the eyes sit EYE (of the box) either
@@ -791,7 +1085,7 @@ class GemEngine {
     // narrow crystal wears a smaller face than a round dome.
     const EYE = eye;
     const MOUTH = 0.13;
-    const k = (FACE_SCALE * FRAME) / 0.95;
+    const k = (scale * FRAME) / 0.95;
     bodyPoint(weights, fx - EYE * k, fy, 1, wob, t, shear, U);
     bodyPoint(weights, fx + EYE * k, fy, 1, wob, t, shear, V);
     bodyPoint(weights, fx, fy - MOUTH * k, 1, wob, t, shear, P);
@@ -821,52 +1115,75 @@ class GemEngine {
     };
   }
 
-  private draw(avatar: Avatar, activity: Activity, t: number) {
+  /**
+   * Where the hat sits this frame: its band on the head's silhouette (headFor),
+   * a little toward the face while it shows so a turn carries it, tilted with
+   * the head, and pressed down or shrunk to stay inside the layout box.
+   */
+  private hatFit(avatar: Avatar, hat: Exclude<HatStyle, "none">, vis: number, px: number, g: number): HatFit {
+    const body = this.body as Mesh;
+    const size = HAT_SIZES[hat];
+    const head = headFor(weights, avatar.spec.build, size.fit);
+    P.set(0, head.by, 0.5 * head.bx * vis);
+    this.project(P, px, c0);
+    U.copy(P).applyMatrix4(body.matrixWorld);
+    const near = CAMERA_DISTANCE / (CAMERA_DISTANCE - U.z);
+    P.y += 0.25;
+    this.project(P, px, c1);
+    const angle = Math.atan2(c1.x - c0.x, -(c1.y - c0.y)) + (hat === "headphones" ? 0 : avatar.tilt + avatar.jig);
+    const unit = g / FRAME;
+    let k = (head.bx * body.scale.x * unit * near) / size.band;
+    // The room above the band at rest (without a bounce) up to the box's top.
+    const room = c0.y + avatar.bob * unit - ((px - avatar.gemPx) / 2 - 0.04 * avatar.gemPx);
+    let squash = 1;
+    if (size.rise * k > room) {
+      squash = Math.max(0.72, room / (size.rise * k));
+      k = Math.min(k, Math.max(0, room) / (size.rise * squash));
+    }
+    const ears = { lx: 0, ly: 0, rx: 0, ry: 0, tx: 0, ty: 0 };
+    if (hat === "headphones") {
+      P.set(-head.ex, head.ey, 0);
+      this.project(P, px, c2);
+      [ears.lx, ears.ly] = [c2.x, c2.y];
+      P.set(head.ex, head.ey, 0);
+      this.project(P, px, c2);
+      [ears.rx, ears.ry] = [c2.x, c2.y];
+      P.set(0, head.top, 0);
+      this.project(P, px, c2);
+      [ears.tx, ears.ty] = [c2.x, c2.y];
+    }
+    return { x: c0.x, y: c0.y, angle, k, squash, ears };
+  }
+
+  /**
+   * The 3D half of a gem's frame: poses the body, renders it into its slot of
+   * the atlas (sx, sy: canvas pixels from the atlas's top left) and seats the
+   * face and hat on it while the shared mesh still holds this gem's pose.
+   */
+  private render3d(avatar: Avatar, activity: Activity, t: number, sx: number, sy: number): Pending | null {
     const renderer = this.renderer;
     const body = this.body;
-    if (!renderer || !body) return;
-    const glow = Math.min(1.1, avatar.glow + avatar.burst * 0.7);
+    if (!renderer || !body) return null;
+    const glow = Math.min(1.1, avatar.glow + avatar.burst * 0.6);
     this.pose(avatar, activity, t, glow);
-
-    // The gem's frame: FIT of the layout box and SINK lower, as the camera draws it.
-    const g = avatar.gemPx * FIT;
     const px = avatar.px;
-    const o = Math.floor((px - g) / 2);
-    const oy = Math.floor((px - g) / 2 + SINK * avatar.gemPx);
-    renderer.setViewport(0, 0, px, px);
-    renderer.setScissor(0, 0, px, px);
-    renderer.setScissorTest(true);
+    // WebGL counts rows from the bottom.
+    renderer.setViewport(sx, this.atlas - sy - px, px, px);
+    renderer.setScissor(sx, this.atlas - sy - px, px, px);
     renderer.clear();
     renderer.render(this.scene, this.camera);
 
-    const ctx = avatar.ctx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, px, px);
-    const lift = avatar.bob * g * WORLD_TO_FRAME;
-    const slideX = avatar.slide * g * WORLD_TO_FRAME;
-    const cx = o + g / 2;
-    const cy = oy + g / 2;
-    // Idle's tiny internal glow needs no extra full-canvas gradient.
-    if (glow > 0.1) {
-      haloTint.copy(activity === "error" ? ANGRY : avatar.base);
-      if (activity !== "error") haloTint.lerp(WHITE, 0.3);
-      const glowColor = srgb(haloTint);
-      const halo = ctx.createRadialGradient(cx + slideX, cy - lift, 0, cx + slideX, cy - lift, g * 0.58);
-      halo.addColorStop(0, rgbString(glowColor, Math.min(0.32, 0.3 * glow)));
-      halo.addColorStop(0.5, rgbString(glowColor, Math.min(0.14, 0.12 * glow)));
-      halo.addColorStop(1, rgbString(glowColor, 0));
-      ctx.fillStyle = halo;
-      ctx.fillRect(0, 0, px, px);
-    }
-
+    // The gem's frame: FIT of the layout box and SINK lower, as the camera draws it.
+    const g = avatar.gemPx * FIT;
+    const o = Math.floor((px - g) / 2);
+    const oy = Math.floor((px - g) / 2 + SINK * avatar.gemPx);
     const face = avatar.props.face ?? "pill";
     const season = avatar.props.season === "auto" ? seasonFor() : (avatar.props.season ?? "none");
     const hatProp = avatar.props.hat ?? "auto";
-    const base = avatar.base;
     const frame: FaceFrame = {
-      ctx,
+      ctx: avatar.ctx,
       t,
-      since: t - avatar.activitySince,
+      since: activity === "dance" ? this.danceSince(avatar, t) : t - avatar.activitySince,
       prev: avatar.prev,
       box: { x: o, y: oy, s: g },
       anchor: ANCHOR,
@@ -880,80 +1197,178 @@ class GemEngine {
         activity === "offline" ? "none" : hatProp === "auto" ? autoHat(avatar.props.caste, season, avatar.seed) : hatProp,
       season,
       rgb: avatar.rgb,
-      dark: base.r * 0.2126 + base.g * 0.7152 + base.b * 0.0722 < 0.05,
+      dark: avatar.dark,
       talk: avatar.talk,
       desk: avatar.desk,
+      atDesk: avatar.atDesk,
       bubble: avatar.bubble,
+      big: avatar.props.size >= 96,
       seed: avatar.seed,
-      still: this.still || activity === "offline",
+      still: this.still || this.settled(avatar, activity, t),
       eyeShape: avatar.eyes.map((spring) => spring.x),
       lid: avatar.lid,
       mouthShape: avatar.mouth.map((spring) => spring.x),
       mouthOpen: avatar.mouthOpen,
     };
-    if (face !== "none") drawBackProps(frame);
-    // WebGL's viewport origin is bottom-left; the canvas's render sits in the
-    // buffer's bottom-left corner.
-    ctx.drawImage(renderer.domElement, 0, this.bufferPx - px, px, px, 0, 0, px, px);
-    this.drawGlints(avatar, o + slideX, oy - lift, g);
-    if (face === "none") return;
+    const pending: Pending = { avatar, frame, sx, sy, glow, seat: null, hat: null, faceScale: FACE_SCALE, stretch: [1, 1] };
+    if (face === "none") return pending;
 
     // The face, hat and held tools are seated on the surface, so they ride the
-    // body: its turn toward the pointer, hop, shake, lean, squash and wobble.
+    // body: its turn toward the pointer, dance, lean, squash and breath.
     body.updateMatrixWorld(true);
-    avatar.shape.forEach((spring, i) => (weights[i] = spring.x));
     const { lead } = avatar;
     const up = -lead.y * (lead.y < 0 ? 0.1 : 0.05);
     const local: FaceFrame = { ...frame, box: { x: -ANCHOR.x * g, y: -ANCHOR.y * g, s: g } };
-    const seat = this.seat(avatar, lead.x * 0.08, faceHeight(weights) + 0.1 + up, eyeGap(local) / (2 * g), t, px, g);
-    // A fast dart stretches the face along it.
+    // A small gem gets a bigger face, so it still reads in a sidebar row.
+    pending.faceScale = FACE_SCALE * (1 + 0.18 * clamp((64 - avatar.props.size) / 40, 0, 1));
+    pending.seat = this.seat(avatar, lead.x * 0.08, faceHeight(weights) + 0.1 + up, eyeGap(local) / (2 * g), t, px, g, pending.faceScale);
+    // A fast dart stretches the face a little along it.
     const vx = Math.abs(avatar.gaze[0].v);
     const vy = Math.abs(avatar.gaze[1].v);
-    const sx = 1 + Math.min(vx * 0.025, 0.12) - Math.min(vy * 0.012, 0.06);
-    const sy = 1 + Math.min(vy * 0.025, 0.12) - Math.min(vx * 0.012, 0.06);
-    // The hat sits on the crown, toward the face while the face shows (it settles back to the
-    // pole as the gem spins away), and tilts with the surface, but never turns flat. It keeps
-    // the pole's size, so seating it forward does not swell it.
-    // It goes on first, so a face turned toward a headphone cup passes in front.
-    bodyPoint(weights, 0, 1, 0, avatar.wob, t, avatar.shear, P);
-    const near = CAMERA_DISTANCE / (CAMERA_DISTANCE - P.applyMatrix4(body.matrixWorld).z);
-    bodyPoint(weights, 0, 1, HAT_FWD * seat.vis, avatar.wob, t, avatar.shear, P);
-    this.project(P, px, c0);
-    this.project(U.copy(P).multiplyScalar(1.06), px, c1);
-    const crown = Math.atan2(c1.x - c0.x, -(c1.y - c0.y));
-    ctx.save();
-    ctx.setTransform(Math.cos(crown) * near, Math.sin(crown) * near, -Math.sin(crown) * near, Math.cos(crown) * near, c0.x, c0.y);
-    drawHat({ ...frame, box: { x: -0.5 * g, y: -ANCHOR.hatY * g, s: g } });
-    ctx.restore();
+    pending.stretch = [1 + Math.min(vx * 0.01, 0.04) - Math.min(vy * 0.005, 0.02), 1 + Math.min(vy * 0.01, 0.04) - Math.min(vx * 0.005, 0.02)];
+    if (frame.hat !== "none") pending.hat = this.hatFit(avatar, frame.hat, pending.seat.vis, px, g);
+    return pending;
+  }
 
-    // The face and holiday lights are paint on the body: drawn apart, trimmed
-    // to its silhouette (wide shades on a turned gem never stick out), then laid on.
-    const paint = this.paintLayer(px);
-    if (paint && seat.vis > 0.01) {
-      paint.globalAlpha = seat.vis;
-      paint.setTransform(seat.a, seat.b, seat.c, seat.d, seat.e, seat.f);
-      paint.scale(sx, sy);
-      drawFace({ ...local, ctx: paint });
-      // Upright at the face, at the body's scale: the lights hang below the mouth.
-      const tilt = Math.atan2(-seat.c, seat.d);
-      const scale = Math.hypot(seat.c, seat.d) / FACE_SCALE;
-      paint.setTransform(Math.cos(tilt) * scale, Math.sin(tilt) * scale, -Math.sin(tilt) * scale, Math.cos(tilt) * scale, seat.e, seat.f);
-      drawSeasonBody({ ...frame, ctx: paint, box: { x: -ANCHOR.x * g, y: (0.09 - ANCHOR.y) * g, s: g } });
-      paint.setTransform(1, 0, 0, 1, 0, 0);
-      paint.globalAlpha = 1;
-      paint.globalCompositeOperation = "destination-in";
-      paint.drawImage(renderer.domElement, 0, this.bufferPx - px, px, px, 0, 0, px, px);
-      paint.globalCompositeOperation = "source-over";
-      ctx.drawImage(paint.canvas, 0, 0, px, px, 0, 0, px, px);
+  /**
+   * Reads the atlas back once (copying straight from WebGL into each gem's
+   * canvas forced a GPU sync per gem, which held a crowded page near 13fps)
+   * and runs each rendered gem's 2D half.
+   */
+  private flush(batch: Pending[]) {
+    const renderer = this.renderer;
+    if (!batch.length || !renderer) return;
+    let rows = 0;
+    for (const p of batch) rows = Math.max(rows, p.sy + p.avatar.px);
+    if (!this.atlasCopy) this.atlasCopy = document.createElement("canvas").getContext("2d");
+    const copy = this.atlasCopy;
+    if (!copy) return;
+    if (copy.canvas.width < this.atlas || copy.canvas.height < this.atlas) {
+      copy.canvas.width = this.atlas;
+      copy.canvas.height = this.atlas;
+    }
+    copy.clearRect(0, 0, this.atlas, rows);
+    copy.drawImage(renderer.domElement, 0, 0, this.atlas, rows, 0, 0, this.atlas, rows);
+    const started = performance.now();
+    for (const p of batch) this.paint2d(p, copy.canvas);
+    this.paintCost += ((performance.now() - started) / batch.length - this.paintCost) * 0.1;
+    batch.length = 0;
+  }
+
+  /**
+   * The canvas less the inside of a covering hat, as an even-odd clip: from the
+   * band up, across the middle of the band only, where every hat reaches down
+   * to it (a beret's sides curve up, and a heart's lobes stand at its edges).
+   */
+  private crownClip(p: Pending, px: number): Path2D | null {
+    const fit = p.hat;
+    const hat = p.frame.hat;
+    if (!fit || hat === "none" || !COVERS.has(hat)) return null;
+    const half = 0.55 * HAT_SIZES[hat].band * fit.k;
+    const cos = Math.cos(fit.angle);
+    const sin = Math.sin(fit.angle);
+    const path = new Path2D();
+    path.rect(0, 0, px, px);
+    const corners: [number, number][] = [[-half, 0], [half, 0], [half, -px], [-half, -px]];
+    corners.forEach(([u, v], i) => {
+      const x = fit.x + u * cos - v * sin;
+      const y = fit.y + u * sin + v * cos;
+      if (i) path.lineTo(x, y);
+      else path.moveTo(x, y);
+    });
+    path.closePath();
+    return path;
+  }
+
+  /** The 2D half of a gem's frame: halo, body, hat, face, held tools and effects. */
+  private paint2d(p: Pending, atlas: HTMLCanvasElement) {
+    const { avatar, frame, sx, sy, glow, seat } = p;
+    const { t } = frame;
+    const ctx = avatar.ctx;
+    const px = avatar.px;
+    const g = frame.box.s;
+    const o = frame.box.x;
+    const oy = frame.box.y;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, px, px);
+    const unit = g / FRAME;
+    const lift = avatar.bob * unit;
+    const slideX = avatar.slide * unit;
+    // Idle's tiny internal glow needs no extra full-canvas gradient.
+    if (glow > 0.1) {
+      const cx = o + g / 2 + slideX;
+      const cy = oy + g / 2 - lift;
+      haloTint.copy(avatar.base).lerp(WHITE, 0.3);
+      if (avatar.anger > 0) haloTint.lerp(ANGRY, avatar.anger);
+      const glowColor = srgb(haloTint);
+      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, g * 0.58);
+      halo.addColorStop(0, rgbString(glowColor, Math.min(0.32, 0.3 * glow)));
+      halo.addColorStop(0.5, rgbString(glowColor, Math.min(0.14, 0.12 * glow)));
+      halo.addColorStop(1, rgbString(glowColor, 0));
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, px, px);
+    }
+    // A pointed head (a pear's tip, an octahedron's point) rises inside its
+    // hat rather than poking through it.
+    const crown = this.crownClip(p, px);
+    ctx.save();
+    if (crown) ctx.clip(crown, "evenodd");
+    ctx.drawImage(atlas, sx, sy, px, px, 0, 0, px, px);
+    ctx.restore();
+    if (!seat) {
+      this.drawGlints(ctx, avatar, o + slideX, oy - lift, g);
+      return;
     }
 
-    // Tools in hand ride the face.
+    // The hat goes on first, so a face turned toward a headphone cup passes in front.
+    if (p.hat) drawHat(frame, p.hat);
+
+    // The face, holiday lights and glints are paint on the body: drawn apart,
+    // trimmed to its silhouette (wide shades on a turned gem never stick out),
+    // then laid on.
+    const local: FaceFrame = { ...frame, box: { x: -ANCHOR.x * g, y: -ANCHOR.y * g, s: g } };
+    const paint = this.paintLayer(px);
+    if (paint) {
+      if (seat.vis > 0.01) {
+        paint.globalAlpha = seat.vis;
+        paint.setTransform(seat.a, seat.b, seat.c, seat.d, seat.e, seat.f);
+        paint.scale(p.stretch[0], p.stretch[1]);
+        drawFace({ ...local, ctx: paint });
+        // Upright at the face, at the body's scale: the lights hang below the
+        // mouth. Too small to read under 40px, so they stay off there.
+        if (avatar.props.size >= 40) {
+          const tilt = Math.atan2(-seat.c, seat.d);
+          const scale = Math.hypot(seat.c, seat.d) / p.faceScale;
+          paint.setTransform(Math.cos(tilt) * scale, Math.sin(tilt) * scale, -Math.sin(tilt) * scale, Math.cos(tilt) * scale, seat.e, seat.f);
+          drawSeasonBody({ ...frame, ctx: paint, box: { x: -ANCHOR.x * g, y: (0.09 - ANCHOR.y) * g, s: g } });
+        }
+        paint.globalAlpha = 1;
+      }
+      paint.setTransform(1, 0, 0, 1, 0, 0);
+      this.drawGlints(paint, avatar, o + slideX, oy - lift, g);
+      paint.globalCompositeOperation = "destination-in";
+      paint.drawImage(atlas, sx, sy, px, px, 0, 0, px, px);
+      paint.globalCompositeOperation = "source-over";
+      ctx.save();
+      if (crown) ctx.clip(crown, "evenodd");
+      ctx.drawImage(paint.canvas, 0, 0, px, px, 0, 0, px, px);
+      ctx.restore();
+    }
+
+    // Tools in hand ride the face; a finished one goes back into the gem.
+    const away = t - avatar.activitySince;
+    const leaving = avatar.prev !== avatar.activity && !frame.still;
     ctx.save();
     ctx.setTransform(seat.a, seat.b, seat.c, seat.d, seat.e, seat.f);
     drawHeld(local);
+    if (leaving && away < 0.3 && HOLDS.has(avatar.prev)) {
+      drawHeld({ ...local, activity: avatar.prev, since: 10, leave: away / 0.3 });
+    }
     ctx.restore();
     drawProps(frame);
     drawEffects(frame);
+    // What the last activity put around the gem fades out instead of vanishing.
+    if (leaving && away < 0.4) drawActivityEffects({ ...frame, activity: avatar.prev, since: 10 }, 1 - away / 0.4);
   }
 
   /** The body's pose, shape and colors for this frame. */
@@ -962,105 +1377,81 @@ class GemEngine {
     const material = this.material;
     if (!body || !material) return;
     body.geometry = bodyGeometry(avatar.props.size <= 64);
-    const { mood, seed: s, look } = avatar;
+    material.uniforms.uShapes.value = body.geometry.userData.shapes;
+    const still = this.still;
+    let pitch = avatar.pose[0].x;
+    let roll = avatar.pose[1].x;
+    let lift = avatar.pose[2].x;
+    let squash = avatar.pose[3].x;
     let yaw = 0;
-    let pitch = 0;
-    let bob = 0;
-    let roll = 0;
     let slide = 0;
-    let stretch = 0;
     let spin = 0;
-    let breath = 0;
-    if (!this.still && activity !== "offline") {
-      const speed = BUSY.has(activity) ? 1.6 : activity === "dreaming" ? 0.45 : 1;
+    avatar.jig = 0;
+    if (!still) {
+      const since = t - avatar.activitySince;
       yaw = avatar.turn[0].x;
-      pitch = avatar.turn[1].x;
-      bob = 0.028 * Math.sin(t * 1.15 * speed + s * 2.3);
-      // Leaning into a fast turn.
-      roll = clamp(-avatar.turn[0].v * 0.07, -0.18, 0.18);
-      breath = Math.sin(t * (activity === "dreaming" ? 1.1 : 1.9) + s);
-      // Hunched over the keys, bouncing with the typing, as far as the gem
-      // has turned to the laptop (a snap here read as a jump cut).
-      const work = workPhase(activity, t - avatar.activitySince);
-      const typingBob = (work.furious ? 0.03 : 0.018) * Math.sin(t * (work.furious ? 26 : 13));
-      pitch += 0.12 * avatar.desk;
-      bob += (typingBob - bob) * avatar.desk;
-      if (activity === "dance") {
-        // Start on the turn's own beat and ease in/out. The full spin ends
-        // before the celebration does, so returning to idle cannot snap.
-        const start = avatar.activity === "dance" ? avatar.activitySince : avatar.danceUntil - 2.4;
-        const elapsed = Math.max(0, t - start) % 2.4;
-        const ease = (x: number) => { const v = clamp(x, 0, 1); return v * v * (3 - 2 * v); };
-        const envelope = ease(elapsed / 0.2) * ease((2.4 - elapsed) / 0.35);
-        bob = Math.abs(Math.sin(elapsed * 7)) * 0.13 * envelope;
-        roll = Math.sin(elapsed * 3.5) * 0.18 * envelope;
-        stretch = Math.sin(elapsed * 14) * envelope;
-        spin = 2 * Math.PI * ease((elapsed - 0.5) / 1.5);
-      }
-      if (activity === "error") {
-        const since = t - avatar.activitySince;
-        const envelope = since < 0.7 ? 1 : 0.35 * Math.max(0, Math.sin(t * 2.2));
-        slide = Math.sin(t * 38) * 0.04 * envelope;
-      }
+      pitch += avatar.turn[1].x * (1 - avatar.desk);
+      // Leaning into a fast turn, and a slow shift of weight.
+      roll += clamp(-avatar.turn[0].v * 0.05, -0.12, 0.12) +
+        (0.008 + 0.012 * avatar.spec.energy) * Math.sin(t * 0.4 + avatar.seed);
+      // A gentle rhythm while typing, a lift with each syllable.
+      if (activity === "typing") lift += 0.005 * Math.sin(t * 7) * avatar.desk;
+      if (activity === "speaking" || activity === "messaging") lift += 0.008 * avatar.talk;
+      // The dance plays out even if work starts again mid-way, so it never
+      // cuts off; the Dance state loops it. Each gem turns its own way.
+      const move = dance(this.danceSince(avatar, t) / DANCE);
+      const dir = avatar.seed < Math.PI ? 1 : -1;
+      lift += move.lift;
+      squash += move.squash;
+      roll += move.roll * dir;
+      spin += move.spin * dir;
+      avatar.jig = move.hat * dir;
+      // An error lands with one short shake, then holds still.
+      if (activity === "error" && since < 0.55) slide = Math.sin(since * 40) * 0.035 * (1 - since / 0.55) ** 2;
       if (activity === "waiting") {
-        pitch += 0.05;
-        bob += Math.max(0, Math.sin(t * 3.1)) ** 8 * 0.08;
-      }
-      if (activity === "tasking" && t - avatar.activitySince < 1.3) {
-        // Standing at attention for the salute.
-        yaw = look.x * 0.1;
-        pitch = -0.06;
-        bob = 0;
-      }
-      if (mood === "booting") {
-        yaw = 0;
-        spin = (t * 2.4 + s) % (Math.PI * 2);
+        // Every few seconds a small hop: still here, still waiting.
+        const c = (since + 3.5) % 4.5;
+        if (c < 0.45) lift += 0.045 * Math.sin((Math.PI * c) / 0.45);
       }
     }
     // At the laptop the gem turns toward it and scoots left to make room; not
-    // fully side-on, or the face (tongue out, furious) would wrap out of view.
-    spin += avatar.desk * 0.75;
+    // fully side-on, so its face stays in view.
+    spin += avatar.desk * 0.75 + avatar.whirl;
     slide -= avatar.desk * 0.26;
     yaw *= 1 - avatar.desk;
-    const amp = activity === "dreaming" ? 0.035 : 0.02;
-    const wide = (1 - amp * 0.5 * breath) * (1 - stretch * 0.04);
+    const [bw, bh] = avatar.spec.build;
+    const breath = 0.018 * avatar.inhale;
+    const tall = (1 + breath) * (1 - squash);
+    const wide = (1 - breath * 0.5) * (1 + squash * 0.6);
+    // Squashed and stretched from the ground up: the base stays where it stands.
+    lift += (tall - 1) * bh * 0.85;
     body.rotation.set(0.12 + pitch, yaw + spin, roll);
-    body.position.set(slide, bob, 0);
-    body.scale.set(wide, (1 + amp * breath) * (1 + stretch * 0.06), wide);
-    avatar.bob = bob;
+    body.position.set(slide, lift, 0);
+    body.scale.set(bw * wide, bh * tall, bw * wide);
+    avatar.bob = lift;
     avatar.slide = slide;
-    avatar.roll = roll;
-    avatar.spin = spin;
-    avatar.stretch = stretch;
 
-    const moving = !this.still && activity !== "offline";
+    const moving = !still && activity !== "offline";
     const jelly = avatar.motion === "jelly" && moving;
-    avatar.wob = !moving ? 0 : jelly ? 0.012 + avatar.energy * 0.032 : 0.005;
+    avatar.wob = !moving ? 0 : jelly ? 0.012 + avatar.stir * 0.032 : 0.004;
     avatar.shear = jelly ? clamp(-avatar.turn[0].v * 0.16, -0.3, 0.3) : 0;
+    for (let i = 0; i < SHAPES.length; i += 1) weights[i] = avatar.shape[i].x;
+    setShapeWeights(material, weights);
     const u = material.uniforms;
-    const w = avatar.shape;
-    (u.uW0.value as Vector4).set(w[0].x, w[1].x, w[2].x, w[3].x);
-    (u.uW1.value as Vector4).set(w[4].x, w[5].x, w[6].x, w[7].x);
     u.uWob.value = avatar.wob;
     u.uTime.value = t;
     u.uShear.value = avatar.shear;
 
-    const offline = activity === "offline";
-    tint.copy(avatar.base);
-    if (offline) {
-      const gray = tint.r * 0.2126 + tint.g * 0.7152 + tint.b * 0.0722;
-      tint.setRGB(gray, gray, gray).multiplyScalar(0.55);
-    } else if (activity === "error") {
-      tint.lerp(ANGRY, 0.55);
-    }
-    paintBody(material, tint, offline);
-    if (activity === "error") (u.uGlowColor.value as Color).copy(ANGRY);
-    u.uGlow.value = offline ? 0 : Math.min(0.8, glow * 0.85);
+    // Offline: darker, nearly gray with a hint of its hue, no finish. An error: flushed red.
+    tint.copy(avatar.base).multiplyScalar(1 - 0.45 * avatar.rest);
+    if (avatar.anger > 0) tint.lerp(ANGRY, 0.55 * avatar.anger);
+    paintBody(material, tint, avatar.rest, avatar.spec.material, clamp((avatar.props.size - 24) / 40, 0, 1));
+    if (avatar.anger > 0) (u.uGlowColor.value as Color).lerp(ANGRY, avatar.anger);
+    u.uGlow.value = Math.min(0.8, glow * 0.85) * (1 - avatar.rest);
   }
 
-  private drawGlints(avatar: Avatar, ox: number, oy: number, g: number) {
+  private drawGlints(ctx: CanvasRenderingContext2D, avatar: Avatar, ox: number, oy: number, g: number) {
     if (!avatar.glints.length) return;
-    const ctx = avatar.ctx;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     for (const glint of avatar.glints) {

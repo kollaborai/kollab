@@ -228,19 +228,38 @@ uses the same saved appearance, and opens Properties on click. The empty chat
 keeps its large welcome gem without a second composer gem. The input remains
 shrinkable beside the gem at narrow widths, including with a wide sidebar.
 
-All gem surfaces (sidebar, toolbar, welcome, composer and Gem Studio) use the
-same renderer and saved looks. One WebGL context and two shared body meshes
-serve the page: sizes up to 64px use 812 vertices, larger previews use 2892,
-with identical shape normalization and surface-anchored faces and hats.
-Idle motion runs at 30fps and active motion at up to 60fps, retaining fractional
-frame deadlines across display refresh rates. Only avatars due to draw advance
-their springs; the drawing budget rotates through visible avatars. Offscreen
+All gem surfaces (sidebar, toolbar, welcome, composer, thread and Gem Studio)
+use the same renderer and saved looks. A gem with no explicit season follows the
+saved one, so an agent wears the same costume everywhere. One WebGL context
+renders every gem due in a frame into one atlas and copies it to the 2D layer in
+a single transfer: a per-gem copy stalls the GPU once per gem (96 gems fell to 13 to
+15fps). Two shared body meshes serve the page: sizes up to 64px use 812
+vertices, larger previews use 2892. Their per-shape tables live in a float
+texture the vertex shader reads only for weighted shapes, since one attribute
+per shape exceeds some GPUs' attribute limit.
+
+Each gem keeps its own rhythm: a breath (slow inhale, longer exhale, short rest)
+whose tempo and depth follow its activity, a blink every few seconds with an
+occasional double, glances, and one blink when its state changes. Every work
+state has its own pose, shape pull and prop (thought bubble, laptop, magnifier,
+communicator, clipboard, a "?" badge while waiting, a "!" badge and flush on
+errors), so it reads at 28px. Transitions ease through springs; a turn that
+ends after 2.5 seconds of work earns a 1.8-second dance (four bounces, a sway, one
+spin and a jigging hat), the Dance state loops it, booting gems whirl and wind
+round to face front, and errors shake once.
+Hats are fitted to each cut's silhouette (band width, tilt, headroom), and hats
+that cover the crown clip pointed tips. Dark gems get light faces.
+
+Large lively gems draw at 60fps and small ones at 30; idle gems draw at 20 to
+30fps by size, and a strained page halves every rate. Fractional frame deadlines
+carry across display refresh rates, only avatars due to draw advance their
+springs, and the drawing budget rotates through visible avatars. Offscreen
 avatars and hidden tabs do no animation work. Offline and reduced-motion gems
 render a settled pose on changes, without a continuous loop or finish dance.
 The shared face canvas must fit both dimensions, including the browser's
 initial 300-by-150 canvas and changes between sidebar and hero sizes.
-Pointer attention fades with distance and time; breathing, shape changes and
-completion dances ease without changing an agent's activity or saved appearance.
+Pointer attention fades with distance and time and never changes an agent's
+activity or saved appearance.
 
 Initialization records carry `metadata.system_initialization: true` and are omitted
 from Chat, while original context remains available to the model and Trajectory.

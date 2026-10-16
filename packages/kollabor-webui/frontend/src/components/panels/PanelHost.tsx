@@ -125,7 +125,7 @@ function RevealCard({
   return (
     <section
       aria-label={reveal.data.label}
-      className="mx-4 mt-3 flex min-w-0 flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 sm:mx-6"
+      className="mx-4 mt-3 flex min-w-0 flex-col gap-2 rounded-lg bg-amber-500/10 p-3 sm:mx-6"
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium">{reveal.data.label}</span>
@@ -530,10 +530,10 @@ export function PanelHost({
           <div
             role="status"
             className={cn(
-              "mx-4 mt-3 flex min-w-0 items-start gap-2 rounded-md border px-3 py-2 text-sm sm:mx-6",
+              "mx-4 mt-3 flex min-w-0 items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6",
               message.ok
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                : "border-destructive/30 bg-destructive/10 text-destructive",
+                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                : "bg-destructive/10 text-destructive",
             )}
           >
             {message.ok ? (
@@ -644,7 +644,7 @@ export function PanelHost({
             </TabsTrigger>
           ))}
         </TabsList>
-        <div className="mt-3 flex min-h-0 flex-1 flex-col border-t">
+        <div className="mt-3 flex min-h-0 flex-1 flex-col">
           <div
             role="tabpanel"
             aria-label="Session"

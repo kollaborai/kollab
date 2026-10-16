@@ -443,7 +443,7 @@ export function SessionToolbar({
                   return (
                     <div
                       key={name}
-                      className="flex flex-col gap-2 rounded-lg border p-3"
+                      className="flex flex-col gap-2 rounded-lg bg-muted/30 p-3"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex min-w-0 flex-col gap-1">
@@ -541,7 +541,7 @@ export function SessionToolbar({
             </div>
           </ScrollArea>
           {mcpDraft ? (
-            <div className="flex flex-col gap-2 rounded-lg border p-3">
+            <div className="flex flex-col gap-2 rounded-lg bg-muted/30 p-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold">
                   {mcpDraft.original ? `Edit ${mcpDraft.original}` : "Add Server"}
@@ -581,7 +581,7 @@ export function SessionToolbar({
                 }
               />
               <textarea
-                className="border-input bg-background placeholder:text-muted-foreground min-h-16 rounded-md border px-2 py-1.5 text-sm"
+                className="bg-muted/50 placeholder:text-muted-foreground min-h-16 rounded-md px-2 py-1.5 text-sm"
                 aria-label="Environment variables"
                 placeholder={"env vars, one per line:\nGITHUB_TOKEN=…"}
                 value={mcpDraft.env}
@@ -691,15 +691,15 @@ export function SessionToolbar({
             {agentsLoading ? (
               <p className="text-muted-foreground text-sm">Looking for online agents…</p>
             ) : agents === null ? (
-              <p className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
+              <p className="text-muted-foreground rounded-md bg-muted/30 p-4 text-sm">
                 Online agent status is unavailable. Refresh to try again.
               </p>
             ) : agents.length ? (
-              <details className="group rounded-md border">
+              <details className="group rounded-md bg-muted/30">
                 <summary className="text-muted-foreground flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium [&::-webkit-details-marker]:hidden">
                   <span>Online agents</span><span className="group-open:rotate-180 transition-transform">⌄</span>
                 </summary>
-              <ScrollArea className="max-h-56 border-t p-2">
+              <ScrollArea className="max-h-56 p-2">
                 <div className="flex flex-col gap-1">
                   {agents.map((agent) => {
                     const identity = String(
@@ -734,7 +734,7 @@ export function SessionToolbar({
               </ScrollArea>
               </details>
             ) : (
-              <p className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
+              <p className="text-muted-foreground rounded-md bg-muted/30 p-4 text-sm">
                 No online agents are advertising a presence right now.
               </p>
             )}

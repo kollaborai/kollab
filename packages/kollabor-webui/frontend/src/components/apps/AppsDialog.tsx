@@ -316,7 +316,7 @@ export function AppsDialog({
           searchRef.current?.focus();
         }}
       >
-        <header className="flex shrink-0 flex-col gap-3 border-b px-4 pt-4 pb-4 sm:px-6 sm:pt-5">
+        <header className="flex shrink-0 flex-col gap-3 px-4 pt-4 pb-4 sm:px-6 sm:pt-5">
           <div className="flex min-w-0 items-center gap-3">
             <DialogTitle className="shrink-0 text-lg leading-none font-semibold">
               Apps
@@ -330,7 +330,7 @@ export function AppsDialog({
                   type="button"
                   aria-pressed={installedOnly}
                   onClick={() => setInstalledOnly((value) => !value)}
-                  className="hover:bg-accent focus-visible:ring-ring/50 flex min-w-0 items-center gap-2 rounded-full py-1 pr-1 pl-2 text-sm outline-none focus-visible:ring-[3px]"
+                  className="hover:bg-accent focus-visible:ring-ring/50 flex min-w-0 items-center gap-2 rounded-lg py-1 pr-1 pl-2 text-sm outline-none focus-visible:ring-[3px]"
                 >
                   <span className="flex shrink-0 -space-x-2">
                     {added.slice(0, 4).map((row) => (
@@ -355,7 +355,7 @@ export function AppsDialog({
                 type="search"
                 aria-label="Search apps"
                 placeholder="Search apps"
-                className="h-10 rounded-full pl-10"
+                className="h-10 rounded-lg pl-10"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -367,10 +367,10 @@ export function AppsDialog({
           <div
             role="status"
             className={cn(
-              "mx-4 mt-3 flex min-w-0 items-start gap-2 rounded-md border px-3 py-2 text-sm sm:mx-6",
+              "mx-4 mt-3 flex min-w-0 items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6",
               notice.ok
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                : "border-destructive/30 bg-destructive/10 text-destructive",
+                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                : "bg-destructive/10 text-destructive",
             )}
           >
             {notice.ok ? (
@@ -482,7 +482,7 @@ export function AppsDialog({
                   );
                 })}
                 {visible.length === 0 ? (
-                  <p className="text-muted-foreground rounded-lg border border-dashed px-3 py-6 text-center text-sm">
+                  <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
                     {showRegistry
                       ? `No apps in the directory match "${query.trim()}"`
                       : q
