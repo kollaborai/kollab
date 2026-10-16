@@ -228,6 +228,20 @@ uses the same saved appearance, and opens Properties on click. The empty chat
 keeps its large welcome gem without a second composer gem. The input remains
 shrinkable beside the gem at narrow widths, including with a wide sidebar.
 
+All gem surfaces (sidebar, toolbar, welcome, composer and Gem Studio) use the
+same renderer and saved looks. One WebGL context and two shared body meshes
+serve the page: sizes up to 64px use 812 vertices, larger previews use 2892,
+with identical shape normalization and surface-anchored faces and hats.
+Idle motion runs at 30fps and active motion at up to 60fps, retaining fractional
+frame deadlines across display refresh rates. Only avatars due to draw advance
+their springs; the drawing budget rotates through visible avatars. Offscreen
+avatars and hidden tabs do no animation work. Offline and reduced-motion gems
+render a settled pose on changes, without a continuous loop or finish dance.
+The shared face canvas must fit both dimensions, including the browser's
+initial 300-by-150 canvas and changes between sidebar and hero sizes.
+Pointer attention fades with distance and time; breathing, shape changes and
+completion dances ease without changing an agent's activity or saved appearance.
+
 Initialization records carry `metadata.system_initialization: true` and are omitted
 from Chat, while original context remains available to the model and Trajectory.
 Resume preserves explicit initialization provenance rather than classifying user

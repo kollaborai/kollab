@@ -149,7 +149,7 @@ function Lab() {
         {view === "styles" ? (
           <div className="mt-8 flex flex-col gap-10">
             {styles.map((style) => (
-              <div key={style.id} className="flex items-center gap-8">
+              <div key={style.id} className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:gap-8">
                 <div className="w-24 shrink-0">
                   <div className="text-sm font-medium">{style.label}</div>
                   <div className="text-muted-foreground text-[10px] uppercase tracking-wide">{style.group}</div>
@@ -159,15 +159,18 @@ function Lab() {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-6 gap-x-6 gap-y-12 pt-6">{POOL.map(([name]) => gem(name, face))}</div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-x-6 gap-y-12 pt-6">{POOL.map(([name]) => gem(name, face))}</div>
         )}
       </div>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
+const root = createRoot(document.getElementById("root")!);
+root.render(
   <StrictMode>
     <Lab />
   </StrictMode>,
 );
+
+if (import.meta.hot) import.meta.hot.dispose(() => root.unmount());

@@ -141,10 +141,11 @@ export function faceHeight(w: ArrayLike<number>): number {
 // Detail 16: 2892 vertices, smooth at the Gem Studio's hero size.
 const DETAIL = 16;
 let tables: { geometry: BufferGeometry; scale: Float64Array } | null = null;
+let compactGeometry: BufferGeometry | null = null;
 
 /** Samples every shape once per vertex, each normalized to the same outer radius. */
-function build() {
-  const ico = new IcosahedronGeometry(1, DETAIL);
+function build(detail = DETAIL, normalization?: Float64Array) {
+  const ico = new IcosahedronGeometry(1, detail);
   ico.deleteAttribute("normal");
   ico.deleteAttribute("uv");
   const geometry = mergeVertices(ico);
@@ -178,15 +179,20 @@ function build() {
       data[4 * i + 3] = r;
       max = Math.max(max, r);
     }
-    for (let j = 0; j < data.length; j += 1) data[j] /= max;
-    scale[s] = 1 / max;
+    // Both meshes use the same radii as CPU face/hat seating, including at a
+    // size boundary. A coarser sample must not change the gem's proportions.
+    scale[s] = normalization?.[s] ?? 1 / max;
+    for (let j = 0; j < data.length; j += 1) data[j] *= scale[s];
     geometry.setAttribute(`aS${s}`, new Float32BufferAttribute(data, 4));
   });
   return { geometry, scale };
 }
 
-export function bodyGeometry(): BufferGeometry {
+export function bodyGeometry(compact = false): BufferGeometry {
   tables ??= build();
+  // 812 vertices instead of 2892 for sidebar/composer gems. Hero previews
+  // retain the full mesh; all avatars share these two immutable geometries.
+  if (compact) return (compactGeometry ??= build(8, tables.scale).geometry);
   return tables.geometry;
 }
 
@@ -271,10 +277,14 @@ void main() {
   vec3 v = normalize(vV);
   vec3 l = normalize(vec3(-0.5, 0.8, 0.65));
   vec3 col = mix(uBottom, uTop, smoothstep(-0.95, 0.85, vY));
-  col *= 0.74 + 0.36 * (dot(n, l) * 0.5 + 0.5);
-  col += pow(max(dot(reflect(-l, n), v), 0.0), 16.0) * 0.1;
+  col *= 0.66 + 0.38 * (dot(n, l) * 0.5 + 0.5);
+  // A broad softbox and a small clean highlight give the rounded cuts depth
+  // without washing out their pool color or competing with the face.
+  float specular = max(dot(reflect(-l, n), v), 0.0);
+  col += pow(specular, 12.0) * 0.065 + pow(specular, 64.0) * 0.16;
   float facing = max(dot(n, v), 0.0);
-  col += uRim * pow(1.0 - facing, 2.5) * 0.3;
+  float rim = pow(1.0 - facing, 3.0);
+  col += uRim * rim * (0.16 + 0.15 * max(n.y, 0.0));
   // Lit from inside, brightest where the gem faces you.
   col = mix(col, uGlowColor, uGlow * (0.15 + 0.5 * facing * facing)) + uGlowColor * uGlow * 0.08;
   gl_FragColor = vec4(col, 1.0);
