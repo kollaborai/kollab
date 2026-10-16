@@ -77,22 +77,27 @@ def create_app(
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     class _UpdateConfig:
+        """The web server keeps no update cache: every check asks GitHub."""
+
         def get(self, key: str, default=None):
             return default
+
+        def save_key(self, key: str, value, **_kwargs) -> bool:
+            return False
 
     @app.get("/api/update/check")
     async def check_update():
         """Return the latest release and local changelog notes, if available."""
-        from kollabor.version import __version__
         from kollabor.updates import VersionCheckService
         from kollabor.updates.release_notes import load_recent_release_notes
+        from kollabor.version import __version__
 
         service = VersionCheckService(_UpdateConfig(), __version__)
         await service.initialize()
         try:
             release = await service.check_for_updates()
         finally:
-            await service.close()
+            await service.shutdown()
         return {
             "current_version": __version__,
             "available": release is not None,
@@ -187,12 +192,14 @@ def create_app(
             LEGACY_STATIC_DIR / "app.js", media_type="application/javascript"
         )
 
+    def page(directory: Path) -> FileResponse:
+        # Always revalidated: a cached entry page keeps loading the previous
+        # build's hashed assets after a rebuild. The assets themselves can cache.
+        return FileResponse(directory / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+
     @app.get("/")
     async def index():
-        assistant_dir = _assistant_static_dir()
-        if assistant_dir is not None:
-            return FileResponse(assistant_dir / "index.html", media_type="text/html")
-        return FileResponse(LEGACY_STATIC_DIR / "index.html", media_type="text/html")
+        return page(_assistant_static_dir() or LEGACY_STATIC_DIR)
 
     @app.get("/{asset_path:path}")
     async def static_or_spa(asset_path: str):
@@ -209,11 +216,11 @@ def create_app(
             asset = _safe_asset(assistant_dir, asset_path)
             if asset is not None:
                 return FileResponse(asset)
-            return FileResponse(assistant_dir / "index.html", media_type="text/html")
+            return page(assistant_dir)
 
         asset = _safe_asset(LEGACY_STATIC_DIR, asset_path)
         if asset is not None:
             return FileResponse(asset)
-        return FileResponse(LEGACY_STATIC_DIR / "index.html", media_type="text/html")
+        return page(LEGACY_STATIC_DIR)
 
     return app
