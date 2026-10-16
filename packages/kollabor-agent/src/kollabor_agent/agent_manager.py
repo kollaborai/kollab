@@ -41,6 +41,12 @@ import yaml
 if TYPE_CHECKING:
     pass  # For forward reference to AgentManager
 
+from kollabor_ai.prompt_overrides import (
+    PromptOverrideStore,
+)
+from kollabor_ai.prompt_overrides import (
+    get_default_store as get_default_override_store,
+)
 from kollabor_config.config_utils import (
     get_config_directory,
     get_global_agents_dir,
@@ -703,6 +709,7 @@ class Agent:
             agent_manager=agent_manager,
             event_bus=event_bus,
             skip_volatile=skip_volatile,
+            prompt_bundle=self.name,
         )
         rendered_prompt = renderer.render(self.system_prompt)
 
@@ -802,6 +809,18 @@ class Agent:
             path = files_by_name[name]
             try:
                 content = path.read_text(encoding="utf-8")
+                # User-space override wins (System Prompts page): keyed by
+                # the doc's stem under this agent's bundle namespace.
+                store = getattr(renderer, "override_store", None)
+                if not isinstance(store, PromptOverrideStore):
+                    store = get_default_override_store()
+                key = store.section_key_for_path(path)
+                override = store.get_override(
+                    getattr(renderer, "prompt_bundle", None) or "default", key
+                )
+                if override is not None:
+                    content = override
+                    logger.debug(f"Using prompt override for system doc {name}")
                 rendered = renderer.render(content)
                 parts.append(rendered)
                 logger.debug(f"Loaded system doc: {path}")
