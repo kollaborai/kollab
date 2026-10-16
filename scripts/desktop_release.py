@@ -89,7 +89,10 @@ def verify_manifest(directory: Path, version: str) -> None:
 def stage(platform: str, source: Path, version: str) -> Path:
     verify_checksum(source)
     if platform in MACOS_TARGETS:
-        target, bundle = MACOS_TARGETS[platform], {"targets": ["app"]}
+        # codesign cannot sign a scie, so it stays bundle data in Resources
+        # and the app seals it there instead of treating it as nested code.
+        target = MACOS_TARGETS[platform]
+        bundle = {"targets": ["app"], "macOS": {"files": {"Resources/kollab": f"binaries/kollab-{target}"}}}
     else:
         target, packages = TARGETS[platform]
         # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a

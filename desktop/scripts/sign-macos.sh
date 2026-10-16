@@ -196,10 +196,10 @@ if [ "$mode" = developer-id ]; then prepare_keychain; fi
   "$@"
 )
 [ -d "$app" ] || fail 'Tauri did not produce Kollab.app at the expected target path'
-[ -f "$app/Contents/MacOS/kollab" ] || fail 'Kollab.app is missing its bundled kollab sidecar'
+[ -f "$app/Contents/Resources/kollab" ] || fail 'Kollab.app is missing its bundled kollab sidecar'
 if [ "$mode" = developer-id ]; then
+  # The scie sidecar is sealed bundle data, not nested code: codesign cannot sign it.
   verify_signature "$app"
-  verify_signature "$app/Contents/MacOS/kollab"
   notarize "$app"
   cleanup || fail 'signing cleanup incomplete; do not archive or publish this app'
   trap - EXIT INT TERM

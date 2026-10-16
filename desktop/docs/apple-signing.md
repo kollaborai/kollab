@@ -197,8 +197,12 @@ kill can prevent any cleanup handler, so this is not a persistent self-hosted
 runner secret-management design. Configure the consuming workflow to upload only
 its final archive/checksum and exclude all temporary signing state.
 
-The signed path verifies the app and bundled `kollab` sidecar, expected team,
-hardened runtime and secure timestamp. It submits a ZIP with `notarytool --wait`
+The signed path verifies the app's expected team, hardened runtime and secure
+timestamp. The bundled `kollab` sidecar (`Contents/Resources/kollab`) is a pex
+scie that `codesign` cannot sign, so it is sealed as bundle data rather than
+signed as nested code. Notarization checks every Mach-O in the bundle, so it is
+expected to reject that unsigned scie: a notarized build needs the CLI shipped
+as an unpacked Python tree whose binaries are each signed. It submits a ZIP with `notarytool --wait`
 (30-minute wait limit), requires JSON status **Accepted**, staples and validates
 the ticket, rechecks the signature, and runs Gatekeeper assessment. It returns
 success only after all of those checks and cleanup succeed. Rejection, timeout,

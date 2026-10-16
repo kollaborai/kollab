@@ -117,7 +117,9 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
     config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
     assert config["version"] == "1.2.3"
     if platform.startswith("macos-"):
-        assert config["bundle"] == {"targets": ["app"]}
+        assert config["bundle"] == {
+            "targets": ["app"], "macOS": {"files": {"Resources/kollab": f"binaries/kollab-{target}"}}
+        }
         return
     assert config["bundle"]["targets"] == ["appimage", "deb"]
     assert config["bundle"]["externalBin"] == []

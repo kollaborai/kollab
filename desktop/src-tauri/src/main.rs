@@ -187,13 +187,23 @@ fn kollab_version(bin: &Path) -> Option<Vec<u32>> {
         .collect()
 }
 
-/// macOS ships an adjacent sidecar; Linux keeps the scie as opaque package data.
+/// macOS and Linux keep the scie as opaque package data, never beside the app's
+/// executable: codesign cannot sign a scie (data follows its signature), so in
+/// Contents/MacOS it would leave the bundle unsealed and "damaged".
 fn bundled_kollab() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let path = linux_bundled_kollab(&std::env::current_exe().ok()?)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let path = macos_bundled_kollab(&std::env::current_exe().ok()?)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let path = std::env::current_exe().ok()?.with_file_name("kollab");
     path.is_file().then_some(path)
+}
+
+/// Kollab.app/Contents/MacOS/kollab-desktop -> Kollab.app/Contents/Resources/kollab
+#[cfg(any(target_os = "macos", test))]
+fn macos_bundled_kollab(executable: &Path) -> Option<PathBuf> {
+    Some(executable.parent()?.parent()?.join("Resources/kollab"))
 }
 
 /// Debian and AppImage share the usr/bin + usr/share package layout. Keeping
@@ -1028,6 +1038,13 @@ mod tests {
         assert_eq!(linux_bundled_kollab(Path::new("/tmp/Kollab.AppDir/usr/bin/kollab-desktop")),
             Some(PathBuf::from("/tmp/Kollab.AppDir/usr/share/kollab/runtime/kollab")));
         assert_eq!(linux_bundled_kollab(Path::new("kollab-desktop")), None);
+    }
+
+    #[test]
+    fn macos_sidecar_lookup_uses_bundle_resources() {
+        assert_eq!(macos_bundled_kollab(Path::new("/Applications/Kollab.app/Contents/MacOS/kollab-desktop")),
+            Some(PathBuf::from("/Applications/Kollab.app/Contents/Resources/kollab")));
+        assert_eq!(macos_bundled_kollab(Path::new("kollab-desktop")), None);
     }
 
     /// These kernel tests create only private groups with short natural

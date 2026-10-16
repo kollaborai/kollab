@@ -21,16 +21,23 @@ That folder is gitignored, because the binary is about 47 MB.
 ```bash
 cd desktop
 mkdir -p src-tauri/binaries
-cp ~/.local/bin/kollab src-tauri/binaries/kollab-aarch64-apple-darwin
-# Intel Macs use kollab-x86_64-apple-darwin instead.
+cp ~/.local/bin/kollab src-tauri/binaries/kollab
 # or download the matching kollab-macos-* release asset from GitHub Releases
 cargo tauri build
+codesign --force --sign - src-tauri/target/release/bundle/macos/Kollab.app
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (unsigned,
-about 58 MB). To watch its log, run the binary from a terminal:
+The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (ad-hoc
+signed, about 58 MB). To watch its log, run the binary from a terminal:
 `.../Kollab.app/Contents/MacOS/kollab-desktop`.
+
+The CLI goes in `Kollab.app/Contents/Resources/kollab`, not next to the app's
+executable. It is a pex scie: a launcher with its Python payload appended after
+the launcher's code signature, which `codesign` cannot sign. Beside the
+executable it counts as nested code, so the bundle cannot be sealed and a
+downloaded copy opens as "Kollab is damaged". As bundle data it is sealed with
+the rest of the app; `codesign --verify --deep --strict` must pass.
 
 Release builds publish one unsigned `.app.zip` and one `.dmg` for each supported
 macOS architecture (`aarch64` and `x86_64`), targeting macOS 11 or newer to
@@ -46,10 +53,22 @@ must match it. The committed base Tauri config is not rewritten during builds.
 The packaged macOS CLI and app metadata must report that version before the
 `.app.zip` and `.dmg` archives are collected.
 
-Because the app is unsigned, macOS Gatekeeper may block the first launch. Open
-the downloaded archive, then Control-click `Kollab.app`, choose **Open**, and
-confirm **Open** in the dialog. If macOS still refuses it, run
-`xattr -dr com.apple.quarantine /path/to/Kollab.app` once and open it again.
+The app is not signed with an Apple Developer ID, so Gatekeeper blocks its
+first launch with "Apple could not verify Kollab is free of malware".
+Control-click **Open** no longer gets past this on macOS 15 and newer. To allow
+it once:
+
+1. Drag `Kollab.app` to Applications and open it. Click **Done** on the warning.
+2. Open **System Settings > Privacy & Security**, scroll to the Security
+   section, and click **Open Anyway** next to the Kollab message (it shows for
+   about an hour after the blocked launch). Confirm with your password.
+3. Open Kollab again and click **Open Anyway** in the dialog.
+
+Or, from a terminal, clear the download's quarantine flag and open it normally:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Kollab.app
+```
 
 ## Signing and notarization
 
@@ -200,7 +219,7 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 2. **Spawn:** otherwise the app runs `kollab --web-ui` with `BROWSER=true` in
    its own session (setsid), and shows a loading page until the UI answers.
    It uses the newer of:
-   - the bundled kollab (`Kollab.app/Contents/MacOS/kollab`);
+   - the bundled kollab (`Kollab.app/Contents/Resources/kollab`);
    - an installed one: your login shell's `command -v kollab`, then
      `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 
@@ -255,8 +274,8 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 | Path | What it is |
 | --- | --- |
 | `src-tauri/src/main.rs` | All app logic |
-| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar |
-| `src-tauri/tauri.release.json` | Generated Linux version, formats and opaque runtime file mappings |
+| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar (bundled as `Contents/Resources/kollab`) |
+| `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
 | `ui/index.html` | Bundled loading, install and error page |
 | `app-icon.png` | 1024 px icon source (the Kollab mark) |

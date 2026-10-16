@@ -60,10 +60,10 @@ elif tool == "cargo":
         assert os.environ["APPLE_SIGNING_IDENTITY"] == expected
     if os.environ.get("MOCK_NO_APP"):
         sys.exit(0)
-    (app / "Contents/MacOS").mkdir(parents=True, exist_ok=True)
+    (app / "Contents/Resources").mkdir(parents=True, exist_ok=True)
     (app / "stapled").unlink(missing_ok=True)
     if not os.environ.get("MOCK_NO_SIDECAR"):
-        (app / "Contents/MacOS/kollab").write_text("fixture sidecar")
+        (app / "Contents/Resources/kollab").write_text("fixture sidecar")
 elif tool == "codesign" and "--display" in args:
     team = "WRONG_TEAM" if os.environ.get("MOCK_BAD_TEAM") else "FIXTURETEAM"
     print("TeamIdentifier=" + team, file=sys.stderr)
@@ -508,7 +508,8 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_existing_tauri_config_remains_usable_without_signing_settings(self):
         config = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())
-        self.assertEqual(config["bundle"]["externalBin"], ["binaries/kollab"])
+        self.assertNotIn("externalBin", config["bundle"])
+        self.assertEqual(config["bundle"]["macOS"]["files"], {"Resources/kollab": "binaries/kollab"})
         self.assertNotIn("signingIdentity", config["bundle"]["macOS"])
 
 

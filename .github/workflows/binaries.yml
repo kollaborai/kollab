@@ -130,8 +130,15 @@ jobs:
           VERSION="$(python -c 'import json; print(json.load(open("desktop/src-tauri/tauri.release.json"))["version"])')"
           APP="desktop/src-tauri/target/release/bundle/macos/Kollab.app"
           test -d "$APP"
-          test -x "$APP/Contents/MacOS/kollab"
-          shown="$("$APP/Contents/MacOS/kollab" --version)"
+          # The scie sidecar is bundle data: codesign cannot sign a scie, so
+          # beside the executable it left the bundle unsealed ("damaged").
+          test ! -e "$APP/Contents/MacOS/kollab"
+          test -x "$APP/Contents/Resources/kollab"
+          # Ad-hoc seal: a quarantined download then gets Gatekeeper's
+          # Open Anyway path instead of "Kollab is damaged".
+          codesign --force --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          shown="$("$APP/Contents/Resources/kollab" --version)"
           test "${shown##* }" = "$VERSION"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
           mkdir -p dist/desktop
