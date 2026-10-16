@@ -5,12 +5,13 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.2] - 2026-10-16
 
 ### Added
 - Desktop: Kollab.app updates itself on macOS. It asks when a newer release is out (and from Check for Updates… in the menu bar), checks the download's SHA-256 and signature, swaps the app in one step and reopens it. The web UI's update banner inside the app hands the update to the app.
 
 ### Changed
+- Desktop: the title bar blends into the web UI's dark background, so it reads as part of the app while keeping native dragging.
 - Web: the gems read as a cast. Each one has its own silhouette, finish and temperament, hats sit on each gem's crown, and faces stay clear at 28px. Idle gems breathe and blink on their own rhythm, each work state has its own pose and prop, transitions ease, and a long turn ends with a short dance: four bounces, a sway, one spin and a jigging hat. Gem Studio's Dance preview loops it, and a booting gem whirls and winds round to face front. A page of many gems stays smooth, and reduced-motion and offline gems hold still.
 - Web: Gem Studio, Settings, the chat header and Trajectory use underline tabs and toggles instead of pills.
 - Web: no lines anywhere. Sections separate by shade instead of borders (sidebar, headers, Trajectory, dialogs, popovers, the composer palette, code blocks and tables), badges are plain colored labels, and text fields show focus by shade instead of an outline.
