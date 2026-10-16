@@ -157,10 +157,31 @@ class TestSystemPromptBuilder(unittest.TestCase):
         get_cached_aliases.assert_called_once_with()
         formatter.assert_called_once_with(cached_aliases)
 
-    def test_finalize_system_prompt_includes_cached_aliases_after_lazy_load(self):
-        """Rebuilds after first submit should include cached alias content."""
+    def test_finalize_system_prompt_excludes_aliases_from_static_prompt(self):
+        """Aliases ride the rail, not the static prompt (cacheability)."""
         self.builder._shell_alias_prompt = "ALIASES"
         self.builder._shell_aliases_loaded = True
+        self.config.get = MagicMock(
+            side_effect=lambda k, d=None: {
+                "kollabor.llm.system_prompt.include_project_structure": False,
+                "kollabor.llm.system_prompt.attachment_files": [],
+                "kollabor.llm.system_prompt.custom_prompt_files": [],
+                "terminal.interactive_shell": True,
+            }.get(k, d)
+        )
+
+        with patch.object(
+            self.builder, "_get_plugin_system_prompt_additions", return_value=[]
+        ):
+            result = self.builder._finalize_system_prompt(["base prompt"])
+
+        self.assertNotIn("ALIASES", result)
+
+    def test_finalize_system_prompt_inlines_aliases_with_static_optin(self):
+        """static_aliases_inline=True puts aliases in the static prompt."""
+        self.builder._shell_alias_prompt = "ALIASES"
+        self.builder._shell_aliases_loaded = True
+        self.builder.include_static_aliases = True
         self.config.get = MagicMock(
             side_effect=lambda k, d=None: {
                 "kollabor.llm.system_prompt.include_project_structure": False,
@@ -230,8 +251,8 @@ class TestSystemPromptBuilder(unittest.TestCase):
 
         self.assertIn("Could not get directory listing", result)
 
-    def test_finalize_system_prompt_with_structure(self):
-        """Test finalizing system prompt with project structure."""
+    def test_finalize_system_prompt_excludes_structure_from_static_prompt(self):
+        """Project tree rides the rail; static prompt has no Project Structure."""
         self.config.get = MagicMock(
             side_effect=lambda k, d=None: {
                 "kollabor.llm.system_prompt.include_project_structure": True,
@@ -247,11 +268,11 @@ class TestSystemPromptBuilder(unittest.TestCase):
             ):
                 result = self.builder._finalize_system_prompt(["base prompt"])
 
-        self.assertIn("## Project Structure", result)
-        self.assertIn("tree here", result)
+        self.assertNotIn("## Project Structure", result)
+        self.assertNotIn("tree here", result)
 
-    def test_finalize_system_prompt_with_attachment_files(self):
-        """Test finalizing system prompt with attachment files."""
+    def test_finalize_system_prompt_excludes_attachment_files_from_static(self):
+        """Attachment files ride the rail; static prompt stays lean."""
         self.config.get = MagicMock(
             side_effect=lambda k, d=None: {
                 "kollabor.llm.system_prompt.include_project_structure": False,
@@ -261,9 +282,10 @@ class TestSystemPromptBuilder(unittest.TestCase):
             }.get(k, d)
         )
 
+        marker = "ATTACHMENT-BODY-q7z"
         mock_path = MagicMock()
         mock_path.exists.return_value = True
-        mock_path.read_text.return_value = "file content"
+        mock_path.read_text.return_value = marker
 
         with patch("kollabor_ai.system_prompt_builder.Path") as MockPath:
             MockPath.cwd.return_value.__truediv__ = MagicMock(return_value=mock_path)
@@ -272,11 +294,11 @@ class TestSystemPromptBuilder(unittest.TestCase):
             ):
                 result = self.builder._finalize_system_prompt(["base prompt"])
 
-        self.assertIn("## README.md", result)
-        self.assertIn("file content", result)
+        self.assertNotIn("## README.md", result)
+        self.assertNotIn(marker, result)
 
-    def test_finalize_system_prompt_with_custom_files(self):
-        """Test finalizing system prompt with custom prompt files."""
+    def test_finalize_system_prompt_excludes_custom_files_from_static(self):
+        """Custom prompt files ride the rail; static prompt stays lean."""
         self.config.get = MagicMock(
             side_effect=lambda k, d=None: {
                 "kollabor.llm.system_prompt.include_project_structure": False,
@@ -286,9 +308,10 @@ class TestSystemPromptBuilder(unittest.TestCase):
             }.get(k, d)
         )
 
+        marker = "CUSTOM-INSTRUCTIONS-k4m"
         mock_path = MagicMock()
         mock_path.exists.return_value = True
-        mock_path.read_text.return_value = "custom instructions"
+        mock_path.read_text.return_value = marker
 
         with patch("kollabor_ai.system_prompt_builder.Path") as MockPath:
             MockPath.cwd.return_value.__truediv__ = MagicMock(return_value=mock_path)
@@ -297,8 +320,8 @@ class TestSystemPromptBuilder(unittest.TestCase):
             ):
                 result = self.builder._finalize_system_prompt(["base prompt"])
 
-        self.assertIn("## Custom Instructions (custom.md)", result)
-        self.assertIn("custom instructions", result)
+        self.assertNotIn("## Custom Instructions (custom.md)", result)
+        self.assertNotIn(marker, result)
 
     def test_get_plugin_system_prompt_additions_no_plugins(self):
         """Test getting plugin additions when no plugins set."""
