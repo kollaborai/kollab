@@ -8,7 +8,6 @@ import {
   PanelRight,
   type LucideIcon,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { TrajectoryRecord } from "./trajectory-records";
 import {
@@ -62,13 +61,13 @@ export function TrajectoryInspector({
     return (
       <aside
         className={cn(
-          "bg-gradient-to-b from-muted/30 to-background/10 flex min-h-0 flex-col border-l",
+          "bg-muted/25 flex min-h-0 flex-col",
           className,
         )}
         data-testid="trajectory-inspector-empty"
       >
-        <div className="bg-muted/10 flex shrink-0 items-center gap-3 border-b px-4 py-3">
-          <div className="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-lg">
+        <div className="bg-muted/30 flex shrink-0 items-center gap-3 px-4 py-3">
+          <div className="text-muted-foreground flex size-8 items-center justify-center">
             <PanelRight className="size-4" />
           </div>
           <div className="min-w-0">
@@ -79,8 +78,8 @@ export function TrajectoryInspector({
           </div>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
-          <div className="w-full max-w-xs rounded-2xl border border-dashed border-primary/25 bg-primary/[0.035] p-5 shadow-xs">
-            <div className="bg-primary/10 text-primary mx-auto flex size-11 items-center justify-center rounded-2xl">
+          <div className="w-full max-w-xs rounded-2xl bg-background/50 p-5">
+            <div className="text-muted-foreground mx-auto flex size-11 items-center justify-center">
               <PanelRight className="size-5" />
             </div>
             <p className="mt-4 text-sm font-semibold">Inspect a Record</p>
@@ -88,11 +87,11 @@ export function TrajectoryInspector({
               Choose a row to inspect its full input, output, or thinking content.
             </p>
             <div className="text-muted-foreground mt-4 flex items-center justify-center gap-2 text-[0.625rem]">
-              <span className="inline-flex items-center gap-1 rounded-md bg-background/80 px-2 py-1 font-mono">
+              <span className="inline-flex items-center gap-1 rounded-md bg-muted/70 px-2 py-1 font-mono">
                 <ArrowDownUp className="size-3" />
                 ↑ ↓ navigate
               </span>
-              <span className="rounded-md bg-background/80 px-2 py-1 font-mono">
+              <span className="rounded-md bg-muted/70 px-2 py-1 font-mono">
                 Esc clear
               </span>
             </div>
@@ -105,15 +104,15 @@ export function TrajectoryInspector({
   return (
     <aside
       className={cn(
-        "bg-gradient-to-b from-muted/30 to-background/10 flex min-h-0 flex-col border-l",
+        "bg-muted/25 flex min-h-0 flex-col",
         className,
       )}
       aria-label="Trajectory record inspector"
       data-testid="trajectory-inspector"
     >
-      <div className="bg-muted/10 flex shrink-0 flex-col gap-3 border-b p-4">
+      <div className="bg-muted/30 flex shrink-0 flex-col gap-3 p-4">
         <div className="flex items-start gap-3">
-          <div className="bg-primary/10 text-primary flex size-8 shrink-0 items-center justify-center rounded-lg">
+          <div className="text-muted-foreground flex size-8 shrink-0 items-center justify-center">
             <PanelRight className="size-4" />
           </div>
           <div className="min-w-0 flex-1">
@@ -129,28 +128,28 @@ export function TrajectoryInspector({
             </p>
           </div>
           {record.isError && (
-            <Badge variant="destructive" className="gap-1">
+            <span className="text-destructive flex shrink-0 items-center gap-1 text-xs font-medium">
               <CircleAlert className="size-3" />
-              error
-            </Badge>
+              Error
+            </span>
           )}
         </div>
-        <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[0.6875rem]">
-          <span className="rounded-md border border-border/60 bg-background/60 px-2 py-1">
+        <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] tabular-nums">
+          <span>
             {formatTimestamp(record.timestamp)}
           </span>
-          <span className="rounded-md border border-border/60 bg-background/60 px-2 py-1">
+          <span>
             {formatDuration(record.durationSeconds)}
           </span>
           {(record.inputTokens !== undefined ||
             record.outputTokens !== undefined) && (
-            <span className="rounded-md border border-border/60 bg-background/60 px-2 py-1">
+            <span>
               in {formatTokens(record.inputTokens)} · out {formatTokens(record.outputTokens)}
             </span>
           )}
         </div>
         <div
-          className="bg-muted/70 flex rounded-lg p-1"
+          className="flex gap-1"
           role="tablist"
           aria-label="Record Details"
         >
@@ -163,10 +162,10 @@ export function TrajectoryInspector({
                 role="tab"
                 aria-selected={tab === item.id}
                 className={cn(
-                  "flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                  "flex-1 border-b-2 px-2 pt-1.5 pb-1 text-xs font-medium transition-colors",
                   tab === item.id
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground",
+                    ? "border-foreground text-foreground"
+                    : "text-muted-foreground hover:text-foreground border-transparent",
                 )}
                 onClick={() => setTab(item.id)}
               >
@@ -184,7 +183,7 @@ export function TrajectoryInspector({
           </pre>
         ) : (
           <div className="p-4">
-            <div className="rounded-xl border border-dashed border-border/70 bg-background/30 p-4">
+            <div className="rounded-xl bg-background/50 p-4">
               <p className="text-sm font-medium">No {tab} captured</p>
               <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
                 This record does not include {tab} content in session history.

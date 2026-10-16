@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from ..binary import running_binary
+from ..binary import app_launcher, running_binary
 from .git_update import _current_source_root, pip_command, run_source_update
 from .version_comparator import is_newer_version
+
+logger = logging.getLogger(__name__)
 
 # What a binary upgrades to; /releases/latest skips drafts and prereleases.
 LATEST_RELEASE = "https://api.github.com/repos/kollaborai/kollab/releases/latest"
@@ -103,13 +107,33 @@ def _open(url: str, timeout: float, headers: dict | None = None):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _in_app() -> bool:
+    """True when the running app called us from a worker thread.
+
+    /upgrade, the startup auto-update and the web UI run the updater with
+    asyncio.to_thread. There the terminal belongs to the UI (stderr would
+    corrupt it) and Python refuses to install signal handlers.
+    """
+    return threading.current_thread() is not threading.main_thread()
+
+
+def _status(text: str) -> None:
+    """One status line: stderr for ``kollab --update``, the log inside the app."""
+    if _in_app():
+        logger.info(text)
+    else:
+        print(text, file=sys.stderr, flush=True)
+
+
 def _print_progress(done: int, total: int | None) -> None:
     """Download progress on stderr; stdout stays a consumed contract.
 
     Interactive terminals get an updating ``\r`` line; pipes keep the
     one-line-per-chunk form (still stderr, so ``kollab --update |`` and
-    pipe mode never see it).
+    pipe mode never see it). Inside the app there is no progress line.
     """
+    if _in_app():
+        return
     try:
         is_tty = sys.stderr.isatty()
     except (AttributeError, ValueError):  # replaced/closed stream
@@ -174,7 +198,7 @@ def _download_with_progress(response, out, digest) -> None:
         done += len(chunk)
         last_byte_at = now
         _print_progress(done, total)
-    if done:
+    if done and not _in_app():
         print("", file=sys.stderr, flush=True)  # end the progress line
 
 
@@ -209,17 +233,16 @@ def _upgrade_binary(binary: Path) -> AutoUpdateResult:
             expected = response.read().decode().split()[0]
         stale = _cleanup_stale_partials(target.parent)
         if stale:
-            print(
-                f"removed {stale} abandoned upgrade download(s)",
-                file=sys.stderr,
-                flush=True,
-            )
+            _status(f"removed {stale} abandoned upgrade download(s)")
         fd, temp_name = tempfile.mkstemp(prefix=".kollab-upgrade-", dir=target.parent)
         temp = Path(temp_name)
         try:
             # An interrupted upgrade must not leave the partial behind:
-            # unlink on Ctrl-C and on SIGTERM, then re-raise/die.
+            # unlink on Ctrl-C and on SIGTERM, then re-raise/die. Only the main
+            # thread may set handlers; inside the app the finally below unlinks
+            # it, and a partial a kill leaves is swept by the next upgrade.
             previous_term = signal.getsignal(signal.SIGTERM)
+            catch_term = not _in_app()
 
             def _unlink_on_signal(signum, frame):
                 temp.unlink(missing_ok=True)
@@ -229,7 +252,8 @@ def _upgrade_binary(binary: Path) -> AutoUpdateResult:
                     raise SystemExit(128 + signum)
                 raise KeyboardInterrupt
 
-            signal.signal(signal.SIGTERM, _unlink_on_signal)
+            if catch_term:
+                signal.signal(signal.SIGTERM, _unlink_on_signal)
             try:
                 digest = hashlib.sha256()
                 attempt = 0
@@ -270,23 +294,16 @@ def _upgrade_binary(binary: Path) -> AutoUpdateResult:
                             if attempt >= 1:
                                 raise TimeoutError(f"{exc} (after retry)") from exc
                             attempt += 1
-                            print(
-                                "download interrupted; retrying once...",
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                            _status("download interrupted; retrying once...")
             finally:
-                signal.signal(signal.SIGTERM, previous_term)
+                if catch_term:
+                    signal.signal(signal.SIGTERM, previous_term)
             if digest.hexdigest() != expected:
                 return AutoUpdateResult(
                     False, f"The v{latest} download did not match its SHA-256; kept v{current}.", "binary"
                 )
             temp.chmod(0o755)
-            print(
-                "verifying the new binary (first run unpacks its Python; can take a minute)...",
-                file=sys.stderr,
-                flush=True,
-            )
+            _status("verifying the new binary (first run unpacks its Python; can take a minute)...")
             # Its first start unpacks its own Python; it must not inherit this binary's identity.
             env = {key: value for key, value in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
             shown = subprocess.run([str(temp), "--version"], capture_output=True, text=True, timeout=600, env=env)
@@ -311,6 +328,12 @@ def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
     use the safe fast-forward updater. Installed packages are upgraded by the
     installer that owns the running interpreter.
     """
+    if app_launcher() is not None:
+        # Any write inside Kollab.app breaks its signature: the app updates whole.
+        return AutoUpdateResult(
+            False, "This Kollab runs inside Kollab.app; update it by installing the latest Kollab.app.", "app",
+            changed=False,
+        )
     binary = running_binary()
     if binary is not None:
         return _upgrade_binary(binary)

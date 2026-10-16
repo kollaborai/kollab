@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 
+import kollabor_webui
 import psutil
 import pytest
 
@@ -60,10 +61,13 @@ def launch(monkeypatch):
     monkeypatch.setattr(
         cli, "_pick_engine_port", lambda *a, **k: pytest.fail("picked an engine")
     )
+    rebuilds = []
+    monkeypatch.setattr(kollabor_webui, "rebuild_stale_bundle", lambda: rebuilds.append(True))
 
     def run(port):
         monkeypatch.setenv("KOLLAB_WEBUI_PORT", str(port))
         asyncio.run(cli._handle_cli_web_ui())
+        return rebuilds
 
     return run
 
@@ -71,7 +75,8 @@ def launch(monkeypatch):
 def test_a_running_web_ui_is_reused(listener, launch, capsys):
     port = listener("Kollab WebUI")
 
-    launch(port)
+    # The running UI reads its files per request, so a stale build is rebuilt in place.
+    assert launch(port) == [True]
 
     out = capsys.readouterr().out
     assert "already running" in out

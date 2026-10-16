@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Desktop: Kollab.app updates itself on macOS. It asks when a newer release is out (and from Check for Updates… in the menu bar), checks the download's SHA-256 and signature, swaps the app in one step and reopens it. The web UI's update banner inside the app hands the update to the app.
+
+### Changed
+- Web: the gems read as a cast. Each one has its own silhouette, finish and temperament, hats sit on each gem's crown, and faces stay clear at 28px. Idle gems breathe and blink on their own rhythm, each work state has its own pose and prop, transitions ease, and a long turn ends with a short dance: four bounces, a sway, one spin and a jigging hat. Gem Studio's Dance preview loops it, and a booting gem whirls and winds round to face front. A page of many gems stays smooth, and reduced-motion and offline gems hold still.
+- Web: Gem Studio, Settings, the chat header and Trajectory use underline tabs and toggles instead of pills.
+- Web: no lines anywhere. Sections separate by shade instead of borders (sidebar, headers, Trajectory, dialogs, popovers, the composer palette, code blocks and tables), badges are plain colored labels, and text fields show focus by shade instead of an outline.
+- Terminal: Apps moved into `/mcp`. `/mcp browse`, `/mcp search`, `/mcp add` and `/mcp remove` replace `/apps`, and the `/mcp` manager screen lists the Apps catalog's MCP servers, so `a` adds Context7, Linear, Sentry and the rest from there.
+
+### Fixed
+- Web: gems in messages and online notices wear the same seasonal costume as everywhere else.
+- Web: "came online" and "going offline" notices fold into small chips that stack together, including ones that arrive inside an agent's HUD, instead of full message cards.
+- Web: the version-mismatch banner no longer shows twice.
+- Web: the update check no longer fails with a server error, and it reports a newer release when there is one.
+- `/upgrade` in a binary install no longer fails with "signal only works in main thread", and its download progress no longer prints over the app's screen.
+- Web: `kollab --web-ui` in a source checkout rebuilds the web UI when its source changed since the last build, even with the UI already running, and the browser always revalidates the page, so a change no longer looks reverted.
+- Web: `kollab --web-ui` no longer attaches to an engine that runs from another kollab install, such as the desktop app's or a test build's. It leaves that engine running and starts its own on the next port.
+- A delegation to Claude Code or Codex over ACP no longer echoes back into the sender's chat as "<you> → Koordinator". An agent that takes a peer's message as its input stopped rebroadcasting it to every agent as if you had typed it.
+
 ## [0.16.1] - 2026-10-15
 
 ### Added

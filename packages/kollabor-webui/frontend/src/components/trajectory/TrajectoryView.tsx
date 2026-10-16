@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, RefreshCw, Search, Wrench } from "lucide-react";
 import type { EngineApi, SessionEvent } from "@/api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -210,7 +209,7 @@ export function TrajectoryView({
       data-testid="trajectory-view"
     >
       {/* The session header's Trajectory tab already names this view: counts only. */}
-      <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/[0.06] px-4 py-2.5">
+      <div className="flex shrink-0 flex-col gap-3 px-4 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <p className="text-muted-foreground text-xs tabular-nums">
@@ -227,31 +226,35 @@ export function TrajectoryView({
               )}
             </p>
             {refreshing && (
-              <Badge variant="secondary" className="gap-1.5 font-normal">
+              <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
                 <RefreshCw className="size-3 animate-spin" />
                 Refreshing
-              </Badge>
+              </span>
             )}
           </div>
           {/* Phones: a full row where the search flexes (Refresh wrapped alone). */}
           <div className="flex w-full items-center justify-end gap-2 sm:w-auto sm:flex-wrap">
             <div
-              className="bg-muted flex shrink-0 rounded-md p-0.5"
+              className="flex shrink-0 items-center gap-1"
               role="group"
               aria-label="Trajectory layout"
             >
               {(["table", "waterfall"] as const).map((option) => (
-                <Button
+                <button
                   key={option}
                   type="button"
-                  variant={layout === option ? "secondary" : "ghost"}
-                  size="xs"
                   aria-pressed={layout === option}
                   data-testid={`trajectory-${option}-tab`}
                   onClick={() => setLayout(option)}
+                  className={cn(
+                    "border-b-2 px-1.5 pt-1 pb-0.5 text-xs font-medium transition-colors",
+                    layout === option
+                      ? "border-foreground text-foreground"
+                      : "text-muted-foreground hover:text-foreground border-transparent",
+                  )}
                 >
                   {option === "table" ? "Table" : "Waterfall"}
-                </Button>
+                </button>
               ))}
             </div>
             <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
@@ -261,7 +264,7 @@ export function TrajectoryView({
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search records"
                 aria-label="Search trajectory"
-                className="h-8 rounded-lg bg-background/70 pl-8 text-xs shadow-xs"
+                className="h-8 rounded-lg pl-8 text-xs shadow-none"
               />
             </div>
             <label className="text-muted-foreground flex items-center gap-2 text-xs">
@@ -280,7 +283,7 @@ export function TrajectoryView({
               onClick={() => void refreshHistory()}
               disabled={refreshing}
               aria-label="Refresh trajectory"
-              className="rounded-lg bg-background/70 shadow-xs"
+              className="rounded-lg shadow-none"
             >
               <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
               <span className="hidden sm:inline">Refresh</span>
@@ -288,14 +291,14 @@ export function TrajectoryView({
           </div>
         </div>
         {error && (
-          <div className="text-destructive flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs shadow-xs">
+          <div className="text-destructive flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
             <span className="min-w-0 break-words">{error}</span>
           </div>
         )}
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 md:p-4">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card/40 shadow-sm lg:flex-row">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl bg-card/60 lg:flex-row">
           {layout === "table" ? (
             <TrajectoryTable
               records={visibleRecords}
@@ -332,7 +335,7 @@ export function TrajectoryView({
           <SheetHeader className="sr-only">
             <SheetTitle>Record Details</SheetTitle>
           </SheetHeader>
-          <TrajectoryInspector record={selectedRecord} className="min-h-0 border-0" />
+          <TrajectoryInspector record={selectedRecord} className="min-h-0" />
         </SheetContent>
       </Sheet>
     </div>

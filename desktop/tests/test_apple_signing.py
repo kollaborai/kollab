@@ -60,10 +60,8 @@ elif tool == "cargo":
         assert os.environ["APPLE_SIGNING_IDENTITY"] == expected
     if os.environ.get("MOCK_NO_APP"):
         sys.exit(0)
-    (app / "Contents/MacOS").mkdir(parents=True, exist_ok=True)
+    (app / "Contents/Resources").mkdir(parents=True, exist_ok=True)
     (app / "stapled").unlink(missing_ok=True)
-    if not os.environ.get("MOCK_NO_SIDECAR"):
-        (app / "Contents/MacOS/kollab").write_text("fixture sidecar")
 elif tool == "codesign" and "--display" in args:
     team = "WRONG_TEAM" if os.environ.get("MOCK_BAD_TEAM") else "FIXTURETEAM"
     print("TeamIdentifier=" + team, file=sys.stderr)
@@ -100,6 +98,16 @@ class SigningContractTests(unittest.TestCase):
             executable = tools / name
             executable.write_text("#!" + sys.executable + "\n" + MOCK_TOOL)
             executable.chmod(0o700)
+        # The tree scripts/desktop_release.py stage unpacks: a launcher beside
+        # runtime/, whose Mach-O files (magic numbers only here) need signing.
+        self.runtime = self.scratch / "app-runtime"
+        for name, body in (("kollab", b"#!/bin/sh\n"), ("runtime/KOLLAB-APP", b""),
+                           ("runtime/bin/python3.12", bytes.fromhex("cffaedfe") + b"python"),
+                           ("runtime/lib/python3.12/site-packages/ext.so", bytes.fromhex("cafebabe") + b"universal"),
+                           ("runtime/lib/python3.12/os.py", b"import abc\n")):
+            (self.runtime / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.runtime / name).write_bytes(body)
+        self.machos = ["runtime/bin/python3.12", "runtime/lib/python3.12/site-packages/ext.so"]
         self.state = self.scratch / "kollab-apple-signing-fixture"
         self.artifacts = self.scratch / "artifacts"
         self.build_number = 0
@@ -113,6 +121,7 @@ class SigningContractTests(unittest.TestCase):
             MOCK_LOG=str(self.scratch / "tools.jsonl"),
             MOCK_BUILD_CWD=str(ROOT / "desktop"),
             MOCK_APP=str(self.scratch / "unused/Kollab.app"),
+            KOLLAB_APP_RUNTIME=str(self.runtime),
         )
 
     def signed(self, api=False):
@@ -182,6 +191,22 @@ class SigningContractTests(unittest.TestCase):
         path = self.scratch / "tools.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def signings(self):
+        """(path relative to Resources or the app itself, codesign flags) for each signing, in order."""
+        resources = str(self.app / "Contents/Resources") + "/"
+        return [(args[-1].removeprefix(resources) if args[-1] != str(self.app) else "app", args[:-1])
+                for tool, args in self.calls() if tool == "codesign" and "--sign" in args]
+
+    def assert_sealed(self, identity, flags):
+        signed = self.signings()
+        self.assertEqual(sorted(path for path, _ in signed[:-1]), sorted(self.machos))
+        self.assertEqual(signed[-1][0], "app", "the app is signed after the code inside it")
+        for _, args in signed:
+            self.assertEqual(args, ["--force", "--sign", identity, *flags])
+        self.assertEqual((self.app / "Contents/Resources/kollab").read_bytes(), b"#!/bin/sh\n")
+        self.assertTrue((self.app / "Contents/Resources/runtime/lib/python3.12/os.py").is_file())
+        self.assertIn(["codesign", ["--verify", "--deep", "--strict", "--verbose=2", str(self.app)]], self.calls())
+
     def assert_failed_and_clean(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("the caller may now archive", result.stdout)
@@ -192,7 +217,8 @@ class SigningContractTests(unittest.TestCase):
         self.env.pop("RUNNER_TEMP")
         result = self.run_build()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual({call[0] for call in self.calls()}, {"cargo"})
+        self.assertEqual({call[0] for call in self.calls()}, {"cargo", "codesign"})
+        self.assert_sealed("-", ["--timestamp=none"])
         self.assertFalse(self.state.exists())
         self.assertFalse(self.artifacts.exists())
         self.assertTrue(self.app.is_dir())
@@ -218,7 +244,7 @@ class SigningContractTests(unittest.TestCase):
         extra = ("--config", '{"version":"1.2.3","bundle":{"macOS":{"hardenedRuntime":true}}}')
         result = self.run_build(extra_args=extra)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls(), [["cargo", self.build_command[1:]]])
+        self.assertEqual([call for call in self.calls() if call[0] == "cargo"], [["cargo", self.build_command[1:]]])
         self.assertIn("target output 1", str(self.app))
 
     def test_existing_app_is_preserved_without_starting_a_build(self):
@@ -280,7 +306,16 @@ class SigningContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.artifacts.exists(), "helper must leave distributable creation to the caller")
         self.assertTrue((self.app / "stapled").exists())
+        self.assert_sealed("Developer ID Application: Fixture (FIXTURETEAM)", ["--options", "runtime", "--timestamp"])
         calls = self.calls()
+        # Notarization checks code in Resources, which --deep never reaches.
+        for path in self.machos:
+            nested = str(self.app / "Contents/Resources" / path)
+            self.assertIn(["codesign", ["--verify", "--strict", nested]], calls)
+            self.assertIn(["codesign", ["--display", "--verbose=4", nested]], calls)
+        submit = next(index for index, call in enumerate(calls) if call[0] == "xcrun")
+        last_signing = max(index for index, (tool, args) in enumerate(calls) if tool == "codesign" and "--sign" in args)
+        self.assertLess(last_signing, submit, "everything is signed before notarization")
         self.assertIn(["security", ["list-keychains", "-d", "user", "-s", "/fixture/login with spaces.keychain-db", "/fixture/extra.keychain-db"]], calls)
         self.assertIn("spctl", {call[0] for call in calls})
         self.assertFalse(self.state.exists())
@@ -299,8 +334,8 @@ class SigningContractTests(unittest.TestCase):
         self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
         result = self.run_documented_step(self.doc_unsigned)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls(), [["cargo", ["tauri", "build", "--target", TARGET, "--bundles", "app", "--config", "src-tauri/tauri.release.json"]]])
-        self.assertTrue(self.app.is_dir())
+        self.assertEqual(self.calls()[0], ["cargo", ["tauri", "build", "--target", TARGET, "--bundles", "app", "--config", "src-tauri/tauri.release.json"]])
+        self.assert_sealed("-", ["--timestamp=none"])
         self.assertFalse(self.github_env.exists())
         self.assertFalse(self.state.exists())
 
@@ -378,12 +413,32 @@ class SigningContractTests(unittest.TestCase):
                 self.assert_failed_and_clean(self.run_build())
                 self.env.pop(flag)
 
-    def test_missing_app_or_sidecar_fails_validation(self):
-        for flag in ("MOCK_NO_APP", "MOCK_NO_SIDECAR"):
-            with self.subTest(flag=flag):
-                self.env[flag] = "1"
-                self.assert_failed_and_clean(self.run_build())
-                self.env.pop(flag)
+    def test_missing_app_fails_validation(self):
+        self.env["MOCK_NO_APP"] = "1"
+        self.assert_failed_and_clean(self.run_build())
+
+    def test_a_missing_or_unstaged_runtime_fails_before_build(self):
+        for runtime in (None, self.scratch / "nowhere", self.runtime / "runtime"):
+            with self.subTest(runtime=runtime):
+                self.env.pop("KOLLAB_APP_RUNTIME", None)
+                if runtime is not None:
+                    self.env["KOLLAB_APP_RUNTIME"] = str(runtime)
+                result = self.run_build()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("KOLLAB_APP_RUNTIME", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_seal_signs_an_existing_build_ad_hoc_once(self):
+        self.app = self.scratch / "built/Kollab.app"
+        (self.app / "Contents/Resources").mkdir(parents=True)
+        result = self.run_script("seal", str(self.app))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_sealed("-", ["--timestamp=none"])
+        self.assertNotIn("security", {call[0] for call in self.calls()})
+        again = self.run_script("seal", str(self.app))
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("already holds a kollab runtime", again.stderr)
+        self.assertNotEqual(self.run_script("seal", "relative/Kollab.app").returncode, 0)
 
     def test_cleanup_does_not_remove_unowned_or_outside_state(self):
         self.state.mkdir()
@@ -483,7 +538,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", json.dumps(job))
         unsigned = next(step for step in job["steps"] if step.get("if") == "env.APPLE_SIGNING_MODE == 'unsigned'")
         self.assertNotIn("env", unsigned)
-        self.assertEqual(unsigned["run"], 'cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json')
+        self.assertEqual(unsigned["run"].splitlines(), [
+            'cargo tauri build --target "$TARGET" --bundles app --config src-tauri/tauri.release.json',
+            'bash scripts/sign-macos.sh seal "$CARGO_TARGET_DIR/$TARGET/release/bundle/macos/Kollab.app"',
+        ])
         cleanup = next(step for step in job["steps"] if step.get("run", "").endswith(" cleanup"))
         self.assertEqual(cleanup["if"], "always() && env.APPLE_SIGNING_MODE == 'developer-id'")
 
@@ -508,7 +566,9 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_existing_tauri_config_remains_usable_without_signing_settings(self):
         config = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())
-        self.assertEqual(config["bundle"]["externalBin"], ["binaries/kollab"])
+        self.assertNotIn("externalBin", config["bundle"])
+        # The kollab runtime is sign-macos.sh's to add and sign, never Tauri's to copy.
+        self.assertNotIn("files", config["bundle"]["macOS"])
         self.assertNotIn("signingIdentity", config["bundle"]["macOS"])
 
 

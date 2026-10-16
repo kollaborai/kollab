@@ -222,7 +222,7 @@ export function ProfilesDialog({
           {profiles.map((p) => (
             <div
               key={p.name}
-              className="flex items-center gap-2 rounded-md border p-2"
+              className="flex items-center gap-2 rounded-md bg-muted/30 p-2"
             >
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium">{p.name}</div>
@@ -265,7 +265,7 @@ export function ProfilesDialog({
           )}
         </div>
 
-        <div className="rounded-md border p-3">
+        <div className="rounded-md bg-muted/30 p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold">
               {editing ? `Edit: ${editing}` : "New Profile"}

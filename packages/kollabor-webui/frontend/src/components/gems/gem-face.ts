@@ -186,8 +186,6 @@ export type FaceAnchor = {
   x: number;
   y: number;
   gap: number;
-  hatY: number;
-  hatScale: number;
   view: { x0: number; x1: number; y0: number; y1: number };
 };
 
@@ -218,8 +216,12 @@ export type FaceFrame = {
   talk: number;
   /** 0..1: how far the gem has turned side-on to its laptop. */
   desk: number;
+  /** Thinking at the laptop between tool calls, rather than with a thought bubble alone. */
+  atDesk: boolean;
   /** 0..1: how far the thought bubble is open. */
   bubble: number;
+  /** A hero-sized gem (welcome, studio): room for the season's bats and snow. */
+  big: boolean;
   /** Stable per-gem value in [0, 2π), for variety across a roster. */
   seed: number;
   still: boolean;
@@ -231,26 +233,18 @@ export type FaceFrame = {
   mouthShape?: readonly number[];
   /** 0..1: how open the shared mouth is. */
   mouthOpen?: number;
+  /** 0..1 while a finished activity's tool goes back into the gem (gem-props.ts). */
+  leave?: number;
 };
 
-/** Where activity escalation stands while thinking or working at length. */
-export function workPhase(activity: Activity, since: number) {
+/**
+ * What a working gem has out: the laptop for tools (reading, typing) and the
+ * thought bubble while thinking. Thinking between two tool calls stays at the
+ * laptop (`atDesk`), so the gem does not turn away and back on every call.
+ */
+export function workPhase(activity: Activity, atDesk = false) {
   const thinking = activity === "thinking";
-  const offset = thinking ? 4 : 0;
-  const laptop = activity === "reading" || activity === "typing" || (thinking && since >= 4);
-  const s = since - offset;
-  const furious = laptop && activity !== "reading" && s >= 5 && s < 7;
-  // A keyboard goes flying at 7s, then every 9s once three are out, and a
-  // spare comes out right after each throw.
-  let throwAt = -1;
-  let spareAt = -1;
-  if (laptop && activity !== "reading" && s >= 7) {
-    const cycle = s >= 13 ? (s - 13) % 9 : s - 7;
-    if (cycle < 0.9) throwAt = cycle;
-    else if (cycle < 1.7) spareAt = cycle - 0.9;
-  }
-  const triple = laptop && activity !== "reading" && s >= 13;
-  return { bubble: thinking && since < 4, laptop, furious: furious || triple, throwAt, spareAt, triple };
+  return { bubble: thinking, laptop: activity === "reading" || activity === "typing" || (thinking && atDesk) };
 }
 
 const EYE_GAP: Record<EyeStyle, number> = {
@@ -319,14 +313,13 @@ export function drawFace(f: FaceFrame) {
   const ax = box.x + anchor.x * s + shift.x;
   const ay = box.y + anchor.y * s + shift.y;
   const offline = activity === "offline";
-  const work = workPhase(activity, f.since);
   const angry = activity === "error";
   const m: FaceMood = {
     closed: offline || activity === "dreaming" || activity === "booting",
     happy: activity === "dance",
     angry,
     gaze: gazeFor(f),
-    squint: angry ? 0.72 : work.furious ? 0.6 : 1,
+    squint: angry ? 0.72 : 1,
     wide: activity === "waiting" ? 1.15 : 1,
     ink: offline ? "rgba(120,124,136,0.9)" : f.dark ? "rgba(236,242,255,0.95)" : "rgba(8,10,18,0.92)",
   };
@@ -1058,11 +1051,11 @@ function drawMouth(f: FaceFrame, mx: number, my: number, ink: string) {
   ctx.fillStyle = stroke;
   ctx.lineWidth = Math.max(1, s * 0.017);
   const vampire = f.season === "halloween" && !visor;
-  const work = workPhase(activity, f.since);
+  const work = workPhase(activity, f.atDesk);
 
   if (work.laptop) {
-    if (activity === "reading") line(ctx, mx - s * 0.015, my, mx + s * 0.015, my);
-    else if (work.furious) teeth(ctx, mx, my, s);
+    // Reading, or weighing the next call at the keys: lips pressed. Typing: tongue out.
+    if (activity !== "typing") line(ctx, mx - s * 0.015, my, mx + s * 0.015, my);
     else {
       // Tongue out in concentration.
       line(ctx, mx - s * 0.022, my, mx + s * 0.02, my);
@@ -1245,12 +1238,15 @@ function trace(ctx: CanvasRenderingContext2D, o: Outline) {
   ctx.closePath();
 }
 
-const PILL = [1, 0, 0, 0];
-const HAPPY = [0.1, 0, 0.9, 0];
 const SHUT = [0, 0, 0, 1];
+const HAPPY = [0.1, 0, 0.9, 0];
 
-/** The pill eye's shape mix for an activity: pill, round, happy arc, shut line. `cheer` is a passing idle smile. */
-export function eyeShape(activity: Activity, t: number, cheer: boolean): readonly number[] {
+/**
+ * The pill eye's shape mix for an activity: pill, round, happy arc, shut line.
+ * `cheer` (0..1) is a smile on the way: the celebration, or a hello when the
+ * pointer comes close.
+ */
+export function eyeShape(activity: Activity, cheer = 0): readonly number[] {
   switch (activity) {
     case "offline":
     case "dreaming":
@@ -1264,14 +1260,15 @@ export function eyeShape(activity: Activity, t: number, cheer: boolean): readonl
       return HAPPY;
     case "speaking":
     case "messaging":
-      return t % 1.7 < 0.4 ? HAPPY : PILL;
+      // Smiling eyes while it talks, held, not flickering.
+      return [0.72, 0, 0.28, 0];
     default:
-      return cheer ? HAPPY : PILL;
+      return [1 - 0.9 * cheer, 0, 0.9 * cheer, 0];
   }
 }
 
 /** The shared mouth's shape mix (smile, grin, round "o", flat line, frown) and how open it is. */
-export function mouthShape(activity: Activity, t: number, talk: number, cheer: boolean): { mix: readonly number[]; open: number } {
+export function mouthShape(activity: Activity, t: number, talk: number, cheer = 0): { mix: readonly number[]; open: number } {
   switch (activity) {
     case "speaking":
     case "messaging":
@@ -1292,7 +1289,7 @@ export function mouthShape(activity: Activity, t: number, talk: number, cheer: b
     case "offline":
       return { mix: [0, 0, 0, 1, 0], open: 0 };
     default:
-      return { mix: cheer ? [0, 1, 0, 0, 0] : [1, 0, 0, 0, 0], open: cheer ? 0.25 : 0 };
+      return { mix: [1 - cheer, cheer, 0, 0, 0], open: 0.25 * cheer };
   }
 }
 
@@ -1310,7 +1307,7 @@ function morphEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: num
     band(0, 0.3, 0.52, 1.5 * Math.PI - 1.05, 1.5 * Math.PI + 1.05, 0.12),
     stadium(0.48, 0.1),
   ];
-  const weights = f.eyeShape ?? eyeShape(f.activity, f.t, false);
+  const weights = f.eyeShape ?? eyeShape(f.activity);
   const shape = blend(eyeOutlines, weights, shapeBuffer);
   // Blinks squash the eye; a fast dart is handled by the face's stretch.
   const shut = 1 - f.blink;
@@ -1368,7 +1365,7 @@ function morphEye(f: FaceFrame, ex: number, ey: number, side: -1 | 0 | 1, k: num
 function morphMouth(f: FaceFrame, mx: number, my: number, color: string): number {
   const { ctx, box } = f;
   const s = box.s;
-  const target = f.mouthShape ? { mix: f.mouthShape, open: f.mouthOpen ?? 0 } : mouthShape(f.activity, f.t, f.talk, false);
+  const target = f.mouthShape ? { mix: f.mouthShape, open: f.mouthOpen ?? 0 } : mouthShape(f.activity, f.t, f.talk);
   const open = Math.max(0, Math.min(1, target.open));
   mouthOutlines ??= [
     band(0, -0.03, 0.042, 0.78 * Math.PI, 0.22 * Math.PI, 0.0085),

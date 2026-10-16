@@ -114,7 +114,7 @@ jobs:
       - name: Install pinned Tauri CLI
         run: cargo install tauri-cli --locked --version "2.12.0"
 
-      - name: Prepare the sidecar and release version
+      - name: Unpack the CLI into the app runtime and set the release version
         env:
           VERSION: ${{ inputs.version }}
         run: python scripts/desktop_release.py --version "$VERSION" stage --platform ${{ matrix.platform }} --source dist/bin/kollab-${{ matrix.binary_platform }}
@@ -130,9 +130,20 @@ jobs:
           VERSION="$(python -c 'import json; print(json.load(open("desktop/src-tauri/tauri.release.json"))["version"])')"
           APP="desktop/src-tauri/target/release/bundle/macos/Kollab.app"
           test -d "$APP"
-          test -x "$APP/Contents/MacOS/kollab"
-          shown="$("$APP/Contents/MacOS/kollab" --version)"
+          # The app carries the CLI unpacked (desktop_release.py stage), never
+          # a scie: codesign cannot sign one. sign-macos.sh copies it into
+          # Resources and seals it ad hoc, each Mach-O and then the app, so a
+          # quarantined download gets Gatekeeper's Open Anyway path, not "damaged".
+          KOLLAB_APP_RUNTIME="$PWD/desktop/src-tauri/binaries/app-runtime-${{ matrix.target }}" \
+            bash desktop/scripts/sign-macos.sh seal "$PWD/$APP"
+          test ! -e "$APP/Contents/MacOS/kollab"
+          test -x "$APP/Contents/Resources/kollab"
+          shown="$("$APP/Contents/Resources/kollab" --version)"
           test "${shown##* }" = "$VERSION"
+          # The signed extensions load, and running kollab writes nothing into the app.
+          "$APP/Contents/Resources/runtime/bin/python3.12" -I -c \
+            "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, kollabor_voice, plugins"
+          codesign --verify --deep --strict --verbose=2 "$APP"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
           mkdir -p dist/desktop
           base="kollab-desktop-${{ matrix.platform }}-${VERSION}"

@@ -95,7 +95,7 @@ export function FormPanel({
               <details
                 key={section.id}
                 open={q || failed || small ? true : undefined}
-                className="group rounded-lg border"
+                className="group rounded-lg bg-muted/30"
               >
                 <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm font-medium select-none [&::-webkit-details-marker]:hidden">
                   <ChevronRight className="size-4 shrink-0 transition-transform group-open:rotate-90" />
@@ -107,7 +107,7 @@ export function FormPanel({
                     {section.fields.length}
                   </span>
                 </summary>
-                <div className="divide-y border-t px-3">
+                <div className="px-3 pb-1">
                   {section.fields.map((field) => (
                     <FieldRenderer
                       key={field.path}
@@ -123,14 +123,14 @@ export function FormPanel({
             );
           })}
           {!sections.length ? (
-            <p className="text-muted-foreground rounded-lg border border-dashed px-3 py-6 text-center text-sm">
+            <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
               No settings match your search.
             </p>
           ) : null}
         </div>
       </div>
 
-      <footer className="flex shrink-0 flex-col gap-2 border-t px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-6">
+      <footer className="bg-muted/30 flex shrink-0 flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-6">
         <p className="text-muted-foreground text-xs sm:pt-2" aria-live="polite">
           {dirtyCount
             ? `${dirtyCount} unsaved change${dirtyCount === 1 ? "" : "s"}`

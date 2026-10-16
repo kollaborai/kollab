@@ -11,7 +11,6 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { TrajectoryRecord } from "./trajectory-records";
@@ -20,14 +19,14 @@ import { formatDuration, formatKind, formatTokens } from "./trajectory-format";
 function kindClass(kind: TrajectoryRecord["kind"]): string {
   switch (kind) {
     case "user":
-      return "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200";
+      return "text-blue-700 dark:text-blue-300";
     case "assistant":
-      return "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900 dark:bg-violet-950 dark:text-violet-200";
+      return "text-violet-700 dark:text-violet-300";
     case "tool":
     case "tool-batch":
-      return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200";
+      return "text-amber-700 dark:text-amber-300";
     case "system":
-      return "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200";
+      return "text-slate-700 dark:text-slate-300";
     default:
       return "";
   }
@@ -80,7 +79,7 @@ export function LoadEarlierBanner({
   onLoad: () => void;
 }) {
   return (
-    <div className="border-primary/15 bg-primary/[0.04] flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
+    <div className="bg-primary/[0.06] flex shrink-0 items-center justify-between gap-3 px-3 py-2">
       <span className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
         <History className="text-primary size-3.5 shrink-0" />
         <span>Older records are available.</span>
@@ -143,7 +142,7 @@ export function TrajectoryTable({
       {canLoadEarlier && (
         <LoadEarlierBanner loading={loadingEarlier} onLoad={onLoadEarlier} />
       )}
-      <div className="bg-muted/55 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] border-b px-3 py-2.5 text-[0.625rem] font-semibold tracking-[0.14em] uppercase backdrop-blur md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
+      <div className="bg-muted/40 text-muted-foreground grid shrink-0 grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] px-3 py-2.5 text-[0.625rem] font-semibold tracking-[0.14em] uppercase md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]">
         <span>#</span>
         <span>Event</span>
         <span>Content</span>
@@ -175,13 +174,12 @@ export function TrajectoryTable({
                   aria-selected={selectedId === record.id}
                   data-record-id={record.id}
                   className={cn(
-                    "group grid min-h-10 w-full cursor-pointer grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] items-center border-b border-border/45 border-l-2 border-l-transparent px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60 md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]",
-                    record.opensTurn && "border-t-2 border-t-primary/40",
-                    record.kind === "tool" || record.kind === "tool-batch"
-                      ? "border-l-amber-500/60 bg-amber-500/[0.04]"
-                      : "",
+                    "group grid min-h-10 w-full cursor-pointer grid-cols-[2.75rem_minmax(8.5rem,10rem)_minmax(0,1fr)] items-center px-3 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60 md:grid-cols-[3.5rem_minmax(10rem,11rem)_minmax(0,1fr)]",
+                    // Turns alternate shade; tools inside one carry an amber tint.
+                    record.turn % 2 === 1 && "bg-muted/[0.16]",
+                    (record.kind === "tool" || record.kind === "tool-batch") && "bg-amber-500/[0.05]",
                     selectedId === record.id
-                      ? "bg-primary/[0.08] text-accent-foreground shadow-[inset_0_1px_0_hsl(var(--primary)/0.22),inset_0_-1px_0_hsl(var(--primary)/0.22)]"
+                      ? "bg-primary/[0.1] text-accent-foreground"
                       : "hover:bg-accent/45",
                   )}
                   onClick={() => onSelect(record.id)}
@@ -190,10 +188,9 @@ export function TrajectoryTable({
                     {record.index}
                   </span>
                   <span className="flex min-w-0 flex-wrap items-center gap-1 pr-2">
-                    <Badge
-                      variant="outline"
+                    <span
                       className={cn(
-                        "max-w-full gap-1 rounded-full px-2 text-[0.625rem] shadow-none",
+                        "flex max-w-full items-center gap-1 text-[0.6875rem] font-medium",
                         kindClass(record.kind),
                       )}
                     >
@@ -201,14 +198,14 @@ export function TrajectoryTable({
                       <span className="truncate">
                         {formatKind(record.kind)}
                       </span>
-                    </Badge>
+                    </span>
                     {record.turn > 0 && (
-                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem]">
+                      <span className="text-muted-foreground font-mono text-[0.625rem]">
                         T{record.turn}
                       </span>
                     )}
                     {record.request !== null && (
-                      <span className="text-muted-foreground rounded bg-muted/60 px-1 py-0.5 font-mono text-[0.625rem]">
+                      <span className="text-muted-foreground font-mono text-[0.625rem]">
                         R{record.request}
                       </span>
                     )}
@@ -234,7 +231,7 @@ export function TrajectoryTable({
                     </span>
                     {(record.inputTokens !== undefined ||
                       record.outputTokens !== undefined) && (
-                      <span className="text-muted-foreground hidden shrink-0 rounded bg-muted/50 px-1.5 py-0.5 font-mono text-[0.625rem] xl:inline">
+                      <span className="text-muted-foreground hidden shrink-0 font-mono text-[0.625rem] xl:inline">
                         in {formatTokens(record.inputTokens)} · out {formatTokens(record.outputTokens)}
                       </span>
                     )}
@@ -247,7 +244,7 @@ export function TrajectoryTable({
             })
           ) : (
             <div className="text-muted-foreground flex min-h-56 flex-col items-center justify-center gap-3 p-6 text-center">
-              <div className="bg-muted/70 text-muted-foreground flex size-10 items-center justify-center rounded-xl">
+              <div className="text-muted-foreground flex size-10 items-center justify-center">
                 <SearchX className="size-5" />
               </div>
               <div>

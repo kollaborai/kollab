@@ -174,7 +174,7 @@ def _outcome(result: dict[str, Any], panel: dict[str, Any]) -> dict[str, Any]:
 
 
 class AppsPanel:
-    """``/apps``: the Apps picker. Rows, sections, and the Add, Turn On and Remove row actions."""
+    """The Apps picker (``/mcp`` in the web UI). Rows, sections, and the Add, Turn On and Remove row actions."""
 
     name = "apps"
     kind = "picker"

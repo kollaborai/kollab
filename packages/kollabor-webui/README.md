@@ -20,7 +20,10 @@ The checked-in frontend source is the source of truth.  `hatch_build.py` runs
 `npm ci` and `npm run build` when npm is available, then force-includes Vite's
 `frontend/dist` output in a wheel under `kollabor_webui/static/assistant`.  The
 source checkout also serves `frontend/dist` directly, which makes editable
-installs useful without copying generated files into git.  Python-only builds
+installs useful without copying generated files into git. When `frontend/` holds a
+change newer than that build, `kollabor-webui` runs `npm run build` before it serves
+(and `kollab --web-ui` does too when the UI is already running), so the UI it serves
+is never older than its source.  Python-only builds
 continue to serve the legacy `static/index.html` and `static/app.js` fallback
 if Node/npm is unavailable.
 

@@ -262,6 +262,13 @@ class AgentOrchestrator:
         command cannot be a relative ``python main.py``. That only works while
         cwd is the Kollab source repo and silently kills spawns elsewhere.
         """
+        from kollabor.binary import own_launcher
+
+        # The binary or Kollab.app this runs from, never another kollab on PATH.
+        launcher = own_launcher()
+        if launcher is not None:
+            return [str(launcher)]
+
         source_main = Path(__file__).resolve().parents[2] / "main.py"
         if source_main.exists():
             return [sys.executable, str(source_main)]

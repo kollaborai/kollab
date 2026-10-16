@@ -16,7 +16,15 @@ from kollabor.commands.mcp_command import register_mcp_commands
 from kollabor.commands.registry import SlashCommandRegistry
 from kollabor.state.snapshots import McpServerInfo, McpSnapshot
 from kollabor_tui.key_parser import KeyPress
+import plugins.altview.mcp_wizard_altview as mcp_wizard
 from plugins.altview.mcp_wizard_altview import McpWizardAltView, build_mcp_entries
+
+
+@pytest.fixture(autouse=True)
+def _no_apps_catalog(request, monkeypatch):
+    """Only the example config, unless a test asks for the real Apps catalog."""
+    if "apps_catalog" not in request.keywords:
+        monkeypatch.setattr(mcp_wizard, "_catalog_servers", lambda: {})
 
 
 def _example_config():
@@ -113,6 +121,9 @@ class _MemoryMcpManager:
         self.current_config["servers"][name]["enabled"] = True
         return {"success": True}
 
+    def upsert_server(self, name, entry):
+        self.current_config.setdefault("servers", {})[name] = deepcopy(entry)
+
     def disable_server(self, name):
         self.disabled.append(name)
         self.current_config["servers"][name]["enabled"] = False
@@ -150,6 +161,33 @@ def test_build_mcp_entries_merges_configured_available_and_runtime_state():
     assert by_name["fetch"].state == "available"
     assert by_name["brave"].badges == ["available", "needs env"]
     assert by_name["local-only"].state == "disabled"
+
+
+@pytest.mark.apps_catalog
+@pytest.mark.asyncio
+async def test_mcp_altview_lists_and_adds_apps_catalog_servers():
+    manager = _MemoryMcpManager({"servers": {}}, _example_config())
+    state_service = SimpleNamespace(
+        get_mcp_state=AsyncMock(return_value=McpSnapshot()),
+        reload_mcp_servers=AsyncMock(return_value={"reconnected": 1}),
+    )
+    view = McpWizardAltView()
+    view.set_context(mcp_manager=manager, state_service=state_service)
+
+    await view.on_enter(renderer=Mock())
+
+    assert view._entry_by_name("brave").source == "available"  # example config still listed
+    assert view._entry_by_name("context7").source == "available"  # and the Apps catalog
+    assert view._entry_by_name("github").missing_env == ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+
+    view._selected_index = view._entry_index("context7")
+    await view.handle_input(_key("a", "a"))
+
+    saved = manager.current_config["servers"]["context7"]
+    assert saved["added_by"] == "apps"
+    assert view._status_message.startswith("Added Context7")
+    state_service.reload_mcp_servers.assert_awaited_once()
+    assert view._entry_by_name("context7").source == "configured"
 
 
 @pytest.mark.asyncio

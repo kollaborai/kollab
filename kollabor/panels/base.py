@@ -49,7 +49,7 @@ COMMAND_PANELS: dict[str, str] = {
     "model": "model",
     "setup": "setup",
     "connect": "connect",
-    "apps": "apps",
+    "mcp": "apps",
     "voice": "voice",
 }
 

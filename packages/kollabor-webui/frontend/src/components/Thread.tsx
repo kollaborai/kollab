@@ -170,8 +170,9 @@ const HubNoteView: FC<{
   );
 };
 
-// Online announcements read as quiet activity; details remain available on demand.
-const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
+// Presence announcements (came online, went offline) read as quiet activity;
+// details remain available on demand.
+const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
   const pool = useContext(PoolContext);
   const { remote: remoteAgents } = useContext(ComposerHubContext);
   const where = useContext(WhereContext);
@@ -196,13 +197,13 @@ const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
         size={18}
         className="shrink-0"
       />
-      <span className="min-w-0 truncate text-start">{titleCase(name)} came online</span>
+      <span className="min-w-0 truncate text-start">{titleCase(name)} {note.presence === "offline" ? "went offline" : "came online"}</span>
       {details ? <ChevronDownIcon className="size-3 shrink-0 transition-transform group-data-[state=open]/chip:rotate-180" /> : null}
     </>
   );
 
   return (
-    <div data-slot="kollab_online-notice" className="my-1.5 w-full">
+    <div data-slot="kollab_online-notice" className="w-full">
       <Collapsible defaultOpen={false}>
         <CollapsibleTrigger
           data-slot="kollab_online-chip-trigger"
@@ -228,14 +229,16 @@ const OnlineNoticeChip: FC<{ note: HubNote }> = ({ note }) => {
 // these). One this agent only saw go by is dimmed, like the terminal's ◇.
 const HubNoteMessage: FC = () => {
   const note = useAuiState((s) => s.message.metadata.custom["hub"]) as HubNote | undefined;
-  if (note?.isOnlineNotice) {
+  if (note?.presence) {
+    // A run of presence chips stacks tight instead of taking a thread gap each.
     return (
       <MessagePrimitive.Root
         data-slot="kollab_hub-message"
         data-role="system"
-        className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150"
+        data-presence={note.presence}
+        className="fade-in slide-in-from-bottom-1 animate-in px-2 duration-150 [[data-presence]+&]:-mt-5"
       >
-        <OnlineNoticeChip note={note} />
+        <PresenceChip note={note} />
       </MessagePrimitive.Root>
     );
   }

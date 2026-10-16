@@ -5,16 +5,10 @@
  * Tools are summoned out of the gem the way the Gems summon their weapons.
  */
 
-import { BLACK, TAU, WHITE, drawFace, eyeGap, mix, rgba, workPhase, type FaceFrame } from "./gem-face";
+import { BLACK, TAU, WHITE, drawFace, eyeGap, mix, rgba, type FaceFrame } from "./gem-face";
 
 const GLYPHS = ["{", "}", ";", "</>", "=>", "()", "0", "1", "[]", "&&"];
 const CODE_COLORS = ["#7ee787", "#79c0ff", "#d2a8ff", "#ffa657"];
-
-// Where the two spare keyboards sit, out front of the laptop.
-const EXTRA_KEYS = [
-  [0.6, 1.0],
-  [0.86, 1.12],
-] as const;
 
 function handAt(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, color: string, angle = 0) {
   ctx.fillStyle = color;
@@ -26,29 +20,12 @@ function handAt(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, 
   ctx.stroke();
 }
 
-function keyboard(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, glow: string, t: number) {
-  const h = w * 0.3;
-  ctx.fillStyle = "#23252d";
-  ctx.strokeStyle = "rgba(255,255,255,0.18)";
-  ctx.lineWidth = Math.max(0.6, w * 0.02);
-  ctx.beginPath();
-  ctx.roundRect(x - w / 2, y - h / 2, w, h, h * 0.2);
-  ctx.fill();
-  ctx.stroke();
-  const cols = 7;
-  const kw = (w * 0.86) / cols;
-  for (let row = 0; row < 3; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const lit = Math.sin(t * 23 + row * 3.1 + col * 1.7) > 0.86;
-      ctx.fillStyle = lit ? glow : "rgba(255,255,255,0.32)";
-      ctx.fillRect(x - w * 0.43 + col * kw + kw * 0.15, y - h * 0.36 + row * h * 0.26, kw * 0.7, h * 0.16);
-    }
-  }
-}
-
-/** Grow a summoned tool in around (x, y) over its first moments. */
+/**
+ * Grow a summoned tool in around (x, y) over its first moments, or shrink it
+ * back into the gem as it is put away (`f.leave`).
+ */
 function summonIn(f: FaceFrame, x: number, y: number, start = 0) {
-  const p = f.still ? 1 : Math.min(1, Math.max(0, (f.since - start) / 0.35));
+  const p = f.leave !== undefined ? 1 - f.leave : f.still ? 1 : Math.min(1, Math.max(0, (f.since - start) / 0.35));
   const e = 1 - (1 - p) ** 3;
   const k = 0.4 + 0.6 * e;
   f.ctx.globalAlpha *= e;
@@ -62,6 +39,9 @@ function facePoint(f: FaceFrame) {
   return { ax: f.box.x + f.anchor.x * s + f.shift.x, ay: f.box.y + f.anchor.y * s + f.shift.y, s };
 }
 
+/** Whether an activity holds a tool (drawHeld), so a finished one is put away. */
+export const HOLDS: ReadonlySet<FaceFrame["activity"]> = new Set(["searching", "messaging", "tasking"]);
+
 /** Tools in hand. Drawn with the body, so they ride its moves. */
 export function drawHeld(f: FaceFrame) {
   switch (f.activity) {
@@ -72,7 +52,7 @@ export function drawHeld(f: FaceFrame) {
       communicator(f);
       return;
     case "tasking":
-      if (f.since < 1.3) salute(f);
+      if (f.since < 1.3 && f.leave === undefined) salute(f);
       else clipboard(f);
   }
 }
@@ -273,17 +253,16 @@ function clipboard(f: FaceFrame) {
  */
 export function drawProps(f: FaceFrame) {
   if (f.desk < 0.02) return;
-  const phase = workPhase(f.activity, f.since);
   const { ctx, box, t } = f;
   const s = box.s;
   const enter = (1 - f.desk) * s * 0.3;
   const X = (u: number) => box.x + u * s + enter;
   const Y = (v: number) => box.y + v * s;
-  const typing = phase.laptop && f.activity !== "reading" && !f.still;
-  const furious = typing && phase.furious;
+  // Thinking at the laptop rests its hands; only typing taps.
+  const typing = f.activity === "typing" && !f.still;
   const glow = rgba(mix(f.rgb, WHITE, 0.55));
   const hand = rgba(mix(f.rgb, BLACK, 0.15));
-  const flicker = typing ? 0.82 + 0.18 * Math.sin(t * (furious ? 31 : 9)) : 1;
+  const flicker = typing ? 0.92 + 0.08 * Math.sin(t * 5) : 1;
   const baseTop = Y(0.86);
   const hingeX = X(1.1);
   const lidLen = s * 0.36;
@@ -309,9 +288,6 @@ export function drawProps(f: FaceFrame) {
   ctx.lineTo(X(0.45), Y(0.25));
   ctx.closePath();
   ctx.fill();
-
-  // Three keyboards deep: two more out front.
-  if (phase.triple) EXTRA_KEYS.forEach(([u, v], i) => keyboard(ctx, X(u), Y(v), s * 0.3, glow, t + i));
 
   // Base with its keys.
   const shell = ctx.createLinearGradient(0, baseTop, 0, baseTop + s * 0.034);
@@ -349,44 +325,16 @@ export function drawProps(f: FaceFrame) {
   ctx.fill();
   ctx.restore();
 
-  if (phase.spareAt >= 0) {
-    // A spare dropped onto the keys after the throw.
-    const p = phase.spareAt / 0.8;
-    const fall = p < 0.7 ? (p / 0.7) ** 2 : 1 - Math.sin(((p - 0.7) / 0.3) * Math.PI) * 0.1;
-    const from = Y(0.3);
-    keyboard(ctx, X(0.82), from + (baseTop - s * 0.04 - from) * fall, s * 0.3, glow, t);
-  }
-
-  {
-    // Hands on the keys, fading with the laptop; furious typing blurs them. With three keyboards out
-    // the same two hands dart between the laptop and the spares, out of step.
-    const tap = furious ? 26 : 12;
-    const ghosts = furious ? 3 : 1;
-    [0.72, 0.88].forEach((u, i) => {
-      let hx = X(u);
-      let hy = baseTop - s * 0.026;
-      if (phase.triple && typing) {
-        const [ku, kv] = EXTRA_KEYS[i];
-        const c = (t * 1.6 + i * 0.5) % 1;
-        // Dwell, dash over in 8% of the beat, dwell, dash back.
-        const away = c < 0.42 ? 0 : c < 0.5 ? (c - 0.42) / 0.08 : c < 0.92 ? 1 : 1 - (c - 0.92) / 0.08;
-        const e = away * away * (3 - 2 * away);
-        hx += (X(ku) - s * 0.03 - hx) * e;
-        hy += (Y(kv) - s * 0.035 - hy) * e;
-      }
-      for (let g = ghosts - 1; g >= 0; g -= 1) {
-        ctx.globalAlpha = base * (g === 0 ? 1 : 0.28);
-        const lift = typing ? Math.max(0, Math.sin(t * tap + i * Math.PI - g * 0.7)) * s * 0.03 : 0;
-        handAt(ctx, hx + g * s * 0.012, hy - lift, s, hand);
-      }
-    });
-    ctx.globalAlpha = base;
-  }
+  // Hands on the keys, fading with the laptop, tapping out of step while it types.
+  [0.72, 0.88].forEach((u, i) => {
+    const lift = typing ? Math.max(0, Math.sin(t * 11 + i * Math.PI)) * s * 0.026 : 0;
+    handAt(ctx, X(u), baseTop - s * 0.026 - lift, s, hand);
+  });
 
   if (typing && s >= 40) {
-    // Keystrokes: code glyphs fly up off the keys.
-    const count = furious ? 6 : 3;
-    const rate = furious ? 2.4 : 1;
+    // Keystrokes: code glyphs float up off the keys.
+    const count = 3;
+    const rate = 0.8;
     ctx.font = `700 ${Math.round(s * 0.06)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -411,32 +359,6 @@ export function drawProps(f: FaceFrame) {
     }
     ctx.globalAlpha = base;
   }
-  if (furious) {
-    // Sweat flying off the back of the head.
-    const p = (t * 1.6) % 1;
-    const x = box.x + (0.15 - p * 0.12) * s;
-    const y = box.y + (0.28 + p * p * 0.1) * s;
-    ctx.fillStyle = "#8fd3ff";
-    ctx.beginPath();
-    ctx.moveTo(x, y - s * 0.035);
-    ctx.quadraticCurveTo(x + s * 0.022, y, x, y + s * 0.012);
-    ctx.quadraticCurveTo(x - s * 0.022, y, x, y - s * 0.035);
-    ctx.fill();
-  }
   ctx.restore();
 }
 
-/** The keyboard flung over the shoulder passes behind the gem. */
-export function drawBackProps(f: FaceFrame) {
-  const phase = workPhase(f.activity, f.since);
-  if (phase.throwAt < 0 || f.desk < 0.5) return;
-  const { ctx, box, t } = f;
-  const s = box.s;
-  const p = phase.throwAt / 0.9;
-  ctx.save();
-  ctx.globalAlpha = p > 0.75 ? 1 - (p - 0.75) / 0.25 : 1;
-  ctx.translate(box.x + (0.82 - p) * s, box.y + (0.82 - Math.sin(p * Math.PI) * 0.85 + p * 0.22) * s);
-  ctx.rotate(-p * TAU * 1.5);
-  keyboard(ctx, 0, 0, s * 0.3, rgba(mix(f.rgb, WHITE, 0.55)), t);
-  ctx.restore();
-}

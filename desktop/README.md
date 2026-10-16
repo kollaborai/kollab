@@ -15,22 +15,31 @@ icon available. The four existing CLI release binaries are unchanged.
 Needs Rust and the Tauri 2 CLI (`cargo install tauri-cli --version "^2"`, or
 use `npx @tauri-apps/cli@2` in place of `cargo tauri`).
 
-First put the kollab release binary where the bundler expects the sidecar.
-That folder is gitignored, because the binary is about 47 MB.
+First unpack a kollab release binary into the app runtime. `stage` checks the
+binary against its `.sha256`, so use a release asset pair or build one from this
+checkout; the runtime lands in the gitignored `src-tauri/binaries/`.
 
 ```bash
+python scripts/build_binary.py --out dist/bin    # or download kollab-macos-* + .sha256
+python scripts/desktop_release.py stage --platform macos-aarch64 --source dist/bin/kollab-macos-aarch64
 cd desktop
-mkdir -p src-tauri/binaries
-cp ~/.local/bin/kollab src-tauri/binaries/kollab-aarch64-apple-darwin
-# Intel Macs use kollab-x86_64-apple-darwin instead.
-# or download the matching kollab-macos-* release asset from GitHub Releases
-cargo tauri build
+cargo tauri build --config src-tauri/tauri.release.json --bundles app
+KOLLAB_APP_RUNTIME="$PWD/src-tauri/binaries/app-runtime-aarch64-apple-darwin" \
+  bash scripts/sign-macos.sh seal "$PWD/src-tauri/target/release/bundle/macos/Kollab.app"
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (unsigned,
-about 58 MB). To watch its log, run the binary from a terminal:
+The bundle is `src-tauri/target/release/bundle/macos/Kollab.app` (ad-hoc
+signed, about 175 MB on disk). To watch its log, run the binary from a terminal:
 `.../Kollab.app/Contents/MacOS/kollab-desktop`.
+
+The CLI is not a scie inside the app: `codesign` cannot sign a scie, and
+notarization rejects unsigned code. `stage` unpacks it into the scie's own
+CPython with kollab installed in it; `seal` copies that to
+`Kollab.app/Contents/Resources/` (`kollab` launcher, `runtime/`), signs every
+Mach-O in it, then the app, and `codesign --verify --deep --strict` must pass.
+The app updates whole: a kollab running from it never runs `/upgrade` in place.
+Details in [macOS signing and notarization](docs/apple-signing.md).
 
 Release builds publish one unsigned `.app.zip` and one `.dmg` for each supported
 macOS architecture (`aarch64` and `x86_64`), targeting macOS 11 or newer to
@@ -46,16 +55,29 @@ must match it. The committed base Tauri config is not rewritten during builds.
 The packaged macOS CLI and app metadata must report that version before the
 `.app.zip` and `.dmg` archives are collected.
 
-Because the app is unsigned, macOS Gatekeeper may block the first launch. Open
-the downloaded archive, then Control-click `Kollab.app`, choose **Open**, and
-confirm **Open** in the dialog. If macOS still refuses it, run
-`xattr -dr com.apple.quarantine /path/to/Kollab.app` once and open it again.
+The app is not signed with an Apple Developer ID, so Gatekeeper blocks its
+first launch with "Apple could not verify Kollab is free of malware".
+Control-click **Open** no longer gets past this on macOS 15 and newer. To allow
+it once:
+
+1. Drag `Kollab.app` to Applications and open it. Click **Done** on the warning.
+2. Open **System Settings > Privacy & Security**, scroll to the Security
+   section, and click **Open Anyway** next to the Kollab message (it shows for
+   about an hour after the blocked launch). Confirm with your password.
+3. Open Kollab again and click **Open Anyway** in the dialog.
+
+Or, from a terminal, clear the download's quarantine flag and open it normally:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Kollab.app
+```
 
 ## Signing and notarization
 
-The reusable `scripts/sign-macos.sh` helper can wrap a CI Tauri build to sign,
-notarize and staple with explicitly configured Apple Developer secrets. Its
-default is unsigned; it does not download sidecars, archive or publish assets.
+The reusable `scripts/sign-macos.sh` helper adds the staged runtime to a Tauri
+build and signs it: ad hoc by default, or with Developer ID, notarization and
+stapling from explicitly configured Apple Developer secrets. It does not
+download sidecars, archive or publish assets.
 See [macOS signing and notarization](docs/apple-signing.md) for operator setup,
 cleanup guarantees, and validation limits.
 
@@ -200,7 +222,7 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 2. **Spawn:** otherwise the app runs `kollab --web-ui` with `BROWSER=true` in
    its own session (setsid), and shows a loading page until the UI answers.
    It uses the newer of:
-   - the bundled kollab (`Kollab.app/Contents/MacOS/kollab`);
+   - the bundled kollab (`Kollab.app/Contents/Resources/kollab`);
    - an installed one: your login shell's `command -v kollab`, then
      `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 
@@ -216,7 +238,7 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 ## Menu bar and quitting
 
 - **Tray menu:** Open Kollab, Launch at Login (off by default; when on, the app
-  starts at login, hidden in the menu bar), Quit Kollab.
+  starts at login, hidden in the menu bar), Check for Updates…, Quit Kollab.
 - **Closing the window:** the window hides and the app keeps running in the
   menu bar. While the window is hidden the Dock icon goes away too (an
   accessory app, as Docker Desktop does); Open Kollab or a second launch
@@ -237,6 +259,35 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
   same version, just as it does in a terminal. The app didn't start that
   engine, so it is left running.
 
+## Updates
+
+The app updates itself on macOS (`src-tauri/src/updater.rs`). 30 s after launch
+and every 6 hours it reads the latest GitHub release; when it is newer than the
+app and carries `kollab-desktop-macos-<arch>-<version>.app.zip` plus its
+`.sha256`, it asks "Kollab X.Y.Z is available" (Install / Later). Later quiets
+the background check for that version until the next launch. Check for
+Updates… (tray and app menu) always asks, and says when Kollab is up to date.
+
+Install downloads beside the running app (a hidden `.Kollab-update-<pid>`
+folder on the same volume), and checks the zip against the release's
+SHA-256, `codesign --verify --deep --strict`, and that the bundle identifier
+matches and `CFBundleShortVersionString` is the release's version. Only then
+does it stop the runtime it started (as Quit does), swap the bundles in one
+`renamex_np(RENAME_SWAP)` (two renames with rollback off APFS), verify the
+installed app again (rolling back on failure) and reopen the new app once this
+one has exited. Any failure leaves the old app running and names the release
+page. A folder Kollab cannot write to (or a translocated app) gets the same
+message. The app is signed ad hoc, so the release checksum is the integrity
+check, as for the CLI binary's `/upgrade`.
+
+The web UI's update banner asks the running kollab to update; inside Kollab.app
+that answers method `app`, and in the app's window the banner then opens
+`kollab-desktop://update`, which runs Check for Updates. Linux packages are not
+updated in place: the prompt offers the release page instead.
+
+`KOLLAB_DESKTOP_RELEASE_URL` points the updater at another release JSON
+(`file://` works), for testing.
+
 ## Window behavior
 
 - Links to other origins and `target="_blank"` links open in the default
@@ -254,9 +305,10 @@ The port is `KOLLAB_WEBUI_PORT`, or 8080 if that is unset.
 
 | Path | What it is |
 | --- | --- |
-| `src-tauri/src/main.rs` | All app logic |
-| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar |
-| `src-tauri/tauri.release.json` | Generated Linux version, formats and opaque runtime file mappings |
+| `src-tauri/src/main.rs` | App logic: runtime, window, menus, quitting |
+| `src-tauri/src/updater.rs` | Self-update from the latest GitHub release |
+| `src-tauri/tauri.conf.json` | Identifier `ai.kollabor.kollab`, the macOS `binaries/kollab` sidecar (bundled as `Contents/Resources/kollab`) |
+| `src-tauri/tauri.release.json` | Generated release version, formats and opaque sidecar file mappings |
 | `src-tauri/Info.plist` | Microphone usage text; local networking allowed |
 | `ui/index.html` | Bundled loading, install and error page |
 | `app-icon.png` | 1024 px icon source (the Kollab mark) |
