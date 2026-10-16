@@ -133,8 +133,13 @@ def unpack_runtime(scie: Path, destination: Path) -> Path:
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
+    # A downloaded workflow artifact loses its executable bit, so run an
+    # executable copy of the verified scie rather than the download itself.
+    runnable = work / scie.name
+    shutil.copyfile(scie, runnable)
+    runnable.chmod(0o755)
     # SCIE=split writes the scie's files, each checked against its lift manifest.
-    subprocess.run([str(scie), str(work / "split")], env={**scie_env(), "SCIE": "split"}, check=True)
+    subprocess.run([str(runnable), str(work / "split")], env={**scie_env(), "SCIE": "split"}, check=True)
     lift = json.loads((work / "split/lift.json").read_text())["scie"]["lift"]
     (python,) = [entry for entry in lift["files"] if entry.get("key") == "python-distribution"]
     archive = work / "split" / python["name"]
