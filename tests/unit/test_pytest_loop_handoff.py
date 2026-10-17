@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+import warnings
 
 import pytest
 
@@ -19,15 +20,21 @@ class TestIsolatedRunnerHandoff(unittest.IsolatedAsyncioTestCase):
 
 @pytest.fixture
 def application_owned_loop():
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    policy.set_event_loop(loop)
+    # policy API warns from 3.14; the fixture is testing policy behavior,
+    # not the deprecation, so silence it (see test below)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        policy = asyncio.get_event_loop_policy()
+        loop = policy.new_event_loop()
+        policy.set_event_loop(loop)
     try:
         yield loop
     finally:
         assert not loop.is_closed()
-        loop.close()
-        policy.set_event_loop(None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            loop.close()
+            policy.set_event_loop(None)
 
 
 def test_asyncio_run_does_not_close_application_owned_loop(
@@ -38,15 +45,20 @@ def test_asyncio_run_does_not_close_application_owned_loop(
 
 
 def test_sync_hook_does_not_allocate_policy_loop() -> None:
-    previous_policy = asyncio.get_event_loop_policy()
-    fresh_policy = asyncio.DefaultEventLoopPolicy()
-    asyncio.set_event_loop_policy(fresh_policy)
-    try:
-        # 3.12/3.13 record implicit get_event_loop() allocation as
-        # _set_called; 3.14 removed implicit allocation and the flag, so a
-        # missing attribute means "never allocated". _loop stays None on
-        # every version until an explicit set_event_loop() runs.
-        assert not getattr(fresh_policy._local, "_set_called", False)
-        assert getattr(fresh_policy._local, "_loop", None) is None
-    finally:
-        asyncio.set_event_loop_policy(previous_policy)
+    # The policy API itself warns from 3.14 (removal slated 3.16) and this
+    # test IS the policy API's customer -- suppress its deprecation noise so
+    # strict-warning runs test the allocation behavior, not the warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        previous_policy = asyncio.get_event_loop_policy()
+        fresh_policy = asyncio.DefaultEventLoopPolicy()
+        asyncio.set_event_loop_policy(fresh_policy)
+        try:
+            # 3.12/3.13 record implicit get_event_loop() allocation as
+            # _set_called; 3.14 removed implicit allocation and the flag, so
+            # a missing attribute means "never allocated". _loop stays None
+            # on every version until an explicit set_event_loop() runs.
+            assert not getattr(fresh_policy._local, "_set_called", False)
+            assert getattr(fresh_policy._local, "_loop", None) is None
+        finally:
+            asyncio.set_event_loop_policy(previous_policy)
