@@ -2,10 +2,19 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import pkg from "./package.json";
+
+// The web bundle version tracks the release version (frontend package.json,
+// gated by scripts/check_version_parity.py). Injected at build time so the
+// bundle never hardcodes a version that drifts from the engine.
+const __APP_VERSION__ = JSON.stringify(pkg.version);
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: "./",
+  define: {
+    __APP_VERSION__: __APP_VERSION__,
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

@@ -84,7 +84,11 @@ before restarting any.
 - [ ] Secret and personal-data scans pass on the exact commit to be released.
 - [ ] GitHub issue templates, PR template, and branch-protection settings match
       the current release gate.
-- [ ] Package metadata versions match the release tag.
+- [ ] Package metadata versions match the release tag:
+      `python scripts/check_version_parity.py` (engine, every workspace
+      package, the web frontend bundle, and the desktop Tauri config must sit
+      at one version; the publish workflow re-runs this against the tag and
+      refuses to build or upload on drift).
 - [ ] CLI starts locally.
 - [ ] Engine starts locally when engine changes are included:
       `python -m kollabor_engine serve --port 7433`.
@@ -98,6 +102,7 @@ before restarting any.
 
 ```bash
 git status --short --branch
+python scripts/check_version_parity.py
 gitleaks detect --source . --no-git -v
 gitleaks detect --source . -v
 trufflehog git file://$PWD --only-verified
