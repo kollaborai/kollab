@@ -41,6 +41,12 @@ import yaml
 if TYPE_CHECKING:
     pass  # For forward reference to AgentManager
 
+from kollabor_ai.prompt_overrides import (
+    PromptOverrideStore,
+)
+from kollabor_ai.prompt_overrides import (
+    get_default_store as get_default_override_store,
+)
 from kollabor_config.config_utils import (
     get_config_directory,
     get_global_agents_dir,
@@ -669,11 +675,19 @@ class Agent:
         """
         Get system prompt with active skills appended.
 
-        Skills are added under "## Skill: {name}" headers.
-        System docs from agents/system/ directories are auto-appended
-        before the agent's own prompt content.
-        The system prompt is rendered through PromptRenderer to process
-        any <trender> tags (both commands and file includes).
+        Layout (stable-prefix friendly — identity first, volatile last):
+          1. the agent's own prompt (identity/role header, working rules,
+             communication, tools, skills catalog)
+          2. the condensed hub protocol, appended only when the hub is on
+          3. active skills
+          4. the skills catalog for inactive skills
+          5. the cache-boundary sentinel
+
+        The legacy agents/system/*.md hub docs are no longer prepended at
+        the top of the prompt; the hub protocol lives at the tail so the
+        cached prefix stays identical when hub state changes. The prompt is
+        rendered through PromptRenderer to process any <trender> tags
+        (both commands and file includes).
 
         Args:
             agent_manager: Optional AgentManager for rendering <trender type="agents_list" /> tags.
@@ -696,24 +710,26 @@ class Agent:
                 except Exception as e:
                     logger.error(f"Failed to load system_prompt for {self.name}: {e}")
 
-        # Render the base system prompt (processes <trender> tags)
-        # Use agent directory as base_path for resolving relative includes
+        # Render the agent's own system prompt (processes <trender> tags).
+        # Identity/role/workflow come first so the cached prefix is stable;
+        # hub protocol and skills are appended behind it.
         renderer = PromptRenderer(
             base_path=self.directory,
             agent_manager=agent_manager,
             event_bus=event_bus,
             skip_volatile=skip_volatile,
+            prompt_bundle=self.name,
         )
         rendered_prompt = renderer.render(self.system_prompt)
 
-        # Auto-inject system docs from agents/system/ directories
-        # Global system dir first, then local (local can override by filename)
-        system_docs = self._load_system_docs(renderer)
+        parts = [rendered_prompt]
 
-        parts = []
-        if system_docs:
-            parts.append(system_docs)
-        parts.append(rendered_prompt)
+        # Condensed hub protocol: appended, never prepended, and only when
+        # this process is actually on the hub. A hub-disabled or solo
+        # process gets none, so its prompt stays identical to a plain run.
+        hub_protocol = self._load_hub_protocol(renderer)
+        if hub_protocol:
+            parts.append(hub_protocol)
 
         # Level 2: Active skills (full content loaded into context)
         for skill_name in self.active_skills:
@@ -747,68 +763,88 @@ class Agent:
                 catalog_lines.append(f"  - {name}: {desc}")
             parts.append("\n".join(catalog_lines))
 
+        # Cache-boundary sentinel: everything above this marker is static
+        # for this session (identity, rules, tools, skills, hub protocol);
+        # per-turn context rides the injection rail instead.
+        parts.append(
+            "[cache boundary]\n"
+            "Everything above this marker in the system prompt is static "
+            "for this session and byte-identical across sessions for the "
+            "same agent. Everything below arrives per turn and may change."
+        )
+
         return "\n".join(parts)
 
-    def _load_system_docs(self, renderer) -> str:
-        """Load and render all .md files from agents/system/ directories.
+    def _load_hub_protocol(self, renderer) -> str:
+        """Load the condensed hub protocol doc, when the hub is on.
 
-        Scans global (~/.kollab/agents/system/) and local
-        (.kollab/agents/system/) directories. Files are sorted
-        alphabetically. Local files override global ones with the same name.
+        Replaces the legacy agents/system/*.md prepend: the hub docs are
+        protocol reference, so they belong at the prompt tail where they
+        do not disturb the cached prefix. A hub-disabled or solo process
+        (env set by the engine / kollabor.hub_env) gets no hub protocol.
 
         Args:
             renderer: PromptRenderer instance for processing trender tags.
 
         Returns:
-            Rendered system docs concatenated, or empty string if none found.
+            Rendered hub protocol markdown, or empty string when the hub
+            is off or no hub doc is present.
         """
         from kollabor_config.config_utils import (
             get_global_agents_dir,
             get_local_agents_dir,
         )
 
-        # Collect files: global first, local overrides by filename
-        files_by_name: Dict[str, Path] = {}
+        # The hub docs teach the mesh. A solo or hub-disabled process is
+        # not on it (env set by the engine / kollabor.hub_env), so it gets
+        # none. KOLLAB_HUB_ENABLED (explicit opt-in) also admits the doc.
+        hub_on = any(
+            os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
+            for key in ("KOLLAB_HUB_ENABLED",)
+        )
+        hub_off = any(
+            os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
+            for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB")
+        )
+        if hub_off or not hub_on:
+            return ""
 
-        global_system = get_global_agents_dir() / "system"
-        if global_system.is_dir():
-            for md_file in sorted(global_system.glob("*.md")):
-                files_by_name[md_file.name] = md_file
-
+        # Local overrides global by filename; the first hub-*.md wins.
+        candidates: List[Path] = []
         local_agents = get_local_agents_dir()
         if local_agents:
             local_system = local_agents / "system"
             if local_system.is_dir():
-                for md_file in sorted(local_system.glob("*.md")):
-                    files_by_name[md_file.name] = md_file
+                candidates.extend(sorted(local_system.glob("hub-*.md")))
+        global_system = get_global_agents_dir() / "system"
+        if global_system.is_dir():
+            candidates.extend(sorted(global_system.glob("hub-*.md")))
 
-        # Hub docs teach the mesh. A solo or hub-disabled process is not on
-        # it (env set by the engine / kollabor.hub_env), so it gets none.
-        if any(
-            os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
-            for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB")
-        ):
-            files_by_name = {
-                name: path
-                for name, path in files_by_name.items()
-                if not name.startswith("hub-")
-            }
-
-        if not files_by_name:
-            return ""
-
-        parts = []
-        for name in sorted(files_by_name.keys()):
-            path = files_by_name[name]
+        seen: set = set()
+        for path in candidates:
+            if path.name in seen:
+                continue
+            seen.add(path.name)
             try:
                 content = path.read_text(encoding="utf-8")
+                # User-space override wins (System Prompts page): keyed by
+                # the doc's stem under this agent's bundle namespace.
+                store = getattr(renderer, "override_store", None)
+                if not isinstance(store, PromptOverrideStore):
+                    store = get_default_override_store()
+                key = store.section_key_for_path(path)
+                override = store.get_override(
+                    getattr(renderer, "prompt_bundle", None) or "default", key
+                )
+                if override is not None:
+                    content = override
+                    logger.debug(f"Using prompt override for hub doc {path.name}")
                 rendered = renderer.render(content)
-                parts.append(rendered)
-                logger.debug(f"Loaded system doc: {path}")
+                logger.debug(f"Loaded hub protocol doc: {path}")
+                return rendered
             except Exception as e:
-                logger.error(f"Failed to load system doc {path}: {e}")
-
-        return "\n\n".join(parts)
+                logger.error(f"Failed to load hub protocol doc {path}: {e}")
+        return ""
 
     def load_skill(self, skill_name: str) -> bool:
         """

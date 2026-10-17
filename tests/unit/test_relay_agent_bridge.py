@@ -159,6 +159,10 @@ class RecordingTaskLedger:
         self.assignments.append(kwargs)
         return SimpleNamespace(id=f"task-{len(self.assignments)}")
 
+    def enqueue(self, **kwargs):
+        self.assignments.append({"status": "open", **kwargs})
+        return SimpleNamespace(id=f"task-{len(self.assignments)}")
+
     def pending_replies(self):
         return []
 
@@ -1549,6 +1553,7 @@ def test_hub_msg_parser_preserves_question_kind():
         "thread_id": thread_id,
         "reply_to": question_id,
         "kind": "answer",
+        "task_id": "",
         "content": "Use the workspace root.",
     }
 

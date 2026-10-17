@@ -11,14 +11,23 @@ permissions:
 
 jobs:
   tests:
-    name: ci/tests
+    name: ci/tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is the launch runtime (operator directive): required leg.
+        # 3.12 stays as a non-blocking, informative leg for the >=3.12 floor.
+        python-version: ["3.14", "3.12"]
+    # only the 3.12 leg may fail without blocking the merge gate
+    continue-on-error: ${{ matrix.python-version == '3.12' }}
+
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -38,6 +47,31 @@ jobs:
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 
+  # The required "ci/tests" check must resolve under that EXACT name. Matrix
+  # legs report as "ci/tests (3.14)" / "ci/tests (3.12)", which never matches,
+  # leaving a required rule stuck on "Expected, waiting". This aggregate job
+  # carries the exact name and mirrors the matrix verdict: the 3.14 leg must
+  # succeed; the 3.12 leg is informative (continue-on-error) and cannot fail
+  # the aggregate. A skipped or cancelled matrix also fails the aggregate, so
+  # the check can never resolve green without the suite having run.
+  required_tests:
+    # The job ID cannot contain '/' (GitHub id charset), but the DISPLAY name
+    # is free-form: this resolves as the check "ci/tests", which is the exact
+    # name the required rule expects.
+    name: ci/tests
+    needs: [tests]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless the required matrix leg passed
+        env:
+          RESULT: ${{ needs.tests.result }}
+        run: |
+          case "$RESULT" in
+            success) echo "ci/tests: required leg succeeded"; exit 0 ;;
+            *)       echo "ci/tests: required leg result was '$RESULT'"; exit 1 ;;
+          esac
+
   standards-check:
     name: ci/standards-check
     runs-on: ubuntu-latest
@@ -45,8 +79,9 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
+        # launch runtime: standards checks gate on 3.14 (operator directive)
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -89,3 +124,24 @@ jobs:
 
       - name: Run Gitleaks
         run: gitleaks detect --source . --redact --verbose
+
+  # One quick CLI binary build smoke on PRs: proves the packaging path still
+  # works without paying for the full binary/desktop matrix (those run only on
+  # pushes to main and release tags, see binaries.yml).
+  binary-smoke:
+    name: ci/binary-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Build the Linux CLI binary and check that it runs
+        env:
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
+        run: python scripts/build_binary.py --out dist/bin

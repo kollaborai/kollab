@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import traceback
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request  # type: ignore[import-not-found]
@@ -98,11 +99,25 @@ async def open_named_session(request: Request) -> None:
         raise HTTPException(status_code=503, detail=f"could not open this agent: {e}")
 
 
+@asynccontextmanager
+async def _engine_lifespan(app: FastAPI):
+    """Lifespan handlers (replaces deprecated on_event startup/shutdown)."""
+    logger.info("Engine started")
+    try:
+        yield
+    finally:
+        for session in list(_sessions.values()):
+            await session.shutdown()
+        _sessions.clear()
+        logger.info("Engine shutdown - all sessions cleaned up")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Kollab Engine",
         description="AI engine API - conversations, tools, permissions",
         version="0.1.0",
+        lifespan=_engine_lifespan,
     )
 
     # Auth middleware
@@ -188,9 +203,11 @@ def create_app() -> FastAPI:
 
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
+    from .routes.prompts import router as prompts_router
 
     app.include_router(agents_router)
     app.include_router(hub_router)
+    app.include_router(prompts_router)
 
     from .routes.workspaces import router as workspaces_router
 
@@ -276,16 +293,5 @@ def create_app() -> FastAPI:
         # Ready if profiles exist AND at least one has valid credentials
         ready = checks["profiles"] == "ok" and checks["api_credentials"] == "ok"
         return {"ready": ready, "checks": checks}
-
-    @app.on_event("startup")
-    async def on_startup():
-        logger.info("Engine started")
-
-    @app.on_event("shutdown")
-    async def on_shutdown():
-        for session in list(_sessions.values()):
-            await session.shutdown()
-        _sessions.clear()
-        logger.info("Engine shutdown - all sessions cleaned up")
 
     return app

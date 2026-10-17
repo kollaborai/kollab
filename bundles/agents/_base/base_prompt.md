@@ -11,9 +11,7 @@
 <trender type="include" path="sections/protocols/tool-execution.md" />
 <trender type="include" path="sections/protocols/notifications.md" />
 
-<trender type="include" path="sections/tool-reference/git.md" />
-<trender type="include" path="sections/tool-reference/mcp.md" />
-<trender type="include" path="sections/tool-reference/session-logs.md" />
+<trender type="include" path="sections/tool-reference/context.md" />
 <trender type="include" path="sections/tool-reference/web.md" />
 <trender type="include" path="sections/tool-reference/on-demand.md" />
 
@@ -30,8 +28,6 @@
 <trender type="include" path="sections/practices/performance.md" />
 <trender type="include" path="sections/practices/dirty-worktree.md" />
 <trender type="include" path="sections/practices/communication-style.md" />
-
-<trender type="include" path="../system/hub-context.md" />
 
 <trender type="include" path="sections/meta/completion-checklist.md" />
 <trender type="include" path="sections/meta/final-reminders.md" />

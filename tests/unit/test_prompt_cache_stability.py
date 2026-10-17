@@ -57,7 +57,14 @@ def test_volatile_context_renders_once_per_user_turn():
     # each part is its own keyed block, so one changed part re-sends only itself
     keys = [key for key, _ in first]
     assert {"context:hub_roster", "context:hub_vault", "context:active_llm"} <= set(keys)
-    assert all(block.startswith("[context]\n") for _, block in first)
+    # context blocks keep the "[context]" format; the cache-boundary sentinel
+    # is intentionally its own block and must stay last
+    assert all(
+        block.startswith("[context]\n")
+        for key, block in first
+        if key != "context:cache_boundary"
+    )
+    assert first[-1][0] == "context:cache_boundary"
     # tool loop: assistant + tool messages land after the user message
     history.append(ConversationMessage(role="assistant", content="calling"))
     assert builder.build_volatile_context() == first

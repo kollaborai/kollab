@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from .prompt_overrides import DEFAULT_BUNDLE, get_default_store
+
 if TYPE_CHECKING:
     from kollabor_agent import AgentManager
 
@@ -125,6 +127,8 @@ class PromptRenderer:
         profile_manager: Optional[Any] = None,
         conversation_logger: Optional[Any] = None,
         skip_volatile: bool = False,
+        prompt_bundle: Optional[str] = None,
+        override_store: Optional[Any] = None,
     ):
         """Initialize the prompt renderer.
 
@@ -154,6 +158,11 @@ class PromptRenderer:
         # to empty so the rendered prefix is byte-identical across sessions.
         # Their content is re-emitted per turn on the injection rail.
         self.skip_volatile = skip_volatile
+        # Prompt bundle this render belongs to (agent name or "default").
+        # Section includes resolve against the user override store under
+        # this bundle before the file on disk is read.
+        self.prompt_bundle = prompt_bundle or DEFAULT_BUNDLE
+        self.override_store = override_store
 
     def _ensure_alias_utils(self) -> Optional[Dict[str, Any]]:
         """Ensure shell alias utilities are loaded."""
@@ -982,6 +991,30 @@ class PromptRenderer:
             logger.error(f"Failed to execute command '{command}': {e}")
             return error_msg
 
+    def _finalize_override_content(self, original_path: str, override: str) -> str:
+        """Rebase nested includes inside an override against the original file.
+
+        Keeps relative includes inside an override resolving from the
+        original section's directory, mirroring _include_file's rebase.
+        """
+        try:
+            path = (self.base_path / original_path).resolve()
+            if not path.exists():
+                return override
+            included_dir = path.parent
+
+            def _rebase_include(m):
+                inc_path = m.group(1).strip()
+                if not Path(inc_path).is_absolute():
+                    abs_path = (included_dir / inc_path).resolve()
+                    if abs_path.exists():
+                        return f'<trender type="include" path="{abs_path}" />'
+                return m.group(0)
+
+            return self.TRENDER_INCLUDE_PATTERN.sub(_rebase_include, override)
+        except OSError:
+            return override
+
     def _include_file(self, file_path: str) -> str:
         """Include content from a file.
 
@@ -1024,6 +1057,19 @@ class PromptRenderer:
                 )
                 logger.error(f"Blocked dangerous file include: {path}")
                 return error_msg
+
+            # User overrides win over the file on disk. The store maps the
+            # file to a section key (stem) namespaced by this render's
+            # prompt bundle; seeded into the cache so the rebase loop and
+            # the render loop see it exactly once.
+            store = self.override_store or get_default_store()
+            override = store.get_override(
+                self.prompt_bundle, store.section_key_for_path(path)
+            )
+            if override is not None:
+                content = self._finalize_override_content(str(path), override)
+                self._file_cache[file_path] = content
+                return content
 
             # Read file content
             content = path.read_text(encoding="utf-8")
@@ -1106,6 +1152,8 @@ def render_system_prompt(
     profile_manager: Optional[Any] = None,
     conversation_logger: Optional[Any] = None,
     skip_volatile: bool = False,
+    prompt_bundle: Optional[str] = None,
+    override_store: Optional[Any] = None,
 ) -> str:
     """Convenience function to render a system prompt.
 
@@ -1117,6 +1165,8 @@ def render_system_prompt(
         event_bus: Optional EventBus instance for hub trender tags.
         profile_manager: Optional ProfileManager for active_llm trender tag.
         conversation_logger: Optional conversation logger for log path in active_llm tag.
+        prompt_bundle: Bundle name for prompt section override lookup.
+        override_store: Override store to consult (defaults to the shared store).
 
     Returns:
         Processed prompt with commands replaced by their output and
@@ -1130,5 +1180,7 @@ def render_system_prompt(
         profile_manager=profile_manager,
         conversation_logger=conversation_logger,
         skip_volatile=skip_volatile,
+        prompt_bundle=prompt_bundle,
+        override_store=override_store,
     )
     return renderer.render(prompt_content)

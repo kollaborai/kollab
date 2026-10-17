@@ -151,7 +151,9 @@ class EngineSession:
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
-        self.created_at = datetime.utcnow()
+        # timezone-aware now(): datetime.utcnow() is deprecated in Python 3.12+
+        # and removed-planned for future versions (launch runtime is 3.14).
+        self.created_at = datetime.now(timezone.utc)
         self.profile = profile
         self._profile_revision = 0
         self.agent = agent
@@ -348,8 +350,12 @@ class EngineSession:
             except OSError:
                 pass
         if found.get("created_at"):
-            started = datetime.fromtimestamp(float(found["created_at"]), timezone.utc)
-            session.created_at = started.replace(tzinfo=None)
+            # keep it aware: created_at is timezone-aware since the 3.14
+            # launch-runtime change (datetime.now(timezone.utc) above), and a
+            # naive/aware mix would break any comparison or subtraction.
+            session.created_at = datetime.fromtimestamp(
+                float(found["created_at"]), timezone.utc
+            )
         try:
             session.daemon = await get_daemon_pool().adopt(session_id, found)
             # An existing pool-owned handle belongs to its original session;

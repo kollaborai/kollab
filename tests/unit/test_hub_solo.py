@@ -99,12 +99,16 @@ async def test_solo_agent_registers_only_state_hooks(solo):
 
 
 def test_off_mesh_agents_get_no_hub_docs(tmp_path, monkeypatch):
-    for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB"):
+    for key in (
+        "KOLLAB_HUB_ENABLED",
+        "KOLLAB_HUB_SOLO",
+        "KOLLAB_HUB_DISABLED",
+        "KOLLAB_NO_HUB",
+    ):
         monkeypatch.delenv(key, raising=False)
     system = tmp_path / "system"
     system.mkdir()
     (system / "hub-collaboration.md").write_text("HUB")
-    (system / "other.md").write_text("OTHER")
     renderer = MagicMock(render=lambda text: text)
     agent = Agent(name="t", directory=tmp_path, system_prompt="")
 
@@ -115,9 +119,14 @@ def test_off_mesh_agents_get_no_hub_docs(tmp_path, monkeypatch):
         ),
         patch("kollabor_config.config_utils.get_local_agents_dir", return_value=None),
     ):
-        assert "HUB" in agent._load_system_docs(renderer)
+        # no hub env: off-mesh by default -> no hub protocol at all
+        assert agent._load_hub_protocol(renderer) == ""
+        # explicit opt-in admits the hub protocol doc
+        monkeypatch.setenv("KOLLAB_HUB_ENABLED", "1")
+        assert "HUB" in agent._load_hub_protocol(renderer)
+        # solo/off-mesh env suppresses the protocol even when opted in
         monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
-        assert agent._load_system_docs(renderer) == "OTHER"
+        assert agent._load_hub_protocol(renderer) == ""
 
 
 def test_hub_tags_render_nothing_for_a_solo_hub():
