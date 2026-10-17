@@ -257,7 +257,7 @@ Fix:
   - `GET /hub/identities/{identity}/capture` as alias of output with clearer naming.
   - Keep existing `GET /hub/agents/{agent_id}` style routes as agent-id aliases where useful; do not overload one path parameter with both identity and agent id.
 - Extract `HubLifecycleService` from `plugins/hub/plugin.py` spawn/stop logic before adding engine write routes. The service must own pool identity selection, online checks, reservation, skill/profile resolution, orchestrator registration, DNS attestation, stop signaling, pid verification, and stale presence cleanup.
-- Use `process_manager.py` or `mentiko_adapter.py` only as spawn backends. They are not sufficient as the lifecycle contract owner because they do not implement hub pool/reservation/attestation semantics.
+- Use `process_manager.py` only as a spawn backend. It is not sufficient as the lifecycle contract owner because it does not implement hub pool/reservation/attestation semantics.
 - Require stronger authorization for lifecycle routes:
   - bearer auth remains required by engine middleware.
   - spawn/stop additionally requires `manage_hub=true` on the request or a configured engine capability.

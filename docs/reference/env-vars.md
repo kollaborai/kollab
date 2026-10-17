@@ -375,7 +375,6 @@ here so you know to leave them alone.
 | `KOLLAB_DAEMON_READY_FD` | Pipe FD for daemon-ready signaling |
 | `KOLLAB_PARENT_PID` | Parent watchdog — child self-terminates if parent dies |
 | `KOLLAB_ROOT_SOCKET` | Socket namespace for hub coordination |
-| `KOLLAB_AGENT_ID` | Agent ID inherited by spawned sub-agents |
 | `KOLLAB_AGENT_NAME` | Agent name inherited by spawned sub-agents |
 | `KOLLAB_DEEP_THOUGHT_INSTANCE` | Deep-thought plugin instance marker |
 | `KOLLAB_DEEP_THOUGHT_CHILD` | Deep-thought child process flag |
