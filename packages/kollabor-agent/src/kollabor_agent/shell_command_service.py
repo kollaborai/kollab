@@ -346,8 +346,10 @@ class ShellCommandService:
                     renderer.status_area.update(
                         "shell-exec", f"exec: {command[:60]}...", priority=50
                     )
-            except Exception:
-                pass  # graceful fallback
+            except Exception as exc:
+                logger.debug(
+                    "Could not show shell exec status indicator: %s", exc
+                )
         logger.debug(f"Executing: {command}")
 
     def _hide_executing(self) -> None:

@@ -287,9 +287,10 @@ class ShellExecutor:
                 await self._kill_windows_process_tree()
             else:
                 await self._kill_unix_process_group()
-        except (ProcessLookupError, PermissionError, OSError):
-            # Process already dead or inaccessible
-            pass
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            # Process already dead or inaccessible; debug keeps kill-path
+            # noise down while the failure stays traceable.
+            logger.debug("Process group kill skipped: %s", exc)
 
     async def _kill_unix_process_group(self) -> None:
         """Kill Unix process group using POSIX signals."""
@@ -308,8 +309,10 @@ class ShellExecutor:
                 # Force kill if still running
                 os.killpg(pgid, signal.SIGKILL)
                 await self._current_process.wait()
-        except (ProcessLookupError, PermissionError):
-            pass
+        except (ProcessLookupError, PermissionError) as exc:
+            # Process already dead or inaccessible; debug keeps kill-path
+            # noise down while the failure stays traceable.
+            logger.debug("Process kill skipped: %s", exc)
 
     async def _kill_windows_process_tree(self) -> None:
         """Kill Windows process tree using taskkill."""
@@ -343,8 +346,10 @@ class ShellExecutor:
                     # Last resort: kill()
                     self._current_process.kill()
                     await self._current_process.wait()
-        except (ProcessLookupError, PermissionError):
-            pass
+        except (ProcessLookupError, PermissionError) as exc:
+            # Process already dead or inaccessible; debug keeps kill-path
+            # noise down while the failure stays traceable.
+            logger.debug("Process kill skipped: %s", exc)
 
     def _filter_env(self, env: Dict[str, str]) -> Dict[str, str]:
         """Remove sensitive environment variables."""

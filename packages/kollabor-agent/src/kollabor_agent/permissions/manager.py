@@ -762,8 +762,17 @@ class PermissionManager:
                             operation = json.loads(json.dumps(candidate_operation, sort_keys=True))
                             workspace = candidate_workspace
                             profile = candidate_profile
-                    except (TypeError, ValueError, OSError, json.JSONDecodeError):
-                        pass
+                    except (
+                        TypeError,
+                        ValueError,
+                        OSError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        logger.debug(
+                            "Skipping malformed ACP grant record for key %s: %s",
+                            key,
+                            exc,
+                        )
                 # Identity, scope, and source derive from the authoritative set.
                 records.append({
                     "grant_key": key,
