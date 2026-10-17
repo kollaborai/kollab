@@ -7,8 +7,6 @@ required fields.
 Updated after phases B-D expanded from 16 to 58+ tools.
 """
 
-
-from kollabor_agent.tool_generators.native_json import generate_openai_tools
 from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
 
@@ -29,11 +27,22 @@ class TestParity:
     def test_file_ops_native_names_present(self):
         """All original hardcoded file ops are in the registry."""
         file_ops_names = [
-            "file_read", "file_create", "file_create_overwrite",
-            "file_edit", "file_append", "file_insert_after",
-            "file_insert_before", "file_delete", "file_move",
-            "file_copy", "file_copy_overwrite", "file_mkdir",
-            "file_rmdir", "file_grep", "terminal", "git",
+            "file_read",
+            "file_create",
+            "file_create_overwrite",
+            "file_edit",
+            "file_append",
+            "file_insert_after",
+            "file_insert_before",
+            "file_delete",
+            "file_move",
+            "file_copy",
+            "file_copy_overwrite",
+            "file_mkdir",
+            "file_rmdir",
+            "file_grep",
+            "terminal",
+            "git",
         ]
         reg_native = {t.native_name for t in self.registry.list()}
         for name in file_ops_names:
@@ -82,17 +91,21 @@ class TestParity:
             assert tool.xml_tag_name, f"Tool {tool.name} missing xml_tag"
             assert tool.category, f"Tool {tool.name} missing category"
 
-    def test_openai_output_is_valid(self):
-        """Generated OpenAI tools are well-formed."""
-        tools = generate_openai_tools(self.registry.names(), registry=self.registry)
+    def test_native_schemas_are_valid(self):
+        """Registry-generated native tool schemas are well-formed.
+
+        This exercises the real production generator path
+        (ToolDefinition.to_json_schema, the same call
+        mcp_integration._get_registry_tools makes) so the schema
+        contract cannot drift from the registry.
+        """
+        tools = [t for t in self.registry.list() if t.expose_native]
         assert len(tools) >= 16
-        for t in tools:
-            assert t["type"] == "function"
-            func = t["function"]
-            assert "name" in func
-            assert "description" in func
-            assert "parameters" in func
-            params = func["parameters"]
+        for tool in tools:
+            schema = tool.to_json_schema()
+            assert schema["name"]
+            assert schema["description"]
+            params = schema["parameters"]
             assert params["type"] == "object"
             assert "properties" in params
 

@@ -391,8 +391,12 @@ class SubprocessStrategy(SpawnStrategy):
             if pipe:
                 try:
                     pipe.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Could not close %s pipe descriptor: %s",
+                        type(pipe).__name__,
+                        exc,
+                    )
 
     @staticmethod
     def _filter_env(env: dict) -> dict:
@@ -455,8 +459,8 @@ class SubprocessStrategy(SpawnStrategy):
         snap = ResourceSnapshot()
         try:
             snap.rss_bytes = self._get_rss(pid)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not read RSS for pid %s: %s", pid, exc)
         return snap
 
     @staticmethod
@@ -471,8 +475,8 @@ class SubprocessStrategy(SpawnStrategy):
                         # VmRSS:    12345 kB
                         parts = line.split()
                         return int(parts[1]) * 1024
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("procfs RSS read failed for pid %s: %s", pid, exc)
 
         # macOS fallback
         try:
@@ -821,8 +825,10 @@ class ProcessManager:
                     if self._on_crash:
                         try:
                             self._on_crash(mp.name, mp)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "on_crash callback failed for %s: %s", mp.name, exc
+                            )
                 else:
                     mp.stopped_at = time.time()
                     mp.state = ProcessState.STOPPED

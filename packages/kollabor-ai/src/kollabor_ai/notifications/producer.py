@@ -25,7 +25,7 @@ def push_env(
     message: str,
     kind: str = "external",
     collapse_key: Optional[str] = None,
-) -> None:
+) -> bool:
     """Push one event onto the env queue if available.
 
     Args:
@@ -35,26 +35,32 @@ def push_env(
         message: one-line human-readable text.
         kind: name of an EnvKind value (string form).
         collapse_key: optional dedup key for folding repeats.
+
+    Returns:
+        True when the event was queued, False when the rail was
+        unavailable or the push failed. Callers that need the outage
+        to be visible (e.g. approval-mode changes) check the result;
+        fire-and-forget callers may ignore it. Never raises.
     """
     if event_bus is None:
-        return
+        return False
     try:
         queue = event_bus.get_service("env_queue")
     except Exception:
-        return
+        return False
     if queue is None:
-        return
+        return False
 
     try:
         from .models import SYMBOLS, EnvEvent, EnvKind
 
         symbol = SYMBOLS.get(symbol_key)
         if symbol is None:
-            return
+            return False
         try:
             kind_enum = EnvKind(kind)
         except ValueError:
-            return
+            return False
 
         queue.push(
             EnvEvent(
@@ -64,5 +70,7 @@ def push_env(
                 collapse_key=collapse_key,
             )
         )
+        return True
     except Exception as e:  # never raise out of a producer
         logger.debug("push_env failed: %s", e)
+        return False

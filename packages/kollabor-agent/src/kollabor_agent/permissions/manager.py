@@ -151,20 +151,37 @@ class PermissionManager:
         self._approval_mode = mode
         self._sync_file_access_mode()
 
-        # Env-notification: capability change (fire-and-forget)
+        # Env-notification: capability change (fire-and-forget). The
+        # permission flow must never crash because the notification rail
+        # is down, but the outage must be visible — agents rely on the
+        # [env] capability marker to notice approval changes.
+        old_name = getattr(old_mode, "value", str(old_mode))
+        new_name = getattr(mode, "value", str(mode))
+        message = f"approval:{new_name} (was {old_name})"
         try:
             from kollabor_ai.notifications.producer import push_env
 
-            old_name = getattr(old_mode, "value", str(old_mode))
-            new_name = getattr(mode, "value", str(mode))
-            push_env(
+            delivered = push_env(
                 self._event_bus,
                 "capability",
-                f"approval:{new_name} (was {old_name})",
+                message,
                 kind="permission",
             )
-        except Exception:
-            pass
+        except Exception as exc:  # import or unexpected failure
+            delivered = False
+            logger.warning(
+                "approval-mode env notification for %s could not be "
+                "sent (%s)",
+                message,
+                exc,
+            )
+        if not delivered:
+            logger.warning(
+                "approval-mode env notification for %s was NOT delivered: "
+                "env-notification rail unavailable — agents will not see "
+                "this capability change via [env]",
+                message,
+            )
 
         # Persist to config if config_service is available and persist=True
         if persist and self._config_service:
