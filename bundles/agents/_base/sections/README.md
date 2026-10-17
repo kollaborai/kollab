@@ -14,7 +14,8 @@ sections/
 │   ├── file-edit.md                # <edit>, <create>, <delete> usage
 │   ├── file-append.md              # <append>, <insert_after/before>
 │   ├── directory.md                # <mkdir>, <rmdir>
-│   ├── git.md                      # Git workflow & version control
+│   ├── web.md                      # <web-fetch> / <web-search> usage
+│   ├── on-demand.md                # tool-search / tool-load discovery
 │   └── context.md                  # Context service: curate, evict, ledger query
 ├── protocols/                      # Behavioral protocols
 │   ├── tool-workflow.md            # Tool-first methodology
@@ -54,8 +55,15 @@ Each agent's `system_prompt.md` includes sections via trender paths:
 <!-- Selective tool inclusion -->
 <trender type="include" path="../_base/sections/tool-reference/terminal.md" />
 <trender type="include" path="../_base/sections/tool-reference/file-read.md" />
-<!-- research agent stops here - no file-edit, no git -->
+<!-- research agent stops here - no file-edit, no web -->
 ```
+
+Tool docs for providers WITHOUT native tool calling come from the unified
+tool registry (`render_for_bundle` in
+`packages/kollabor-agent/src/kollabor_agent/tool_generators/markdown.py`),
+not from static md files — the prompt reference and the executable scope
+can never drift. Providers WITH native tool calling get API schemas plus a
+short pointer instead.
 
 ## Tool Permissions via agent.json
 

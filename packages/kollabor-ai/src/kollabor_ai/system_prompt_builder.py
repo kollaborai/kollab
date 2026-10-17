@@ -80,6 +80,15 @@ class SystemPromptBuilder:
         self._shell_alias_prompt: Optional[str] = None
         self._shell_aliases_loaded = False
 
+        # Static mode opt-in for alias inlining (tests / non-stable paths).
+        # Live builds keep aliases off the static prompt; the keyed rail
+        # carries them.
+        self.include_static_aliases = bool(
+            self.config.get(
+                "kollabor.llm.system_prompt.static_aliases_inline", False
+            )
+        )
+
         # (user message, rendered blocks) of the turn build_volatile_context
         # last rendered for; see there.
         self._volatile_memo: Optional[Tuple[Any, List[Tuple[str, str]]]] = None
@@ -257,12 +266,16 @@ class SystemPromptBuilder:
         """Render the per-turn volatile context stripped from the stable prefix.
 
         Returns the session-context (date/git/cwd/probes), the live hub blocks
-        (identity/roster/vault/work_queue) and active_llm — exactly what build()
-        omits when stable_prefix is on — as keyed ``[context]`` blocks for the
-        injection rail. Each part is keyed on its own: the queue processor sends
-        a block only when it changed, so a peer flipping idle re-sends the
-        roster, not the vault. Returns [] when stable_prefix is off (that
-        content is already inline) or when nothing renders.
+        (identity/roster/vault/work_queue), active_llm, and the per-environment
+        blocks moved out of the static prompt (project tree, AGENTS.md,
+        attachment/custom files, shell aliases, cache boundary) — exactly what
+        build() omits when stable_prefix is on — as keyed ``[context]`` blocks
+        for the injection rail. Each part is keyed on its own: the queue
+        processor sends a block only when it changed, so a peer flipping idle
+        re-sends the roster, not the vault, and late-loading aliases appear
+        once and then only on a real content change. Returns [] when
+        stable_prefix is off (that content is already inline) or when nothing
+        renders.
         """
         if not self.config.get(
             "kollabor.llm.system_prompt.stable_prefix", True
@@ -283,6 +296,13 @@ class SystemPromptBuilder:
         memo = self._volatile_memo
         if turn_msg is not None and memo is not None and memo[0] is turn_msg:
             return memo[1]
+
+        stable = self.config.get(
+            "kollabor.llm.system_prompt.stable_prefix", True
+        )
+        if not stable:
+            # Inline mode: build() already carries everything; no rail.
+            return []
 
         # Re-emit the same installed session-context template the stable build
         # strips, so date/git/cwd/probes reach the model verbatim (and fresh).
@@ -320,6 +340,78 @@ class SystemPromptBuilder:
             )
         ]
 
+        # Per-environment blocks moved out of the static prompt (project
+        # tree, AGENTS.md, attachment/custom files, shell aliases). Each is
+        # keyed on its own so a tree change re-sends only the tree, not the
+        # AGENTS.md. The alias block exists only after the lazy load and
+        # re-sends only when its content actually changes -- the rail's
+        # carried-state check does the gating.
+        include_structure = self.config.get(
+            "kollabor.llm.system_prompt.include_project_structure", True
+        )
+        if include_structure:
+            tree_output = self._get_tree_output().strip()
+            if tree_output:
+                parts.append(
+                    (
+                        "project_tree",
+                        f"## Project Structure\n```\n{tree_output}\n```",
+                    )
+                )
+
+        agents_md = Path.cwd() / "AGENTS.md"
+        if agents_md.exists():
+            try:
+                content = agents_md.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(
+                        ("agents_md", f"## Agent Instructions\n{content}")
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to read AGENTS.md for rail: {e}")
+
+        attachment_files = self.config.get(
+            "kollabor.llm.system_prompt.attachment_files", []
+        )
+        for filename in attachment_files:
+            file_path = Path.cwd() / filename
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding="utf-8").strip()
+                    if content:
+                        parts.append(
+                            (
+                                f"attachment:{filename}",
+                                f"## {filename}\n```markdown\n{content}\n```",
+                            )
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to read {filename} for rail: {e}")
+
+        custom_files = self.config.get(
+            "kollabor.llm.system_prompt.custom_prompt_files", []
+        )
+        for filename in custom_files:
+            file_path = Path.cwd() / filename
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding="utf-8").strip()
+                    if content:
+                        parts.append(
+                            (
+                                f"custom:{filename}",
+                                f"## Custom Instructions ({filename})\n{content}",
+                            )
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to read custom prompt {filename} for rail: {e}"
+                    )
+
+        alias_block = self._static_aliases_block()
+        if alias_block:
+            parts.append(("aliases", alias_block))
+
         # ponytail: re-runs the session-context shell probes every turn (5s cap
         # each). Fine at current turn rates; if latency shows, cache the probe
         # output per session and re-run only date/git.
@@ -337,13 +429,26 @@ class SystemPromptBuilder:
             if rendered:
                 blocks.append((f"context:{name}", f"[context]\n{rendered}\n"))
 
+        # Cache-boundary sentinel: nothing after this marker changes within
+        # a session, so a prefix cache may be cut here. Emitted last, once.
+        blocks.append(
+            (
+                "context:cache_boundary",
+                "[cache boundary]\n"
+                "Everything above this marker in the system prompt is static "
+                "for this session and byte-identical across sessions for the "
+                "same agent. Everything below arrives per turn and may "
+                "change.",
+            )
+        )
+
         if turn_msg is not None:
             # holding the message (not its id) keeps a freed id from matching
             self._volatile_memo = (turn_msg, blocks)
         return blocks
 
     @staticmethod
-    def _latest_user_message(event_bus: Any) -> Optional[Any]:
+    def _latest_user_message(event_bus: Any) -> Optional[Any]:  # noqa: C901
         """The newest user message in the live conversation, or None."""
         llm = event_bus.get_service("llm_service") if event_bus else None
         history = getattr(llm, "conversation_history", None)
@@ -441,55 +546,15 @@ class SystemPromptBuilder:
         Returns:
             Complete system prompt string
         """
-        # Add project structure if enabled
-        include_structure = self.config.get(
-            "kollabor.llm.system_prompt.include_project_structure", True
-        )
-        if include_structure:
-            tree_output = self._get_tree_output()
-            prompt_parts.append(f"## Project Structure\n```\n{tree_output}\n```")
+        # Static-only prompt: project tree, AGENTS.md, attachment files,
+        # custom prompt files, shell aliases, and the session-closing line
+        # are per-environment state that changes mid-session. They ride the
+        # per-turn injection rail as keyed blocks (see build_volatile_context)
+        # so the system message stays byte-identical across turns and
+        # sessions and a local LLM can cache it.
 
-        # Add attachment files
-        attachment_files = self.config.get(
-            "kollabor.llm.system_prompt.attachment_files", []
-        )
-        for filename in attachment_files:
-            file_path = Path.cwd() / filename
-            if file_path.exists():
-                try:
-                    content = file_path.read_text(encoding="utf-8")
-                    prompt_parts.append(f"## {filename}\n```markdown\n{content}\n```")
-                    logger.debug(f"Attached file: {filename}")
-                except Exception as e:
-                    logger.warning(f"Failed to read {filename}: {e}")
-
-        # Auto-include AGENTS.md if it exists in project root
-        agents_md = Path.cwd() / "AGENTS.md"
-        if agents_md.exists():
-            try:
-                content = agents_md.read_text(encoding="utf-8")
-                prompt_parts.append(f"## Agent Instructions\n{content}")
-                logger.debug("Auto-included AGENTS.md from project root")
-            except Exception as e:
-                logger.warning(f"Failed to read AGENTS.md: {e}")
-
-        # Add custom prompt files
-        custom_files = self.config.get(
-            "kollabor.llm.system_prompt.custom_prompt_files", []
-        )
-        for filename in custom_files:
-            file_path = Path.cwd() / filename
-            if file_path.exists():
-                try:
-                    content = file_path.read_text(encoding="utf-8")
-                    prompt_parts.append(
-                        f"## Custom Instructions ({filename})\n{content}"
-                    )
-                    logger.debug(f"Added custom prompt: {filename}")
-                except Exception as e:
-                    logger.warning(f"Failed to read custom prompt {filename}: {e}")
-
-        # Add plugin system prompt additions
+        # Add plugin system prompt additions (static: plugin set is fixed
+        # once the app is up)
         plugin_additions = self._get_plugin_system_prompt_additions()
         for addition in plugin_additions:
             prompt_parts.append(addition)
@@ -504,17 +569,34 @@ class SystemPromptBuilder:
         if mcp_summaries:
             prompt_parts.append(mcp_summaries)
 
-        # Add shell aliases only after lazy session load has populated them
-        if self._shell_alias_prompt:
+        # Shell aliases load lazily after the first real submit (see
+        # ensure_shell_aliases_loaded). They must never rewrite the cached
+        # system prefix mid-session, so the static prompt only gains the
+        # aliases block when the builder was constructed with
+        # include_static_aliases=True (used by tests / non-stable modes).
+        # The live path emits aliases as a keyed rail block the first turn
+        # after they load, and only again if their content actually changes.
+        if self.include_static_aliases and self._shell_alias_prompt:
             prompt_parts.append(self._shell_alias_prompt)
-            logger.info("Added cached shell aliases to system prompt")
+            logger.info("Added cached shell aliases to static system prompt")
 
-        # Add closing statement
+        # Add closing statement (static session-awareness handoff)
         prompt_parts.append(
             "This is the codebase and context for our session. You now have full project awareness."
         )
 
         return "\n\n".join(prompt_parts)
+
+    def _static_aliases_block(self) -> Optional[str]:
+        """The shell-aliases rail block, once aliases have loaded.
+
+        Aliases are detected lazily (ensure_shell_aliases_loaded runs at
+        first real submit), so before that there is no aliases block at
+        all -- not an empty one. After the one-time load, the text is a
+        snapshot: it changes only if the alias content itself changes, so
+        the keyed rail emits it once and then only on a real change.
+        """
+        return self._shell_alias_prompt or None
 
     def _get_registry_tool_reference(self) -> Optional[str]:
         """Generate tool reference markdown from the unified tool registry.
@@ -532,6 +614,17 @@ class SystemPromptBuilder:
             )
             if not use_registry:
                 return None
+
+            # Tools come from ONE source: providers with native tool
+            # calling get the schemas over the API, so the prompt carries
+            # only a short pointer. The full XML registry reference is
+            # emitted only for providers without native tools.
+            if self.profile_manager is not None:
+                try:
+                    if self.profile_manager.get_supports_tools():
+                        return None
+                except Exception:
+                    pass
 
             # Determine which tools the active agent has access to
             allowed_tools = None
