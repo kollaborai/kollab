@@ -212,8 +212,12 @@ class ShellExecutor:
                     if transport and hasattr(transport, "close"):
                         try:
                             transport.close()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(
+                                "Could not close %s transport: %s",
+                                type(transport).__name__,
+                                exc,
+                            )
                 self._current_process = None
 
     async def cancel(self) -> None:
