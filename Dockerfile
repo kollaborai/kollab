@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-ARG PYTHON_IMAGE=python:3.12-slim
+# Python 3.14 is the launch runtime (operator directive)
+ARG PYTHON_IMAGE=python:3.14-slim
 
 FROM ${PYTHON_IMAGE} AS wheelhouse
 
