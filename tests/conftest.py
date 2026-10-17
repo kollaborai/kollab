@@ -2,9 +2,25 @@
 
 import asyncio
 import threading
+import warnings
 from collections.abc import Generator
+from contextlib import contextmanager
 
 import pytest
+
+
+@contextmanager
+def _policy_api():
+    """Read the asyncio policy API without tripping 3.14+ deprecation errors.
+
+    The policy machinery is slated for removal in 3.16 and
+    get_event_loop_policy() warns from 3.14 on. pytest-asyncio >= 1.4 manages
+    its loops without the policy, so these reads are no-ops there; on
+    3.12/3.13 they still drive the displaced-loop safeguard below.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        yield asyncio
 
 _state = threading.local()
 
@@ -23,7 +39,11 @@ def _scratch_home(tmp_path_factory, monkeypatch):
 def _policy_loop(policy: asyncio.AbstractEventLoopPolicy):
     """Return the current policy loop without allocating one."""
     policy_local = getattr(policy, "_local", None)
-    if not getattr(policy_local, "_set_called", False):
+    # 3.12/3.13: _set_called separates an implicit get_event_loop()
+    # allocation from an explicit set_event_loop(). 3.14 removed implicit
+    # allocation and the flag; there _loop is only ever set explicitly, so
+    # treat a missing flag as "explicit" and trust the _loop read below.
+    if not getattr(policy_local, "_set_called", True):
         return None
     return getattr(policy_local, "_loop", None)
 
@@ -34,7 +54,8 @@ def pytest_fixture_post_finalizer(fixturedef, request) -> None:
     if fixturedef.argname != "event_loop":
         return
 
-    loop = _policy_loop(asyncio.get_event_loop_policy())
+    with _policy_api() as _a:
+        loop = _policy_loop(_a.get_event_loop_policy())
     if loop is not None and not loop.is_closed():
         _state.pytest_clean_loop = loop
     else:
@@ -56,7 +77,8 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, None, None]:
     try:
         yield
     finally:
-        current_loop = _policy_loop(asyncio.get_event_loop_policy())
+        with _policy_api() as _a:
+            current_loop = _policy_loop(_a.get_event_loop_policy())
         if (
             owned_loop is not None
             and owned_loop is not current_loop

@@ -1,6 +1,7 @@
 """Command executor for slash command execution."""
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Dict
 
@@ -94,7 +95,7 @@ class SlashCommandExecutor:
 
             try:
                 # Call the command handler
-                if asyncio.iscoroutinefunction(command_def.handler):
+                if inspect.iscoroutinefunction(command_def.handler):
                     result = await command_def.handler(command)
                 else:
                     result = command_def.handler(command)

@@ -23,7 +23,7 @@ import logging
 import re
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, List
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
@@ -1419,6 +1419,10 @@ class LocalStateService(StateService):
         When an agent has a 'tools' field in agent.json, only those tools
         are allowed. When agent is None or has no tools field, all tools
         are allowed (legacy default).
+
+        Tools that were dynamically granted mid-session (tool-load) but are
+        not in the new agent's scope are revoked so the notify path fires
+        and native schemas stay consistent (issue #203).
         """
         if self._llm_service is None:
             return
@@ -1434,9 +1438,70 @@ class LocalStateService(StateService):
 
         tools = get_agent_tool_scope(agent)
         if tools:
+            self._revoke_tools_outside_scope(tools)
             tool_executor.set_bundle_scope(tools)
         else:
             tool_executor.clear_bundle_scope()
+
+    def _revoke_tools_outside_scope(self, tools: List[str]) -> None:
+        """Revoke granted tools that fall outside the given scope (issue #203).
+
+        Compares the executor's live bundle scope with the new agent scope
+        and fires inject_tool_revoke for each granted tool that is being
+        dropped, so notifications render and native schemas refresh. The
+        subsequent set_bundle_scope call enforces the same change; this
+        method exists for the user-visible notification contract.
+        """
+        tool_executor = getattr(self._llm_service, "tool_executor", None)
+        revoke = getattr(self._llm_service, "inject_tool_revoke", None)
+        if tool_executor is None or not callable(revoke):
+            return
+
+        current_scope = getattr(tool_executor, "_bundle_tools", None)
+        if current_scope is None:
+            return
+        new_scope = set(tools)
+        removed = [t for t in current_scope if t not in new_scope]
+        if not removed:
+            return
+
+        coro = LocalStateService._revoke_tools_async(self, revoke, removed)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            task = loop.create_task(coro)
+            # Keep a reference so the task is not garbage-collected.
+            self._pending_revokes = getattr(self, "_pending_revokes", [])
+            self._pending_revokes.append(task)
+        else:
+            loop.run_until_complete(coro)
+
+    async def _revoke_tools_async(self, revoke, removed: List[str]) -> None:
+        for tool_name in removed:
+            try:
+                await revoke(tool_name, reason="agent scope changed")
+            except Exception as e:
+                logger.warning("inject_tool_revoke failed for %s: %s", tool_name, e)
+
+    async def _revoke_all_granted_tools(self) -> None:
+        """Revoke every dynamically granted tool before scope clears (issue #203).
+
+        When the active agent is cleared the executor falls back to
+        no-scope (all tools). Any tools granted mid-session would
+        otherwise remain callable; revoke them so notifications fire and
+        native schemas drop them.
+        """
+        tool_executor = getattr(self._llm_service, "tool_executor", None)
+        revoke = getattr(self._llm_service, "inject_tool_revoke", None)
+        if tool_executor is None or not callable(revoke):
+            return
+        current_scope = getattr(tool_executor, "_bundle_tools", None)
+        if not current_scope:
+            return
+        for tool_name in list(current_scope):
+            try:
+                await revoke(tool_name, reason="agent cleared")
+            except Exception as e:
+                logger.warning("inject_tool_revoke failed for %s: %s", tool_name, e)
 
     def _agent_to_snapshot(
         self, agent: Any, *, is_active: bool = False
@@ -1589,7 +1654,10 @@ class LocalStateService(StateService):
             previous = None
         self._agent_manager.clear_active_agent()
 
-        # Clear bundle scope when agent is cleared
+        # Clear bundle scope when agent is cleared. Dynamically granted
+        # tools are revoked first so the notify path fires (issue #203);
+        # clearing to no-scope alone would silently keep them callable.
+        await self._revoke_all_granted_tools()
         self._sync_bundle_scope(None)
 
         llm = self._llm_service

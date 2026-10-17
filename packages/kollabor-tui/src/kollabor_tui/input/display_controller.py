@@ -5,6 +5,7 @@ This is a thin wrapper that manages rendering state and delegates to the termina
 """
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Optional
 
@@ -166,9 +167,9 @@ class DisplayController:
             # Fallback to direct rendering (for tests or when render loop not available)
             if hasattr(
                 self.renderer, "render_active_area"
-            ) and asyncio.iscoroutinefunction(self.renderer.render_active_area):
+            ) and inspect.iscoroutinefunction(self.renderer.render_active_area):
                 await self.renderer.render_active_area()
-            elif hasattr(self.renderer, "render_input") and asyncio.iscoroutinefunction(
+            elif hasattr(self.renderer, "render_input") and inspect.iscoroutinefunction(
                 self.renderer.render_input
             ):
                 await self.renderer.render_input()

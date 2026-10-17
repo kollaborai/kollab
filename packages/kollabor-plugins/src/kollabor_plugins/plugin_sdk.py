@@ -5,6 +5,7 @@ the LLM core service, separate from MCP tools.
 """
 
 import asyncio
+import inspect
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -212,7 +213,7 @@ class {class_name}:
             handler = tool_info["definition"]["handler"]
 
             # Execute handler (async or sync)
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 result = await handler(params)
             else:
                 result = handler(params)
