@@ -39,7 +39,11 @@ def _scratch_home(tmp_path_factory, monkeypatch):
 def _policy_loop(policy: asyncio.AbstractEventLoopPolicy):
     """Return the current policy loop without allocating one."""
     policy_local = getattr(policy, "_local", None)
-    if not getattr(policy_local, "_set_called", False):
+    # 3.12/3.13: _set_called separates an implicit get_event_loop()
+    # allocation from an explicit set_event_loop(). 3.14 removed implicit
+    # allocation and the flag; there _loop is only ever set explicitly, so
+    # treat a missing flag as "explicit" and trust the _loop read below.
+    if not getattr(policy_local, "_set_called", True):
         return None
     return getattr(policy_local, "_loop", None)
 
