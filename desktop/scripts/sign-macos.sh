@@ -127,9 +127,11 @@ PY
 # KOLLAB_APP_RUNTIME: the tree `scripts/desktop_release.py stage` unpacks for
 # macOS, a kollab launcher beside runtime/ (the CLI's CPython with kollab in it).
 check_runtime() {
-  local runtime=${KOLLAB_APP_RUNTIME:-}
+  local runtime=${KOLLAB_APP_RUNTIME:-} interpreter
   [ -n "$runtime" ] || fail 'KOLLAB_APP_RUNTIME must name the staged app runtime (scripts/desktop_release.py stage)'
-  if [ ! -f "$runtime/kollab" ] || [ ! -f "$runtime/runtime/bin/python3.12" ] || [ ! -f "$runtime/runtime/KOLLAB-APP" ]; then
+  # stage leaves exactly one file in runtime/bin: the CPython (python3.N).
+  interpreter=("$runtime"/runtime/bin/python3.*)
+  if [ ! -f "$runtime/kollab" ] || [ ! -f "${interpreter[0]}" ] || [ ! -f "$runtime/runtime/KOLLAB-APP" ]; then
     fail "KOLLAB_APP_RUNTIME is not a staged app runtime: $runtime"
   fi
 }
@@ -152,7 +154,7 @@ PY
 # codesign seals Resources as data and never signs code there itself, while
 # notarization requires every Mach-O to carry Developer ID, hardened runtime
 # and a timestamp. Ad hoc stays without hardened runtime: library validation
-# needs one Team ID across python3.12 and its extensions, which ad hoc lacks.
+# needs one Team ID across python3.x and its extensions, which ad hoc lacks.
 seal_app() {
   local app=$1 identity=$2 resources="$1/Contents/Resources" flags=() file
   [ -d "$resources" ] || fail 'Kollab.app has no Contents/Resources'

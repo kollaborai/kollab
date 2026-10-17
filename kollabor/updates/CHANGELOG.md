@@ -5,6 +5,24 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.3] - 2026-10-17
+
+### Added
+- Hub: work no longer sits idle. The koordinator keeps a durable queue of unassigned tasks that survives restarts, agents claim them first-come, and an idle supervisor wakes idle agents for open work and requeues stalled tasks. (#215)
+- Prompt overrides: replace any section of an agent's system prompt with your own file in `~/.kollab/prompt-overrides/<agent>/<section>.md`, and the engine has an API to list, read and edit them. Overrides apply in the real prompt and survive upgrades. (#209)
+
+### Changed
+- Kollab runs on Python 3.14. The release binaries and the macOS app carry CPython 3.14.8, CI tests 3.14, and the Docker image is built on 3.14 (3.12 is still the minimum for pip installs). The new Python asks for Keychain access once on each Mac. (#221)
+- The system prompt is stable from turn to turn, so providers can cache it. The project tree, AGENTS.md and skill aliases are sent only when they change, and MCP tool summaries come last. (#216)
+- `kollab --hub capture` and the `hub_capture` tool return plain text by default; raw terminal output is opt-in. (#208)
+
+### Fixed
+- Hub agents keep running when the engine restarts, instead of shutting down with it. (#219)
+- A tool loaded mid-session can be called right away, and tools removed from an agent's scope stop being callable when the agent or session changes. (#212)
+- `kollab --update` upgrades a user-site pip install (`pip --user`), so the running engine actually gets the new version, and it names any other kollab copies it left untouched. (#218)
+- An approval-mode change that cannot reach agents is logged instead of failing silently. (#213)
+- The web UI bundle reports the same version as the rest of the release. (#217)
+
 ## [0.16.2] - 2026-10-16
 
 ### Added

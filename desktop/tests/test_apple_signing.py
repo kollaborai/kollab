@@ -102,12 +102,12 @@ class SigningContractTests(unittest.TestCase):
         # runtime/, whose Mach-O files (magic numbers only here) need signing.
         self.runtime = self.scratch / "app-runtime"
         for name, body in (("kollab", b"#!/bin/sh\n"), ("runtime/KOLLAB-APP", b""),
-                           ("runtime/bin/python3.12", bytes.fromhex("cffaedfe") + b"python"),
-                           ("runtime/lib/python3.12/site-packages/ext.so", bytes.fromhex("cafebabe") + b"universal"),
-                           ("runtime/lib/python3.12/os.py", b"import abc\n")):
+                           ("runtime/bin/python3.14", bytes.fromhex("cffaedfe") + b"python"),
+                           ("runtime/lib/python3.14/site-packages/ext.so", bytes.fromhex("cafebabe") + b"universal"),
+                           ("runtime/lib/python3.14/os.py", b"import abc\n")):
             (self.runtime / name).parent.mkdir(parents=True, exist_ok=True)
             (self.runtime / name).write_bytes(body)
-        self.machos = ["runtime/bin/python3.12", "runtime/lib/python3.12/site-packages/ext.so"]
+        self.machos = ["runtime/bin/python3.14", "runtime/lib/python3.14/site-packages/ext.so"]
         self.state = self.scratch / "kollab-apple-signing-fixture"
         self.artifacts = self.scratch / "artifacts"
         self.build_number = 0
@@ -204,7 +204,7 @@ class SigningContractTests(unittest.TestCase):
         for _, args in signed:
             self.assertEqual(args, ["--force", "--sign", identity, *flags])
         self.assertEqual((self.app / "Contents/Resources/kollab").read_bytes(), b"#!/bin/sh\n")
-        self.assertTrue((self.app / "Contents/Resources/runtime/lib/python3.12/os.py").is_file())
+        self.assertTrue((self.app / "Contents/Resources/runtime/lib/python3.14/os.py").is_file())
         self.assertIn(["codesign", ["--verify", "--deep", "--strict", "--verbose=2", str(self.app)]], self.calls())
 
     def assert_failed_and_clean(self, result):

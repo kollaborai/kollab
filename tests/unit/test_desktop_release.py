@@ -122,13 +122,13 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
     assert "xdg-utils" in config["bundle"]["linux"]["deb"]["depends"]
 
 
-# A stand-in python3.12: the pex's venv tool, compileall, and kollab --version.
+# A stand-in python3.14: the pex's venv tool, compileall, and kollab --version.
 FAKE_PYTHON = """#!/bin/sh
 case "$*" in
   *" venv --site-packages-copies "*)
     for last; do :; done
-    mkdir -p "$last/lib/python3.12/site-packages/kollabor"
-    : > "$last/lib/python3.12/site-packages/kollabor/__init__.py" ;;
+    mkdir -p "$last/lib/python3.14/site-packages/kollabor"
+    : > "$last/lib/python3.14/site-packages/kollabor/__init__.py" ;;
   *"-m compileall"*) : ;;
   *"-m kollabor_cli_main --version") echo "kollabor_cli_main.py 1.2.3" ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
@@ -144,17 +144,17 @@ def fake_scie(path):
 
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w:gz") as archive:
-        for name, body, mode in (("python/bin/python3.12", FAKE_PYTHON.encode(), 0o755),
+        for name, body, mode in (("python/bin/python3.14", FAKE_PYTHON.encode(), 0o755),
                                  ("python/bin/pip3", b"#!/build/machine/python", 0o755),
-                                 ("python/include/python3.12/Python.h", b"", 0o644),
+                                 ("python/include/python3.14/Python.h", b"", 0o644),
                                  ("python/lib/libtcl9.0.dylib", b"", 0o644),
-                                 ("python/lib/python3.12/os.py", b"", 0o644),
-                                 ("python/lib/python3.12/tkinter/__init__.py", b"", 0o644),
-                                 ("python/lib/python3.12/site-packages/pip/__init__.py", b"", 0o644)):
+                                 ("python/lib/python3.14/os.py", b"", 0o644),
+                                 ("python/lib/python3.14/tkinter/__init__.py", b"", 0o644),
+                                 ("python/lib/python3.14/site-packages/pip/__init__.py", b"", 0o644)):
             info = tarfile.TarInfo(name)
             info.size, info.mode = len(body), mode
             archive.addfile(info, io.BytesIO(body))
-    name = "cpython-3.12.15+20261009-aarch64-apple-darwin-install_only_stripped.tar.gz"
+    name = "cpython-3.14.8+20261009-aarch64-apple-darwin-install_only_stripped.tar.gz"
     lift = {"scie": {"lift": {"files": [
         {"name": name, "key": "python-distribution", "hash": hashlib.sha256(payload.getvalue()).hexdigest()},
         {"name": "pex"},
@@ -187,12 +187,12 @@ def test_macos_stage_unpacks_the_scie_into_a_signable_runtime(source_root, platf
     assert launcher == destination / "kollab" and launcher.stat().st_mode & 0o111
     assert "-I -B" in launcher.read_text() and "-m kollabor_cli_main" in launcher.read_text()
     assert (runtime / "KOLLAB-APP").is_file()
-    assert sorted(p.name for p in (runtime / "bin").iterdir()) == ["python3.12"]
-    site_packages = runtime / "lib/python3.12/site-packages"
+    assert sorted(p.name for p in (runtime / "bin").iterdir()) == ["python3.14"]
+    site_packages = runtime / "lib/python3.14/site-packages"
     assert (site_packages / "kollabor/__init__.py").is_file()
     assert "dont_write_bytecode = True" in (site_packages / "kollab-app.pth").read_text()
-    assert (runtime / "lib/python3.12/os.py").is_file()
-    for pruned in ("include", "lib/libtcl9.0.dylib", "lib/python3.12/tkinter", "lib/python3.12/site-packages/pip"):
+    assert (runtime / "lib/python3.14/os.py").is_file()
+    for pruned in ("include", "lib/libtcl9.0.dylib", "lib/python3.14/tkinter", "lib/python3.14/site-packages/pip"):
         assert not (runtime / pruned).exists(), pruned
     assert not destination.with_name(destination.name + ".work").exists()
     config = json.loads((source_root / "desktop/src-tauri/tauri.release.json").read_text())
@@ -245,3 +245,9 @@ def test_publish_cli_validates_flattened_download_and_returns_nonzero_on_corrupt
     rejected = subprocess.run(command, capture_output=True, text=True)
     assert rejected.returncode != 0
     assert "SHA-256 mismatch" in rejected.stderr
+
+
+def test_app_runtime_matches_the_cli_binary_python():
+    from scripts import build_binary
+
+    assert release.RUNTIME_PYTHON == "python" + build_binary.PYTHON.rsplit(".", 1)[0]

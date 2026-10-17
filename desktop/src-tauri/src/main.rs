@@ -207,7 +207,7 @@ fn bundled_kollab() -> Option<PathBuf> {
 }
 
 /// Kollab.app/Contents/MacOS/kollab-desktop -> Kollab.app/Contents/Resources/kollab,
-/// the sh launcher that runs Resources/runtime/bin/python3.12 -m kollabor_cli_main.
+/// the sh launcher that runs Resources/runtime/bin/python3.14 -m kollabor_cli_main.
 #[cfg(any(target_os = "macos", test))]
 fn macos_bundled_kollab(executable: &Path) -> Option<PathBuf> {
     Some(executable.parent()?.parent()?.join("Resources/kollab"))
