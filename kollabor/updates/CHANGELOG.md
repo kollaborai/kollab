@@ -5,6 +5,15 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.5] - 2026-10-17
+
+### Removed
+- The unused Mentiko spawn adapter (`kollabor_agent.mentiko_adapter`). The engine's daemon pool starts agents. (#225)
+
+### Fixed
+- The web UI opens a new chat on the agent in its own folder. When the same gem ran in another folder (each project runs its own koordinator), the engine could attach the chat to that folder's agent, and a chat that failed to start could stop it. (#229)
+- Errors that were silently ignored are logged: a tool grant, tool revoke or MCP connect notice that cannot reach the agent logs a warning, and process-kill and fallback paths log at debug level. (#226)
+
 ## [0.16.4] - 2026-10-17
 
 ### Fixed
