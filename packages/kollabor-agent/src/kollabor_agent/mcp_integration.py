@@ -189,8 +189,12 @@ class MCPServerConnection:
                             logger.error(
                                 f"MCP server {self.server_name} stderr: {stderr_output.decode()}"
                             )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not read shutdown stderr from MCP server %s: %s",
+                            self.server_name,
+                            exc,
+                        )
             return False
 
         # Check for error response
@@ -456,8 +460,12 @@ class MCPServerConnection:
                 # Close stdin first to signal server
                 if self.process.stdin and not self.process.stdin.is_closing():
                     self.process.stdin.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Could not close stdin for MCP server %s: %s",
+                    self.server_name,
+                    exc,
+                )
 
             try:
                 self.process.terminate()

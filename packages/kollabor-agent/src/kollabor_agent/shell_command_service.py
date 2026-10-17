@@ -358,8 +358,10 @@ class ShellCommandService:
                 renderer = self.event_bus.get_service("renderer")
                 if renderer and hasattr(renderer, 'status_area'):
                     renderer.status_area.clear("shell-exec")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Could not clear status area after shell execution: %s", exc
+                )
         logger.debug("Execution complete")
 
     async def _display_error(self, command: str, error: str) -> None:
