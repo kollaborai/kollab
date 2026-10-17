@@ -1833,22 +1833,49 @@ class AgentSocketServer:
         write_lock = asyncio.Lock()
 
         async def _send_events():
+            # Generator variant of sub_queue.get for asyncio.to_thread: the
+            # 5s timeout heartbeat needs to distinguish "queue empty" from an
+            # exception escaping the worker thread.
+            def _get_event():
+                try:
+                    return sub_queue.get(timeout=5.0)
+                except queue_mod.Empty:
+                    return None
+
             try:
                 while True:
                     try:
-                        event = await asyncio.to_thread(sub_queue.get, timeout=5.0)
-                    except queue_mod.Empty:
-                        # Heartbeat
+                        event = await asyncio.to_thread(_get_event)
+                    except Exception:
+                        # The to_thread executor itself failed (e.g. default
+                        # executor torn down while the owning process is
+                        # dying). Never let a transient executor failure kill
+                        # a live attach stream: retry after a short backoff.
+                        # A genuinely dead client is still detected by the
+                        # recv side and by write errors on the next drained
+                        # event. CancelledError is not swallowed: it derives
+                        # from BaseException in 3.8+ and passes through.
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    if event is None:
+                        # Heartbeat (queue empty)
                         hb = json.dumps({"type": "heartbeat"}) + "\n"
-                        async with write_lock:
-                            writer.write(hb.encode())
-                            await writer.drain()
+                        try:
+                            async with write_lock:
+                                writer.write(hb.encode())
+                                await writer.drain()
+                        except (ConnectionError, BrokenPipeError, OSError):
+                            return
                         continue
 
                     line = json.dumps(event, default=str) + "\n"
-                    async with write_lock:
-                        writer.write(line.encode())
-                        await writer.drain()
+                    try:
+                        async with write_lock:
+                            writer.write(line.encode())
+                            await writer.drain()
+                    except (ConnectionError, BrokenPipeError, OSError):
+                        return
             except (ConnectionError, BrokenPipeError, OSError):
                 pass
 
