@@ -33,7 +33,8 @@ and `kollab --version` reports the new version.
 
 - name: `kollab`
 - version: see `pyproject.toml`
-- python: `>=3.12`
+- python: `>=3.12` floor; `3.14` is the launch runtime (CI gates on 3.14;
+  Docker and docs target 3.14)
 - type: terminal AI chat + plugin system + agent runtime
 - architecture: monorepo with extracted workspace packages under `packages/*`
 - main entrypoint: `kollab` -> `kollabor_cli_main:cli_main`
