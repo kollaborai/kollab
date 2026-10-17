@@ -168,6 +168,11 @@ class ToolExecutor:
         self._cancel_callback = None
         self._operation_observer = None
 
+        # Async callback fired after dynamic tool scope changes (tool
+        # loads) so the owner can refresh derived state such as the
+        # native API tool schema list. Issue #202.
+        self._scope_change_callback: Optional[Callable[[], Awaitable[None]]] = None
+
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
 
@@ -235,6 +240,36 @@ class ToolExecutor:
             store,
             preview_chars=preview_chars,
         )
+
+    async def _notify_scope_change(self) -> None:
+        """Invoke the scope-change callback, absorbing its failures.
+
+        Best-effort by design: the tool load itself succeeded, and a
+        broken refresh must not turn it into an error.
+        """
+        callback = getattr(self, "_scope_change_callback", None)
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception as e:
+            logger.warning("Scope-change callback failed: %s", e)
+
+    def set_scope_change_callback(
+        self, callback: Optional[Callable[[], Awaitable[None]]]
+    ) -> None:
+        """Set an async callback invoked after the dynamic tool scope changes.
+
+        Tool loads (built-in and MCP) mutate the in-memory scope/enable
+        state directly, so the native API tool schemas go stale unless
+        something reloads them. The coordinator wires this callback to
+        its native-tool refresh (issue #202). Failures in the callback
+        must never fail the tool load itself.
+
+        Args:
+            callback: Async callable taking no arguments, or None to clear.
+        """
+        self._scope_change_callback = callback
 
     def set_bundle_scope(self, allowed_tools: Optional[List[str]]) -> None:
         """Set the bundle scope for tool access control.
@@ -1700,8 +1735,10 @@ class ToolExecutor:
             )
 
         # Add to bundle scope if active
+        newly_loaded = False
         if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
             self._bundle_tools.append(tool_def.name)
+            newly_loaded = True
             logger.info(f"Tool loaded into active set: {tool_def.name}")
 
         # Generate full documentation
@@ -1712,6 +1749,11 @@ class ToolExecutor:
             f"{markdown}"
         )
 
+        # Issue #202: a load just changed the dynamic scope, so the native
+        # API schema list must be refreshed for the tool to be callable
+        # in native mode on the next turn.
+        await self._notify_scope_change()
+
         return ToolExecutionResult(
             tool_id=tool_id,
             tool_type="tool_load",
@@ -1720,7 +1762,7 @@ class ToolExecutor:
             metadata={
                 "loaded_tool": tool_def.name,
                 "category": tool_def.category,
-                "already_active": False,
+                "already_active": not newly_loaded,
             },
         )
 
@@ -1793,6 +1835,11 @@ class ToolExecutor:
 
         # Ensure enabled
         mcp_tool["enabled"] = True
+
+        # Issue #202: enabling an MCP tool changes what the native API
+        # should expose — refresh the schema list via the coordinator
+        # callback (no-op when none is wired).
+        await self._notify_scope_change()
 
         definition = mcp_tool.get("definition", {})
         description = definition.get("description", "(no description)")

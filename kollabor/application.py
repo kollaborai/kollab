@@ -928,14 +928,51 @@ class TerminalLLMChat:
         self.permission_manager._sync_file_access_mode()
 
         # Wire bundle scope sync callback into agent_manager
-        # so scope is set on startup, resume, and agent changes
+        # so scope is set on startup, resume, and agent changes.
+        # Granted tools outside the new scope are revoked first so the
+        # notify path fires and native schemas refresh (issue #203).
         def _sync_bundle_scope_to_executor(agent):
             te = self.llm_service.tool_executor
             tools = get_agent_tool_scope(agent)
             if tools:
+                _revoke_removed_grants(tools)
                 te.set_bundle_scope(tools)
             else:
                 te.clear_bundle_scope()
+
+        def _revoke_removed_grants(tools):
+            """Revoke granted tools dropped by an agent switch (issue #203)."""
+            te = self.llm_service.tool_executor
+            revoke = getattr(self.llm_service, "inject_tool_revoke", None)
+            if not callable(revoke):
+                return
+            current_scope = getattr(te, "_bundle_tools", None)
+            if current_scope is None:
+                return
+            new_scope = set(tools)
+            removed = [t for t in current_scope if t not in new_scope]
+            if not removed:
+                return
+
+            async def _run():
+                for tool_name in removed:
+                    try:
+                        await revoke(tool_name, reason="agent scope changed")
+                    except Exception as e:
+                        logger.warning(
+                            "inject_tool_revoke failed for %s: %s", tool_name, e
+                        )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (startup sync): nothing to schedule;
+                # scope enforcement below still applies.
+                return
+            task = loop.create_task(_run())
+            # Keep a reference so the task is not garbage-collected.
+            self._pending_tool_revokes = getattr(self, "_pending_tool_revokes", [])
+            self._pending_tool_revokes.append(task)
 
         self.agent_manager._on_agent_changed = _sync_bundle_scope_to_executor
         # Sync the already-loaded default agent (loaded before llm_service existed)
