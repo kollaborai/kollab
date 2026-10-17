@@ -6,9 +6,17 @@ Compaction cannot touch the system prompt, so agents can never
 forget their active tasks.
 
 Lifecycle:
+  enqueue -> open -> claim -> active -> (checkpoint)* -> complete/fail
+      -> QA review -> closed
   assign -> active -> (checkpoint)* -> complete/fail -> QA review -> closed
   assign -> standby -> active -> (checkpoint)* -> ... (standby = no cron)
+  active -> stall timeout -> requeue -> open (idle supervisor, issue #211)
   assign -> obsolete/cancelled (audited terminal state, no cron)
+
+"open" cards are the durable koordinator work queue: unassigned work that
+survives hub restarts. Any agent can claim an open card (first claim wins
+under the card's advisory file lock), and the idle supervisor wakes the
+coordinator whenever open work sits while the hub is idle.
 """
 
 import fcntl
@@ -70,6 +78,14 @@ class TaskCard:
 
     # Metadata
     project: str = field(default_factory=os.getcwd)
+
+    # Idle-supervisor bookkeeping (issue #211). last_activity_at is the
+    # freshness signal stall detection keys on: it is set on claim,
+    # checkpoint and explicit touches, so an "active" card with no worker
+    # progress for the stall threshold gets nudged, then requeued.
+    last_activity_at: float = 0.0
+    stall_count: int = 0
+    reassignments: int = 0
 
     def add_checkpoint(self, note: str, data: Optional[Dict] = None):
         self.checkpoints.append(
@@ -167,6 +183,9 @@ class TaskCard:
             "terminal_message_id": self.terminal_message_id,
             "terminalized_at": self.terminalized_at,
             "project": self.project,
+            "last_activity_at": self.last_activity_at,
+            "stall_count": self.stall_count,
+            "reassignments": self.reassignments,
         }
 
     @classmethod
@@ -186,6 +205,7 @@ class TaskCard:
             "cron_ttl_seconds": 7200.0,
             "snoozed_until": 0.0,
             "qa_requested_at": None,
+            "last_activity_at": 0.0,
         }
         for name, default in numeric_defaults.items():
             if name not in filtered:
@@ -561,11 +581,183 @@ class TaskLedger:
                 result.append(card)
         return result
 
+    # --- Durable open queue (issue #211) ---------------------------------
+    #
+    # "open" cards are unassigned work on the shared ledger. They survive
+    # hub restarts (plain JSON cards like every other card) and are the
+    # pool the idle supervisor pulls from when the coordinator goes idle.
+
+    def _mutate_locked(self, task_id: str, mutator) -> Optional[TaskCard]:
+        """Apply ``mutator`` to a card under its advisory file lock.
+
+        The lock covers load AND save, so read-modify-write sequences like
+        claim are atomic across processes. The mutator returns True to
+        persist the mutation, or None/False to leave the card untouched.
+        """
+        path = self._task_path(task_id)
+        if not path.exists():
+            return None
+        with self._file_lock(path):
+            try:
+                card = TaskCard.from_dict(self._load_json_object(path))
+            except Exception as e:
+                logger.debug(f"Failed to load task {task_id} for mutation: {e}")
+                return None
+            if mutator(card) is True:
+                card.updated_at = time.time()
+                self._write_json_atomic(path, card.to_dict())
+                return card
+        return None
+
+    def enqueue(
+        self,
+        assigner: str,
+        directive: str,
+        deliverable: str = "",
+        report_to: str = "",
+        priority: int = 5,
+        timeout: float = 0,
+        project: str = "",
+    ) -> TaskCard:
+        """Add an open (unassigned) card to the durable work queue."""
+        required = {
+            "assigner": assigner,
+            "directive": directive,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(
+                "open task requires non-empty " + ", ".join(missing)
+            )
+
+        card = TaskCard(
+            assigner=assigner,
+            assignee="",
+            directive=directive,
+            deliverable=deliverable,
+            report_to=report_to or assigner,
+            priority=priority,
+            timeout_seconds=timeout,
+            status="open",
+            cron_active=False,
+            project=project,
+        )
+        self._save(card)
+        logger.info(
+            f"Open task {card.id} enqueued by {assigner}: {directive[:60]}"
+        )
+        return card
+
+    def claim(
+        self, task_id: str, worker: str, project: str = ""
+    ) -> Optional[TaskCard]:
+        """Atomically claim an open card. First claim wins; the loser gets None."""
+        if not str(worker).strip():
+            return None
+
+        def _claim(card: TaskCard):
+            if card.status != "open" or card.assignee:
+                return None
+            if project and card.project and card.project != project:
+                return None
+            card.assignee = worker
+            card.status = "active"
+            card.cron_active = True
+            card.last_activity_at = time.time()
+            card.add_checkpoint(f"claimed by {worker}")
+            return True
+
+        card = self._mutate_locked(task_id, _claim)
+        if card:
+            logger.info(f"Task {task_id} claimed by {worker}")
+        return card
+
+    def claim_next_open(
+        self, worker: str, project: str = ""
+    ) -> Optional[TaskCard]:
+        """Claim the highest-priority open card for ``worker``, if any."""
+        for card in self.get_open(project=project):
+            claimed = self.claim(card.id, worker, project=project)
+            if claimed:
+                return claimed
+        return None
+
+    def get_open(self, project: str = "") -> List[TaskCard]:
+        """Get open (unassigned) cards, highest priority first."""
+        result = [
+            c for c in self.get_all(status="open") if not c.assignee
+        ]
+        if project:
+            result = [
+                c for c in result if not c.project or c.project == project
+            ]
+        return sorted(result, key=lambda c: (-c.priority, c.created_at))
+
+    def get_stalled(
+        self, threshold_seconds: float, now: Optional[float] = None
+    ) -> List[TaskCard]:
+        """Get active cards with no worker activity past the threshold.
+
+        Freshness comes from last_activity_at (claim/checkpoint/touch);
+        cards written before that field existed fall back to updated_at.
+        """
+        now = time.time() if now is None else now
+        stalled = []
+        for card in self.get_all(status="active"):
+            ref = card.last_activity_at or card.updated_at
+            if ref > 0 and (now - ref) > threshold_seconds:
+                stalled.append(card)
+        return sorted(stalled, key=lambda c: c.last_activity_at or c.updated_at)
+
+    def requeue_stalled(
+        self, task_id: str, reason: str = ""
+    ) -> Optional[TaskCard]:
+        """Return a stalled active card to the open queue, unassigned."""
+        previous_holder: List[str] = []
+
+        def _requeue(card: TaskCard):
+            if card.status != "active":
+                return None
+            previous = card.assignee
+            previous_holder.append(previous)
+            card.status = "open"
+            card.assignee = ""
+            card.stall_count += 1
+            card.reassignments += 1
+            card.cron_active = False
+            card.last_activity_at = 0.0
+            card.add_checkpoint(
+                f"requeued to open queue (was {previous or 'unassigned'}):"
+                f" {reason or 'stall timeout'}"
+            )
+            return True
+
+        card = self._mutate_locked(task_id, _requeue)
+        if card:
+            logger.info(
+                "Task %s requeued to open queue (was %s): %s",
+                task_id,
+                previous_holder[0] if previous_holder else "unassigned",
+                reason or "stall timeout",
+            )
+        return card
+
+    def touch_activity(self, task_id: str) -> bool:
+        """Record worker liveness on a card without adding a checkpoint."""
+        def _touch(card: TaskCard):
+            if card.status in self.TERMINAL_STATUSES:
+                return None
+            card.last_activity_at = time.time()
+            return True
+
+        return self._mutate_locked(task_id, _touch) is not None
+
     def checkpoint(self, task_id: str, note: str, data: Optional[Dict] = None) -> bool:
         card = self._load_mutable(task_id, "checkpoint")
         if not card:
             return False
         card.add_checkpoint(note, data)
+        card.last_activity_at = time.time()
         self._save(card)
         return True
 

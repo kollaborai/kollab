@@ -70,6 +70,15 @@ from .presence import PresenceManager, get_messages_dir, pid_alive
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
+from .supervisor import (
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_STALL_THRESHOLD,
+    DEFAULT_WAKE_COOLDOWN,
+    SupervisorState,
+)
+from .supervisor import (
+    evaluate as evaluate_supervisor,
+)
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
 from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
@@ -605,6 +614,8 @@ class HubPlugin(BasePlugin):
         self._cron_task: Optional[asyncio.Task] = None
         self._autosave_task: Optional[asyncio.Task] = None
         self._presence_sweep_task: Optional[asyncio.Task] = None
+        self._supervisor_task: Optional[asyncio.Task] = None
+        self._supervisor_state = SupervisorState()
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
@@ -686,6 +697,11 @@ class HubPlugin(BasePlugin):
                     "dreaming_idle_threshold": 300,
                     "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
+                    "supervisor_enabled": True,
+                    "supervisor_poll_interval": 10,
+                    "supervisor_stall_threshold": 900,
+                    "supervisor_wake_cooldown": 120,
+                    "supervisor_max_reassignments": 3,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -3807,6 +3823,12 @@ class HubPlugin(BasePlugin):
                 error=f"task {task_id} not found or terminal",
             )
         logger.info(f"Task {task_id} checkpoint: {note[:60]}")
+        # Fresh worker activity resets that card's stall timer (issue #211).
+        # getattr: test doubles and partially-initialized plugins may not
+        # have run the supervisor init path.
+        supervisor_state = getattr(self, "_supervisor_state", None)
+        if supervisor_state is not None:
+            supervisor_state.nudges.pop(task_id, None)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="task_checkpoint",
@@ -3905,6 +3927,10 @@ class HubPlugin(BasePlugin):
                 success=False,
                 error=f"no open task {task_id} on your ledger; task_complete takes an id from your work queue",
             )
+
+        # Event-driven supervisor pass: a finished card means the ledger
+        # may hold open work the coordinator can now hand out (issue #211).
+        await self._supervisor_kick()
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -5356,6 +5382,19 @@ class HubPlugin(BasePlugin):
                 self._presence_sweep_task = asyncio.create_task(
                     self._presence_sweep_loop()
                 )
+                # Start idle supervisor (coordinator only — issue #211).
+                # Open or stalled ledger work re-invokes the coordinator
+                # so the hub never sits idle while work is queued.
+                if self.config and self.config.get(
+                    "plugins.hub.supervisor_enabled", True
+                ):
+                    poll = self.config.get(
+                        "plugins.hub.supervisor_poll_interval",
+                        DEFAULT_POLL_INTERVAL,
+                    )
+                    self._supervisor_task = asyncio.create_task(
+                        self._supervisor_loop(poll)
+                    )
 
             if self._conversation_manager:
                 logger.info("Hub messaging ready (direct injection)")
@@ -6134,6 +6173,172 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"presence sweep error: {e}")
+
+    async def _supervisor_loop(self, poll_interval: float) -> None:
+        """Coordinator-only idle supervisor (issue #211).
+
+        Every ``poll_interval`` seconds, evaluate the shared ledger against
+        the roster. Open or stalled cards produce decisions delivered here:
+        nudges and coordinator wakes go out as messages, requeues were
+        already applied to the ledger by the supervisor itself. A task
+        completion also kicks this once immediately via
+        ``_supervisor_kick`` so the next card is picked up without waiting
+        for the next poll.
+        """
+        stall = self.config.get(
+            "plugins.hub.supervisor_stall_threshold",
+            DEFAULT_STALL_THRESHOLD,
+        )
+        cooldown = self.config.get(
+            "plugins.hub.supervisor_wake_cooldown",
+            DEFAULT_WAKE_COOLDOWN,
+        )
+        max_reassign = self.config.get(
+            "plugins.hub.supervisor_max_reassignments",
+            3,
+        )
+        while True:
+            try:
+                await asyncio.sleep(max(1.0, float(poll_interval)))
+                await self._supervisor_tick(stall, cooldown, max_reassign)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"supervisor loop error: {e}")
+
+    async def _supervisor_tick(
+        self, stall: float, cooldown: float, max_reassign: int
+    ) -> List[str]:
+        """One supervisor pass. Returns human-readable outcome lines."""
+        if not self._task_ledger or not self._identity:
+            return []
+        roster = list(self._roster or [])
+        if self._presence:
+            try:
+                roster = await self._presence.discover_agents_async()
+            except Exception:
+                pass  # fall back to the cached roster
+        # The supervisor's logic is dict-based; presence discovery returns
+        # AgentRuntime objects while cached rosters are dicts. Normalize.
+        norm_roster = []
+        for a in roster:
+            if isinstance(a, dict):
+                norm_roster.append(a)
+            else:
+                norm_roster.append(
+                    {
+                        "identity": getattr(a, "identity", "")
+                        or getattr(a, "name", ""),
+                        "state": getattr(a, "state", ""),
+                        "is_coordinator": bool(
+                            getattr(a, "is_coordinator", False)
+                        ),
+                    }
+                )
+        decisions, self._supervisor_state = evaluate_supervisor(
+            self._task_ledger,
+            norm_roster,
+            time.time(),
+            stall_threshold=stall,
+            wake_cooldown=cooldown,
+            max_reassignments=max_reassign,
+            state=self._supervisor_state,
+        )
+        if not decisions:
+            return []
+
+        outcomes: List[str] = []
+        my_id = self._identity.agent_id
+        for decision in decisions:
+            if decision.kind == "wake_coordinator":
+                wake_msg = HubMessage(
+                    action="message",
+                    from_agent=my_id,
+                    from_identity="idle-supervisor",
+                    to=self._identity.identity,
+                    content=decision.text,
+                    scope=MessageScope.DIRECT.value,
+                )
+                # Deliver directly through the inbound pipeline the same
+                # way self-targeted cron does: it re-invokes the
+                # coordinator's turn with the open-work report.
+                await self._on_message_received(wake_msg)
+                outcomes.append(
+                    f"wake_coordinator -> {decision.worker}"
+                )
+            elif decision.kind == "nudge_worker":
+                nudge_msg = HubMessage(
+                    action="message",
+                    from_agent=my_id,
+                    from_identity="idle-supervisor",
+                    to=decision.worker,
+                    content=decision.text,
+                    scope=MessageScope.DIRECT.value,
+                    metadata={"task_id": decision.card_id},
+                )
+                sent = False
+                if self._presence:
+                    try:
+                        agents = await self._presence.discover_agents_async()
+                        for a in agents:
+                            if a.identity == decision.worker:
+                                await self._deliver_to_agent(a, nudge_msg)
+                                sent = True
+                                break
+                    except Exception as e:
+                        logger.debug(
+                            "supervisor nudge delivery failed for %s: %s",
+                            decision.worker,
+                            e,
+                        )
+                if sent:
+                    outcomes.append(f"nudge_worker -> {decision.worker}")
+                else:
+                    logger.warning(
+                        "supervisor: worker %s went offline before"
+                        " nudge for task %s",
+                        decision.worker,
+                        decision.card_id,
+                    )
+            else:  # requeue_stalled — already applied on the ledger
+                outcomes.append(
+                    f"requeue_stalled: task {decision.card_id}"
+                    f" (was {decision.worker or 'unassigned'})"
+                )
+        if outcomes:
+            logger.info("idle supervisor: %s", "; ".join(outcomes))
+        return outcomes
+
+    async def _supervisor_kick(self) -> None:
+        """Event-driven supervisor pass (task completion, card claim).
+
+        Runs the same evaluation as the poll loop so a finished card
+        re-wakes the coordinator for the next item within one pass instead
+        of waiting out the poll interval.
+        """
+        if (
+            self._supervisor_task is None
+            or self._supervisor_task.done()
+            or not self._identity
+            or not self._identity.is_coordinator
+        ):
+            return
+        try:
+            stall = self.config.get(
+                "plugins.hub.supervisor_stall_threshold",
+                DEFAULT_STALL_THRESHOLD,
+            )
+            cooldown = self.config.get(
+                "plugins.hub.supervisor_wake_cooldown",
+                DEFAULT_WAKE_COOLDOWN,
+            )
+            await self._supervisor_tick(
+                stall, cooldown, self.config.get(
+                    "plugins.hub.supervisor_max_reassignments", 3
+                )
+            )
+        except Exception as e:
+            logger.debug(f"supervisor kick error: {e}")
 
     async def _messaging_bridge_loop(self) -> None:
         """Background loop: connect to messaging bridge, poll for incoming.
@@ -13291,15 +13496,25 @@ class HubPlugin(BasePlugin):
         return sum(await asyncio.gather(*sends))
 
     def _format_work(self) -> str:
-        if not self._work_queue:
-            return "work queue: unavailable"
-        slots = self._work_queue.get_all()
-        if not slots:
+        lines: List[str] = []
+        if self._work_queue:
+            slots = self._work_queue.get_all()
+            if slots:
+                lines.append(f"work queue: {len(slots)} slot(s)")
+                for s in slots:
+                    assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
+                    lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
+        if self._task_ledger:
+            try:
+                open_cards = self._task_ledger.get_open()
+                if open_cards:
+                    lines.append(f"open ledger cards: {len(open_cards)}")
+                    for c in open_cards:
+                        lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+            except Exception as e:
+                logger.debug(f"open card listing failed: {e}")
+        if not lines:
             return "work queue: empty"
-        lines = [f"work queue: {len(slots)} slot(s)"]
-        for s in slots:
-            assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
-            lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
         return "\n".join(lines)
 
     def _handle_queue_command(self, task: str) -> str:
@@ -13312,7 +13527,25 @@ class HubPlugin(BasePlugin):
             project=self._identity.project if self._identity else "",
             queued_by=self._identity.identity if self._identity else "",
         )
-        return f"queued: [{slot.id}] {task[:60]}"
+        # Dual-write to the durable open ledger queue (issue #211): open
+        # cards are what the idle supervisor watches and what survives
+        # coordinator restarts. The WorkQueue slot keeps legacy claim
+        # behavior; the card's checkpoint cross-references the slot id.
+        card = None
+        if self._task_ledger and self._identity:
+            try:
+                card = self._task_ledger.enqueue(
+                    assigner=self._identity.identity,
+                    directive=task,
+                    report_to=self._identity.identity,
+                    project=self._identity.project,
+                )
+                card.add_checkpoint(f"queued as slot [{slot.id}]")
+                self._task_ledger._save(card)
+            except Exception as e:
+                logger.debug(f"open-card enqueue failed for slot {slot.id}: {e}")
+        suffix = f" + open card [{card.id}]" if card else ""
+        return f"queued: [{slot.id}] {task[:60]}{suffix}"
 
     async def _handle_claim_command(self, slot_id: str) -> str:
         if not self._work_queue or not self._identity:
@@ -13325,6 +13558,14 @@ class HubPlugin(BasePlugin):
             )
             if slot:
                 return f"claimed: [{slot.id}] {slot.task[:60]}"
+            # Fall back to the durable open ledger queue (issue #211):
+            # open task cards are claimable by id like work slots.
+            card = self._task_ledger.claim(
+                rest, self._identity.identity, project=self._identity.project
+            )
+            if card:
+                await self._supervisor_kick()
+                return f"claimed: [{card.id}] {card.directive[:60]}"
             return f"slot '{rest}' not found or not pending"
         slot = self._work_queue.claim_next(
             self._identity.identity,
@@ -13332,6 +13573,12 @@ class HubPlugin(BasePlugin):
         )
         if slot:
             return f"claimed: [{slot.id}] {slot.task[:60]}"
+        card = self._task_ledger.claim_next_open(
+            self._identity.identity, project=self._identity.project
+        )
+        if card:
+            await self._supervisor_kick()
+            return f"claimed: [{card.id}] {card.directive[:60]}"
         return "no available work to claim"
 
     def _format_vault(self, args: str = "") -> str:
@@ -14325,6 +14572,13 @@ class HubPlugin(BasePlugin):
             self._autosave_task.cancel()
             try:
                 await self._autosave_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._supervisor_task:
+            self._supervisor_task.cancel()
+            try:
+                await self._supervisor_task
             except asyncio.CancelledError:
                 pass
 
