@@ -42,7 +42,11 @@ def test_sync_hook_does_not_allocate_policy_loop() -> None:
     fresh_policy = asyncio.DefaultEventLoopPolicy()
     asyncio.set_event_loop_policy(fresh_policy)
     try:
-        assert not fresh_policy._local._set_called
-        assert fresh_policy._local._loop is None
+        # 3.12/3.13 record implicit get_event_loop() allocation as
+        # _set_called; 3.14 removed implicit allocation and the flag, so a
+        # missing attribute means "never allocated". _loop stays None on
+        # every version until an explicit set_event_loop() runs.
+        assert not getattr(fresh_policy._local, "_set_called", False)
+        assert getattr(fresh_policy._local, "_loop", None) is None
     finally:
         asyncio.set_event_loop_policy(previous_policy)
