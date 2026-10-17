@@ -320,6 +320,8 @@ def parse_arguments(
         cli_help = build_cli_help_text(command_registry)
 
     parser = argparse.ArgumentParser(
+        # Python 3.14 derives the default from how __main__ ran ("python /path/kollab")
+        prog=os.path.basename(sys.argv[0]),
         description="Kollab - Terminal-based LLM chat interface",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,  # We handle -h ourselves to show plugin commands
