@@ -17,7 +17,6 @@ from .error_utils import (
     safe_execute,
 )
 from .executor import HookExecutor
-from .hook_adapter import HookAdapter
 from .models import (
     CommandCategory,
     CommandDefinition,
@@ -55,7 +54,6 @@ __all__ = [
     "HookRegistry",
     "HookExecutor",
     "EventProcessor",
-    "HookAdapter",
     "ReadyMessageItem",
     "ReadyMessageCollector",
     # Data models
