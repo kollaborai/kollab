@@ -1152,7 +1152,15 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" kind="answer">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
         # `to` is required; the rest are optional and may come in any order.
-        hub_msg_pat = tag_pattern("hub_msg", required={"to": "some"}, end="body?")
+        # task_id is optional: when present, the receiver's TaskLedger mint
+        # is deterministic (issue #211 addendum — handoffs were invisible to
+        # the tracker because nothing could carry an id).
+        hub_msg_pat = tag_pattern(
+            "hub_msg",
+            required={"to": "some"},
+            valid={"task_id": r"[0-9A-Za-z._:@-]+"},
+            end="body?",
+        )
 
         def _extract_hub_msg(m):
             attrs = tag_attrs(m.group(1))
@@ -1163,6 +1171,7 @@ class HubPlugin(BasePlugin):
                 "thread_id": (attrs.get("thread_id") or attrs.get("thread") or "").strip(),
                 "reply_to": attrs.get("reply_to", "").strip(),
                 "kind": attrs.get("kind", "").strip().lower(),
+                "task_id": attrs.get("task_id", "").strip(),
                 "content": m.group(2).strip(),
             }
 
@@ -7133,6 +7142,31 @@ class HubPlugin(BasePlugin):
         "take ownership",
         "new assignment",
         "qa needed",
+        # Directive openings from real coordinator handoffs (issue #211
+        # addendum). 2026-10-16: not one of koordinator's eight real
+        # handoffs matched the pre-existing list — "New task (Marco via
+        # operator): ..." and "Next assignment: ..." were invisible to the
+        # tracker. These are intent-level openings, not bare request verbs,
+        # so the old false positives ("fix" in "prefix") stay out.
+        "new task",
+        "next assignment",
+        "task assignment",
+        "assignment:",
+        "assigned to you",
+    )
+
+    # An intent match mints an OPEN card only when the message reads like
+    # a real directive. These phrases mark hold/status messages that use
+    # assignment-shaped openings ("Next assignment: nothing queued —
+    # hold.") without handing off work (same incident, message 8).
+    _NO_HANDOFF_MARKERS = (
+        "nothing queued",
+        "no task",
+        "hold",
+        "stand by",
+        "standby",
+        "task complete",
+        "no handoff",
     )
     _REPORT_MARKERS = (
         "task complete",
@@ -7156,6 +7190,7 @@ class HubPlugin(BasePlugin):
     # of findings must not silence the findings.
     _ACK_MAX_WORDS = 25
     _task_assignment_marker_re = _compile_marker_pattern(_TASK_ASSIGNMENT_MARKERS)
+    _no_handoff_marker_re = _compile_marker_pattern(_NO_HANDOFF_MARKERS)
 
     def _normalize_hub_wake_content(self, content: str) -> str:
         text = (content or "").strip().lower()
@@ -7265,7 +7300,10 @@ class HubPlugin(BasePlugin):
         """
         text = self._normalize_hub_wake_content(content)
         if self._task_assignment_marker_re.search(text):
-            return True
+            # An assignment-shaped opening on a hold/status message
+            # ("Next assignment: nothing queued — hold.") is coordination
+            # chatter, not a handoff.
+            return not self._no_handoff_marker_re.search(text)
         return bool(task_id and self._has_request_evidence(text))
 
     @staticmethod
@@ -7961,14 +7999,38 @@ class HubPlugin(BasePlugin):
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
                         )
-                    else:
+                    elif task_id:
+                        # Explicitly tagged handoff: the assigner named the
+                        # card, so create it already assigned and active
+                        # under THAT id — reports, checkpoints and
+                        # task_complete against task_id then land on the
+                        # same card instead of a random sibling.
                         card = self._task_ledger.create(
                             assigner=assigner,
                             assignee=assignee,
                             directive=directive[:500],
                             report_to=assigner,
+                            card_id=task_id,
                         )
                         logger.info(f"Auto-created task {card.id} from" f" {assigner}")
+                    else:
+                        # Heuristic match (no tag): mint as OPEN so the
+                        # worker must claim it and the idle supervisor
+                        # tracks it. The worker's claim records the real
+                        # handoff; guessing 'active' would strand work on
+                        # an agent that never saw the directive.
+                        card = self._task_ledger.enqueue(
+                            assigner=assigner,
+                            directive=f"{assignee}: {directive}"[:500],
+                            report_to=assigner,
+                            project=self._identity.project or "",
+                        )
+                        logger.info(
+                            "Auto-enqueued OPEN task %s from %s"
+                            " (untagged assignment intent)",
+                            card.id,
+                            assigner,
+                        )
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the

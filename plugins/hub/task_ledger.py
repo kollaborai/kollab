@@ -40,7 +40,9 @@ class TaskCard:
     """A task assignment that survives context compaction."""
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    status: str = "active"  # active, standby, paused, done, failed, qa_review, closed, cancelled, obsolete
+    status: str = (
+        "active"  # active, standby, paused, done, failed, qa_review, closed, cancelled, obsolete
+    )
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -234,9 +236,7 @@ class TaskCard:
 class TaskLedger:
     """Manages TaskCards on disk. Survives any crash or compaction."""
 
-    TERMINAL_STATUSES = frozenset(
-        {"done", "failed", "closed", "cancelled", "obsolete"}
-    )
+    TERMINAL_STATUSES = frozenset({"done", "failed", "closed", "cancelled", "obsolete"})
     EXPLICIT_TERMINAL_STATUSES = frozenset({"cancelled", "obsolete"})
 
     def __init__(self, tasks_dir: Optional[str] = None):
@@ -258,9 +258,7 @@ class TaskLedger:
         """Yield task card files without the pending-reply envelope."""
         pending_name = self._pending_replies_path().name
         return (
-            path
-            for path in self._tasks_dir.glob("*.json")
-            if path.name != pending_name
+            path for path in self._tasks_dir.glob("*.json") if path.name != pending_name
         )
 
     @contextmanager
@@ -286,7 +284,9 @@ class TaskLedger:
             value, end = decoder.raw_decode(raw.lstrip())
             if not isinstance(value, dict):
                 raise
-            logger.warning("Recovered valid JSON prefix from corrupted ledger file %s", path)
+            logger.warning(
+                "Recovered valid JSON prefix from corrupted ledger file %s", path
+            )
             return value
 
     @staticmethod
@@ -389,6 +389,7 @@ class TaskLedger:
         timeout: float = 0,
         cron_interval: float = 300,
         status: str = "active",
+        card_id: str = "",
     ) -> TaskCard:
         required = {
             "assigner": assigner,
@@ -397,11 +398,10 @@ class TaskLedger:
         }
         missing = [name for name, value in required.items() if not str(value).strip()]
         if missing:
-            raise ValueError(
-                "task assignment requires non-empty " + ", ".join(missing)
-            )
+            raise ValueError("task assignment requires non-empty " + ", ".join(missing))
 
         card = TaskCard(
+            id=(card_id or uuid.uuid4().hex[:8]),
             assigner=assigner,
             assignee=assignee,
             directive=directive,
@@ -626,9 +626,7 @@ class TaskLedger:
         }
         missing = [name for name, value in required.items() if not str(value).strip()]
         if missing:
-            raise ValueError(
-                "open task requires non-empty " + ", ".join(missing)
-            )
+            raise ValueError("open task requires non-empty " + ", ".join(missing))
 
         card = TaskCard(
             assigner=assigner,
@@ -643,14 +641,10 @@ class TaskLedger:
             project=project,
         )
         self._save(card)
-        logger.info(
-            f"Open task {card.id} enqueued by {assigner}: {directive[:60]}"
-        )
+        logger.info(f"Open task {card.id} enqueued by {assigner}: {directive[:60]}")
         return card
 
-    def claim(
-        self, task_id: str, worker: str, project: str = ""
-    ) -> Optional[TaskCard]:
+    def claim(self, task_id: str, worker: str, project: str = "") -> Optional[TaskCard]:
         """Atomically claim an open card. First claim wins; the loser gets None."""
         if not str(worker).strip():
             return None
@@ -672,9 +666,7 @@ class TaskLedger:
             logger.info(f"Task {task_id} claimed by {worker}")
         return card
 
-    def claim_next_open(
-        self, worker: str, project: str = ""
-    ) -> Optional[TaskCard]:
+    def claim_next_open(self, worker: str, project: str = "") -> Optional[TaskCard]:
         """Claim the highest-priority open card for ``worker``, if any."""
         for card in self.get_open(project=project):
             claimed = self.claim(card.id, worker, project=project)
@@ -684,13 +676,9 @@ class TaskLedger:
 
     def get_open(self, project: str = "") -> List[TaskCard]:
         """Get open (unassigned) cards, highest priority first."""
-        result = [
-            c for c in self.get_all(status="open") if not c.assignee
-        ]
+        result = [c for c in self.get_all(status="open") if not c.assignee]
         if project:
-            result = [
-                c for c in result if not c.project or c.project == project
-            ]
+            result = [c for c in result if not c.project or c.project == project]
         return sorted(result, key=lambda c: (-c.priority, c.created_at))
 
     def get_stalled(
@@ -709,9 +697,7 @@ class TaskLedger:
                 stalled.append(card)
         return sorted(stalled, key=lambda c: c.last_activity_at or c.updated_at)
 
-    def requeue_stalled(
-        self, task_id: str, reason: str = ""
-    ) -> Optional[TaskCard]:
+    def requeue_stalled(self, task_id: str, reason: str = "") -> Optional[TaskCard]:
         """Return a stalled active card to the open queue, unassigned."""
         previous_holder: List[str] = []
 
@@ -744,6 +730,7 @@ class TaskLedger:
 
     def touch_activity(self, task_id: str) -> bool:
         """Record worker liveness on a card without adding a checkpoint."""
+
         def _touch(card: TaskCard):
             if card.status in self.TERMINAL_STATUSES:
                 return None
