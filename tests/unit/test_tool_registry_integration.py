@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from kollabor_agent.tool_generators.markdown import render_for_bundle
-from kollabor_agent.tool_generators.native_json import generate_openai_tools
 from kollabor_agent.tool_generators.xml_regex import generate_all_regexes
 from kollabor_agent.tool_registry import ToolRegistry, get_registry
 
@@ -25,22 +24,27 @@ class TestRegistryIntegration:
     """End-to-end registry integration tests."""
 
     def test_full_pipeline_native_json(self):
-        """Registry -> native JSON -> valid OpenAI schemas."""
+        """Registry -> to_json_schema -> valid native tool schemas.
+
+        The OpenAI function envelope ({type: function, function: ...})
+        is applied by the provider adapter on top of these schemas.
+        """
         r = get_registry()
-        tools = generate_openai_tools(r.names(), registry=r)
+        tools = [t for t in r.list() if t.expose_native]
 
         assert len(tools) >= 16  # Was 16 in phase A; now 58+ after phases B-D
-        for t in tools:
-            func = t["function"]
-            assert func["name"]
-            assert func["description"]
-            assert "parameters" in func
-            params = func["parameters"]
+        for tool in tools:
+            schema = tool.to_json_schema()
+            assert schema["name"]
+            assert schema["description"]
+            assert "parameters" in schema
+            params = schema["parameters"]
             assert params["type"] == "object"
             assert isinstance(params["properties"], dict)
 
-        assert "git" not in {t["function"]["name"] for t in tools}
-        assert "terminal" in {t["function"]["name"] for t in tools}
+        names = {t.to_json_schema()["name"] for t in tools}
+        assert "git" not in names  # git doc-tool is XML-only, not native
+        assert "terminal" in names
 
     def test_full_pipeline_regex(self):
         """Registry -> XML regex -> matches sample XML."""
@@ -71,7 +75,13 @@ class TestRegistryIntegration:
         """Registry -> markdown -> valid docs for a bundle."""
         r = get_registry()
         # Simulate coder bundle tools
-        bundle_tools = ["terminal", "file-read", "file-edit", "file-append", "directory"]
+        bundle_tools = [
+            "terminal",
+            "file-read",
+            "file-edit",
+            "file-append",
+            "directory",
+        ]
         md = render_for_bundle(bundle_tools, registry=r)
 
         assert "Tool Reference" in md
@@ -108,9 +118,7 @@ class TestRegistryIntegration:
 
         config = MagicMock()
         config.get = lambda key, default=None: (
-            False
-            if key == "kollabor.tool_registry.use_registry"
-            else default
+            False if key == "kollabor.tool_registry.use_registry" else default
         )
 
         mcp = MCPIntegration.__new__(MCPIntegration)
@@ -178,6 +186,5 @@ class TestRegistryIntegration:
         prompt = builder.build()
         # Should NOT have registry-generated tool reference
         assert not (
-            "Tool Reference" in prompt
-            and "The tools below are available" in prompt
+            "Tool Reference" in prompt and "The tools below are available" in prompt
         )

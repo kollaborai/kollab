@@ -450,6 +450,12 @@ class LLMService:
         # Wire up cancellation callback so tool executor can check for user cancellation
         self.tool_executor.set_cancel_callback(lambda: self.cancel_processing)
         self.tool_executor.set_operation_observer(self._observe_tool_operation)
+        # Issue #202: tool loads change the dynamic scope inside the
+        # executor; refresh the native API schemas so loaded tools are
+        # callable in native mode immediately.
+        self.tool_executor.set_scope_change_callback(
+            self._refresh_native_tools_after_scope_change
+        )
 
         # Register as services so plugins can access them
         event_bus.register_service("response_parser", self.response_parser)
@@ -1263,6 +1269,11 @@ class LLMService:
     async def restart_session(self) -> dict:
         """Restart the conversation session - save current, start fresh."""
         self.current_parent_uuid = None
+        # Issue #203: a session reset is the one path where tools granted
+        # mid-session (tool-load, plugin grants) should not survive. Revoke
+        # them — notifications render, the scope narrows, and the native
+        # schema list refreshes via inject_tool_revoke.
+        await self._revoke_granted_tools_for_reset()
         return cast(
             dict,
             await self._session.restart_session(
@@ -1270,6 +1281,37 @@ class LLMService:
                 add_message_fn=self._add_conversation_message,
             ),
         )
+
+    async def _revoke_granted_tools_for_reset(self) -> None:
+        """Revoke dynamically granted tools on session reset (issue #203).
+
+        The executor's bundle scope starts at the active agent's declared
+        tools; anything granted on top of that during the session is
+        transient and is revoked here so revoked tools actually stop being
+        callable after a reset.
+        """
+        declared_scope = None
+        try:
+            if self.agent_manager is not None:
+                from kollabor_agent.runtime import get_agent_tool_scope
+
+                declared_scope = get_agent_tool_scope(
+                    self.agent_manager.get_active_agent()
+                )
+        except Exception as e:
+            logger.debug("Could not read agent tool scope for reset: %s", e)
+
+        current_scope = getattr(self.tool_executor, "_bundle_tools", None)
+        if current_scope is None:
+            # No dynamic grants to unwind when no scope is active.
+            return
+        declared = set(declared_scope) if declared_scope is not None else set()
+        granted = [t for t in current_scope if t not in declared]
+        for tool_name in granted:
+            try:
+                await self.inject_tool_revoke(tool_name, reason="session reset")
+            except Exception as e:
+                logger.warning("inject_tool_revoke failed for %s: %s", tool_name, e)
 
     async def _initialize_provider(self) -> None:
         """Initialize provider from active profile.
