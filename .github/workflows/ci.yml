@@ -54,7 +54,10 @@ jobs:
   # succeed; the 3.12 leg is informative (continue-on-error) and cannot fail
   # the aggregate. A skipped or cancelled matrix also fails the aggregate, so
   # the check can never resolve green without the suite having run.
-  ci/tests:
+  required_tests:
+    # The job ID cannot contain '/' (GitHub id charset), but the DISPLAY name
+    # is free-form: this resolves as the check "ci/tests", which is the exact
+    # name the required rule expects.
     name: ci/tests
     needs: [tests]
     if: ${{ !cancelled() }}
