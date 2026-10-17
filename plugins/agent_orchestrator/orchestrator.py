@@ -605,9 +605,16 @@ class AgentOrchestrator:
         root_socket = os.environ.get("KOLLAB_ROOT_SOCKET", self.project_name)
 
         env = os.environ.copy()
+        # Hub agents must outlive this process. KOLLAB_PARENT_PID arms the
+        # child's parent watchdog (application.py:_start_parent_watchdog):
+        # when the parent dies, the child runs graceful shutdown. Spawning
+        # hub agents with it meant a single engine bounce self-shut every
+        # agent it had spawned, on both hubs. Drop any inherited
+        # parent-identity instead of propagating it.
+        env.pop("KOLLAB_PARENT_PID", None)
+        env.pop("KOLLAB_PARENT_CREATE_TIME", None)
         env["KOLLAB_ROOT_SOCKET"] = root_socket
         env["KOLLAB_AGENT_NAME"] = agent_name
-        env["KOLLAB_PARENT_PID"] = str(os.getpid())
 
         cmd = self._find_kollab_command()
         cmd.append("--detached")
@@ -740,6 +747,13 @@ class AgentOrchestrator:
         """Terminate agent subprocess.
 
         Sends SIGTERM, waits up to 5s, then SIGKILL if still alive.
+
+        This is the ONLY sanctioned path for terminating a spawned hub
+        agent: it targets a single tracked pid. Loose ``pkill -f`` sweeps
+        over shared command-line substrings are forbidden -- a fleet-wide
+        restart must bounce processes by explicit pid (or a dedicated
+        restart tool), never by matching ``--detached --as`` style flags,
+        which every hub agent on every machine carries.
         """
         agent = None
         for a in self.agents.values():
