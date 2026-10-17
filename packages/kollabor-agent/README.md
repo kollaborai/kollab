@@ -46,7 +46,6 @@ kollabor_agent/
 ├── shell_utils.py                (230 lines)  Shell alias detection for prompt context
 ├── mcp_integration.py            (1221 lines) MCP JSON-RPC protocol over stdio
 ├── mcp_manager.py                (381 lines)  MCP config file management (no UI deps)
-├── mentiko_adapter.py            (203 lines)  Mentiko platform spawn adapter
 ├── native_tools_handler.py       (214 lines)  Native API function-calling routing
 ├── process_manager.py            (782 lines)  Agent subprocess lifecycle management
 ├── background_task_manager.py    (507 lines)  Background task tracking with circuit breaker
@@ -199,10 +198,6 @@ tasks:
 - Per-task metrics (optional)
 
 ### Other Modules
-
-- `MentikoAdapter` (`mentiko_adapter.py`) — Adapter for the Mentiko platform.
-  Spawns kollabor agents via subprocess with `--detached` flag. Provides both
-  Python API (`spawn_agent()`) and CLI entrypoint.
 
 - `NativeToolsHandler` (`native_tools_handler.py`) — Bridges native API
   function calling (OpenAI/Anthropic style) with the tool executor. Handles
