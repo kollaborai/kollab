@@ -29,12 +29,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PEX = "pex==2.103.4"
-UVX_PEX = ["uvx", "--python", "3.12", "--from", PEX]
 # The CPython the binary carries: a Python Standalone Builds release and version.
 # It, not the kollab file, is what reads the Keychain, and macOS knows it by its
 # code hash (it is ad hoc signed): changing either makes every Mac ask once again.
+# scripts/desktop_release.py lays out the same runtime as RUNTIME_PYTHON.
 PBS_RELEASE = "20261009"
-PYTHON = "3.12.15"
+PYTHON = "3.14.8"
+# pex runs on the same minor version, since floor_platform reads its wheel tags.
+UVX_PEX = ["uvx", "--python", PYTHON.rsplit(".", 1)[0], "--from", PEX]
 # The oldest systems the binary runs on: macOS 11, and glibc 2.28 (Debian 10+,
 # Ubuntu 20.04+, RHEL 8+). Wheels are picked for these, never for the build
 # machine, so a newer CI image cannot raise the floor unnoticed.

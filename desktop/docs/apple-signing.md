@@ -23,15 +23,15 @@ signed build. Explicit unsigned mode ignores inherited Apple credentials.
 Kollab.app ships no scie: `codesign` cannot sign one (every scie-jump keeps a
 15-byte trailer after `LC_CODE_SIGNATURE`) and notarization rejects any unsigned
 Mach-O. `scripts/desktop_release.py stage --platform macos-*` unpacks the
-verified CLI scie instead (`SCIE=split`): its own CPython 3.12, kollab and every
+verified CLI scie instead (`SCIE=split`): its own CPython 3.14, kollab and every
 dependency installed into that Python's `site-packages` by the pex's own tools,
 Tcl/Tk, headers and pip removed, all bytecode precompiled with
 `unchecked-hash`. It lands in `desktop/src-tauri/binaries/app-runtime-<target>/`:
 
 ```text
-Kollab.app/Contents/Resources/kollab              sh launcher: python3.12 -I -B -m kollabor_cli_main
-Kollab.app/Contents/Resources/runtime/bin/python3.12
-Kollab.app/Contents/Resources/runtime/lib/python3.12/...   stdlib, site-packages (about 25 .so)
+Kollab.app/Contents/Resources/kollab              sh launcher: python3.14 -I -B -m kollabor_cli_main
+Kollab.app/Contents/Resources/runtime/bin/python3.14
+Kollab.app/Contents/Resources/runtime/lib/python3.14/...   stdlib, site-packages (about 25 .so)
 Kollab.app/Contents/Resources/runtime/KOLLAB-APP           marker read by kollabor/binary.py
 ```
 
@@ -50,7 +50,7 @@ library validation, which loads an extension only when it shares the
 interpreter's Team ID, and ad hoc signatures have none: `pydantic_core` fails
 with "different Team IDs". A Developer ID signature gives every file the same
 Team ID, so the signed path needs no entitlements. Checked locally with ad hoc
-hardened runtime plus `disable-library-validation` on python3.12 standing in for
+hardened runtime plus `disable-library-validation` on python3.14 standing in for
 the shared Team ID: kollab's imports, HTTPS, ctypes and cffi callbacks, PyNaCl
 and uvloop all run.
 
@@ -284,7 +284,7 @@ need a Developer ID and have not run yet:
    Only the unsigned `seal` path is connected today.
 3. A first real submission for each architecture. If Apple rejects a file,
    `xcrun notarytool log <id>` names it; every Mach-O under
-   `Contents/Resources/runtime` (about 25 `.so` plus `python3.12`, some of
+   `Contents/Resources/runtime` (about 25 `.so` plus `python3.14`, some of
    them universal) must carry the team, hardened runtime and a timestamp.
 4. Run the notarized app with no entitlements first. ctypes and cffi callbacks,
    PyNaCl, uvloop and TLS worked under hardened runtime locally; add
@@ -293,7 +293,7 @@ need a Developer ID and have not run yet:
 5. Notarize and staple the `.dmg` as well as the app inside it, then run the
    clean-Mac checks below on both downloads.
 6. Expect one Keychain prompt per stored secret after the switch: macOS knows
-   `python3.12` by its signature, and Developer ID replaces the ad hoc one.
+   `python3.14` by its signature, and Developer ID replaces the ad hoc one.
    From then on the requirement (team + identifier) stays the same across
    updates, so later releases do not prompt again.
 

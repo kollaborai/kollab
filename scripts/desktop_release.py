@@ -11,7 +11,7 @@ kollab installed in its site-packages, which desktop/scripts/sign-macos.sh
 copies into Kollab.app and signs file by file:
 
     Kollab.app/Contents/Resources/kollab     sh launcher (`kollab --version`, `--web-ui`)
-    Kollab.app/Contents/Resources/runtime/   bin/python3.12, lib/python3.12/..., KOLLAB-APP
+    Kollab.app/Contents/Resources/runtime/   bin/python3.14, lib/python3.14/..., KOLLAB-APP
 """
 
 from __future__ import annotations
@@ -32,7 +32,9 @@ CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64
 # kollabor/binary.py reads this marker in sys.prefix: the app's runtime starts
 # again through the launcher beside it and never updates itself in place.
 APP_MARKER = "KOLLAB-APP"
-LAUNCHER = """#!/bin/sh
+# The scie's CPython minor version: scripts/build_binary.py PYTHON (a test keeps them equal).
+RUNTIME_PYTHON = "python3.14"
+LAUNCHER = f"""#!/bin/sh
 # Kollab.app's kollab: the app's own Python, isolated (-I) from the caller's
 # Python settings, never writing bytecode (-B) into the sealed bundle.
 self=$0
@@ -41,16 +43,17 @@ while [ -L "$self" ]; do
   case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
 done
 # -I ignores PYTHONUNBUFFERED, which the app sets so its log stays current.
-exec "$(dirname "$self")/runtime/bin/python3.12" -I -B ${PYTHONUNBUFFERED:+-u} -m kollabor_cli_main "$@"
+exec "$(dirname "$self")/runtime/bin/{RUNTIME_PYTHON}" -I -B ${{PYTHONUNBUFFERED:+-u}} -m kollabor_cli_main "$@"
 """
 # What kollab never runs: Tcl/Tk, headers, pip (nothing installs into a signed
-# app), the embedding dylib (python3.12 links libpython statically) and the
+# app), the embedding dylib (python3.x links libpython statically) and the
 # scripts whose shebangs name the build machine. Fewer Mach-O files to sign.
 PRUNE = (
-    "include", "share", "lib/pkgconfig", "lib/libpython3.12.dylib", "lib/itcl*", "lib/libtcl*",
-    "lib/tcl9*", "lib/thread*", "lib/tk9*", "lib/python3.12/config-3.12-darwin", "lib/python3.12/ensurepip",
-    "lib/python3.12/idlelib", "lib/python3.12/tkinter", "lib/python3.12/turtle.py",
-    "lib/python3.12/turtledemo", "lib/python3.12/lib-dynload/_tkinter.*", "lib/python3.12/site-packages/pip*",
+    "include", "share", "lib/pkgconfig", f"lib/lib{RUNTIME_PYTHON}.dylib", "lib/itcl*", "lib/libtcl*",
+    "lib/tcl9*", "lib/thread*", "lib/tk9*", f"lib/{RUNTIME_PYTHON}/config-*-darwin", f"lib/{RUNTIME_PYTHON}/ensurepip",
+    f"lib/{RUNTIME_PYTHON}/idlelib", f"lib/{RUNTIME_PYTHON}/tkinter", f"lib/{RUNTIME_PYTHON}/turtle.py",
+    f"lib/{RUNTIME_PYTHON}/turtledemo", f"lib/{RUNTIME_PYTHON}/lib-dynload/_tkinter.*",
+    f"lib/{RUNTIME_PYTHON}/site-packages/pip*",
 )
 MACOS_TARGETS = {"macos-aarch64": "aarch64-apple-darwin", "macos-x86_64": "x86_64-apple-darwin"}
 TARGETS = {
@@ -149,7 +152,9 @@ def unpack_runtime(scie: Path, destination: Path) -> Path:
     runtime = destination / "runtime"
     destination.mkdir(parents=True)
     (work / "cpython/python").rename(runtime)
-    interpreter = runtime / "bin/python3.12"
+    interpreter = runtime / "bin" / RUNTIME_PYTHON
+    if not interpreter.is_file():
+        raise ValueError(f"the scie's CPython has no bin/{RUNTIME_PYTHON}; match RUNTIME_PYTHON to build_binary.PYTHON")
     # The pex's own tools lay out exactly the distributions the scie resolved.
     subprocess.run(
         [str(interpreter), str(work / "split/pex"), "venv", "--site-packages-copies", str(work / "venv")],
@@ -161,14 +166,14 @@ def unpack_runtime(scie: Path, destination: Path) -> Path:
     for path in (runtime / "bin").iterdir():
         if path != interpreter:
             path.unlink()
-    site_packages = runtime / "lib/python3.12/site-packages"
-    shutil.copytree(work / "venv/lib/python3.12/site-packages", site_packages, dirs_exist_ok=True)
+    site_packages = runtime / "lib" / RUNTIME_PYTHON / "site-packages"
+    shutil.copytree(work / "venv/lib" / RUNTIME_PYTHON / "site-packages", site_packages, dirs_exist_ok=True)
     shutil.rmtree(work)
     # Bytecode that never goes stale: -B stops writes, unchecked-hash stops
     # recompiles, and a write inside the app would break its seal.
     subprocess.run(
         [str(interpreter), "-I", "-m", "compileall", "-q", "-j0", "--invalidation-mode", "unchecked-hash",
-         str(runtime / "lib/python3.12")],
+         str(runtime / "lib" / RUNTIME_PYTHON)],
         env=scie_env(), check=False, stdout=subprocess.DEVNULL,
     )
     # Python children started without -B (sys.executable -m ...) write no bytecode either.
