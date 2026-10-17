@@ -133,7 +133,9 @@ jobs:
           shown="$("$APP/Contents/Resources/kollab" --version)"
           test "${shown##* }" = "$VERSION"
           # The signed extensions load, and running kollab writes nothing into the app.
-          "$APP/Contents/Resources/runtime/bin/python3.12" -I -c \
+          # runtime/bin holds only the app's CPython (python3.N, desktop_release.py RUNTIME_PYTHON).
+          interpreter=("$APP"/Contents/Resources/runtime/bin/python3.*)
+          "${interpreter[0]}" -I -c \
             "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, kollabor_voice, plugins"
           codesign --verify --deep --strict --verbose=2 "$APP"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
