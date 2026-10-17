@@ -188,3 +188,58 @@ async def test_spawn_retries_a_socket_that_is_not_listening_yet():
     assert result is handle
     assert handle.connect.await_count == 2
     handle.close.assert_not_awaited()
+
+
+def _koordinator(folder, pid, socket_path):
+    return {"identity": "koordinator", "project": str(folder), "pid": pid, "socket_path": str(socket_path)}
+
+
+@pytest.mark.asyncio
+async def test_spawn_attaches_to_the_daemon_in_its_own_folder(tmp_path):
+    # Every folder runs its own koordinator. Until the new one publishes
+    # presence, the only live koordinator is another folder's: attaching to it
+    # wires the chat to the wrong agent.
+    here, other = tmp_path / "here", tmp_path / "other"
+    here.mkdir()
+    other.mkdir()
+    (tmp_path / "here.sock").touch()
+    (tmp_path / "other.sock").touch()
+    agents = [_koordinator(other, 111, tmp_path / "other.sock")]
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: list(agents)
+    handle = SimpleNamespace(
+        identity="koordinator", connect=AsyncMock(), launcher=SimpleNamespace(poll=lambda: None), pid=0
+    )
+
+    async def publish():
+        await asyncio.sleep(0.3)
+        agents.append(_koordinator(here, 222, tmp_path / "here.sock"))
+
+    with (
+        patch.object(daemon_pool.subprocess, "Popen", return_value=SimpleNamespace()),
+        patch.object(daemon_pool, "DaemonHandle", return_value=handle),
+    ):
+        publisher = asyncio.create_task(publish())
+        await pool.spawn("sess_here", identity="koordinator", workspace=str(here))
+        await publisher
+
+    handle.connect.assert_awaited_once_with(str(tmp_path / "here.sock"))
+    assert handle.pid == 222
+
+
+@pytest.mark.asyncio
+async def test_failed_spawn_never_signals_another_folders_agent(tmp_path):
+    # close() looks up the pid of a daemon that failed before its presence was
+    # read; a same-named agent in another folder is not that daemon.
+    handle = daemon_pool.DaemonHandle("sess_failed", "koordinator", SimpleNamespace())
+    handle.project = str(tmp_path / "here")
+    elsewhere = [_koordinator(tmp_path / "other", 4242, tmp_path / "other.sock")]
+
+    with (
+        patch.object(daemon_pool.HubBridge, "get_agents", return_value=elsewhere),
+        patch.object(daemon_pool.os, "kill") as kill,
+    ):
+        await handle.close(timeout=0.1)
+
+    assert handle.pid == 0
+    kill.assert_not_called()

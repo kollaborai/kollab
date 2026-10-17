@@ -16,7 +16,6 @@ from pathlib import Path
 import psutil
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 SDK_AGENT = r'''
@@ -166,6 +165,48 @@ async def cleanup_test_daemon(identity, root):
     await wait_dead(identity)
 
 
+def _test_spawned_process(process, root, adapter):
+    """This test's stray: a daemon running in one of its folders, or an SDK
+    running its adapter script. Both live under this run's tmp_path, so a
+    concurrent run of the same test is never touched."""
+    try:
+        cmdline = process.cmdline()
+        if not cmdline:
+            return False
+        if str(adapter) in cmdline:
+            return True
+        if "--detached" not in cmdline:
+            return False
+        return os.path.realpath(process.cwd()).startswith(os.path.realpath(root) + os.sep)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+        return False
+
+
+async def stop_stray_test_processes(root, adapter):
+    """Final net: stop every daemon/SDK this test spawned, pass or fail.
+
+    The detached sibling has no owner watchdog, and the identity-based
+    cleanup above only knows processes the owner managed to report. An
+    owner that dies before writing its report (crash, interrupted run)
+    otherwise leaks its daemons for good.
+    """
+    strays = [
+        process
+        for process in psutil.process_iter(["pid"])
+        if _test_spawned_process(process, root, adapter)
+    ]
+    for process in strays:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            process.terminate()
+    _, alive = psutil.wait_procs(strays, timeout=10) if strays else ([], [])
+    for process in alive:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            process.kill()
+    if alive:
+        _, alive = psutil.wait_procs(alive, timeout=10)
+    assert not alive, f"test processes survived teardown: {[p.pid for p in alive]}"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["ready", "blocked"])
 async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agent(tmp_path, phase):
@@ -228,13 +269,17 @@ async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agen
         assert read_sdk_identity(root / "owned")["create_time"] == report["sdk"]["create_time"]
         assert not same_birth_alive(report["sdk"])
     finally:
-        if process.returncode is None:
-            # This is the exact process created here; ordinary termination only.
-            if same_birth_alive(owner_identity):
-                process.terminate()
-            await asyncio.wait_for(process.wait(), 10)
-        stderr = await stderr_task
-        (root / "owner-stderr.txt").write_bytes(stderr)
+        problems: list[str] = []
+        try:
+            if process.returncode is None:
+                # This is the exact process created here; ordinary termination only.
+                if same_birth_alive(owner_identity):
+                    process.terminate()
+                await asyncio.wait_for(process.wait(), 10)
+            stderr = await asyncio.wait_for(stderr_task, 10)
+            (root / "owner-stderr.txt").write_bytes(stderr)
+        except BaseException as error:
+            problems.append(f"owner shutdown: {type(error).__name__}: {error}")
         # Retain all identity/evidence files, even when the qualification fails.
         if not report and (root / "owner-report.json").exists():
             report = json.loads((root / "owner-report.json").read_text())
@@ -242,15 +287,28 @@ async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agen
             sdk = read_sdk_identity(root / "detached")
             if sdk is not None:
                 report["detached_sdk"] = sdk
-        for key in ("daemon", "detached_daemon"):
-            if key in report:
-                await cleanup_test_daemon(report[key], root)
-        for key in ("sdk", "detached_sdk"):
-            if key in report:
-                await wait_dead(report[key])
+        try:
+            for key in ("daemon", "detached_daemon"):
+                if key in report:
+                    await cleanup_test_daemon(report[key], root)
+            for key in ("sdk", "detached_sdk"):
+                if key in report:
+                    await wait_dead(report[key])
+        except BaseException as error:
+            # A failed precise cleanup must not skip the sweep below.
+            problems.append(f"identity cleanup: {type(error).__name__}: {error}")
+        try:
+            # Last net, pass or fail: never leave a daemon or SDK behind,
+            # even when the owner died before reporting any identity.
+            await stop_stray_test_processes(root, adapter)
+        except BaseException as error:
+            problems.append(f"stray sweep: {type(error).__name__}: {error}")
         observation["identities"] = report
         observation["remaining_same_births_after_owned_teardown"] = [
             key for key, value in report.items()
             if isinstance(value, dict) and "pid" in value and same_birth_alive(value)
         ]
+        observation["teardown_problems"] = problems
         (root / "lifetime-observation.json").write_text(json.dumps(observation, indent=2))
+        if problems:
+            raise AssertionError("teardown problems: " + "; ".join(problems))

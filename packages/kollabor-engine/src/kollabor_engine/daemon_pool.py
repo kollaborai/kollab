@@ -134,6 +134,10 @@ class DaemonHandle:
         # (DaemonPool.adopt): closing that handle detaches and never signals it.
         self.launcher = launcher
         self.pid: int = 0
+        # Folder a spawned daemon runs in (its presence ``project``). Gem names
+        # repeat across folders, so finding it by identity alone can return
+        # another folder's agent.
+        self.project: str = ""
         self.socket_path: str = ""
         self.created_at = time.time()
 
@@ -319,12 +323,13 @@ class DaemonHandle:
 
         # A spawn that failed before presence was read has no pid yet. Look it
         # up one last time so a failed create never leaves a live daemon behind.
-        if not self.pid:
+        # Only in its own folder: never signal another folder's same-named agent.
+        if not self.pid and self.project:
             try:
                 from .hub_bridge import HubBridge
 
                 agent = HubBridge().get_agent_by_identity(
-                    self.identity, use_cache=False
+                    self.identity, use_cache=False, project=self.project
                 )
                 if agent:
                     self.pid = int(agent.get("pid") or 0)
@@ -515,7 +520,8 @@ class DaemonPool:
                 raise ValueError(f"workspace does not exist: {cwd}")
 
             logger.info("spawning daemon %s for session %s", identity_name, session_id)
-            self._starting[session_id] = (identity_name, os.path.realpath(cwd))
+            folder = os.path.realpath(cwd)
+            self._starting[session_id] = (identity_name, folder)
             try:
                 process = subprocess.Popen(
                     argv,
@@ -528,6 +534,7 @@ class DaemonPool:
                 )
 
                 handle = DaemonHandle(session_id, identity_name, process)
+                handle.project = folder
                 try:
                     deadline = time.monotonic() + SPAWN_TIMEOUT_SECONDS
                     while True:
@@ -614,7 +621,9 @@ class DaemonPool:
             # use_cache=False is essential: we are polling for an agent that
             # starts *after* the cached presence snapshot was taken, so a
             # cached lookup can never see it.
-            agent = self._bridge.get_agent_by_identity(handle.identity, use_cache=False)
+            agent = self._bridge.get_agent_by_identity(
+                handle.identity, use_cache=False, project=handle.project
+            )
             if agent:
                 # Record the pid the moment presence reports it, before the
                 # socket check - otherwise a failure between here and connect()

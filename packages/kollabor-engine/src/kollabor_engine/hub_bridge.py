@@ -202,17 +202,23 @@ class HubBridge:
         return sessions
 
     def get_agent_by_identity(
-        self, identity: str, use_cache: bool = True
+        self, identity: str, use_cache: bool = True, project: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """Return a single agent's presence data by identity (e.g. 'koordinator').
 
         Pass use_cache=False when polling for an agent that is expected to
         appear: the cached list is a snapshot from up to CACHE_TTL_SECONDS ago
         and will never contain an agent that started after it was taken.
+        Gem names repeat across folders (a koordinator per project): pass
+        ``project`` to match only the agent running in that folder.
         """
+        folder = os.path.realpath(project) if project else None
         for agent in self.get_agents(use_cache=use_cache):
-            if agent.get("identity") == identity:
-                return agent
+            if agent.get("identity") != identity:
+                continue
+            if folder and os.path.realpath(str(agent.get("project") or "")) != folder:
+                continue
+            return agent
         return None
 
     def _socket_path_for_agent(self, agent_data: Dict[str, Any]) -> Optional[Path]:
