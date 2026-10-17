@@ -40,19 +40,16 @@ jobs:
 
       - name: Verify release consistency
         # Enforce the release invariant on the pristine tagged commit BEFORE any
-        # rewrite: source versions, changelog entry, and the packaged changelog
-        # copy must already agree with the tag. If they don't, the tag was cut
-        # without a prep PR -- fail fast rather than silently repairing in CI.
+        # rewrite: every versioned surface (engine, workspace packages, web
+        # frontend bundle, desktop Tauri config), the changelog entry, and the
+        # packaged changelog copy must already agree with the tag. If they
+        # don't, the tag was cut without a prep PR -- fail fast rather than
+        # silently repairing in CI. This is the drift gate: a tag that slips
+        # past local release prep is refused here, before any build or upload.
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           fail=0
-          for pkg in pyproject.toml packages/*/pyproject.toml; do
-            cur=$(grep -m1 '^version = ' "$pkg" | sed 's/version = "\(.*\)"/\1/')
-            if [ "$cur" != "$VERSION" ]; then
-              echo "::error::$pkg version '$cur' != tag '$VERSION'"
-              fail=1
-            fi
-          done
+          python scripts/check_version_parity.py --expected "v$VERSION" || fail=1
           if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [$VERSION]' entry"
             fail=1
