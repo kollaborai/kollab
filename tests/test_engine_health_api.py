@@ -122,10 +122,19 @@ def test_endpoints():
             assert "session_ids" in data
             assert "version" in data
             assert "providers" in data
-            assert "mcp_servers" in data
             assert isinstance(data["providers"], list)
-            assert isinstance(data["mcp_servers"], dict)
             print("  /status OK")
+
+            # Test per-session MCP status (the /status payload no longer
+            # carries mcp_servers; server.py moved it to
+            # GET /sessions/{id}/mcp in 1f6efcaf because servers belong to
+            # each daemon, not to the engine as a whole). The route is
+            # auth-protected like the rest of /sessions, so a fresh engine
+            # without a token answers 401 here; the 404 shape for a missing
+            # session is covered by the authed session tests elsewhere.
+            resp = requests.get(f"{base_url}/sessions/none/mcp", timeout=5)
+            assert resp.status_code == 401
+            print("  /sessions/{{id}}/mcp routing OK")
 
             # Test /ready
             resp = requests.get(f"{base_url}/ready", timeout=5)
