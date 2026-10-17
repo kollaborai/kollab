@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -144,6 +145,84 @@ def test_auto_update_uses_uv_pip_when_the_venv_has_no_pip(tmp_path, monkeypatch)
     auto_update.run_auto_update(repo_root=tmp_path)
 
     assert calls == [("uv", "pip", "install", "--upgrade", "kollab", "--python", "/venv/bin/python")]
+
+
+def test_auto_update_upgrades_user_site_installs_with_pip_user(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: True)
+    user_site = Path("/Users/u/.local/lib/python3.14/site-packages")
+    monkeypatch.setattr(auto_update, "_dist_install_dir", lambda: user_site)
+    monkeypatch.setattr(auto_update, "_user_site_dir", lambda: user_site)
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/Users/u/.pyenv/versions/3.14.7")
+    monkeypatch.setattr(auto_update.sys, "path", [str(user_site)])
+
+    result = auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert (result.success, result.method, result.changed) == (True, "pip", True)
+    assert calls == [
+        ("/Users/u/.pyenv/versions/3.14.7/bin/python", "-m", "pip", "install", "--upgrade", "--user", "kollab")
+    ]
+    assert result.message == (
+        "Kollab upgraded: v0.10.1 -> v0.10.2 (via pip).\n"
+        "  Upgraded the user-site install at /Users/u/.local/lib/python3.14/site-packages"
+    )
+
+
+def test_user_site_upgrade_reports_shadow_copies_it_did_not_touch(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: True)
+    user_site = Path("/Users/u/.local/lib/python3.14/site-packages")
+    monkeypatch.setattr(auto_update, "_dist_install_dir", lambda: user_site)
+    monkeypatch.setattr(auto_update, "_user_site_dir", lambda: user_site)
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/Users/u/.pyenv/versions/3.14.7")
+    shadow = tmp_path / "pyenv" / "lib" / "python3.14" / "site-packages"
+    (shadow / "kollabor").mkdir(parents=True)
+    monkeypatch.setattr(auto_update.sys, "path", [str(user_site), str(shadow)])
+
+    result = auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert "--user" in calls[0]
+    assert f"Untouched copies of kollab also present: {shadow}" in result.message
+
+
+def test_user_site_upgrade_without_pip_fails_with_guidance(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: False)
+    user_site = Path("/Users/u/.local/lib/python3.14/site-packages")
+    monkeypatch.setattr(auto_update, "_dist_install_dir", lambda: user_site)
+    monkeypatch.setattr(auto_update, "_user_site_dir", lambda: user_site)
+    calls = _fake_upgrade(
+        monkeypatch, auto_update, prefix="/Users/u/.pyenv/versions/3.14.7", which="/usr/bin/uv"
+    )
+
+    result = auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert result.success is False
+    assert "user site-packages" in result.message
+    assert "ensurepip" in result.message
+    assert calls == []  # never a `uv pip --user` attempt: uv does not support it
+
+
+def test_auto_update_keeps_plain_pip_for_non_user_site_installs(tmp_path, monkeypatch):
+    import kollabor.updates.auto_update as auto_update
+
+    monkeypatch.setattr(git_update, "_has_pip", lambda: True)
+    monkeypatch.setattr(
+        auto_update, "_dist_install_dir", lambda: Path("/venv/lib/python3.14/site-packages")
+    )
+    monkeypatch.setattr(
+        auto_update, "_user_site_dir", lambda: Path("/Users/u/.local/lib/python3.14/site-packages")
+    )
+    calls = _fake_upgrade(monkeypatch, auto_update, prefix="/venv")
+
+    result = auto_update.run_auto_update(repo_root=tmp_path)
+
+    assert result.changed is True
+    assert calls == [("/venv/bin/python", "-m", "pip", "install", "--upgrade", "kollab")]
+    assert "user-site" not in result.message
 
 
 def test_auto_update_reports_already_up_to_date_without_change(tmp_path, monkeypatch):

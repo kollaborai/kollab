@@ -35,7 +35,7 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
-from .capture import normalize_records, paginate, plain_text
+from .capture import normalize_records, normalize_text, paginate, plain_text
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
@@ -1703,18 +1703,19 @@ class HubPlugin(BasePlugin):
             "hub_cron_delete", self._handle_hub_cron_delete_tool
         )
 
-        # hub_capture (self-closing, optional lines attribute)
+        # hub_capture (self-closing, optional lines/format attributes)
         def _extract_hub_capture(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "cap_name": attrs.get("name", "").strip(),
                 "cap_lines": attrs.get("lines") or "50",
+                "cap_format": (attrs.get("format") or "").strip().lower(),
             }
 
         cap_pat = tag_pattern(
             "hub_capture",
             required={"name": "some"},
-            valid={"lines": r"\d+"},
+            valid={"lines": r"\d+", "format": r"(?:terminal|plain|json)"},
             end="/>",
         )
         response_parser.register_plugin_tag(
@@ -4507,9 +4508,15 @@ class HubPlugin(BasePlugin):
             or tool_data.get("lines", "")
             or "50"
         )
+        cap_format = str(
+            request.get("format", "") or tool_data.get("cap_format", "") or ""
+        ).strip().lower()
+        wants_raw = cap_format == "terminal" or bool(request.get("raw"))
         args = cap_name.strip()
         if cap_lines:
             args += f" {cap_lines}"
+        if wants_raw:
+            args += " --raw"
         result = await self._handle_capture_command(args)
         # Truncate per-agent capture to 10k chars (2000 was too low —
         # oldest entries consumed the entire budget before recent work
@@ -9950,7 +9957,9 @@ class HubPlugin(BasePlugin):
                     "console", "", "Agent management console (sidebar + feed)"
                 ),
                 SubcommandInfo("spawn", "<name> <task>", "Spawn a new agent"),
-                SubcommandInfo("capture", "<name|all> [lines]", "Capture agent output"),
+                SubcommandInfo(
+                    "capture", "<name|all> [lines] [--raw]", "Capture agent output"
+                ),
                 SubcommandInfo("stop", "<identity|all>", "Stop agent(s) on the mesh"),
                 SubcommandInfo("agents", "", "List all active agents"),
                 SubcommandInfo(
@@ -11304,7 +11313,9 @@ class HubPlugin(BasePlugin):
                 return f"capture failed for '{peer.identity}': {capture_error}"
             if payload is None:
                 return f"no recent output from '{peer.identity}'"
-            return payload
+            if format == "json":
+                return payload
+            return self._render_plain_capture(peer.identity, payload)
 
         output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
@@ -11319,6 +11330,30 @@ class HubPlugin(BasePlugin):
 
         header = f"[{peer.identity}]"
         return header + "\n" + "\n".join(output_lines)
+
+    @staticmethod
+    def _render_plain_capture(identity: str, payload: Any) -> str:
+        """Render a plain capture envelope as escape-free text.
+
+        Plain is the default chat/CLI format: it strips ANSI and control
+        codes so agent captures do not burn tokens on terminal styling.
+        Older peers may still answer the get_output request with bare
+        "lines" (no envelope); those lines are normalized here too.
+        """
+        if not isinstance(payload, dict):
+            return str(payload or f"no recent output from '{identity}'")
+        text = str(payload.get("text") or "")
+        if not text.strip():
+            lines = payload.get("lines")
+            if isinstance(lines, list) and lines:
+                text = "\n".join(normalize_text(line) for line in lines)
+        if not text.strip():
+            return f"no recent output from '{identity}'"
+        if payload.get("truncated"):
+            next_cursor = payload.get("next_cursor")
+            suffix = f", next_cursor={next_cursor}" if next_cursor else ""
+            text += f"\n... (truncated{suffix})"
+        return text
 
     @staticmethod
     def _remote_target_refusal(target: Any) -> str | None:
@@ -11635,13 +11670,19 @@ class HubPlugin(BasePlugin):
         return msg
 
     async def _handle_capture_command(self, rest: str) -> str:
-        """Handle /hub capture <identity|name|all> [lines].
+        """Handle /hub capture <identity|name|all> [lines] [--raw].
 
         Accepts hub identity names (e.g. "lapis"), orchestrator agent
         names, or "all". Hub identities capture directly over peer sockets.
         Orchestrator session names still route through agent_orchestrator.
+        Defaults to the plain format (ANSI/control codes stripped);
+        pass --raw for the raw terminal rendering.
         """
         args = rest.split() if rest.strip() else []
+        # Plain (ANSI-stripped) is the default capture format; --raw opts
+        # back into the raw terminal rendering.
+        capture_format = "terminal" if "--raw" in args else "plain"
+        args = [a for a in args if a != "--raw"]
         refusal = self._remote_target_refusal(args[0] if args else "")
         if refusal:
             return refusal
@@ -11649,7 +11690,7 @@ class HubPlugin(BasePlugin):
         if not orch:
             return "error: agent orchestrator not available"
         if not args:
-            return "usage: /hub capture <identity|name|all> [lines]"
+            return "usage: /hub capture <identity|name|all> [lines] [--raw]"
 
         target = args[0]
         try:
@@ -11671,7 +11712,9 @@ class HubPlugin(BasePlugin):
 
             peer = self._get_peer_by_identity(target)
             if peer is not None:
-                return await self._capture_peer_output(peer, lines)
+                return await self._capture_peer_output(
+                    peer, lines, format=capture_format
+                )
 
             resolved = self._resolve_identity_to_agent_name(target)
             if resolved is not None:
