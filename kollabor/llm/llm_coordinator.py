@@ -227,18 +227,30 @@ class LLMService:
         await self.inject_system_message(content, subtype="tool_grant")
         logger.info(f"Tool grant injected: {tool_name}{reason_block}")
 
-        # Env-notification: tool grant (fire-and-forget)
+        # Env-notification: tool grant (fire-and-forget). The grant flow
+        # must not fail because the env rail is down, but the outage must
+        # be visible.
         try:
             from kollabor_ai.notifications.producer import push_env
 
-            push_env(
+            delivered = push_env(
                 self.event_bus,
                 "capability",
                 f"+tool:{tool_name}",
                 kind="tool_grant",
             )
-        except Exception:
-            pass
+        except Exception as exc:  # import or unexpected failure
+            delivered = False
+            logger.warning(
+                "tool-grant env notification for %s could not be sent (%s)",
+                tool_name,
+                exc,
+            )
+        if not delivered:
+            logger.warning(
+                "tool-grant env notification for %s was NOT delivered",
+                tool_name,
+            )
 
     async def inject_tool_revoke(
         self,
@@ -273,8 +285,13 @@ class LLMService:
             tool = get_registry().get(tool_name)
             if tool:
                 xml_tag = tool.xml_tag_name
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not resolve xml tag for revoked tool %s, using "
+                "tool name as tag: %s",
+                tool_name,
+                exc,
+            )
 
         content = (
             f"[notification] tool revoked{reason_block}\n\n"
@@ -287,18 +304,30 @@ class LLMService:
         await self.inject_system_message(content, subtype="tool_revoke")
         logger.info(f"Tool revoke injected: {tool_name}{reason_block}")
 
-        # Env-notification: tool revoke (fire-and-forget)
+        # Env-notification: tool revoke (fire-and-forget). The revoke flow
+        # must not fail because the env rail is down, but the outage must
+        # be visible.
         try:
             from kollabor_ai.notifications.producer import push_env
 
-            push_env(
+            delivered = push_env(
                 self.event_bus,
                 "capability",
                 f"-tool:{tool_name}",
                 kind="tool_revoke",
             )
-        except Exception:
-            pass
+        except Exception as exc:  # import or unexpected failure
+            delivered = False
+            logger.warning(
+                "tool-revoke env notification for %s could not be sent (%s)",
+                tool_name,
+                exc,
+            )
+        if not delivered:
+            logger.warning(
+                "tool-revoke env notification for %s was NOT delivered",
+                tool_name,
+            )
 
     async def _refresh_native_tools_after_scope_change(self) -> None:
         """Reload native tool schemas after dynamic tool scope changes."""
@@ -546,8 +575,12 @@ class LLMService:
                     native_name = definition.native_name
                     if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", native_name):
                         return native_name
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Native tool name resolution failed for candidates %s: %s",
+                candidates,
+                exc,
+            )
         return None
 
     @staticmethod
@@ -1623,17 +1656,16 @@ class LLMService:
         """Start background task monitoring. Delegates to BackgroundTaskManager."""
         await self._task_manager.start_task_monitor()
 
-    async def get_task_status(self):
-        """Get status of all background tasks. Delegates to BackgroundTaskManager."""
-        return await self._task_manager.get_task_status()
-
     async def cancel_all_tasks(self):
-        """Cancel all background tasks. Delegates to BackgroundTaskManager."""
-        await self._task_manager.cancel_all_tasks()
+        """Cancel all background tasks. Delegates to BackgroundTaskManager.
 
-    async def wait_for_tasks(self, timeout: float = 30.0):
-        """Wait for all background tasks. Delegates to BackgroundTaskManager."""
-        await self._task_manager.wait_for_tasks(timeout)
+        Consumed by shutdown() to drain tracked tasks. The monitor loop in
+        BackgroundTaskManager is a janitor (reaps done tasks, logs its own
+        activity), so it needs no external status consumer. The former
+        get_task_status and wait_for_tasks forwards had no production
+        caller and were removed; use _task_manager directly for those.
+        """
+        await self._task_manager.cancel_all_tasks()
 
     # --- SystemPromptBuilder forwarding methods ---
 

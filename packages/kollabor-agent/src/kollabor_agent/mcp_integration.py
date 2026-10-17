@@ -474,8 +474,12 @@ class MCPServerConnection:
                 try:
                     self.process.kill()
                     await self.process.wait()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "Force kill failed for MCP server %s during shutdown: %s",
+                        self.server_name,
+                        exc,
+                    )
             except Exception as e:
                 logger.warning(f"Error closing MCP server {self.server_name}: {e}")
             finally:
@@ -488,8 +492,13 @@ class MCPServerConnection:
                     if transport and hasattr(transport, "close"):
                         try:
                             transport.close()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug(
+                                "Could not close %s transport for MCP server %s: %s",
+                                type(transport).__name__,
+                                self.server_name,
+                                exc,
+                            )
                 self.process = None
             self.initialized = False
             logger.info(f"Closed MCP server connection: {self.server_name}")
@@ -947,19 +956,33 @@ class MCPIntegration:
             )
 
     def _push_env_mcp_connect(self, server_name: str, tool_count: int) -> None:
-        """Push a capability env event for MCP server connection."""
+        """Push a capability env event for MCP server connection.
+
+        The connect flow must not fail because the env rail is down, but
+        the outage must be visible.
+        """
         try:
             from kollabor_ai.notifications.producer import push_env
 
-            push_env(
+            delivered = push_env(
                 self.event_bus,
                 "capability",
                 f"+mcp:{server_name} ({tool_count} tools)",
                 kind="mcp_connect",
                 collapse_key=f"mcp:{server_name}",
             )
-        except Exception:
-            pass
+        except Exception as exc:  # import or unexpected failure
+            delivered = False
+            logger.warning(
+                "mcp-connect env notification for %s could not be sent (%s)",
+                server_name,
+                exc,
+            )
+        if not delivered:
+            logger.warning(
+                "mcp-connect env notification for %s was NOT delivered",
+                server_name,
+            )
 
     async def _auto_grant_mcp_tools(
         self,

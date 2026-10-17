@@ -152,7 +152,7 @@ class TestTaskManagement:
         task = llm_service.create_background_task(sample_task(), name="status_test")
 
         # Get status while task is running
-        status = await llm_service.get_task_status()
+        status = await llm_service._task_manager.get_task_status()
         assert status["active_tasks"] == 1
         assert status["max_concurrent"] == 50
         assert len(status["tasks"]) == 1
@@ -163,7 +163,7 @@ class TestTaskManagement:
         await task
 
         # Get status after task completion
-        status = await llm_service.get_task_status()
+        status = await llm_service._task_manager.get_task_status()
         assert status["active_tasks"] == 0
         assert len(status["tasks"]) == 0
 
@@ -208,7 +208,7 @@ class TestTaskManagement:
 
         # Wait with short timeout (should timeout and cancel)
         with patch("kollabor_agent.background_task_manager.logger") as mock_logger:
-            await llm_service.wait_for_tasks(timeout=0.1)
+            await llm_service._task_manager.wait_for_tasks(timeout=0.1)
             mock_logger.warning.assert_called_with(
                 "Timeout waiting for tasks to complete"
             )
@@ -228,7 +228,7 @@ class TestTaskManagement:
         task = llm_service.create_background_task(quick_task(), name="wait_test")
 
         # Wait with sufficient timeout
-        await llm_service.wait_for_tasks(timeout=5.0)
+        await llm_service._task_manager.wait_for_tasks(timeout=5.0)
 
         # Verify task completed successfully
         assert task.done()

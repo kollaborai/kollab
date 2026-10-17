@@ -245,7 +245,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
             self.assertFalse(
                 self.service.clear_remote_task_cancellation(remote_generation)
             )
-            await self.service.wait_for_tasks()
+            await self.service._task_manager.wait_for_tasks()
 
         asyncio.run(scenario())
 
@@ -274,7 +274,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
                 self.assertTrue(self.service.cancel_processing)
 
                 finish_cleanup.set()
-                await self.service.wait_for_tasks()
+                await self.service._task_manager.wait_for_tasks()
                 self.assertTrue(
                     self.service.remote_task_cancellation_ready(generation)
                 )
@@ -284,7 +284,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
                 self.assertFalse(self.service.cancel_processing)
             finally:
                 finish_cleanup.set()
-                await self.service.wait_for_tasks()
+                await self.service._task_manager.wait_for_tasks()
 
         asyncio.run(scenario())
 
@@ -700,7 +700,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
             )
             self.service.event_bus.get_service.return_value = acp
             generation = self.service.cancel_current_request()
-            await self.service.wait_for_tasks()
+            await self.service._task_manager.wait_for_tasks()
             self.assertIsInstance(generation, int)
             acp.cancel.assert_awaited_once()
 

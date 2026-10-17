@@ -485,7 +485,8 @@ class SubprocessStrategy(SpawnStrategy):
                 timeout=2,
             )
             return int(out.strip()) * 1024  # ps reports kB on darwin
-        except Exception:
+        except Exception as exc:
+            logger.debug("macOS RSS lookup failed for pid %s: %s", pid, exc)
             return 0
 
     @staticmethod
