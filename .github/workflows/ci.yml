@@ -60,6 +60,13 @@ jobs:
       - name: Compile public entry points
         run: uv run python -m py_compile kollabor/cli.py kollabor_cli_main.py plugins/hub/plugin.py
 
+      - name: Check release version parity
+        # The engine, every workspace package, the web frontend bundle, and the
+        # desktop Tauri config must sit at one release version. Drift fails the
+        # PR here instead of surfacing as a false version-mismatch warning in
+        # the web UI or a broken desktop release later.
+        run: uv run python scripts/check_version_parity.py
+
   security-scan:
     name: ci/security-scan
     runs-on: ubuntu-latest
