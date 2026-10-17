@@ -111,8 +111,29 @@ jobs:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
+      # Prebuilt cargo-tauri from the tauri-cli release — building it from
+      # source took ~15.5 min on the Intel runner. The version check below
+      # keeps the pin honest even if the asset ever drifts.
       - name: Install pinned Tauri CLI
-        run: cargo install tauri-cli --locked --version "2.12.0"
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAURI_CLI_VERSION="2.12.0"
+          case "$TARGET_TRIPLE" in
+            aarch64-apple-darwin) asset_arch="aarch64" ;;
+            x86_64-apple-darwin) asset_arch="x86_64" ;;
+            *) echo "unsupported target: $TARGET_TRIPLE" >&2; exit 1 ;;
+          esac
+          url="https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-${asset_arch}-apple-darwin.zip"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cargo-tauri.zip" "$url"
+          unzip -o -q "$RUNNER_TEMP/cargo-tauri.zip" -d "$RUNNER_TEMP/cargo-tauri"
+          sudo mv "$RUNNER_TEMP/cargo-tauri/cargo-tauri" /usr/local/bin/cargo-tauri
+          sudo chmod +x /usr/local/bin/cargo-tauri
+          installed="$(cargo tauri --version)"
+          echo "installed: $installed"
+          test "${installed##* }" = "${TAURI_CLI_VERSION}"
 
       - name: Unpack the CLI into the app runtime and set the release version
         env:
