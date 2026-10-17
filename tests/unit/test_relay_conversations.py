@@ -18,7 +18,21 @@ WORKSPACE = "d" * 32
 REMOTE_WORKSPACE = "e" * 32
 OTHER_ROOM = "f" * 64
 OTHER_PEER = "1" * 64
-DEADLINE = int(module.time.time()) + 600
+
+
+def _deadline(offset: int = 600) -> int:
+    """Fresh conversation deadline for the current test.
+
+    A module-level constant is pinned at import time and goes stale in long
+    test sessions: relay validation rejects any expires_at outside
+    (0, now + MAX_CONVERSATION_TTL], so a full-suite run that reaches this
+    module more than 600s after import trips every test here with
+    'conversation deadline exceeded'. Computing per call makes the wall
+    clock of the surrounding suite irrelevant.
+    """
+    return int(module.time.time()) + offset
+
+
 LOCAL_AGENT = "local-session"
 REMOTE_AGENT = "remote-session"
 
@@ -40,7 +54,7 @@ def message(number=1, **updates):
         "to_coordinator": False,
         "content": "Please create the harmless requested artifact.",
         "kind": "message",
-        "expires_at": DEADLINE,
+        "expires_at": _deadline(),
     }
     value.update(updates)
     return value
@@ -115,7 +129,12 @@ def test_queue_deadline_expires_waiting_work_without_repeating_execution(
     store, monkeypatch
 ):
     grant(store)
-    queued = admit(store)
+    # The retransmit at the end must carry the SAME payload bytes as the
+    # original admission: duplicate detection is a fingerprint match, and a
+    # freshly generated default message would hash differently once the
+    # deadline is computed per call.
+    original = message()
+    queued = admit(store, original)
     running = admit(store, message(2))
     store.transition(running["id"], "running")
     then = store.task(queued["id"])["created"]
@@ -123,7 +142,7 @@ def test_queue_deadline_expires_waiting_work_without_repeating_execution(
     assert store.expire_queued() == 1
     assert store.task(queued["id"])["state"] == "failed"
     assert store.task(running["id"])["state"] == "running"
-    assert admit(store)["duplicate"]
+    assert admit(store, original)["duplicate"]
     assert not store.transition(queued["id"], "running")
 
 
