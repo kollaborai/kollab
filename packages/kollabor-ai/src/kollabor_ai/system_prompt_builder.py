@@ -223,6 +223,7 @@ class SystemPromptBuilder:
                     profile_manager=self.profile_manager,
                     conversation_logger=self.conversation_logger,
                     skip_volatile=stable,
+                    prompt_bundle=self.agent_manager.active_agent_name,
                 )
                 logger.info(
                     f"System prompt build #{self._build_count} "
@@ -250,6 +251,7 @@ class SystemPromptBuilder:
             profile_manager=self.profile_manager,
             conversation_logger=self.conversation_logger,
             skip_volatile=stable,
+            prompt_bundle="default",
         )
 
         logger.info(
