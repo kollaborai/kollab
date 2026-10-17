@@ -68,6 +68,12 @@ def test_directive_mentions_supervisor_backstop(prompt):
     assert "idle supervisor" in prompt
 
 
+def test_directive_notes_dual_store_split(prompt):
+    """hub_queue slots and TaskLedger cards are distinct stores; the
+    coordinator must not mistake a queued slot for a tracked card."""
+    assert "DISTINCT stores" in prompt
+
+
 def test_system_prompt_includes_sections(prompt):
     base = (KOORDINATOR_DIR / "system_prompt.md").read_text()
     assert "<trender" in base or "sections" in base

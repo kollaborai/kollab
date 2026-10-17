@@ -155,6 +155,71 @@ class TestRealHandoffsClassify:
         ), f"historical false positive {name} regressed"
 
 
+class TestConfigExtensibleMarkers:
+    """Operators can add their own phrasings without code edits."""
+
+    def _shell(self, config=None):
+        shell = object.__new__(HubPlugin)
+        shell.config = config or {}
+        return shell
+
+    def test_extra_markers_extend_builtins(self):
+        shell = self._shell(
+            {"plugins.hub.extra_task_assignment_markers": ["on your plate"]}
+        )
+        assert HubPlugin._is_explicit_task_assignment(
+            shell, "on your plate: the release verification"
+        )
+        # Built-ins keep working alongside.
+        assert HubPlugin._is_explicit_task_assignment(shell, "new task: fix the thing")
+
+    def test_no_config_keeps_builtin_behavior(self):
+        shell = self._shell()
+        assert HubPlugin._is_explicit_task_assignment(
+            shell, "next assignment: take the QA slot"
+        )
+        assert not HubPlugin._is_explicit_task_assignment(
+            shell, "please handle the custom phrasing"
+        )
+
+    def test_extra_markers_respect_word_boundaries(self):
+        shell = self._shell(
+            {"plugins.hub.extra_task_assignment_markers": ["take over"]}
+        )
+        # "takeover" (one word) must not match "take over".
+        assert not HubPlugin._is_explicit_task_assignment(
+            shell, "the hostile takeover completed yesterday"
+        )
+        assert HubPlugin._is_explicit_task_assignment(
+            shell, "take over the release lane now"
+        )
+
+    def test_extra_markers_honored_hold_exclusion(self):
+        """A custom marker cannot mint from hold/status chatter."""
+        shell = self._shell(
+            {"plugins.hub.extra_task_assignment_markers": ["on your plate"]}
+        )
+        assert not HubPlugin._is_explicit_task_assignment(
+            shell, "on your plate: nothing queued — hold"
+        )
+
+    def test_malformed_marker_config_ignored_not_fatal(self):
+        for bad in ([], ["", "   "], [None, 42], ""):
+            shell = self._shell({"plugins.hub.extra_task_assignment_markers": bad})
+            # Falls back to built-ins; no exception.
+            assert HubPlugin._is_explicit_task_assignment(
+                shell, "new task: still works"
+            )
+
+    def test_string_form_accepted(self):
+        shell = self._shell(
+            {"plugins.hub.extra_task_assignment_markers": "grab the baton"}
+        )
+        assert HubPlugin._is_explicit_task_assignment(
+            shell, "grab the baton on issue #204"
+        )
+
+
 class TestTaggedHandoff:
     """task_id on hub_msg makes classification and minting deterministic."""
 

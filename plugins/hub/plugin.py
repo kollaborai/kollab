@@ -7299,12 +7299,44 @@ class HubPlugin(BasePlugin):
         task id without creating a new card.
         """
         text = self._normalize_hub_wake_content(content)
-        if self._task_assignment_marker_re.search(text):
+        marker_re = self._task_assignment_marker_re
+        extra = self._configured_extra_markers()
+        if extra is not None:
+            # Operator-added phrasings extend (never replace) the built-in
+            # markers; recompiling per call keeps config edits hot.
+            marker_re = re.compile(
+                "|".join((marker_re.pattern, extra.pattern))
+            )
+        if marker_re.search(text):
             # An assignment-shaped opening on a hold/status message
             # ("Next assignment: nothing queued — hold.") is coordination
             # chatter, not a handoff.
             return not self._no_handoff_marker_re.search(text)
         return bool(task_id and self._has_request_evidence(text))
+
+    def _configured_extra_markers(self):
+        """Compile operator-added assignment markers from config, if any.
+
+        ``plugins.hub.extra_task_assignment_markers`` is a list of
+        phrases (same semantics as the built-ins: word-boundary anchored,
+        matched against normalized content). Misconfigured entries are
+        logged once and ignored rather than breaking classification.
+        """
+        markers = self.config.get(
+            "plugins.hub.extra_task_assignment_markers"
+        ) if getattr(self, "config", None) else None
+        if not markers:
+            return None
+        if isinstance(markers, str):
+            markers = [markers]
+        clean = [
+            str(m).strip().lower()
+            for m in markers
+            if str(m).strip()
+        ]
+        if not clean:
+            return None
+        return _compile_marker_pattern(tuple(clean))
 
     @staticmethod
     def _touch_wake_cache(

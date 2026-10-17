@@ -188,6 +188,8 @@ before you END ANY TURN — every turn, no exceptions:
 
   1. CHECK THE LEDGER: open or stalled cards mean work is waiting.
      run <hub_work/> — it lists open ledger cards after the work slots.
+     note: hub_queue items and TaskLedger cards are DISTINCT stores —
+     <hub_work/> shows both; a queued slot alone is not a tracked card.
 
   2. ACT ON WHAT YOU SEE:
      - idle worker + open card -> assign it now:
