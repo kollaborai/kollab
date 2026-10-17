@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import signal
+import site
 import subprocess
 import sys
 import tempfile
@@ -15,10 +16,11 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 
 from ..binary import app_launcher, running_binary
+from . import git_update
 from .git_update import _current_source_root, pip_command, run_source_update
 from .version_comparator import is_newer_version
 
@@ -89,6 +91,59 @@ def _install_method() -> str:
     if "Cellar" in parts:
         return "brew"
     return "pip"
+
+
+def _dist_install_dir() -> Path | None:
+    """Site-packages directory that owns the running interpreter's kollab dist."""
+    try:
+        dist = distribution("kollab")
+    except PackageNotFoundError:
+        return None
+    try:
+        # PathDistribution.locate_file("") is the dist-info's parent, i.e. the
+        # site-packages root the running kollab was loaded from.
+        return Path(dist.locate_file("")).resolve()
+    except (OSError, ValueError, NotImplementedError):
+        return None
+
+
+def _user_site_dir() -> Path | None:
+    """This interpreter's user site-packages, or None when user site is off."""
+    if not site.ENABLE_USER_SITE:
+        return None
+    return Path(site.getusersitepackages()).resolve()
+
+
+def _is_user_site_install(install_dir: Path | None) -> bool:
+    """True when the running kollab is imported from user site-packages."""
+    if install_dir is None:
+        return False
+    user_dir = _user_site_dir()
+    return user_dir is not None and install_dir == user_dir
+
+
+def _other_kollab_copies(install_dir: Path | None) -> list[Path]:
+    """sys.path entries besides the upgraded install that hold a kollab copy.
+
+    A stale copy on a later sys.path entry is harmless while it stays
+    shadowed, but the report names it so it can be cleaned up before path
+    changes unshadow it.
+    """
+    others: list[Path] = []
+    seen: set[Path] = set()
+    for entry in sys.path:
+        if not entry:
+            continue
+        try:
+            path = Path(entry).resolve()
+        except OSError:
+            continue
+        if path in seen or path == install_dir:
+            continue
+        seen.add(path)
+        if (path / "kollabor").is_dir() or (path / "kollabor_cli_main.py").is_file():
+            others.append(path)
+    return others
 
 
 def platform_name() -> str | None:
@@ -344,9 +399,28 @@ def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
         return AutoUpdateResult(source.success, source.message, "source", source.changed)
 
     method = _install_method()
-    command = _INSTALLER_COMMANDS.get(method) or pip_command(
-        "install", "--upgrade", "kollab"
-    )
+    install_dir = _dist_install_dir()
+    user_site = _is_user_site_install(install_dir)
+    if user_site and method == "pip":
+        # User site-packages shadow the interpreter's own site-packages: a
+        # plain `pip install --upgrade` would refresh (or newly create) a copy
+        # the engine never imports while this one stays old. The upgrade must
+        # target the install the running interpreter actually loads.
+        if not git_update._has_pip():
+            return AutoUpdateResult(
+                False,
+                (
+                    "Kollab is installed in user site-packages, which needs pip "
+                    f"to upgrade, and {sys.executable} has none. Run "
+                    f"`{sys.executable} -m ensurepip --user` and retry."
+                ),
+                method,
+            )
+        command = pip_command("install", "--upgrade", "--user", "kollab")
+    else:
+        command = _INSTALLER_COMMANDS.get(method) or pip_command(
+            "install", "--upgrade", "kollab"
+        )
     before = _installed_version()
     try:
         result = _run_cmd(*command)
@@ -361,6 +435,11 @@ def run_auto_update(repo_root: Path | None = None) -> AutoUpdateResult:
         return AutoUpdateResult(
             True, f"Kollab is already up to date (v{after}).", method, changed=False
         )
-    return AutoUpdateResult(
-        True, f"Kollab upgraded: v{before} -> v{after} (via {method}).", method
-    )
+    message = f"Kollab upgraded: v{before} -> v{after} (via {method})."
+    if user_site:
+        message += f"\n  Upgraded the user-site install at {install_dir}"
+        others = _other_kollab_copies(install_dir)
+        if others:
+            listed = ", ".join(str(path) for path in others)
+            message += f"\n  Untouched copies of kollab also present: {listed}"
+    return AutoUpdateResult(True, message, method)
