@@ -2,25 +2,17 @@ name: Binaries
 
 # The single-file kollab binary for each platform (scripts/build_binary.py).
 # publish.yml calls this for every release tag and attaches the binaries to the
-# GitHub Release, where install.sh and /upgrade download them. Pull requests that
-# change the build or the code that installs a binary run it as a check.
+# GitHub Release, where install.sh and /upgrade download them.
+#
+# The full binary/desktop matrix runs only on pushes to main and release tags.
+# Pull requests prove the packaging path with the single ci/binary-smoke job in
+# ci.yml instead -- four macOS/Linux binary builds plus two desktop builds per
+# PR was the dominant CI cost and left the required check waiting on runner
+# queues.
 on:
-  pull_request:
+  push:
     branches: [main]
-    paths:
-      - .github/workflows/binaries.yml
-      - .github/workflows/publish.yml
-      - scripts/build_binary.py
-      - scripts/desktop_release.py
-      - scripts/check_desktop_package.py
-      - tests/unit/test_desktop_release.py
-      - desktop/**
-      - install.sh
-      - kollabor/binary.py
-      - kollabor/updates/auto_update.py
-      - pyproject.toml
-      - packages/*/pyproject.toml
-      - uv.lock
+    tags: ["v*"]
   workflow_call:
     inputs:
       version:
