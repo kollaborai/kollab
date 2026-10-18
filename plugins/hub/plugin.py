@@ -5558,6 +5558,7 @@ class HubPlugin(BasePlugin):
                             self._identity.session_log = str(
                                 llm_svc.conversation_logger.session_file
                             )
+                    self._refresh_presence_model()
                     self._presence.heartbeat()
 
                     # Self-socket health check: detect if our socket
@@ -7016,6 +7017,12 @@ class HubPlugin(BasePlugin):
             effort,
         )
 
+    def _refresh_presence_model(self) -> None:
+        """Keep presence on the live model; a lookup that fails keeps the last one."""
+        model = self._active_model_details()[2]
+        if model and self._identity:
+            self._identity.tags["model"] = model
+
     async def announce_model_switch(
         self,
         *,
@@ -7033,9 +7040,6 @@ class HubPlugin(BasePlugin):
         """
         if not self._identity or not self._presence:
             return
-
-        self._identity.tags["model"] = model
-        self._presence.publish()
 
         identity = self._identity.identity
         model_line = f"model: {model}"
