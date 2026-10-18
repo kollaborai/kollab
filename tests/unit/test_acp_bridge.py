@@ -442,6 +442,22 @@ def test_nonce_lookup_rejects_old_birth_or_identity_reused_during_environment_re
         candidate.environ.assert_not_called()
 
 
+def test_nonce_lookup_skips_a_process_whose_environment_psutil_cannot_read(tmp_path, monkeypatch):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    runner._process_nonce = "owned-nonce"
+    runner._process_started_at = 10
+    runner._process_username = "owned-test-user"
+    candidate = Mock()
+    candidate.pid = 9999
+    candidate.info = {"pid": 9999, "create_time": 11, "username": "owned-test-user"}
+    candidate.is_running.return_value = True
+    # psutil on macOS raises SystemError (not psutil.Error) while a process exits
+    candidate.environ.side_effect = SystemError("returned a result with an exception set")
+    monkeypatch.setattr(bridge_mod.psutil, "process_iter", lambda attrs: iter([candidate]))
+    runner._recover_tagged_processes()
+    assert not runner._owned_processes
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 async def test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(tmp_path, monkeypatch):
