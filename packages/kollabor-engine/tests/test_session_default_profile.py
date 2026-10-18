@@ -48,6 +48,12 @@ def started(monkeypatch):
     return names
 
 
+def seat_agent(monkeypatch, preferred):
+    """The bundle POST /sessions finds for ``agent`` names ``preferred`` in its agent.json."""
+    found = {"system_prompt": "", "profile": preferred, "mcp_servers": []}
+    monkeypatch.setattr(sessions, "_resolve_agent", lambda name, workspace: found)
+
+
 async def create(**body):
     request = Request({"type": "http", "method": "POST", "path": "/sessions", "headers": [], "query_string": b""})
     return await sessions.create_session(sessions.CreateSessionRequest(**body), request)
@@ -73,9 +79,19 @@ async def test_the_profile_is_the_callers_else_the_active_one(started, body, exp
     [({}, "fast"), ({"profile": "default"}, "fast"), ({"profile": "fake"}, "fake")],
 )
 async def test_an_agents_own_profile_applies_only_when_the_caller_names_none(monkeypatch, started, body, expected):
-    monkeypatch.setattr(
-        sessions, "_resolve_agent", lambda name, workspace: {"system_prompt": "", "profile": "fast", "mcp_servers": []}
-    )
+    seat_agent(monkeypatch, "fast")
+    await create(agent="coder", **body)
+    assert started == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [({}, "fake"), ({"profile": "default"}, "default"), ({"profile": "fast"}, "fast")],
+)
+async def test_an_agent_that_prefers_default_has_no_preference(monkeypatch, started, body, expected):
+    # The coder bundle's agent.json says "profile": "default"; engineering and startup teams seat it.
+    seat_agent(monkeypatch, "default")
     await create(agent="coder", **body)
     assert started == [expected]
 

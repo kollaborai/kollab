@@ -227,10 +227,13 @@ async def create_session(body: CreateSessionRequest, request: Request):
     safe_system_prompt = effective_system_prompt
 
     # Determine effective profile:
-    # caller's profile wins; agent profile used only when the caller names none
+    # caller's profile wins; agent profile used only when the caller names none.
+    # "default" in a bundle's agent.json (coder has it) is no preference, only the
+    # built-in auto-detect profile's own name.
     effective_profile = body.profile
-    if agent_data and agent_data.get("profile") and body.profile in (None, "default"):
-        effective_profile = agent_data["profile"]
+    agent_profile = agent_data.get("profile") if agent_data else None
+    if agent_profile not in (None, "", "default") and body.profile in (None, "default"):
+        effective_profile = agent_profile
 
     # Merge MCP servers: deduplicate, agent's list appended to caller's
     effective_mcp_servers = list(body.mcp_servers)
