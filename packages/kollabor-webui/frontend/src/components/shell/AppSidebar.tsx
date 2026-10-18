@@ -22,6 +22,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
+import { sessionFolder, sessionSubtitle } from "@/utils/session-subtitle";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -493,7 +494,7 @@ export function AppSidebar({
                 const hubLive = ownPool && Boolean(pool?.active);
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
-                const folder = session.workspace?.split("/").filter(Boolean).pop();
+                const folder = sessionFolder(session);
                 const harness = cliHarness(session);
                 const note = opening?.id === session.session_id ? opening : null;
                 const openProperties = (tab?: "chat") => {
@@ -549,8 +550,7 @@ export function AppSidebar({
                             ) : task ? (
                               task
                             ) : (
-                              // One format for every agent, however it started: what it runs and where.
-                              [pool?.active && pool.solo ? "Off Hub" : "", session.model || session.profile, folder].filter(Boolean).join(" · ") || "Running"
+                              sessionSubtitle(session, Boolean(pool?.active && pool.solo))
                             )}
                           </span>
                           {task && harness ? (
