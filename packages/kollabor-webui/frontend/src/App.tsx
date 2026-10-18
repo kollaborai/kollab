@@ -15,6 +15,7 @@ import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
+import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
   PanelIntent,
@@ -38,6 +39,7 @@ import {
   type AgentNetwork,
   type OfflineAgent,
   type AgentPoolEntry,
+  type LiveAgent,
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
@@ -114,6 +116,7 @@ function RuntimeShell({
   session,
   profiles,
   agents,
+  liveAgents,
   remoteAgents,
   onSessionUpdated,
   onOpenSettings,
@@ -128,6 +131,8 @@ function RuntimeShell({
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
+  /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
+  liveAgents: LiveAgent[];
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -154,8 +159,9 @@ function RuntimeShell({
     () =>
       session.device
         ? targetsOn(session.device, remoteAgents, session.network, session.workspace ?? undefined)
-        : { agents, remote: remoteAgents },
-    [session.device, agents, remoteAgents, session.network, session.workspace],
+        : { agents: poolSeenBy(agents, liveAgents, session), remote: remoteAgents },
+    // The chat's own fields, not `session`: its object is new on every poll.
+    [session.device, agents, liveAgents, remoteAgents, session.network, session.workspace, session.identity, session.instance],
   );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
@@ -312,6 +318,7 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
   // What New Session can start in the chosen folder: every folder has its own hub, so a
   // gem running elsewhere is free here. `agents` stays the whole computer's live state.
   const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
@@ -440,10 +447,12 @@ export default function App() {
       ]);
       const next = result.agents || [];
       setAgents(next);
+      setLiveAgents(result.live || []);
       applyLaunchPool(launch.agents || []);
       return next;
     } catch {
       setAgents([]);
+      setLiveAgents([]);
       setLaunchPool([]);
       return [];
     }
@@ -575,9 +584,10 @@ export default function App() {
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
-          const pool = (await api.listAgentPool(true)).agents || [];
+          const { agents: pool = [], live: running = [] } = await api.listAgentPool(true);
           if (!controller.signal.aborted) {
             setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
+            setLiveAgents((current) => (JSON.stringify(current) === JSON.stringify(running) ? current : running));
           }
           const launch = (await api.listLaunchPool(workspacePathRef.current.trim())).agents || [];
           if (!controller.signal.aborted) applyLaunchPool(launch);
@@ -894,14 +904,14 @@ export default function App() {
     if (!session || !gem) return;
     // Presence is the truth for the switch: whether the agent is live, and
     // whether it is on the mesh.
-    const pool = agents.find((agent) => agent.name === gem);
+    const agent = liveAgentOf(session, liveAgents);
     setStudioFocus({
       gem,
       where: session.device || session.workspace,
       tab,
       chat: {
         session,
-        hub: pool?.active ? !pool.solo : null,
+        hub: agent ? !agent.solo : null,
         setHub: async (enabled) => {
           const result = await api.setSessionHub(sessionId, enabled);
           // An engine that predates the switch answers ok and ignores it.
@@ -932,6 +942,7 @@ export default function App() {
           profiles={profiles}
           api={api}
           agents={agents}
+          liveAgents={liveAgents}
           launchChoices={launchChoices}
           network={network}
           offline={offline}
@@ -1049,6 +1060,7 @@ export default function App() {
                 session={activeSession}
                 profiles={profiles}
                 agents={agents}
+                liveAgents={liveAgents}
                 remoteAgents={network.remote}
                 refreshSignal={refreshSignal}
                 onSessionUpdated={handleSessionUpdated}

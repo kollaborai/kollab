@@ -261,11 +261,26 @@ export type TeamLaunchResult = {
   sessions: Session[];
 };
 
+/** One running hub agent (a presence row). A name can run in several folders at once, so only `agent_id` tells two apart: it is a session's `instance`. */
+export type LiveAgent = {
+  name: string;
+  agent_id: string;
+  state: string;
+  current_task: string;
+  /** Live but off the hub mesh: peers do not see it. */
+  solo: boolean;
+  /** The folder it runs in. */
+  project: string;
+};
+
 /** GET /agents: the pool, as one folder (or the whole computer) sees it. */
 export type AgentPoolResponse = {
+  /** One entry per name; where several folders run a name, this folder's agent speaks for it. */
   agents: AgentPoolEntry[];
   available?: string[];
   active?: string[];
+  /** Every running agent in that scope, one per process (`agents` has one per name). */
+  live?: LiveAgent[];
 };
 
 export type AgentBundleEntry = {

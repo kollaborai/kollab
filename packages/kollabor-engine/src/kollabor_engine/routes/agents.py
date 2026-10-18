@@ -105,6 +105,18 @@ def _pool_entry(
     }
 
 
+def _live_row(agent: Dict[str, Any]) -> Dict[str, Any]:
+    """One running hub agent: a name can run in several folders at once, so only its ``agent_id`` tells two apart."""
+    return {
+        "name": str(agent["identity"]),
+        "agent_id": str(agent.get("agent_id") or ""),
+        "state": str(agent.get("state") or ""),
+        "current_task": str(agent.get("current_task") or ""),
+        "solo": bool(agent.get("solo")),
+        "project": str(agent.get("project") or ""),
+    }
+
+
 @router.get("")
 async def list_agent_pool(
     refresh: bool = Query(False, description="Bypass the hub presence cache"),
@@ -124,7 +136,8 @@ async def list_agent_pool(
     ``project`` / ``last_ran`` describe ``workspace`` only: a gem running in
     another folder does not take it here. ``scope=computer`` is the sidebar's
     view instead: an agent running in any folder shows its state (this
-    folder's wins when a name runs in several).
+    folder's wins when a name runs in several). ``live`` lists every running
+    agent in that scope, one per process, so a row finds its own by ``agent_id``.
     """
     folder = os.path.realpath(os.path.expanduser(workspace)) if workspace else os.path.realpath(os.getcwd())
     pool = pool_identities(folder)
@@ -133,7 +146,8 @@ async def list_agent_pool(
         for agent in _bridge.get_agents(use_cache=not refresh)
         if isinstance(agent, dict) and agent.get("identity")
     ]
-    live_by_identity = {str(agent["identity"]): agent for agent in agents_in_folder(live, folder)}
+    in_folder = agents_in_folder(live, folder)
+    live_by_identity = {str(agent["identity"]): agent for agent in in_folder}
     if scope == "computer":
         live_by_identity = {**{str(agent["identity"]): agent for agent in live}, **live_by_identity}
 
@@ -221,11 +235,18 @@ async def list_agent_pool(
             }
         )
 
+    # ``agents`` holds one entry per name (this folder's wins a name running in
+    # several), so a row that must know *its* agent reads this: one per process.
+    running = sorted(
+        (_live_row(agent) for agent in (live if scope == "computer" else in_folder)),
+        key=lambda row: (row["project"], row["name"], row["agent_id"]),
+    )
     return {
         "agents": agents,
         "available": [agent["name"] for agent in agents if agent["available"]],
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
+        "live": running,
     }
 
 

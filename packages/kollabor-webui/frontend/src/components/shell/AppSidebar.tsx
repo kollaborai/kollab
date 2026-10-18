@@ -1,12 +1,13 @@
 import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
-import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
+import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
+import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
@@ -112,6 +113,7 @@ export function AppSidebar({
   profiles,
   api,
   agents,
+  liveAgents,
   launchChoices,
   network,
   offline,
@@ -151,6 +153,8 @@ export function AppSidebar({
   /** For the workspace picker's folder lists. */
   api: EngineApi;
   agents: AgentPoolEntry[];
+  /** Every running agent, one per process: a row finds its own by its instance, never by name. */
+  liveAgents: LiveAgent[];
   /** What New Session can start in the chosen folder: its roster, then the other rosters (an agent running in another folder is free here). */
   launchChoices: LaunchChoice[];
   network: AgentNetwork;
@@ -454,15 +458,15 @@ export function AppSidebar({
             <SidebarMenu>
               {visibleSessions.map((session) => {
                 const gem = session.identity || session.agent || "";
-                // Hub presence when the identity is live; otherwise the engine's
-                // own word on whether a daemon backs the session.
-                const pool = poolByName.get(session.identity || "");
-                // Gem names repeat across folders (a koordinator per project), so
-                // an agent started elsewhere reads only its own presence entry.
-                const ownPool = !session.external || pool?.agent_id === session.session_id;
-                const hubLive = ownPool && Boolean(pool?.active);
+                // Hub presence when this very agent is live; otherwise the engine's
+                // own word on whether a daemon backs the session. Gem names repeat
+                // across folders (a koordinator per project), so presence is read
+                // by the row's instance and the pool only dresses the gem.
+                const agent = liveAgentOf(session, liveAgents);
+                const look = poolByName.get(session.identity || "");
+                const hubLive = Boolean(agent);
                 const live = hubLive || session.active !== false;
-                const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
+                const task = agent?.state === "working" ? agent.current_task.trim() : "";
                 const folder = sessionFolder(session);
                 const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
                 const harness = cliHarness(session);
@@ -497,13 +501,13 @@ export function AppSidebar({
                         >
                           <Avatar
                             gem={gem}
-                            avatar={pool?.avatar}
-                            displayName={pool?.display_name}
+                            avatar={look?.avatar}
+                            displayName={look?.display_name}
                             folder={session.device ? undefined : session.workspace}
                             where={session.device || session.workspace}
-                            caste={pool?.caste}
-                            color={pool?.color}
-                            state={hubLive ? pool?.state : live ? "idle" : "offline"}
+                            caste={look?.caste}
+                            color={look?.color}
+                            state={agent ? agent.state : live ? "idle" : "offline"}
                             live={live}
                             activity={session.session_id === activeId ? activeActivity : null}
                             season="auto"
@@ -523,7 +527,7 @@ export function AppSidebar({
                             ) : task ? (
                               task
                             ) : (
-                              sessionSubtitle(session, Boolean(pool?.active && pool.solo))
+                              sessionSubtitle(session, Boolean(agent?.solo))
                             )}
                           </span>
                           {task && harness ? (
@@ -532,9 +536,9 @@ export function AppSidebar({
                           {session.acp_waiting && (
                             <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
                           )}
-                          {harness && ((pool?.active && pool.solo) || folder) ? (
+                          {harness && (agent?.solo || folder) ? (
                             <span className="text-muted-foreground truncate text-[0.6875rem]">
-                              {[pool?.active && pool.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
+                              {[agent?.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
                             </span>
                           ) : null}
                           {note?.error ? <OpenError text={note.error} /> : null}

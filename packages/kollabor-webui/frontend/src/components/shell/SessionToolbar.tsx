@@ -714,7 +714,7 @@ export function SessionToolbar({
                     const look = pool.find((entry) => entry.name === identity);
                     return (
                       <div
-                        key={identity}
+                        key={String(agent.agent_id || agent.id || identity)}
                         className="flex items-center gap-3 rounded-md px-2 py-2"
                       >
                         <Avatar

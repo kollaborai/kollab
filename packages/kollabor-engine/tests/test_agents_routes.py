@@ -269,6 +269,46 @@ class TestAgentPoolFolders:
         assert (await self.pool(client, scope="computer"))["lapis"]["agent_id"] == "g2"
         assert (await self.pool(client, scope="computer", workspace=str(other)))["lapis"]["agent_id"] == "g1"
 
+    async def test_the_computer_view_lists_every_process_of_a_name(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [
+            live("k2", "koordinator", "working", "slow job", project=str(other)),
+            {**live("k1", "koordinator", project=str(home)), "solo": True},
+        ]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        body = (await client.get("/agents", params={"scope": "computer"})).json()
+
+        # `agents` keeps one koordinator (this folder's); `live` has both, each its own.
+        assert [a["agent_id"] for a in body["agents"] if a["name"] == "koordinator"] == ["k1"]
+        assert body["live"] == [
+            {
+                "name": "koordinator",
+                "agent_id": "k1",
+                "state": "idle",
+                "current_task": "",
+                "solo": True,
+                "project": str(home),
+            },
+            {
+                "name": "koordinator",
+                "agent_id": "k2",
+                "state": "working",
+                "current_task": "slow job",
+                "solo": False,
+                "project": str(other),
+            },
+        ]
+
+    async def test_the_folder_view_lists_only_that_folders_processes(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [live("k1", "koordinator", project=str(home)), live("k2", "koordinator", project=str(other))]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        body = (await client.get("/agents", params={"workspace": str(other)})).json()
+
+        assert [row["agent_id"] for row in body["live"]] == ["k2"]
+
     async def test_last_ran_is_the_asked_folders(self, client, folders, monkeypatch, tmp_path):
         home, other = folders
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
