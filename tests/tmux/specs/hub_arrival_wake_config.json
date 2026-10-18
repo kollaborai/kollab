@@ -1,6 +1,6 @@
 {
   "name": "hub-arrival-wake-config",
-  "description": "Who wakes when an agent comes online is set in /config, per folder. The global file says koordinator and the folder has no file of its own, so /config shows koordinator; changing it to none and saving Local writes <folder>/.kollab/config.json only (the global file keeps its value) and takes effect for that folder's agents: a peer joining wakes nobody. The same HOME's other folder keeps the global value: its coordinator (lapis, the first agent there, so the only one holding the role) wakes for an arrival and its other peer stays asleep. The daemon plus this window, detached peers, a throwaway HOME and a fake model whose replies start with pong:, no keyring (lib/hub_arrival_probe.sh).",
+  "description": "Who wakes when an agent comes online is set in /config, per folder. The global file says koordinator and the folder has no file of its own, so /config shows koordinator; changing it to none and saving Local writes <folder>/.kollab/config.json only (the global file keeps its value) and shows when /config is reopened and takes effect for that folder's agents: a peer joining wakes nobody. The same HOME's other folder keeps the global value: its coordinator (lapis, the first agent there, so the only one holding the role) wakes for an arrival and its other peer stays asleep. The daemon plus this window, detached peers, a throwaway HOME and a fake model whose replies start with pong:, no keyring (lib/hub_arrival_probe.sh).",
   "config": {
     "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
     "app_init_sleep": 3,
@@ -88,6 +88,50 @@
       "description": "the folder's own file holds none; the global file and the other folder are untouched",
       "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; sleep 1; w=$(p set ws); g=$(p set global); o=$(p set ws2); if [ \"$w\" = 'ws: \"arrival_wake\":\"none\"' ] && [ \"$g\" = 'global: \"arrival_wake\":\"koordinator\"' ] && [ \"$o\" = 'ws2: no arrival_wake' ]; then echo 'saved to this folder only'; else echo \"wrong: $w | $g | $o\"; exit 1; fi",
       "assert_contains": "saved to this folder only"
+    },
+    {
+      "action": "section",
+      "title": "reopened, /config shows the saved value"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "back at the prompt"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/arrival"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: none",
+      "timeout": 15,
+      "description": "the reopened modal reads the folder file, not the value it first opened with"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "back at the prompt"
     },
     {
       "action": "section",
