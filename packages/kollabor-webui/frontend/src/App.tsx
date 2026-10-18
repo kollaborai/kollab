@@ -56,6 +56,7 @@ import {
 import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
+import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
@@ -389,6 +390,9 @@ export default function App() {
     [activeId, sessions],
   );
   const operationRef = useRef(0);
+  // True once a chat is open or being opened, by the person or by the restore on load: the
+  // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
+  const openedRef = useRef(false);
   const recoveryRef = useRef<{
     sessionId: string;
     controller: AbortController;
@@ -665,6 +669,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Startup runs once: a run that finds a chat open or being opened leaves it alone.
+    if (openedRef.current) return;
     let mounted = true;
     const operation = ++operationRef.current;
     (async () => {
@@ -684,12 +690,13 @@ export default function App() {
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );
-      // Restore this engine's newest chat; an agent started elsewhere opens on a click.
-      const first = [...result].reverse().find((session) => !session.external);
+      // Restore this engine's newest chat unless the person has opened one.
+      const first = chatToRestore(result, openedRef.current);
       if (first) {
         setBusyMessage("Restoring session…");
         const firstState = await loadState(first.session_id, result);
-        if (!mounted || operation !== operationRef.current) return;
+        if (!mounted || operation !== operationRef.current || openedRef.current) return;
+        openedRef.current = true;
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
@@ -714,6 +721,7 @@ export default function App() {
 
   /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
   const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -773,6 +781,7 @@ export default function App() {
   /** Open an agent on another computer. With no agent here on its network, start the
    * koordinator of that network's folder to carry it first (GET /sessions `network`). */
   const selectRemote = async (handle: string): Promise<boolean> => {
+    openedRef.current = true;
     const on = networkOf(network, handle);
     if (on.live) return selectSession(handle);
     setOpening({ id: handle });
@@ -812,6 +821,7 @@ export default function App() {
   };
 
   const deleteSession = async (sessionId: string) => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -859,6 +869,7 @@ export default function App() {
 
   /** Resolves true once the chat is open (false if it failed or a newer click took over). */
   const selectSession = async (sessionId: string): Promise<boolean> => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
