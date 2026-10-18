@@ -240,10 +240,12 @@ function Problems({ problems }: { problems: LibraryProblem[] }) {
 function LibraryBody({
   api,
   workspace,
+  profile,
   onLaunched,
 }: {
   api: EngineApi;
   workspace: string;
+  profile: string;
   onLaunched: () => void;
 }) {
   const [folder, setFolder] = useState(workspace);
@@ -284,7 +286,7 @@ function LibraryBody({
       try {
         // An empty folder is the engine's own; the launch wants its path.
         const target = folder || (await api.listWorkspaces()).home.path;
-        const done: TeamLaunchResult = await api.launchTeam(team.name, target);
+        const done: TeamLaunchResult = await api.launchTeam(team.name, target, profile);
         setResults((current) => ({ ...current, [team.name]: { lines: launchLines(done, nameOf), error: "" } }));
         onLaunched();
       } catch (reason) {
@@ -293,7 +295,7 @@ function LibraryBody({
         setLaunching("");
       }
     },
-    [api, folder, onLaunched],
+    [api, folder, profile, onLaunched],
   );
 
   return (
@@ -360,6 +362,7 @@ export function AgentLibrary({
   open,
   onOpenChange,
   workspace,
+  profile,
   onLaunched,
 }: {
   api: EngineApi;
@@ -367,6 +370,8 @@ export function AgentLibrary({
   onOpenChange: (open: boolean) => void;
   /** The folder New Session has chosen; the view starts there. */
   workspace: string;
+  /** The Model New Session has chosen; every member of a team starts on it, as a New Session chat would. */
+  profile: string;
   /** A team was started: the sidebar should list its agents now. */
   onLaunched: () => void;
 }) {
@@ -374,7 +379,7 @@ export function AgentLibrary({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(48rem,calc(100%-2rem))]">
         {/* Mounted per open, so each visit reads the files as they are now. */}
-        <LibraryBody api={api} workspace={workspace} onLaunched={onLaunched} />
+        <LibraryBody api={api} workspace={workspace} profile={profile} onLaunched={onLaunched} />
       </DialogContent>
     </Dialog>
   );

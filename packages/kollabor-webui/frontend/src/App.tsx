@@ -986,6 +986,7 @@ export default function App() {
           open={agentsOpen}
           onOpenChange={setAgentsOpen}
           workspace={workspacePath.trim()}
+          profile={selectedProfile}
           onLaunched={() => {
             void loadSessions();
             void refreshAgentPool();
