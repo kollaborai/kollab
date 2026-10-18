@@ -1,0 +1,133 @@
+{
+  "name": "hub-arrival-wake",
+  "description": "plugins.hub.arrival_wake decides which peers spend a model call when an agent comes online, and a folder's own .kollab/config.json beats the global file. The global file says all, the folder says none: a peer joining wakes nobody and the notice still shows. The folder file is then rewritten while the app runs: all wakes every peer, koordinator wakes only the koordinator. The koordinator (a daemon with this window attached) plus detached agents in a throwaway HOME, a fake model whose replies start with pong:, no keyring (lib/hub_arrival_probe.sh). /config lists the setting as a dropdown showing the folder's value.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 140,
+    "term_height": 40
+  },
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop the agents and the fake model",
+      "command": "sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" stop; true"
+    }
+  ],
+  "steps": [
+    {
+      "action": "section",
+      "title": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME: global arrival_wake all, the folder's none, a fake model",
+      "command": "sh tests/tmux/lib/hub_arrival_probe.sh setup",
+      "assert_contains": "throwaway HOME"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "title": "folder none beats global all: nobody wakes, the notice still shows"
+    },
+    {
+      "action": "shell",
+      "description": "lapis joins",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; p join lapis",
+      "assert_contains": "lapis online"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "lapis -> koordinator",
+      "timeout": 20,
+      "description": "the arrival notice reaches the koordinator"
+    },
+    {
+      "action": "sleep",
+      "seconds": 6
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "just came online",
+      "description": "the notice is on screen"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "pong:",
+      "description": "no model call for it"
+    },
+    {
+      "action": "section",
+      "title": "folder all: every peer wakes (config reloaded while running)"
+    },
+    {
+      "action": "shell",
+      "description": "rewrite the folder file to all, then sapphire joins",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; p folder all; sleep 3; p join sapphire",
+      "assert_contains": "sapphire online"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong:",
+      "timeout": 40,
+      "description": "the koordinator answered the arrival"
+    },
+    {
+      "action": "shell",
+      "description": "lapis answered it too",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; for _ in $(seq 1 20); do [ \"$(p pongs lapis)\" -ge 1 ] && { echo 'lapis woke'; exit 0; }; sleep 1; done; echo 'lapis never woke'; exit 1",
+      "assert_contains": "lapis woke"
+    },
+    {
+      "action": "section",
+      "title": "folder koordinator: only the koordinator wakes"
+    },
+    {
+      "action": "shell",
+      "description": "rewrite the folder file to koordinator, peridot joins; lapis and sapphire stay asleep, the koordinator answers",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; p folder koordinator; sleep 12; l0=$(p pongs lapis); s0=$(p pongs sapphire); k0=$(p pongs koordinator); p join peridot; sleep 12; l1=$(p pongs lapis); s1=$(p pongs sapphire); k1=$(p pongs koordinator); if [ \"$l0\" = \"$l1\" ] && [ \"$s0\" = \"$s1\" ] && [ \"$k1\" -gt \"$k0\" ]; then echo 'only the koordinator woke'; else echo \"wrong: lapis $l0 -> $l1, sapphire $s0 -> $s1, koordinator $k0 -> $k1\"; exit 1; fi",
+      "assert_contains": "only the koordinator woke"
+    },
+    {
+      "action": "section",
+      "title": "/config shows the setting with this folder's value"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/arrival"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: koordinator",
+      "timeout": 15,
+      "description": "the Hub dropdown reads the folder file's value"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

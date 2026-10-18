@@ -73,6 +73,9 @@ metadata fields:
   source_agent:    str  (optional)  originating agent for relay messages
   bridge_platform: str  (optional)  platform identity if message crossed bridge
   task_assignment: bool (optional)  if true, auto-creates TaskCard on receipt
+  lifecycle_event: str  (optional)  "arrival" or "model_switch", a presence notice. a model
+                                    switch never wakes a peer; an arrival wakes the peers
+                                    plugins.hub.arrival_wake names (all, koordinator, none)
 
 cooldown gate:
   blocked if: agent.state == WAITING AND cooldown_until > now
