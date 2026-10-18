@@ -184,6 +184,10 @@ class EngineSession:
         self._raw_history: List[Dict[str, Any]] = []
         self._history_anchor = ""
         self._history_lock = asyncio.Lock()
+        # The mirror holds a disk seed the daemon has not replaced yet. A seed
+        # is no prefix of the daemon's history (hub messages are logged apart),
+        # so a page showing it replaces its thread whole when the daemon answers.
+        self._history_seeded = False
 
         # The daemon's own conversation id (its conversations/<id>.jsonl
         # name). Arrives with the first answered snapshot; before that, disk
@@ -470,15 +474,19 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-    async def refresh_history(self) -> List[Dict[str, Any]]:
+    async def refresh_history(self, notify: bool = False) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
         Asks for only the messages past the ones already held, with the digest
         the daemon gave for them; a daemon whose history changed (compaction,
         /clear, /resume), or one too old to know, sends all of it.
+
+        Subscribers hear ``history_updated`` when the answer replaces a disk
+        seed (whoever asked) or, with ``notify``, when it changed anything.
         """
         async with self._history_lock:
             held = self._raw_history
+            before = anchor_digest(held)
             try:
                 snapshot = await asyncio.wait_for(
                     self.state.get_conversation(
@@ -558,6 +566,9 @@ class EngineSession:
                     logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
             # XML tool turns in the shape the web renders for native tools.
             self.history = web_history(display_history)
+            seed_replaced, self._history_seeded = self._history_seeded, False
+            if seed_replaced or (notify and anchor_digest(self._raw_history) != before):
+                self._emit_event({"type": "history_updated"})
             return self.history
 
     # --- nonblocking open path -------------------------------------------
@@ -597,10 +608,9 @@ class EngineSession:
         machine's disk. A background refresh (coalesced: one task, however
         many requests arrive) reconciles with the daemon afterward, and the
         ``history_updated`` event it emits when it lands brings late
-        replies to the page instead of throwing them away.
+        replies to the page instead of throwing them away. Until it lands the
+        answer says ``stale``: the page replaces what it built from the seed.
         """
-        stale = False
-        source = "mirror"
         if not self.history:
             conversations_dir = self._disk_conversation_dir()
             if conversations_dir is not None:
@@ -609,12 +619,13 @@ class EngineSession:
                     seeded = await read_history_from_disk_async(
                         conversations_dir, conversation_id, limit
                     )
-                    if seeded:
+                    # The daemon may have answered while the disk was read.
+                    if seeded and not self.history:
                         self.history = seeded
                         self._history_anchor = (
                             ""  # seed is not anchor-safe: refetch whole
                         )
-                        source, stale = "disk", True
+                        self._history_seeded = True
         history = self.history[-limit:] if limit else self.history
         self._schedule_refresh()
         turn_error = dict(self.last_turn_error) if self.last_turn_error else None
@@ -629,8 +640,8 @@ class EngineSession:
             "session_id": self.session_id,
             "history": history,
             "last_turn_error": turn_error,
-            "source": source,
-            "stale": stale,
+            "source": "disk" if self._history_seeded else "mirror",
+            "stale": self._history_seeded,
         }
 
     def _schedule_refresh(self) -> None:
@@ -645,11 +656,8 @@ class EngineSession:
         self.history_syncing = True
 
         async def _run() -> None:
-            before = anchor_digest(self._raw_history)
-            changed = False
             try:
-                await self.refresh_history()
-                changed = anchor_digest(self._raw_history) != before
+                await self.refresh_history(notify=True)
             except Exception as e:  # a background refresh never breaks a route
                 logger.debug(
                     "session %s background refresh failed: %s", self.session_id, e
@@ -657,8 +665,6 @@ class EngineSession:
             finally:
                 self.history_syncing = False
                 self._history_refresh_task = None
-                if changed:
-                    self._emit_event({"type": "history_updated"})
 
         self._history_refresh_task = asyncio.get_running_loop().create_task(
             _run(), name=f"session-history-{self.session_id}"

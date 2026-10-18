@@ -391,3 +391,81 @@ async def test_unchanged_refresh_does_not_emit_history_updated(registry, convers
     await asyncio.wait_for(session._history_refresh_task, timeout=2)
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(emitted.get(), timeout=0.05)
+
+
+def _answer(*texts):
+    """What get_conversation returns: the daemon's whole conversation."""
+    return SimpleNamespace(
+        messages=[
+            {"role": "user" if index % 2 == 0 else "assistant", "content": text, "timestamp": f"t{index}"}
+            for index, text in enumerate(texts)
+        ],
+        session_id="conv-1",
+        started_at="t0",
+        message_count=len(texts),
+        metadata={},
+        anchor="",
+        since=None,
+    )
+
+
+def _seeded_session(registry, conversations, state):
+    conversations_dir, workspace_root = conversations
+    _write_jsonl(
+        conversations_dir / "conv-1.jsonl",
+        [{"role": "user", "content": "seed", "timestamp": "t0"}],
+    )
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.conversation_id = "conv-1"
+    session.created_at = None
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    return session
+
+
+@pytest.mark.asyncio
+async def test_every_open_before_the_daemon_answers_reports_the_seed(registry, conversations):
+    """A second page opening while the refresh runs gets the seed too, and the page must know."""
+    release = asyncio.Event()
+    state = SilentState()
+
+    async def get_conversation(since=None, anchor=None):
+        await release.wait()
+        return _answer("seed", "from daemon")
+
+    state.get_conversation = get_conversation
+    session = _seeded_session(registry, conversations, state)
+
+    first = await session.get_history_nonblocking()
+    second = await session.get_history_nonblocking()
+    assert (first["source"], first["stale"]) == ("disk", True)
+    assert (second["source"], second["stale"]) == ("disk", True)
+
+    release.set()
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    third = await session.get_history_nonblocking()
+    assert (third["source"], third["stale"]) == ("mirror", False)
+    assert [m["content"] for m in third["history"]] == ["seed", "from daemon"]
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_whatever_replaces_the_seed_announces_it_once(registry, conversations):
+    """A turn ending before the background refresh lands still tells the page to drop its seed."""
+    state = SilentState()
+
+    async def get_conversation(since=None, anchor=None):
+        return _answer("seed", "from daemon")
+
+    state.get_conversation = get_conversation
+    session = _seeded_session(registry, conversations, state)
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    session._schedule_refresh = lambda: None  # only the direct refresh runs
+
+    assert (await session.get_history_nonblocking())["stale"] is True
+    await session.refresh_history()  # what turn_complete does
+    assert emitted == [{"type": "history_updated"}]
+    await session.refresh_history()
+    assert emitted == [{"type": "history_updated"}]

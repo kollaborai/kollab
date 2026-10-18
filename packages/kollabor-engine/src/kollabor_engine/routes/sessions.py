@@ -920,7 +920,8 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     # Never waits on the daemon: the warm mirror, or a disk seed, answers at
     # once; the reconciling refresh runs in the background and its result
     # arrives as a history_updated event. source says where the history came
-    # from and stale whether a refresh is still reconciling it.
+    # from and stale whether it is still the disk seed (every answer before
+    # the daemon's replaces it, not only the first).
     return await session.get_history_nonblocking(limit)
 
 
