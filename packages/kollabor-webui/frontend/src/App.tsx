@@ -7,6 +7,7 @@ import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
+import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
 import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -53,6 +54,7 @@ import {
 import { formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
+import { useRosters } from "@/hooks/use-rosters";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -334,13 +336,16 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const intentNonceRef = useRef(0);
-  // The agent a new session runs, shown in New Session. Until the user picks
-  // one it is the gem's pool bundle: the hub moves an unpinned gem onto it
+  // The Type a new session runs, shown in New Session. Until the user picks
+  // one it is the agent's own bundle: the hub moves an unpinned gem onto it
   // (plugins/hub/plugin.py, "Reconcile agent bundle to hub role"), so showing
   // "default" there was false.
   const [pickedBundle, setPickedBundle] = useState<string | null>(null);
-  const pickedAgent = launchPool.find((agent) => agent.name === selectedIdentity);
-  const gemBundle = pickedAgent?.agent_type;
+  // Everyone the chosen folder can start: its own list, then the other rosters' personas.
+  const { library } = useRosters(api, workspacePath.trim());
+  const launchChoices = useMemo(() => buildLaunchChoices(launchPool, library), [launchPool, library]);
+  const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
+  const gemBundle = pickedAgent?.bundle;
   const selectedBundle =
     pickedBundle ??
     (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
@@ -413,16 +418,15 @@ export default function App() {
     return next;
   }, [stampHidden, syncHidden]);
 
-  // The folder's pool; an agent taken there cannot be the one New Session starts, so the
-  // pick falls to the first free one (the next free gem in that folder).
   const applyLaunchPool = useCallback((next: AgentPoolEntry[]) => {
     setLaunchPool((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
-    setSelectedIdentity((current) =>
-      next.some((agent) => agent.name === current && agent.available)
-        ? current
-        : next.find((agent) => agent.available)?.name || "",
-    );
   }, []);
+
+  // An agent taken in the folder cannot be the one New Session starts, so the pick
+  // falls to the first free one (the next free agent in that folder).
+  useEffect(() => {
+    setSelectedIdentity((current) => keepPick(current, launchChoices));
+  }, [launchChoices]);
 
   const refreshAgentPool = useCallback(async () => {
     try {
@@ -437,7 +441,6 @@ export default function App() {
     } catch {
       setAgents([]);
       setLaunchPool([]);
-      setSelectedIdentity("");
       return [];
     }
   }, [applyLaunchPool]);
@@ -925,7 +928,7 @@ export default function App() {
           profiles={profiles}
           api={api}
           agents={agents}
-          launchAgents={launchPool}
+          launchChoices={launchChoices}
           network={network}
           offline={offline}
           hiddenAgents={hiddenAgents}
@@ -941,7 +944,11 @@ export default function App() {
           busy={busy}
           creationError={creationError}
           onProfileChange={setSelectedProfile}
-          onIdentityChange={setSelectedIdentity}
+          onIdentityChange={(ref) => {
+            // A new pick brings its own Type along.
+            setSelectedIdentity(ref);
+            setPickedBundle(null);
+          }}
           onBundleChange={setPickedBundle}
           onApps={() => setAppsOpen(true)}
           onAgents={() => setAgentsOpen(true)}

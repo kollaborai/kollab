@@ -1,8 +1,9 @@
 import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
+import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import type { LaunchChoice } from "@/components/agents/launch-choices";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
@@ -111,7 +112,7 @@ export function AppSidebar({
   profiles,
   api,
   agents,
-  launchAgents,
+  launchChoices,
   network,
   offline,
   hiddenAgents,
@@ -150,8 +151,8 @@ export function AppSidebar({
   /** For the workspace picker's folder lists. */
   api: EngineApi;
   agents: AgentPoolEntry[];
-  /** What New Session can start in the chosen folder (a gem running in another folder is free here). */
-  launchAgents: AgentPoolEntry[];
+  /** What New Session can start in the chosen folder: its roster, then the other rosters (an agent running in another folder is free here). */
+  launchChoices: LaunchChoice[];
   network: AgentNetwork;
   /** Agents that ran in this folder and are not running; a click starts one. */
   offline: OfflineAgent[];
@@ -212,15 +213,6 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
-  // Free gems first; the ones the chosen folder already runs stay listed, disabled.
-  // Live agents outside the pool (pool: false) are shown, never launched as.
-  const gemOptions = useMemo(
-    () =>
-      launchAgents
-        .filter((agent) => agent.pool !== false)
-        .sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
-    [launchAgents],
-  );
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -269,8 +261,8 @@ export function AppSidebar({
   const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
-  const pickedGem = launchAgents.find((agent) => agent.name === selectedIdentity);
-  const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
+  const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
+  const identityLabel = pickedAgent ? choiceLabel(pickedAgent) : "Next Free Agent";
   const modelLabel =
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
     selectedProfile ||
@@ -333,10 +325,13 @@ export function AppSidebar({
               className="w-80 p-0"
             >
               <div className="bg-foreground/[0.04] flex items-center gap-3 px-4 py-3">
-                <GemAvatar
-                  gem={selectedIdentity}
-                  caste={pickedGem?.caste}
-                  color={pickedGem?.color}
+                <Avatar
+                  gem={pickedAgent?.name ?? ""}
+                  avatar={pickedAgent?.avatar}
+                  displayName={pickedAgent?.display_name}
+                  folder={workspacePath.trim()}
+                  caste={pickedAgent?.caste}
+                  color={pickedAgent?.color}
                   state="idle"
                   live
                   season="auto"
@@ -351,8 +346,18 @@ export function AppSidebar({
                 </div>
               </div>
               <div className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-4 py-3">
-                <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
+                <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
                   Agent
+                </Label>
+                <AgentPicker
+                  id="new-session-gem"
+                  choices={launchChoices}
+                  value={selectedIdentity}
+                  onChange={onIdentityChange}
+                  folder={workspacePath.trim()}
+                />
+                <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
+                  Type
                 </Label>
                 <Select value={selectedBundle || "default"} onValueChange={onBundleChange}>
                   <SelectTrigger id="new-session-agent" size="sm" className="w-full">
@@ -365,32 +370,6 @@ export function AppSidebar({
                             field's profile, so the bundle's preferred one never
                             applies ("coder · default" also read as two agents). */}
                         {bundle.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
-                  Gem
-                </Label>
-                <Select
-                  value={selectedIdentity}
-                  onValueChange={onIdentityChange}
-                  disabled={!launchAgents.length}
-                >
-                  <SelectTrigger id="new-session-gem" size="sm" className="w-full">
-                    {/* The name only: the list's "Ran 3d Ago" tag would crowd the field. */}
-                    <SelectValue placeholder="Next Free Gem">
-                      {selectedIdentity ? titleCase(selectedIdentity) : undefined}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {gemOptions.map((agent) => (
-                      <SelectItem key={agent.name} value={agent.name} disabled={agent.active}>
-                        {titleCase(agent.name)}
-                        {agent.active ? " · In Use" : ""}
-                        {!agent.active && agent.last_ran ? (
-                          <span className="text-muted-foreground"> · {lastRanLabel(agent.last_ran)}</span>
-                        ) : null}
                       </SelectItem>
                     ))}
                   </SelectContent>
