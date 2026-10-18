@@ -2188,12 +2188,18 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
 
+    # The app's bundled runtime runs isolated (-I); its children must not pick up
+    # a pip --user kollab from ~/.local, which would shadow the bundled copy.
+    child_env = dict(os.environ)
+    if sys.flags.isolated:
+        child_env["PYTHONNOUSERSITE"] = "1"
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(
-            [sys.executable, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+            [sys.executable, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            env=child_env,
         )
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
@@ -2206,7 +2212,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             _terminate_child(engine_proc)
             sys.exit(1)
 
-    env = dict(os.environ)
+    env = child_env
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
     webui_proc = subprocess.Popen(
