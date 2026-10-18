@@ -68,7 +68,10 @@ export function FormPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 sm:px-6">
-        <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3">
+        {/* Where the dialog sits on a fractional pixel, the scroller's clip edge and this box's edge snap a device
+            row apart and a row of scrolled settings showed above the search; the 1px shadow in the box's own
+            colour covers that row. */}
+        <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3 shadow-[0_-1px_0_var(--color-background)]">
           <div className="relative">
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
             <Input
