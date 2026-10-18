@@ -133,7 +133,7 @@ class TestBirths:
 
         def everyday(const):
             block = text.split(f"export const {const}", 1)[1].split("export const", 1)[0]
-            return {id_ for id_, group in entry.findall(block) if group not in ("Halloween", "Christmas")}
+            return {id_ for id_, group in entry.findall(block) if group not in ("Halloween", "Christmas", "Hair")}
 
         assert everyday("EYE_STYLES") == set(gem_appearance.BIRTH_FACES)
         assert everyday("HAT_STYLES") == set(gem_appearance.BIRTH_HATS)

@@ -5,6 +5,11 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Web: gems can grow hair or fur. The Hat tab has a Hair group: Hair covers the top of the head and Fur the whole body, thousands of 3D strands in the gem's own color, darker at the roots, that sway as it moves and still read as a coat in the sidebar. A Person shape gives the hair a head to grow on. No gem is born with either.
+
 ## [0.16.7] - 2026-10-18
 
 ### Added

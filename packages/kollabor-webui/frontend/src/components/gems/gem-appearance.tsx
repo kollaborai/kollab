@@ -12,8 +12,8 @@ import { EYE_STYLES, HAT_STYLES, SEASONS } from "./gem-face";
 import { GEM_CUTS } from "./gem-specs";
 import { lookKey, resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
 
-const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
-/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
+const everyday = (style: { group: string }) => !["Halloween", "Christmas", "Hair"].includes(style.group);
+/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same); hair is only ever picked. */
 export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
 export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
 

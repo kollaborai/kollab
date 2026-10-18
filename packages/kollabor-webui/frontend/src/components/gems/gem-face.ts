@@ -41,7 +41,9 @@ export type HatStyle =
   | "pumpkin"
   | "santa"
   | "antlers"
-  | "elf";
+  | "elf"
+  | "hair"
+  | "fur";
 
 export type Season = "none" | "halloween" | "xmas";
 
@@ -94,6 +96,8 @@ export const HAT_STYLES: Option<HatStyle>[] = [
   { id: "headphones", label: "Headphones", group: "Everyday" },
   { id: "hardhat", label: "Hard Hat", group: "Everyday" },
   { id: "beret", label: "Beret", group: "Everyday" },
+  { id: "hair", label: "Hair", group: "Hair" },
+  { id: "fur", label: "Fur", group: "Hair" },
   { id: "witch", label: "Witch", group: "Halloween" },
   { id: "horns", label: "Horns", group: "Halloween" },
   { id: "pumpkin", label: "Pumpkin", group: "Halloween" },
@@ -101,6 +105,14 @@ export const HAT_STYLES: Option<HatStyle>[] = [
   { id: "antlers", label: "Antlers", group: "Christmas" },
   { id: "elf", label: "Elf", group: "Christmas" },
 ];
+
+/**
+ * Hair (the top of the head) and fur (the whole body) are picked like hats but
+ * grow from the gem in 3D (gem-fur.ts), so no hat is drawn for them. They stay
+ * on: an offline gem keeps them, and no gem is born with them.
+ */
+export type HairStyle = "hair" | "fur";
+export const isHair = (hat: HatStyle): hat is HairStyle => hat === "hair" || hat === "fur";
 
 export const SEASONS: Option<Season>[] = [
   { id: "none", label: "None", group: "" },

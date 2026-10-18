@@ -51,7 +51,8 @@ MAX_EMOJI = 16
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}(@[^\x00-\x1f\x7f]{1,1024})?$")
 
 # What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
-# the Halloween and Christmas groups (a test keeps the two in step).
+# the Halloween, Christmas and Hair groups (a test keeps the two in step). Hair
+# is only ever picked, so no gem's born look changes when a style is added.
 BIRTH_FACES = ("pill", "dot", "disney", "kawaii", "diamond", "heart", "triclops", "shades", "visor", "googly", "pixel")
 BIRTH_HATS = ("none", "party", "top", "beanie", "crown", "wizard", "cap", "headphones", "hardhat", "beret")
 

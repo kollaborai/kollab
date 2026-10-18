@@ -12,6 +12,7 @@ import {
 } from "./gem-blob";
 import { HAT_SIZES, drawActivityEffects, drawEffects, drawHat, drawSeasonBody, type HatFit } from "./gem-dress";
 import {
+  isHair,
   autoHat,
   drawFace,
   eyeGap,
@@ -24,9 +25,11 @@ import {
   type EyeStyle,
   type FaceAnchor,
   type FaceFrame,
+  type HairStyle,
   type HatStyle,
   type Season,
 } from "./gem-face";
+import { coatMesh, dressCoat } from "./gem-fur";
 import { drawn } from "./gem-look";
 import { HOLDS, drawHeld, drawProps } from "./gem-props";
 import { gemMood, gemSpec, type GemCut, type GemMood, type GemSpec } from "./gem-specs";
@@ -451,6 +454,8 @@ class GemEngine {
   private scene = new Scene();
   private camera = new PerspectiveCamera(CANVAS_FOV, 1, 0.1, 20);
   private body: Mesh | null = null;
+  /** Hair or fur grown from the body (gem-fur.ts), a child of it. */
+  private coat: Mesh | null = null;
   private material: ShaderMaterial | null = null;
   /** Where the face is painted before it is trimmed to the body's silhouette. */
   private paint: CanvasRenderingContext2D | null = null;
@@ -511,6 +516,8 @@ class GemEngine {
       this.body = new Mesh(bodyGeometry(), this.material);
       this.body.frustumCulled = false;
       this.scene.add(this.body);
+      this.coat = coatMesh();
+      this.body.add(this.coat);
       this.renderer = renderer;
     } catch {
       this.failed = true;
@@ -1122,7 +1129,7 @@ class GemEngine {
    * a little toward the face while it shows so a turn carries it, tilted with
    * the head, and pressed down or shrunk to stay inside the layout box.
    */
-  private hatFit(avatar: Avatar, hat: Exclude<HatStyle, "none">, vis: number, px: number, g: number): HatFit {
+  private hatFit(avatar: Avatar, hat: Exclude<HatStyle, "none" | HairStyle>, vis: number, px: number, g: number): HatFit {
     const body = this.body as Mesh;
     const size = HAT_SIZES[hat];
     const head = headFor(weights, avatar.spec.build, size.fit);
@@ -1194,9 +1201,15 @@ class GemEngine {
       blink: avatar.blink,
       activity,
       style: face === "none" ? "pill" : face,
-      // A bubbled (offline) gem rests bare-headed.
+      // A bubbled (offline) gem rests bare-headed; hair and fur stay on.
       hat:
-        activity === "offline" ? "none" : hatProp === "auto" ? autoHat(avatar.props.caste, season, avatar.seed) : hatProp,
+        activity === "offline"
+          ? hatProp !== "auto" && isHair(hatProp)
+            ? hatProp
+            : "none"
+          : hatProp === "auto"
+            ? autoHat(avatar.props.caste, season, avatar.seed)
+            : hatProp,
       season,
       rgb: avatar.rgb,
       dark: avatar.dark,
@@ -1228,7 +1241,7 @@ class GemEngine {
     const vx = Math.abs(avatar.gaze[0].v);
     const vy = Math.abs(avatar.gaze[1].v);
     pending.stretch = [1 + Math.min(vx * 0.01, 0.04) - Math.min(vy * 0.005, 0.02), 1 + Math.min(vy * 0.01, 0.04) - Math.min(vx * 0.005, 0.02)];
-    if (frame.hat !== "none") pending.hat = this.hatFit(avatar, frame.hat, pending.seat.vis, px, g);
+    if (frame.hat !== "none" && !isHair(frame.hat)) pending.hat = this.hatFit(avatar, frame.hat, pending.seat.vis, px, g);
     return pending;
   }
 
@@ -1265,7 +1278,7 @@ class GemEngine {
   private crownClip(p: Pending, px: number): Path2D | null {
     const fit = p.hat;
     const hat = p.frame.hat;
-    if (!fit || hat === "none" || !COVERS.has(hat)) return null;
+    if (!fit || hat === "none" || isHair(hat) || !COVERS.has(hat)) return null;
     const half = 0.55 * HAT_SIZES[hat].band * fit.k;
     const cos = Math.cos(fit.angle);
     const sin = Math.sin(fit.angle);
@@ -1450,6 +1463,14 @@ class GemEngine {
     paintBody(material, tint, avatar.rest, avatar.spec.material, clamp((avatar.props.size - 24) / 40, 0, 1));
     if (avatar.anger > 0) (u.uGlowColor.value as Color).lerp(ANGRY, avatar.anger);
     u.uGlow.value = Math.min(0.8, glow * 0.85) * (1 - avatar.rest);
+    if (this.coat) {
+      dressCoat(this.coat, material, avatar.props.hat, {
+        weights,
+        rest: avatar.rest,
+        hairline: faceHeight(weights) + 0.42,
+        unitPx: (avatar.gemPx * FIT) / FRAME,
+      });
+    }
   }
 
   private drawGlints(ctx: CanvasRenderingContext2D, avatar: Avatar, ox: number, oy: number, g: number) {
