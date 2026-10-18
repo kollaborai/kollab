@@ -6,9 +6,7 @@ import hashlib
 import logging
 import os
 import shlex
-import shutil
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -256,32 +254,15 @@ class AgentOrchestrator:
         return cmd
 
     def _find_kollab_command(self) -> List[str]:
-        """Find the command used to launch child kollab agents.
+        """The command that starts this same kollab for a child agent.
 
-        Child agents run in the user's current project directory, so the
-        command cannot be a relative ``python main.py``. That only works while
-        cwd is the Kollab source repo and silently kills spawns elsewhere.
+        Child agents run in the user's current project directory, so it cannot be a
+        relative ``python main.py``, and it is never whichever ``kollab`` PATH
+        finds first (see ``kollabor.binary.kollab_argv``).
         """
-        from kollabor.binary import own_launcher
+        from kollabor.binary import kollab_argv
 
-        # The binary or Kollab.app this runs from, never another kollab on PATH.
-        launcher = own_launcher()
-        if launcher is not None:
-            return [str(launcher)]
-
-        source_main = Path(__file__).resolve().parents[2] / "main.py"
-        if source_main.exists():
-            return [sys.executable, str(source_main)]
-
-        same_env_script = Path(sys.executable).parent / "kollab"
-        if same_env_script.exists():
-            return [str(same_env_script)]
-
-        kollab_bin = shutil.which("kollab")
-        if kollab_bin:
-            return [kollab_bin]
-
-        return [sys.executable, "-m", "kollabor_cli_main"]
+        return kollab_argv()
 
     async def spawn(
         self,

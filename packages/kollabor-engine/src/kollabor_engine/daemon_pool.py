@@ -32,10 +32,8 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -102,21 +100,6 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
         if key in event:
             flat[key] = event[key]
     return flat
-
-
-def _kollab_command() -> List[str]:
-    """Return the argv prefix that launches kollab in this environment."""
-    from kollabor.binary import own_launcher
-
-    # The binary or Kollab.app this engine runs from, so its daemons run the same version.
-    launcher = own_launcher()
-    if launcher is not None:
-        return [str(launcher)]
-    console_script = shutil.which("kollab")
-    if console_script:
-        return [console_script]
-    # Editable checkout without the console script on PATH.
-    return [sys.executable, str(Path(__file__).resolve().parents[4] / "main.py")]
 
 
 class DaemonHandle:
@@ -477,7 +460,12 @@ class DaemonPool:
             identity_name = self._assign_identity(identity, workspace)
             # Keep `roster/name` so the daemon picks that roster's persona.
             as_arg = identity if identity and identity.endswith("/" + identity_name) else identity_name
-            argv = _kollab_command() + ["--detached", "--as", as_arg]
+            # The kollab this engine runs from: a binary or Kollab.app launcher,
+            # else this interpreter. Never whichever `kollab` PATH finds first, or a
+            # checkout's engine starts an older install's daemons.
+            from kollabor.binary import kollab_argv
+
+            argv = [*kollab_argv(), "--detached", "--as", as_arg]
             if agent:
                 argv += ["--agent", agent]
             if profile:

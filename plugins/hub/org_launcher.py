@@ -7,9 +7,7 @@ self-organize through the hub mesh. Team files: ``docs/specs/rosters-and-teams.m
 
 import logging
 import os
-import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Set
@@ -142,19 +140,11 @@ class OrgLauncher:
         profile: str = "",
     ) -> None:
         """Launch a single kollab agent as a subprocess."""
-        # Build the command (--detached forces interactive mode with piped stdin)
-        from kollabor.binary import own_launcher
+        # Build the command (--detached forces interactive mode with piped stdin).
+        # The kollab this one runs from, never whichever `kollab` PATH finds first.
+        from kollabor.binary import kollab_argv
 
-        # The binary or Kollab.app this runs from, then a kollab on PATH.
-        launcher = own_launcher()
-        kollab_bin = str(launcher) if launcher else shutil.which("kollab")
-        if kollab_bin:
-            cmd = [kollab_bin]
-        else:
-            # Dev mode fallback
-            main_py = Path(__file__).resolve().parents[2] / "main.py"
-            cmd = [sys.executable, str(main_py)]
-
+        cmd = kollab_argv()
         cmd.extend(
             [
                 "--detached",
