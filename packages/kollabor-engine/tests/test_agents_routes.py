@@ -76,7 +76,7 @@ class TestAgentPoolColor:
             ),
             gem("ruby", color_rgb=(200, 20, 60), personality="bold", caste="defense"),
         ]
-        monkeypatch.setattr(agents_routes, "pool_identities", lambda: identities)
+        monkeypatch.setattr(agents_routes, "pool_identities", lambda *_: identities)
 
     async def test_every_entry_carries_its_gem_color(self, client, pool, monkeypatch):
         row = live("a1", "lapis", "working", "fix tests")
@@ -190,7 +190,7 @@ class TestAgentPoolColor:
         assert json.loads(appearance_store.read_text())["born"] == born
 
     async def test_missing_color_falls_back_to_neutral_gray(self, client, monkeypatch):
-        monkeypatch.setattr(agents_routes, "pool_identities", lambda: [SimpleNamespace(name="opal")])
+        monkeypatch.setattr(agents_routes, "pool_identities", lambda *_: [SimpleNamespace(name="opal")])
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
 
         _, agent = (await client.get("/agents")).json()["agents"]  # koordinator, opal
@@ -205,7 +205,7 @@ class TestAgentPoolFolders:
     @pytest.fixture
     def folders(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            agents_routes, "pool_identities", lambda: [gem("lapis", color_rgb=(30, 90, 180)), gem("ruby")]
+            agents_routes, "pool_identities", lambda *_: [gem("lapis", color_rgb=(30, 90, 180)), gem("ruby")]
         )
         home, other = tmp_path / "home", tmp_path / "other"
         home.mkdir()

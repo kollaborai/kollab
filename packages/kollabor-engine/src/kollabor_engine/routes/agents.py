@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import
 from ..folders import agents_in_folder, hub_folder
 from ..gem_appearance import load_appearance, record_births, save_appearance
 from ..hub_bridge import HubBridge
+from .rosters import avatar_descriptor, persona_dict
 
 # plugins.hub.models.COORDINATOR_IDENTITY; kept here so the route imports no plugin.
 COORDINATOR_IDENTITY = "koordinator"
@@ -59,14 +60,25 @@ def ran_in(folder: str) -> Dict[str, float]:
     return ran
 
 
-def pool_identities() -> List[Any]:
-    """The personas of the engine folder's roster (name, color, caste, ...); none if the hub is unavailable."""
+def pool_identities(folder: Optional[str] = None) -> List[Any]:
+    """The personas of ``folder``'s roster (name, color, caste, ...); none if the hub is unavailable."""
     try:
         from plugins.hub.rosters import roster_personas
 
-        return list(roster_personas())
+        return list(roster_personas(folder))
     except Exception:
         return []
+
+
+def persona_in(name: str, folder: str) -> Dict[str, Any]:
+    """A name's persona (any roster, a numbered ``lapis-2`` wears ``lapis``) as the UI reads it; {} if none."""
+    try:
+        from plugins.hub.rosters import find_persona
+
+        persona = find_persona(name, folder)
+    except Exception:
+        return {}
+    return persona_dict(persona) if persona else {}
 
 
 def _pool_entry(
@@ -114,8 +126,8 @@ async def list_agent_pool(
     view instead: an agent running in any folder shows its state (this
     folder's wins when a name runs in several).
     """
-    pool = pool_identities()
     folder = os.path.realpath(os.path.expanduser(workspace)) if workspace else os.path.realpath(os.getcwd())
+    pool = pool_identities(folder)
     live = [
         agent
         for agent in _bridge.get_agents(use_cache=not refresh)
@@ -134,10 +146,14 @@ async def list_agent_pool(
             live_by_identity.get(COORDINATOR_IDENTITY),
             last_ran(COORDINATOR_IDENTITY),
             agent_type=COORDINATOR_IDENTITY,
+            agent=COORDINATOR_IDENTITY,
+            roster="",
+            display_name="Koordinator",
+            avatar={"kind": "gem"},
             role_aliases=[],
             personality="",
             caste="",
-            # Not a pool gem: the web UI gives it a born color.
+            # Not a persona: the web UI gives it a born gem and color.
             color=None,
         )
     ]
@@ -151,6 +167,13 @@ async def list_agent_pool(
                 live_by_identity.get(name),
                 last_ran(name),
                 agent_type=str(getattr(identity, "agent", "") or ""),
+                agent=str(getattr(identity, "agent", "") or ""),
+                roster=str(getattr(identity, "roster", "") or ""),
+                display_name=str(getattr(identity, "display_name", "") or name),
+                avatar=avatar_descriptor(
+                    getattr(identity, "avatar", None) or {"kind": "initials"},
+                    str(getattr(identity, "roster", "") or ""),
+                ),
                 role_aliases=list(getattr(identity, "role_aliases", []) or []),
                 personality=str(getattr(identity, "personality", "") or ""),
                 caste=str(getattr(identity, "caste", "") or ""),
@@ -163,24 +186,30 @@ async def list_agent_pool(
     if alive:
         record_births(alive)
 
-    # Live agents the pool does not name (numbered gems like lapis-2) are
-    # listed too, so the sidebar shows every agent. "pool": False keeps them
-    # out of the launch list; a numbered gem wears its base's color.
+    # Live agents the pool does not name (numbered gems like lapis-2, a persona
+    # of another roster) are listed too, so the sidebar shows every agent.
+    # "pool": False keeps them out of the launch list; a numbered gem wears its
+    # base's look, a persona of another roster its own.
     by_name = {agent["name"]: agent for agent in agents}
     for name, current in sorted(live_by_identity.items()):
         if name in by_name:
             continue
         base = by_name.get(name.rsplit("-", 1)[0], {})
+        known = persona_in(name, folder)
         agents.append(
             {
                 "name": name,
                 "identity": name,
-                "agent_type": "",
+                "agent_type": known.get("agent", ""),
+                "agent": known.get("agent", ""),
+                "roster": known.get("roster", ""),
+                "display_name": known.get("display_name") or base.get("display_name") or name,
+                "avatar": known.get("avatar") or base.get("avatar") or {"kind": "initials"},
                 "role_aliases": [],
                 "personality": "",
-                "caste": base.get("caste", ""),
-                # None when no pool gem is its base: the web UI gives it a born color.
-                "color": base.get("color"),
+                "caste": base.get("caste") or known.get("caste", ""),
+                # None when no persona is its base: the web UI gives it a born color.
+                "color": base.get("color") or known.get("color"),
                 "available": False,
                 "active": True,
                 "pool": False,

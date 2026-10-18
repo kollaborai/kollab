@@ -188,3 +188,33 @@ def test_a_persona_fills_the_session_request_but_the_caller_wins(folders):
     body = SimpleNamespace(identity="not-a-persona", workspace=folders.project, agent=None, profile="default")
     rosters_routes.apply_persona(body)
     assert body.agent is None
+
+
+@pytest.mark.asyncio
+async def test_agents_rows_carry_the_folders_roster_and_persona_fields(client, folders, monkeypatch):
+    import kollabor_engine.routes.agents as agents_routes  # type: ignore[import-not-found]
+
+    live = [{"agent_id": "a1", "identity": "omar", "state": "idle", "project": folders.project}]
+    monkeypatch.setattr(agents_routes, "_bridge", SimpleNamespace(get_agents=lambda use_cache=True: list(live)))
+    put(folders.project + "/.kollab/config.json", {"plugins": {"hub": {"roster": "marketing-crew"}}})
+
+    rows = (await client.get("/agents", params={"workspace": folders.project})).json()["agents"]
+    by_name = {r["name"]: r for r in rows}
+    assert [r["name"] for r in rows][:3] == ["koordinator", "omar", "maya"]
+    assert "lapis" not in by_name  # this folder draws from the marketing crew
+    maya = by_name["maya"]
+    assert (maya["roster"], maya["display_name"], maya["agent"], maya["agent_type"]) == (
+        "marketing-crew", "Maya Lindqvist", "research", "research")
+    assert maya["avatar"] == {"kind": "emoji", "value": "🎯"} and maya["color"] == [92, 138, 214]
+    assert by_name["omar"]["active"] is True
+
+    # another folder still launches gems, and a persona of another roster that is live there is listed
+    other = os.path.join(os.path.dirname(folders.project), "other")
+    os.makedirs(other, exist_ok=True)
+    live.append({"agent_id": "a2", "identity": "theo", "state": "idle", "project": other})
+    rows = (await client.get("/agents", params={"workspace": other})).json()["agents"]
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["lapis"]["roster"] == "gems" and by_name["lapis"]["avatar"] == {"kind": "gem"}
+    theo = by_name["theo"]
+    assert theo["pool"] is False and theo["roster"] == "marketing-crew" and theo["display_name"] == "Theo Brandt"
+    assert theo["avatar"] == {"kind": "initials"} and theo["color"] == [176, 96, 178]
