@@ -154,7 +154,13 @@ def create_app(
             "engine_version": engine_version,
         }
 
-    @app.api_route("/engine/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+    # One route answers five methods, so it has one operation id; the engine's own
+    # schema documents what this forwards, and /openapi.json only has to carry the title.
+    @app.api_route(
+        "/engine/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
     async def engine_proxy(path: str, request: Request):
         query = f"?{request.url.query}" if request.url.query else ""
         upstream = engine.build_request(
