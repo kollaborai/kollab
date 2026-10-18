@@ -258,8 +258,8 @@ def create_app() -> FastAPI:
             except Exception:
                 return "unknown"
 
-        # The providers in use. An opened agent's profile is None until its daemon
-        # answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
+        # The providers in use. An opened agent's profile is what presence says
+        # until its daemon answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
         providers = sorted(
             {getattr(s.profile, "provider", "") or "" for s in _sessions.values()} - {""}
         )

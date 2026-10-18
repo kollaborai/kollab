@@ -293,3 +293,88 @@ async def test_adopt_does_not_await_slow_history_refresh(monkeypatch):
         assert session._history_refresh_task is not None
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_row_keeps_what_presence_says_until_the_daemon_answers(monkeypatch):
+    """A busy daemon is slow to answer its profile; the row must not drop its model meanwhile."""
+    answer = asyncio.Event()
+
+    class BusyState:
+        async def get_conversation(self, **kwargs):
+            await asyncio.sleep(10)
+
+        async def get_active_profile(self):
+            await answer.wait()
+            return SimpleNamespace(name="local", model="qwen", provider="custom", description="", effort="")
+
+        async def get_permission_state(self):
+            return SimpleNamespace(approval_mode="TRUST_ALL")
+
+    handle = SimpleNamespace(
+        alive=True,
+        launcher=None,
+        state=BusyState(),
+        identity="koordinator",
+        agent_name="default",
+        pid=4242,
+        subscribe=lambda: asyncio.Queue(),
+        unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
+    )
+
+    class Pool:
+        async def adopt(self, session_id, found):
+            return handle
+
+        async def stop(self, session_id):
+            return True
+
+    monkeypatch.setattr("kollabor_engine.session.get_daemon_pool", lambda: Pool())
+    found = _row(session_id="busy", profile="openai-oauth", model="gpt-6-luna", provider="openai")
+    session = await EngineSession.adopt(found)
+    try:
+        row = session.to_dict()
+        assert (row["profile"], row["model"], row["provider"], row["harness"]) == (
+            "openai-oauth",
+            "gpt-6-luna",
+            "openai",
+            "",
+        )
+
+        answer.set()
+        await session._facts_task
+        row = session.to_dict()
+        assert (row["profile"], row["model"], row["provider"]) == ("local", "qwen", "custom")
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_harness_row_keeps_its_harness_name(monkeypatch):
+    handle = SimpleNamespace(
+        alive=True,
+        launcher=None,
+        state=SimpleNamespace(),
+        identity="coder",
+        agent_name="default",
+        pid=4243,
+        subscribe=lambda: asyncio.Queue(),
+        unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
+    )
+
+    class Pool:
+        async def adopt(self, session_id, found):
+            return handle
+
+        async def stop(self, session_id):
+            return True
+
+    monkeypatch.setattr("kollabor_engine.session.get_daemon_pool", lambda: Pool())
+    found = _row(session_id="acp", profile="claude-code", provider="acp", harness="Claude Code")
+    session = await EngineSession.adopt(found)
+    try:
+        assert session.to_dict()["harness"] == "Claude Code"
+    finally:
+        await session.shutdown()

@@ -329,9 +329,17 @@ class EngineSession:
         from it, never set, and closing the session only detaches.
         """
         session_id = str(found["session_id"])
+        # What presence says it runs: the row keeps its model while a busy
+        # daemon is slow to answer _read_agent_facts, which then replaces this.
+        seed = ProfileSnapshot(
+            name=str(found.get("profile") or ""),
+            model=str(found.get("model") or ""),
+            provider=str(found.get("provider") or ""),
+            description=str(found.get("harness") or ""),
+        )
         session = cls(
             session_id=session_id,
-            profile=None,
+            profile=seed if seed.name or seed.model else None,
             approval_mode="",
             agent=str(found.get("agent") or "") or None,
             identity=str(found.get("identity") or "") or None,
@@ -832,9 +840,13 @@ class EngineSession:
             self.agent or (self.daemon.agent_name if self.daemon else "") or "default"
         )
         model = getattr(self.profile, "model", "")
+        provider = getattr(self.profile, "provider", "")
+        harness = ""
+        if provider == "acp":
+            harness = getattr(self.profile, "description", "") or getattr(self.profile, "name", "")
         return {
-            "harness": (getattr(self.profile, "description", "") or getattr(self.profile, "name", "")) if getattr(self.profile, "provider", "") == "acp" else "",
-            "provider": getattr(self.profile, "provider", ""),
+            "harness": harness,
+            "provider": provider,
             "acp_waiting": self.acp_waiting,
             "acp_usage": self.acp_usage,
             "acp_plan": self.acp_plan,
@@ -845,9 +857,7 @@ class EngineSession:
             "model": model,
             # What the daemon will send next (mirrored by apply_profile_mirror).
             "effort": getattr(self.profile, "effort", "") or "",
-            "supports_vision": supports_vision(
-                model, getattr(self.profile, "provider", "")
-            ),
+            "supports_vision": supports_vision(model, provider),
             "agent": agent_name,
             "workspace": self.workspace,
             "device": self.device,
