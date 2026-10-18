@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 python3 - "$SPEC_PATH" "$REPO_ROOT" <<'PY'
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -261,6 +262,19 @@ def _remove_home() -> None:
                 Path(sock).unlink(missing_ok=True)
                 Path(sock).parent.rmdir()
         except (OSError, ValueError):
+            pass
+    # A daemon that exited cleanly removed its socket but not the directory,
+    # keyed by a hash of the project data folder's name. Only the throwaway
+    # project's folder counts (its name holds the unique HOME name; one named
+    # after the checkout would be the live agents' key), and rmdir only takes
+    # an empty directory.
+    for project in TEST_HOME.glob(".kollab/projects/*"):
+        if TEST_HOME.name not in project.name:
+            continue
+        key = hashlib.sha256(project.name.encode()).hexdigest()[:12]
+        try:
+            Path(SOCKET_DIR_ROOT, key).rmdir()
+        except OSError:
             pass
     shutil.rmtree(TEST_HOME, ignore_errors=True)
 

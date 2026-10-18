@@ -126,7 +126,8 @@ agents (paid model calls) and write conversation logs and vault entries there.
   idiom) keeps it, and keeps its own project folders.
 - When the spec ends the runner runs `--hub stop all`, then stops every
   process whose environment carries that `HOME` (daemons outlive the tmux pane),
-  removes leftover socket files and deletes the directory.
+  removes leftover socket files and the project's empty socket directory, and
+  deletes the directory.
   `KOLLAB_TMUX_KEEP=1` keeps the tmux session and the `HOME`.
 - `KOLLAB_WEBUI_HOSTS` (the developer's VPN address) is dropped from the app
   command and every `shell` step, so a web UI a spec starts listens on

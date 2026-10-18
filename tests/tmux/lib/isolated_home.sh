@@ -76,7 +76,7 @@ isolated_home_cleanup() {
     done
     # A daemon killed hard leaves its socket file behind; its presence record names it.
     "$ISOLATED_PYTHON" - "$ISOLATED_HOME" <<'PY'
-import glob, json, os, sys
+import glob, hashlib, json, os, sys
 
 for record in glob.glob(sys.argv[1] + "/.kollab/**/presence/*.json", recursive=True):
     try:
@@ -86,6 +86,17 @@ for record in glob.glob(sys.argv[1] + "/.kollab/**/presence/*.json", recursive=T
                 os.unlink(sock)
             os.rmdir(os.path.dirname(sock))
     except (OSError, ValueError):
+        pass
+# a daemon that exited cleanly removed its socket but not the directory, keyed by a hash of
+# the project data folder's name. Only the throwaway project's folder counts (its name holds the
+# unique HOME name; one named after the checkout would be the live agents' key), and rmdir only
+# takes an empty directory.
+for project in glob.glob(sys.argv[1] + "/.kollab/projects/*"):
+    if os.path.basename(sys.argv[1]) not in os.path.basename(project):
+        continue
+    try:
+        os.rmdir("/tmp/kollabor-hub/" + hashlib.sha256(os.path.basename(project).encode()).hexdigest()[:12])
+    except OSError:
         pass
 PY
     rm -rf "$ISOLATED_HOME"
