@@ -73,6 +73,25 @@ Broadcast to everyone:
 /hub broadcast we're switching to the v2 API, update your imports
 ```
 
+## Choose Who Wakes When an Agent Joins
+
+When an agent comes online, every other agent in the folder gets a "just came
+online" notice and, by default, wakes for a model call to react to it. Set
+`plugins.hub.arrival_wake` to change that for a project (`/config` > Hub >
+Wake on Agent Arrival, saved Local, or `.kollab/config.json`):
+
+```json
+{ "plugins": { "hub": { "arrival_wake": "koordinator" } } }
+```
+
+| Value | Who wakes |
+|-------|-----------|
+| `all` (default) | Every agent in the folder |
+| `koordinator` | Only the agent named koordinator |
+| `none` | Nobody |
+
+Agents that stay asleep still see the notice and read it on their next turn.
+
 ## Hub CLI (No TUI Needed)
 
 Manage agents from the command line without starting an interactive

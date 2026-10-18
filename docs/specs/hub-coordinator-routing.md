@@ -32,20 +32,20 @@ to the coordinator as direct messages. the coordinator (where the operator
 sits) sees everything. the coordinator's own untagged responses
 stay local (since that operator is right there reading them).
 
-this is a configurable flag, off by default, so it doesn't break
-existing behavior.
+this is a configurable flag, on by default (set it false to keep
+untagged replies local).
 
 ## design
 
 ### config flag
 
   config path: plugins.hub.route_untagged_to_coordinator
-  default: false
+  default: true
   type: checkbox
 
 added to get_default_config():
 
-  "route_untagged_to_coordinator": False
+  "route_untagged_to_coordinator": True
 
 added to get_config_widgets():
 
@@ -225,9 +225,9 @@ this is a small change. one method, one config flag, one guard clause.
       - _get_coordinator_identity(): new helper (~8 lines)
       - _inject_roster_context(): add note about auto-routing
 
-  no new files. no new dependencies. no tests broken (flag defaults
-  off). tmux test optional -- hard to test multi-agent routing in
-  single-agent test harness.
+  no new files. no new dependencies. the flag defaults on (false keeps
+  untagged replies local). tmux test optional -- hard to test
+  multi-agent routing in single-agent test harness.
 
 ## future considerations
 

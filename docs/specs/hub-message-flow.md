@@ -196,6 +196,7 @@ arrives via socket or mailbox polling.
              ONLY if ALL of:
                is_intended (to=me or to=*)
                NOT departure message
+               NOT an arrival this project keeps asleep (see "arrival wake")
                NOT system (hub-cron, task-cron, hub)
                NOT human_elsewhere (human typing in other window)
              then: emit TRIGGER_LLM_CONTINUE
@@ -209,6 +210,23 @@ lapis show a message "from coordinator" even though human was
 talking locally. fix: is_human_elsewhere check suppresses LLM
 trigger when the broadcast came from a human typing in another
 agent's window.
+
+### arrival wake
+
+an agent that comes online tells every live peer (plugin.py
+_announce_to_peers): a direct "just came online" message tagged
+metadata.lifecycle_event = "arrival". whether a peer spends a model call
+on it is the project's `plugins.hub.arrival_wake` (`/config` > Hub >
+Wake on Agent Arrival; a folder's .kollab/config.json beats the global file):
+
+  all          every peer wakes (default)
+  koordinator  only the agent named koordinator wakes
+  none         nobody wakes
+
+a peer that does not wake still shows the notice (feed, HUD, web chips) and
+queues it for its next turn, with no model call. any other value counts as
+all and logs a warning. only arrivals are affected: departures never wake,
+and model switches and every other wake rule are unchanged.
 
 
 ## flow 4: event pipeline (PRE -> MAIN -> POST)

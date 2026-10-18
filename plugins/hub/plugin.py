@@ -731,6 +731,9 @@ class HubPlugin(BasePlugin):
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
                     "route_untagged_to_coordinator": True,
+                    # Who wakes for a model call when an agent comes online:
+                    # "all", "koordinator" or "none" (see _wakes_on_arrival).
+                    "arrival_wake": "all",
                     "allowed_runtimes": ["kollab"],
                     "require_auth": False,
                     "authority": "kollabor.ai",
@@ -984,6 +987,17 @@ class HubPlugin(BasePlugin):
                     "label": "Route Untagged to Coordinator",
                     "config_path": "plugins.hub.route_untagged_to_coordinator",
                     "help": "Send replies with no named recipient to the coordinator agent",
+                },
+                {
+                    "type": "dropdown",
+                    "label": "Wake on Agent Arrival",
+                    "config_path": "plugins.hub.arrival_wake",
+                    "options": ["all", "koordinator", "none"],
+                    "help": (
+                        "Who wakes for a model call when an agent comes online: "
+                        "all agents, only the koordinator, or none. The others "
+                        "still see the notice on their next turn."
+                    ),
                 },
                 {
                     "type": "slider",
@@ -7024,6 +7038,9 @@ class HubPlugin(BasePlugin):
                     f'<hub_msg to="{self._identity.identity}">your message</hub_msg>'
                 ),
                 scope=MessageScope.DIRECT.value,
+                # _decide_hub_wake reads this: plugins.hub.arrival_wake says
+                # which peers spend a model call on the notice.
+                metadata={"lifecycle_event": "arrival"},
             )
             await self._deliver_to_agent(peer, intro)
             logger.info(f"Announced to {peer.identity}")
@@ -7476,6 +7493,29 @@ class HubPlugin(BasePlugin):
         self._touch_wake_cache(self._hub_wake_seen_fingerprints, fingerprint, now)
         return None
 
+    def _wakes_on_arrival(self) -> bool:
+        """Whether this agent spends a model call when a peer comes online.
+
+        `plugins.hub.arrival_wake` is read through the config service, so a
+        folder's .kollab/config.json beats the global file. An unknown value
+        wakes everyone, as "all" does.
+        """
+        mode = (
+            self.config.get("plugins.hub.arrival_wake", "all") if self.config else "all"
+        )
+        if mode == "koordinator":
+            me = self._identity.identity if self._identity else ""
+            return me == COORDINATOR_IDENTITY
+        if mode == "none":
+            return False
+        if mode != "all":
+            logger.warning(
+                "plugins.hub.arrival_wake=%r is not all, koordinator or none; "
+                "waking for arrivals",
+                mode,
+            )
+        return True
+
     def _decide_hub_wake(
         self,
         message: HubMessage,
@@ -7520,6 +7560,11 @@ class HubPlugin(BasePlugin):
             return self._wake_or_buffer(message, llm_service, "operator message")
         if metadata.get("lifecycle_event") == "model_switch":
             return HubWakeDecision("observe", False, "model switch")
+        if (
+            metadata.get("lifecycle_event") == "arrival"
+            and not self._wakes_on_arrival()
+        ):
+            return HubWakeDecision("observe", False, "arrival")
         if metadata.get("task_cron_ack"):
             return HubWakeDecision("observe", False, "task-cron acknowledgement")
         sender_has_task = self._sender_has_active_task(message)
