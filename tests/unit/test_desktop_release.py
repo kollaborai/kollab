@@ -122,15 +122,24 @@ def test_stage_checks_hash_version_permissions_and_target_name(source_root, monk
     assert "xdg-utils" in config["bundle"]["linux"]["deb"]["depends"]
 
 
-# A stand-in python3.14: the pex's venv tool, compileall, and kollab --version.
+# A stand-in python3.14: compileall and kollab --version (venv layout comes from
+# the standalone pex-tools stand-in below, matching the new unpack_runtime call).
 FAKE_PYTHON = """#!/bin/sh
+case "$*" in
+  *"-m compileall"*) : ;;
+  *"-m kollabor_cli_main --version") echo "kollabor_cli_main.py 1.2.3" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+# A stand-in pex-tools: unpack_runtime stages via the standalone entry point
+# (PEX_TOOLS=1 on a venv pex is ignored by its shim; see the unpack_runtime comment).
+FAKE_PEX_TOOLS = """#!/bin/sh
 case "$*" in
   *" venv --site-packages-copies "*)
     for last; do :; done
     mkdir -p "$last/lib/python3.14/site-packages/kollabor"
     : > "$last/lib/python3.14/site-packages/kollabor/__init__.py" ;;
-  *"-m compileall"*) : ;;
-  *"-m kollabor_cli_main --version") echo "kollabor_cli_main.py 1.2.3" ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 """
@@ -175,10 +184,15 @@ out.mkdir(parents=True)
     ("macos-aarch64", "aarch64-apple-darwin"),
     ("macos-x86_64", "x86_64-apple-darwin"),
 ])
-def test_macos_stage_unpacks_the_scie_into_a_signable_runtime(source_root, platform, target):
+def test_macos_stage_unpacks_the_scie_into_a_signable_runtime(source_root, monkeypatch, platform, target):
     source = source_root / f"kollab-{platform}"
     fake_scie(source)
     release.write_checksum(source)
+
+    fake_tools = source_root / "fake-pex-tools"
+    fake_tools.write_text(FAKE_PEX_TOOLS)
+    fake_tools.chmod(0o755)
+    monkeypatch.setattr(release, "PEX_TOOLS_CMD", (str(fake_tools),))
 
     launcher = release.stage(platform, source, "1.2.3")
 
@@ -251,3 +265,33 @@ def test_app_runtime_matches_the_cli_binary_python():
     from scripts import build_binary
 
     assert release.RUNTIME_PYTHON == "python" + build_binary.PYTHON.rsplit(".", 1)[0]
+
+
+def test_pex_tools_cmd_is_the_standalone_entry_point():
+    """The venv pex shim ignores PEX_TOOLS; staging must use pex-tools, never the pex itself."""
+    assert release.PEX_TOOLS_CMD[-1] == "pex-tools"
+    assert "--from" in release.PEX_TOOLS_CMD and release.PEX_PIN in release.PEX_TOOLS_CMD
+
+
+def test_unpack_runtime_rejects_a_failing_pex_tools(source_root, monkeypatch):
+    source = source_root / "kollab-macos-aarch64"
+    fake_scie(source)
+    release.write_checksum(source)
+    monkeypatch.setattr(
+        release, "PEX_TOOLS_CMD", ("false",)
+    )
+    with pytest.raises(ValueError, match="exit code"):
+        release.unpack_runtime(source, source_root / "app-runtime-aarch64-apple-darwin")
+
+
+def test_unpack_runtime_rejects_a_venv_without_site_packages(source_root, monkeypatch):
+    source = source_root / "kollab-macos-aarch64"
+    fake_scie(source)
+    release.write_checksum(source)
+    noop = "#!/bin/sh\nexit 0\n"
+    fake_tools = source_root / "fake-pex-tools-noop"
+    fake_tools.write_text(noop)
+    fake_tools.chmod(0o755)
+    monkeypatch.setattr(release, "PEX_TOOLS_CMD", (str(fake_tools),))
+    with pytest.raises(ValueError, match="no site-packages"):
+        release.unpack_runtime(source, source_root / "app-runtime-aarch64-apple-darwin")
