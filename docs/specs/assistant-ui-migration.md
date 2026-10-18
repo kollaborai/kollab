@@ -266,7 +266,13 @@ from Chat, while original context remains available to the model and Trajectory.
 Resume preserves explicit initialization provenance rather than classifying user
 messages by their headings. Existing resumed bases can recover that display flag
 through a bounded read-only match of their original initialization UUID and exact
-content; missing proof leaves the message visible. The raw history mirror and
+content; missing proof leaves the message visible. Every producer of that message
+keeps the mark: the daemon's prompt rebuild and the engine's disk seed (the log
+read an adopted agent is first opened from), so an agent started in a terminal
+and one started by the engine show the same chat. A live agent's sidebar row
+reads `<model> · <folder>` however it started (`utils/session-subtitle.ts`); the
+model comes from presence (`tags.model`) until the engine has opened the agent.
+The raw history mirror and
 its incremental-sync anchor remain unchanged. Old ACP `Reply from … [thread:…]` batches are projected
 as individual peer messages only when persisted source is `observation`; human
 examples remain user text. Routing ids and raw prompt text stay in history without
