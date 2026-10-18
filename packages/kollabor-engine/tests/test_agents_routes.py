@@ -292,6 +292,15 @@ class TestAgentPoolFolders:
 
         assert inside["lapis"]["active"] and inside["lapis"]["agent_id"] == "g1"
 
+    async def test_a_global_hub_is_one_hub_for_every_folder(self, client, folders, monkeypatch):
+        home, other = folders
+        monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("g1", "lapis", project=str(home))]))
+
+        in_other = await self.pool(client, workspace=str(other))
+
+        assert in_other["lapis"]["active"] and in_other["lapis"]["agent_id"] == "g1"
+
 
 class TestSnapshotDiff:
     def test_snapshot_carries_current_task(self):

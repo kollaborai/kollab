@@ -92,6 +92,15 @@ def test_a_folder_inside_a_repo_shares_the_repos_hub(tmp_path) -> None:
         pool._assign_identity("lapis", str(repo / "pkg"))
 
 
+def test_a_global_hub_holds_every_name_for_every_folder(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis", "project": str(tmp_path / "other")}]
+
+    with pytest.raises(ValueError, match="lapis.*already in use"):
+        pool._assign_identity("lapis", str(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_spawn_closes_dead_existing_handle_before_replacement():
     pool = daemon_pool.DaemonPool()
