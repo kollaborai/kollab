@@ -68,7 +68,7 @@ def apply_persona(body: Any) -> None:
     if persona is None:
         return
     body.agent = body.agent or persona.agent or None
-    if body.profile == "default" and persona.profile:
+    if body.profile in (None, "default") and persona.profile:
         body.profile = persona.profile
 
 

@@ -86,7 +86,9 @@ class Credentials(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    profile: str = "default"
+    # None (or the placeholder "default") names no profile: the persona's or the
+    # agent's applies, else the active profile, which New Session also starts on.
+    profile: Optional[str] = None
     agent: Optional[str] = None
     identity: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -225,9 +227,9 @@ async def create_session(body: CreateSessionRequest, request: Request):
     safe_system_prompt = effective_system_prompt
 
     # Determine effective profile:
-    # caller's profile wins; agent profile used only when caller sends "default"
+    # caller's profile wins; agent profile used only when the caller names none
     effective_profile = body.profile
-    if agent_data and agent_data.get("profile") and body.profile == "default":
+    if agent_data and agent_data.get("profile") and body.profile in (None, "default"):
         effective_profile = agent_data["profile"]
 
     # Merge MCP servers: deduplicate, agent's list appended to caller's
@@ -262,6 +264,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
         from kollabor_ai import ProfileManager
 
         pm = ProfileManager()
+        effective_profile = effective_profile or pm.active_profile_name
         profile = pm.get_profile(effective_profile)
         if not profile:
             raise HTTPException(

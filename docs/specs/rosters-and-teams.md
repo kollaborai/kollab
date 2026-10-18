@@ -107,7 +107,8 @@ base persona. Every folder has its own hub, so a name only has to be free in its
 
 - `agent` is the bundle (`desired_bundle_for_identity`): a plain `kollab --as maya`
   becomes `research`; an explicit `--agent` wins. The web `POST /sessions {"identity"}`
-  fills `agent` and `profile` from the persona when the request leaves them out.
+  fills `agent` and `profile` from the persona when the request leaves them out; a
+  request that names no profile anywhere starts on the active profile.
 - `role`, `display_name` and `prompt` are added to the hub context (the first system
   message), next to "you are <name> on the kollabor hub". A persona with neither role
   nor prompt (the gems) adds nothing.
@@ -169,7 +170,8 @@ token and uses a blob URL.
 `POST /teams/{name}/launch` with `{"workspace": "/abs/folder", "profile": "optional"}`
 starts each member that is not already live **in that folder**, lead first, each through
 `POST /sessions` (same code and registry, so they appear in the sidebar). The agent is
-the member's, the profile is the request's, else the member's, else `default`.
+the member's, the profile is the request's, else the member's, else none: `POST /sessions`
+then picks the active profile, the one a New Session chat starts on.
 
 ```json
 {"team": "marketing", "workspace": "/abs/folder",

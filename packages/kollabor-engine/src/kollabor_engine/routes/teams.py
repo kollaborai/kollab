@@ -18,7 +18,9 @@ _bridge = HubBridge()
 
 class LaunchTeamRequest(BaseModel):
     workspace: str
-    profile: Optional[str] = None  # one profile for every member; default: each member's own
+    # One profile for every member. Without it, each member's own; a member with none
+    # starts on what POST /sessions picks when it is given no profile.
+    profile: Optional[str] = None
 
 
 def team_dict(team: Any) -> Dict[str, Any]:
@@ -88,7 +90,7 @@ async def launch_team(name: str, body: LaunchTeamRequest, request: Request) -> D
         try:
             session = await create_session(
                 CreateSessionRequest(
-                    profile=body.profile or member.profile or "default",
+                    profile=body.profile or member.profile or None,
                     agent=member.agent or None,
                     identity=ref,
                     launch_brief=team_member_prompt(team, member),

@@ -142,6 +142,8 @@ async def test_launch_starts_every_member_lead_first_and_a_second_call_starts_no
 
     lead, maya = hub.calls[0], hub.calls[1]
     assert (lead.identity, lead.agent, lead.workspace) == ("marketing-crew/omar", "default", folders.project)
+    # A member with no profile of its own names none: POST /sessions picks, as it does for New Session.
+    assert all(c.profile is None for c in hub.calls)
     assert maya.agent == "research" and "you report to: omar" in maya.launch_brief
 
     again = (await client.post("/teams/marketing/launch", json={"workspace": folders.project})).json()
@@ -188,6 +190,15 @@ def test_a_persona_fills_the_session_request_but_the_caller_wins(folders):
     body = SimpleNamespace(identity="not-a-persona", workspace=folders.project, agent=None, profile="default")
     rosters_routes.apply_persona(body)
     assert body.agent is None
+
+
+@pytest.mark.parametrize("named", [None, "default"])
+def test_a_persona_profile_applies_when_the_caller_names_none(folders, named):
+    crew = {"name": "crew", "personas": [{"name": "ana", "profile": "fast"}]}
+    put(folders.project + "/.kollab/rosters/crew.json", crew)
+    body = SimpleNamespace(identity="ana", workspace=folders.project, agent=None, profile=named)
+    rosters_routes.apply_persona(body)
+    assert body.profile == "fast"
 
 
 @pytest.mark.asyncio

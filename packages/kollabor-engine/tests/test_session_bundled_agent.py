@@ -44,7 +44,9 @@ async def client(empty_home, monkeypatch):
     FakeSession.made = []
     monkeypatch.setattr(sessions_routes, "EngineSession", FakeSession)
     monkeypatch.setattr(sessions_routes, "remember_workspace", lambda *_: None)
-    profiles = SimpleNamespace(get_profile=lambda name: SimpleNamespace(name=name))
+    profiles = SimpleNamespace(
+        active_profile_name="saved", get_profile=lambda name: SimpleNamespace(name=name)
+    )
     monkeypatch.setattr("kollabor_ai.ProfileManager", lambda: profiles)
     monkeypatch.setattr(
         teams_routes, "_bridge", SimpleNamespace(get_agents=lambda use_cache=True: [])
@@ -94,6 +96,8 @@ async def test_a_team_launches_with_every_members_bundle_on_an_empty_home(
     body = response.json()
     assert body["failed"] == [], body
     assert body["started"] == ["omar", "maya", "theo", "priya", "luz", "jonas"]
+    # No member names a profile, so each starts on the active one, as New Session would.
+    assert {s.kwargs["profile"].name for s in FakeSession.made} == {"saved"}
     assert [s.kwargs["agent"] for s in FakeSession.made] == [
         "default",
         "research",
