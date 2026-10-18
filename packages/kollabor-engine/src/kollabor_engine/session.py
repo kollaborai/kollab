@@ -216,12 +216,13 @@ class EngineSession:
         self._facts_task: Optional[asyncio.Task] = None
 
     @staticmethod
-    def _resolve_workspace(workspace: Optional[str]) -> Optional[str]:
-        """Normalize and validate a caller-provided daemon working directory."""
-        if not workspace:
-            return None
+    def _resolve_workspace(workspace: Optional[str]) -> str:
+        """Normalize and validate the daemon's working directory.
 
-        path = Path(workspace).expanduser().resolve()
+        With no folder named the daemon runs in this engine's own, so that is
+        the folder the session reports: a null left every reader to guess it.
+        """
+        path = Path(workspace or Path.cwd()).expanduser().resolve()
         if not path.exists():
             raise ValueError(f"Workspace does not exist: {workspace}")
         if not path.is_dir():

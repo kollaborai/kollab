@@ -209,6 +209,18 @@ def test_engine_session_normalizes_workspace_for_daemon(tmp_path):
     assert session.workspace == str(tmp_path.resolve())
 
 
+def test_engine_session_without_workspace_reports_the_engine_folder(tmp_path, monkeypatch):
+    from kollabor_engine.session import EngineSession
+
+    # The daemon runs in the engine's own folder when none is named, so the
+    # row says so (a null left the sidebar without a folder to show).
+    monkeypatch.chdir(tmp_path)
+    session = EngineSession(session_id="sess_default_folder", profile=None)
+
+    assert session.workspace == str(tmp_path.resolve())
+    assert session.to_dict()["workspace"] == str(tmp_path.resolve())
+
+
 def test_engine_session_rejects_invalid_workspace(tmp_path):
     from kollabor_engine.session import EngineSession
 
