@@ -31,9 +31,12 @@ if Node/npm is unavailable.
 
 - **Sidebar**: New Session starts a session with the current picks in one
   click; the options button next to it opens Agent, Gem, Model and Workspace.
-  The gem list starts with koordinator while this folder runs none (a terminal
-  makes the first agent in a folder its koordinator) and says when each gem
-  last ran here ("Ran 3d Ago", from its vault). Workspace is a folder picker:
+  The gem list is the chosen Workspace's: every folder has its own hub, so a
+  gem or koordinator running in another folder is free here and "In Use" means
+  in use in that folder (a folder inside a git repo shares the repo's hub). It
+  starts with koordinator while the folder runs none (a terminal makes the
+  first agent in a folder its koordinator) and says when each gem last ran
+  there ("Ran 3d Ago", from its vault). Workspace is a folder picker:
   the engine's folder, recent folders with their live agents, a folder
   browser, or a typed path.
   Each session row shows its gem as a live 3D avatar that acts out what the
