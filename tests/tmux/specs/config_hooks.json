@@ -1,8 +1,8 @@
 {
   "name": "config-hooks",
-  "description": "Verify config hooks system loads without errors during startup",
+  "description": "Verify config hooks system loads without errors during startup. The hooks file is written into the spec's own project folder (the runner's throwaway one), where the app runs, never into the repo folder the developer's live agents use.",
   "config": {
-    "command": "bash -c 'mkdir -p .kollab && echo \"{\\\"hooks\\\":{\\\"UserPromptSubmit\\\":[{\\\"hooks\\\":[{\\\"type\\\":\\\"command\\\",\\\"command\\\":\\\"echo ok\\\"}]}]}}\" > .kollab/hooks.json && python main.py; rm -f .kollab/hooks.json'",
+    "command": "bash -c 'R=$PWD; cd \"$KOLLAB_PROJECT_ROOT\" && mkdir -p .kollab && echo \"{\\\"hooks\\\":{\\\"UserPromptSubmit\\\":[{\\\"hooks\\\":[{\\\"type\\\":\\\"command\\\",\\\"command\\\":\\\"echo ok\\\"}]}]}}\" > .kollab/hooks.json && python \"$R/main.py\"'",
     "app_init_sleep": 5,
     "show_captures": false,
     "term_width": 120,
@@ -15,7 +15,16 @@
     { "action": "section", "title": "Test 1: App starts normally with hooks.json" },
     { "action": "assert_contains", "pattern": "Ready!|kollabor|>", "description": "App started with config hooks loaded" },
 
-    { "action": "section", "title": "Test 2: No crash or error visible" },
+    { "action": "section", "title": "Test 2: The hooks file in the project folder is the one loaded" },
+    {
+      "action": "shell",
+      "command": "grep -rh 'config hooks from hooks.json' \"$HOME\"/.kollab/projects/*/logs/kollab.log | head -1",
+      "description": "Log says the config hooks came from hooks.json",
+      "assert_contains": "Loaded 1 config hooks from hooks.json"
+    },
+
+    { "action": "section", "title": "Test 3: No crash or error visible" },
+    { "action": "capture" },
     { "action": "assert_not_contains", "pattern": "Traceback|Error.*config_hooks|ImportError", "description": "No config hook errors in output" }
   ]
 }
