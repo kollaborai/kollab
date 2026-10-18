@@ -1,0 +1,200 @@
+{
+  "name": "config-save-then-reopen",
+  "description": "After a /config save, reopening /config shows the saved values at once, in every namespace: a Hub plugin key (Roster), another plugin's key (Save Conversation Default Format) and a core key (Thinking Effect). Saved to Local, then the modal is closed and opened again. Plain kollab (--no-daemon) in a throwaway HOME, no keyring, no model call.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-reopen.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.5
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME: a profile that is never called",
+      "command": "P=\"${TMPDIR:-/tmp}/kollab-spec-config-reopen.path\"; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-config-reopen.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:9/v1\",\"api_key\":\"not-a-real-key\"}}}}}' > \"$H/.kollab/config.json\"; echo \"throwaway home ready\"",
+      "assert_contains": "throwaway home ready"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "first open: change three settings in three namespaces"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/roster"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: gems",
+      "timeout": 15
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: marketing-crew",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/default format"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Default Format: transcript",
+      "timeout": 15
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Default Format: markdown",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/thinking effect"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Thinking Effect: shimmer",
+      "timeout": 15
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Thinking Effect: pulse",
+      "timeout": 15
+    },
+    {
+      "action": "section",
+      "label": "a Local save lands in the folder's .kollab/config.json"
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Save to: \\(L\\)ocal",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "l"
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own config holds all three choices",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-reopen.path\"); sleep 1; tr -d ' \\n' < \"$H/ws/.kollab/config.json\"; echo",
+      "assert_contains": "\"roster\":\"marketing-crew\""
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own config also holds another plugin's key",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-reopen.path\"); sleep 1; tr -d ' \\n' < \"$H/ws/.kollab/config.json\"; echo",
+      "assert_contains": "\"default_format\":\"markdown\""
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own config also holds a core key",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-reopen.path\"); sleep 1; tr -d ' \\n' < \"$H/ws/.kollab/config.json\"; echo",
+      "assert_contains": "\"thinking_effect\":\"pulse\""
+    },
+    {
+      "action": "section",
+      "label": "reopened, the modal shows what was saved, not what it opened with"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "back at the prompt"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/roster"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: marketing-crew",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/default format"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Default Format: markdown",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/thinking effect"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Thinking Effect: pulse",
+      "timeout": 15
+    }
+  ]
+}

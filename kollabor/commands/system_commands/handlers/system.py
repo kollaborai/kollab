@@ -277,8 +277,10 @@ class SystemCommandHandler(BaseCommandHandler):
             elif self.config_manager:
                 altview.config_service = self.config_manager
 
-            # push() blocks until the user exits
-            await stack_mgr.push(altview, "config")
+            # push() blocks until the user exits. reuse=False: the widgets copy
+            # the config when the view opens, so a resumed view would show the
+            # values of the previous open and not what was saved since.
+            await stack_mgr.push(altview, "config", reuse=False)
 
             return CommandResult(
                 success=True,
