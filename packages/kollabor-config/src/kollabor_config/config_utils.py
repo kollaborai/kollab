@@ -252,6 +252,16 @@ def get_bundled_skills_dir() -> Path | None:
     return _get_bundled_dir("skills")
 
 
+def get_bundled_rosters_dir() -> Path | None:
+    """Get the bundled persona rosters (``bundles/rosters/*.json``), if present."""
+    return _get_bundled_dir("rosters")
+
+
+def get_bundled_teams_dir() -> Path | None:
+    """Get the bundled teams (``bundles/teams/*.json``), if present."""
+    return _get_bundled_dir("teams")
+
+
 def get_global_skills_dir() -> Path:
     """Get the global skills directory.
 

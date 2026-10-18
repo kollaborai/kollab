@@ -404,7 +404,8 @@ class DaemonPool:
         serialized, and delegate the actual pool ordering to the hub's
         ``IdentityAssigner``.
         """
-        requested = (preferred or "").strip()
+        # `roster/name` names a persona; the hub name is the part after the slash.
+        requested = (preferred or "").strip().rpartition("/")[2]
         # Every folder has its own hub, a koordinator and every gem each: only
         # an agent in this folder's hub holds a name here.
         here = os.path.realpath(folder or os.getcwd())
@@ -423,7 +424,7 @@ class DaemonPool:
         try:
             from plugins.hub.coordinator import IdentityAssigner
 
-            return IdentityAssigner().assign(sorted(taken), requested)
+            return IdentityAssigner(folder=folder).assign(sorted(taken), requested)
         except Exception as exc:
             logger.warning("hub pool identity assignment failed: %s", exc)
 
@@ -457,6 +458,7 @@ class DaemonPool:
         identity: Optional[str] = None,
         workspace: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        launch_brief: Optional[str] = None,
         user_token: Optional[str] = None,
         solo: bool = False,
         profile_env: Optional[Dict[str, str]] = None,
@@ -473,7 +475,9 @@ class DaemonPool:
                 return existing
 
             identity_name = self._assign_identity(identity, workspace)
-            argv = _kollab_command() + ["--detached", "--as", identity_name]
+            # Keep `roster/name` so the daemon picks that roster's persona.
+            as_arg = identity if identity and identity.endswith("/" + identity_name) else identity_name
+            argv = _kollab_command() + ["--detached", "--as", as_arg]
             if agent:
                 argv += ["--agent", agent]
             if profile:
@@ -482,6 +486,10 @@ class DaemonPool:
             env = dict(os.environ)
             if system_prompt:
                 env["KOLLAB_SYSTEM_PROMPT"] = system_prompt
+            # Never inherit another agent's brief from the engine's own env.
+            env.pop("KOLLAB_LAUNCH_BRIEF", None)
+            if launch_brief:
+                env["KOLLAB_LAUNCH_BRIEF"] = launch_brief
             # The daemon's MCP layer forwards these to MCP subprocesses (see
             # MCPIntegration's ambient-env fallback); the session id routes UI
             # effects back to this session. Never inherit another identity's

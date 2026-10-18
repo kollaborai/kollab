@@ -144,8 +144,10 @@ class EngineSession:
         identity: Optional[str] = None,
         solo: bool = False,
         stop_on_owner_exit: bool = False,
+        launch_brief: Optional[str] = None,
     ):
         self.session_id = session_id
+        self.launch_brief = launch_brief or ""
         self.solo = solo
         self.stop_on_owner_exit = stop_on_owner_exit
         self.user_token = user_token
@@ -245,6 +247,7 @@ class EngineSession:
             identity=self.requested_identity,
             workspace=self.workspace,
             system_prompt=self.system_prompt or None,
+            launch_brief=self.launch_brief or None,
             user_token=self.user_token,
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),

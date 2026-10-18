@@ -12,7 +12,7 @@ from kollabor_tui.design_system import (
     set_theme,
     solid_fg,
 )
-from plugins.hub.models import POOL_IDENTITIES
+from plugins.hub.rosters import roster_personas
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 FG_RE = re.compile(r"\033\[38;2;(\d+);(\d+);(\d+)m")
@@ -258,17 +258,17 @@ def test_pool_agent_colors_are_readable_on_black_terminal():
     set_theme("dark")
     set_color_mode(COLOR_TRUECOLOR)
     try:
-        for identity in POOL_IDENTITIES:
+        for identity in roster_personas():
             rendered = CleanRenderer().agent_message(
                 f"{identity.name} -> koordinator\nstanding by.",
-                agent_color=identity.color_rgb,
+                agent_color=identity.color,
                 width=100,
             )
 
             fg = foreground_for(rendered, f"{identity.name} -> koordinator")
 
-            if contrast_ratio(identity.color_rgb, (0, 0, 0)) < 4.5:
-                assert fg != identity.color_rgb
+            if contrast_ratio(identity.color, (0, 0, 0)) < 4.5:
+                assert fg != identity.color
             assert contrast_ratio(fg, (0, 0, 0)) >= 6.5
     finally:
         set_theme(original)

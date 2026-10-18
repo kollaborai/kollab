@@ -346,7 +346,7 @@ class HubConsoleAltView(AltView):
 
     def _render_agent_sidebar(self, content_height: int, theme: Any) -> None:
         assert self.renderer is not None
-        from plugins.hub.models import GEM_BY_NAME
+        from plugins.hub.rosters import find_persona
 
         visible_count = content_height
         if self.selected_idx < self.agent_scroll:
@@ -371,9 +371,9 @@ class HubConsoleAltView(AltView):
                 is_selected = idx == self.selected_idx
 
                 # Get gem color
-                gem = GEM_BY_NAME.get(ident)
+                gem = find_persona(ident)
                 if gem and is_selected:
-                    bg = gem.color_rgb
+                    bg = gem.color
                     fg = theme.text_on(bg) if hasattr(theme, "text_on") else theme.text
                 elif is_selected:
                     bg = theme.primary[0]

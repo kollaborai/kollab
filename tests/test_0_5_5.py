@@ -91,18 +91,18 @@ except Exception as e:
 print("\n=== Pool Identity Loading ===")
 
 try:
-    from plugins.hub.models import (
-        POOL_BY_NAME,
-        POOL_IDENTITIES,
-        PoolIdentity,
-    )
+    from plugins.hub.rosters import Persona, find_persona, roster_personas
+
+    POOL_IDENTITIES = roster_personas()
+    POOL_BY_NAME = {g.name: g for g in POOL_IDENTITIES}
+    PoolIdentity = Persona
 
     test("pool models import", True)
 
     test("24 gems loaded", len(POOL_IDENTITIES) == 24, f"got {len(POOL_IDENTITIES)}")
 
     # All gems have agent_type field
-    all_have_type = all(g.agent_type for g in POOL_IDENTITIES)
+    all_have_type = all(g.agent for g in POOL_IDENTITIES)
     test("all gems have agent_type set", all_have_type)
 
     # All gems have skills field (even if empty)
@@ -113,29 +113,29 @@ try:
     lapis = POOL_BY_NAME.get("lapis")
     test("lapis lookup works", lapis is not None)
     test("lapis is PoolIdentity", isinstance(lapis, PoolIdentity))
-    test("lapis has agent_type", bool(lapis.agent_type), f"got '{lapis.agent_type}'")
+    test("lapis has agent", bool(lapis.agent), f"got '{lapis.agent}'")
 
     # All coder gems
-    coders = [g.name for g in POOL_IDENTITIES if g.agent_type == "coder"]
+    coders = [g.name for g in POOL_IDENTITIES if g.agent == "coder"]
     test(
         "all 24 gems are coder type",
         len(coders) == 24,
         f"got {len(coders)}: {coders[:5]}...",
     )
 
-    # pool.json has all required fields
-    pool_file = ROOT / "plugins" / "hub" / "organizations" / "pool.json"
+    # gems.json has all required fields
+    pool_file = ROOT / "bundles" / "rosters" / "gems.json"
     if pool_file.exists():
         with open(pool_file) as f:
             pool_data = json.load(f)
-        gems = pool_data.get("gems", [])
-        test("pool.json has 24 entries", len(gems) == 24, f"got {len(gems)}")
+        gems = pool_data.get("personas", [])
+        test("gems.json has 24 entries", len(gems) == 24, f"got {len(gems)}")
 
-        required_fields = {"name", "color_rgb", "role_aliases", "personality", "caste", "agent_type", "skills"}
+        required_fields = {"name", "color", "role_aliases", "personality", "caste", "agent", "skills"}
         all_complete = all(required_fields.issubset(set(g.keys())) for g in gems)
-        test("all pool.json entries have all fields", all_complete)
+        test("all gems.json entries have all fields", all_complete)
     else:
-        test("pool.json exists", False, f"not found at {pool_file}")
+        test("gems.json exists", False, f"not found at {pool_file}")
 
 except Exception as e:
     test("pool loading", False, str(e))
@@ -147,14 +147,17 @@ except Exception as e:
 print("\n=== Spawn Identity Resolution ===")
 
 try:
-    from plugins.hub.models import POOL_BY_NAME, POOL_IDENTITIES
+    from plugins.hub.rosters import find_persona, roster_personas
+
+    POOL_IDENTITIES = roster_personas()
+    POOL_BY_NAME = {g.name: g for g in POOL_IDENTITIES}
 
     # MODE 1: name matches a pool identity
     name = "lapis"
     pool_match = POOL_BY_NAME.get(name)
     test("MODE 1: identity lookup", pool_match is not None)
     if pool_match:
-        effective_type = pool_match.agent_type or "coder"
+        effective_type = pool_match.agent or "coder"
         test("MODE 1: resolves agent_type from pool", effective_type == "coder")
 
     # MODE 2: name is an agent_type — find next available
@@ -162,7 +165,7 @@ try:
     pool_match = POOL_BY_NAME.get(name)
     test("MODE 2: 'coder' is not a pool identity name", pool_match is None)
 
-    coders = [g.name for g in POOL_IDENTITIES if g.agent_type == name]
+    coders = [g.name for g in POOL_IDENTITIES if g.agent == name]
     test("MODE 2: finds coder gems in pool", len(coders) > 0, f"got {len(coders)}")
 
     # Simulate picking next available (no online check in unit test)

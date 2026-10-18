@@ -464,10 +464,11 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="NAME",
         help=(
-            "Hub identity for this agent (e.g., --as lapis). "
-            "Pairs with --agent to run a bundle under a gem identity: "
-            "'kollab --agent coder --as lapis'. Without --as, the hub "
-            "picks an identity automatically."
+            "Hub identity for this agent (e.g., --as lapis), a persona from "
+            "any roster. Use roster/name (--as marketing-crew/maya) when two "
+            "rosters share a name. Pairs with --agent to run a bundle under "
+            "a persona: 'kollab --agent coder --as lapis'. Without --as, the "
+            "hub picks the next free name from the folder's roster."
         ),
     )
 
@@ -545,7 +546,7 @@ Telegram bridge setup (run inside interactive mode):
         type=str,
         default=None,
         metavar="ORG",
-        help="Launch an organization (e.g., --org engineering, --org startup)",
+        help="Launch a team (e.g., --org engineering, --org marketing)",
     )
 
     parser.add_argument(
@@ -1369,7 +1370,7 @@ def _print_hub_help() -> None:
     print("  user [name]                show or set the hub user display name")
     print("  on                         enable hub plugin (next session)")
     print("  off                        disable hub plugin (next session)")
-    print("  org <name> [mission]       launch an organization")
+    print("  org <name> [mission]       launch a team")
     print("  help                       show this help")
     print()
     print("examples:")
@@ -1400,7 +1401,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         broadcast <text>        send message to all agents
         user [name]             show or set hub user name
         on / off                enable or disable hub
-        org <name> [mission]    launch an organization
+        org <name> [mission]    launch a team
     """
     import json
     import os
@@ -1901,16 +1902,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
         from plugins.hub.org_launcher import OrgLauncher, load_organization
 
-        org_def = load_organization(org_name)
-        if not org_def:
-            print(f"organization '{org_name}' not found")
+        if not load_organization(org_name):
+            print(f"team '{org_name}' not found")
             sys.exit(1)
 
         launcher = OrgLauncher()
         count, identities = launcher.launch_org(org_name, mission=mission)
-        if count == 0:
-            print(f"no agents defined in org '{org_name}'")
-            sys.exit(1)
         print(f"launched {count} agent(s): {', '.join(identities)}")
 
     elif subcmd in ("help", "-h", "--help"):

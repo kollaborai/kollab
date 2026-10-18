@@ -2,18 +2,17 @@
 
 Covers ``desired_bundle_for_identity`` — the pure function the hub uses to
 decide which agent bundle a given mesh identity should run. The koordinator
-orchestrator bundle must belong ONLY to the elected coordinator; pool gems
-run their declared ``agent_type`` (``coder`` by default); unknown names fall
+orchestrator bundle must belong ONLY to the elected coordinator; personas
+run their declared ``agent`` (``coder`` for the gems); unknown names fall
 back to the default bundle.
 """
 
 import unittest
 
-from plugins.hub.models import (
-    COORDINATOR_IDENTITY,
-    POOL_BY_NAME,
-    desired_bundle_for_identity,
-)
+from plugins.hub.models import COORDINATOR_IDENTITY, desired_bundle_for_identity
+from plugins.hub.rosters import find_persona, roster_personas
+
+POOL_BY_NAME = {p.name: p for p in roster_personas()}
 
 
 class TestDesiredBundleForIdentity(unittest.TestCase):
@@ -23,11 +22,11 @@ class TestDesiredBundleForIdentity(unittest.TestCase):
         )
         self.assertEqual(desired_bundle_for_identity("koordinator"), "koordinator")
 
-    def test_gem_identity_gets_its_pool_agent_type(self):
-        # pool.json ships every gem with agent_type "coder".
+    def test_gem_identity_gets_its_roster_agent(self):
+        # The gems roster ships every gem with agent "coder".
         for gem_name in ("lapis", "sapphire", "ruby", "peridot"):
             self.assertIn(gem_name, POOL_BY_NAME)
-            expected = POOL_BY_NAME[gem_name].agent_type or "default"
+            expected = POOL_BY_NAME[gem_name].agent or "default"
             self.assertEqual(desired_bundle_for_identity(gem_name), expected)
 
     def test_a_numbered_gem_runs_its_gems_bundle(self):
@@ -60,19 +59,23 @@ class TestDesiredBundleForIdentity(unittest.TestCase):
             "coder",
         )
 
-    def test_gem_without_agent_type_uses_default(self):
-        # Defensive: a gem whose agent_type is empty should fall back rather
+    def test_persona_from_another_roster_runs_its_agent(self):
+        self.assertEqual(desired_bundle_for_identity("maya"), "research")
+        self.assertEqual(desired_bundle_for_identity("marketing-crew/theo"), "creative-writer")
+
+    def test_gem_without_agent_uses_default(self):
+        # Defensive: a persona whose agent is empty should fall back rather
         # than return an empty bundle name.
-        gem = next(iter(POOL_BY_NAME.values()))
-        original = gem.agent_type
+        gem = find_persona(next(iter(POOL_BY_NAME)))
+        original = gem.agent
         try:
-            gem.agent_type = ""
+            gem.agent = ""
             self.assertEqual(
                 desired_bundle_for_identity(gem.name, default_bundle="default"),
                 "default",
             )
         finally:
-            gem.agent_type = original
+            gem.agent = original
 
 
 if __name__ == "__main__":

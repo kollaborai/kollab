@@ -23,6 +23,7 @@ from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
+from .rosters import apply_persona
 from .workspaces import remember_workspace
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,10 @@ class CreateSessionRequest(BaseModel):
     agent: Optional[str] = None
     identity: Optional[str] = None
     system_prompt: Optional[str] = None
+    # Instructions for this agent from whoever launched it (a team seat: role,
+    # reporting chain). The daemon adds them to its hub context
+    # (KOLLAB_LAUNCH_BRIEF); a bundle's own prompt is untouched.
+    launch_brief: Optional[str] = None
     workspace: Optional[str] = None
     approval_mode: str = "trust_all"
     mcp_servers: List[str] = []
@@ -204,6 +209,9 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # Resolve user_token: body takes priority, header is fallback (proxy injects it)
     user_token = body.user_token or request.headers.get("x-mentiko-session-token")
 
+    # A persona names its own bundle and profile; what the caller set wins.
+    apply_persona(body)
+
     # Resolve agent definition if requested
     agent_data = None
     if body.agent:
@@ -284,6 +292,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 user_token=user_token,
                 agent=body.agent,
                 identity=body.identity,
+                launch_brief=body.launch_brief,
                 # Bundles with "hub": false (product assistants) get a solo
                 # daemon: attachable by this engine, invisible to the mesh.
                 solo=bool(agent_data) and agent_data.get("hub") is False,

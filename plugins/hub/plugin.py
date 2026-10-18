@@ -57,8 +57,6 @@ from .messenger import (
 )
 from .models import (
     COORDINATOR_IDENTITY,
-    POOL_BY_NAME,
-    POOL_IDENTITIES,
     AgentState,
     HubMessage,
     MessageScope,
@@ -67,6 +65,14 @@ from .models import (
 from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive
+from .rosters import (
+    find_persona,
+    persona_color,
+    persona_context,
+    roster_names,
+    roster_personas,
+    split_ref,
+)
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -527,6 +533,9 @@ class HubPlugin(BasePlugin):
     and naturally collaborate - asking for help, delegating work,
     sharing findings.
     """
+
+    # The `--as roster/name` the agent was launched with, if any.
+    _persona_ref = ""
 
     def __init__(
         self,
@@ -4838,7 +4847,9 @@ class HubPlugin(BasePlugin):
             )
             preferred = ""
             if explicit_as:
-                preferred = self._cli_args.as_identity  # type: ignore[union-attr]
+                # --as roster/name picks the persona; the hub name is `name`.
+                self._persona_ref = self._cli_args.as_identity  # type: ignore[union-attr]
+                preferred = split_ref(self._persona_ref)[1]
             elif is_coordinator and not explicit_agent:
                 # Flock winner claims the koordinator identity. The default
                 # bundle is no longer "koordinator" (demoted to a normal
@@ -4938,7 +4949,9 @@ class HubPlugin(BasePlugin):
             # TOCTOU window tight; re-publishes so presence shows the real
             # bundle name rather than the one loaded at startup.
             if not explicit_agent:
-                desired_bundle = desired_bundle_for_identity(self._identity.identity)
+                desired_bundle = desired_bundle_for_identity(
+                    self._persona_ref or self._identity.identity
+                )
                 current_bundle = (
                     getattr(active_agent, "name", "") if active_agent else ""
                 )
@@ -5155,9 +5168,7 @@ class HubPlugin(BasePlugin):
                     for cap_name in getattr(self._identity, "capabilities", []):
                         caps.append(CapabilityEntry(name=cap_name))
 
-                    pool_info = POOL_BY_NAME.get(
-                        self._identity.identity.split("-")[0], None
-                    )
+                    pool_info = find_persona(self._persona_ref or self._identity.identity)
                     caste = pool_info.caste if pool_info else ""
 
                     authority = "kollabor.ai"
@@ -8528,29 +8539,9 @@ class HubPlugin(BasePlugin):
             # No model to run: nothing will handle it, so the shell must not wait.
             self._open_network_turn(message, "observe")
 
-    # Fallback colors when identity isn't in the gem pool
-    _FALLBACK_COLORS = [
-        (120, 200, 255),
-        (255, 180, 100),
-        (150, 255, 150),
-        (255, 140, 180),
-        (200, 170, 255),
-        (100, 240, 220),
-    ]
-
     def _get_agent_color(self, identity: str) -> tuple:
-        """Get the gem color for an identity, or hash-based fallback."""
-        gem = POOL_BY_NAME.get(identity)
-        if gem:
-            return gem.color_rgb
-        # Numbered variants (peridot-2) -- strip the suffix
-        base = identity.rsplit("-", 1)[0] if "-" in identity else identity
-        gem = POOL_BY_NAME.get(base)
-        if gem:
-            return gem.color_rgb
-        # Fallback for non-gem identities
-        idx = hash(identity) % len(self._FALLBACK_COLORS)
-        return self._FALLBACK_COLORS[idx]
+        """Get the persona color for an identity, or a stable palette fallback."""
+        return persona_color(identity)
 
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
@@ -8699,6 +8690,12 @@ class HubPlugin(BasePlugin):
         lines = []
         lines.append("--- hub context ---")
         lines.append(f'you are "{self._identity.identity}" on the kollabor hub.')
+        persona = find_persona(self._persona_ref or self._identity.identity)
+        if persona:
+            lines.extend(persona_context(persona))
+        brief = os.environ.get("KOLLAB_LAUNCH_BRIEF", "").strip()
+        if brief:
+            lines.append(brief)
         if self._identity.is_coordinator:
             lines.append("you are the coordinator.")
 
@@ -9781,7 +9778,7 @@ class HubPlugin(BasePlugin):
             return False
         if self._identity and target == self._identity.identity:
             return False
-        return target == "koordinator" or target in POOL_BY_NAME
+        return target == "koordinator" or target in roster_names()
 
     # Control-plane actions that must bypass the WAITING cooldown gate.
     # These never trigger an LLM turn — they only update silent local state.
@@ -10262,7 +10259,7 @@ class HubPlugin(BasePlugin):
                 SubcommandInfo("vault", "[name]", "Show vault info for an agent"),
                 SubcommandInfo("vaults", "", "List all agent vaults"),
                 SubcommandInfo("org", "<name> [mission]", "Launch an organization"),
-                SubcommandInfo("orgs", "", "List available organizations"),
+                SubcommandInfo("orgs", "", "List available teams"),
                 SubcommandInfo("feed", "", "Live dashboard of agent activity"),
                 SubcommandInfo(
                     "console", "", "Agent management console (sidebar + feed)"
@@ -11680,10 +11677,10 @@ class HubPlugin(BasePlugin):
 
         Three spawn modes:
           1. By identity: name matches a pool gem (e.g. "lapis")
-             → uses that gem's agent_type from pool.json
+             → uses that persona's agent bundle from its roster
              → fails if that identity is already online
           2. By agent_type: name is an agent type (e.g. "coder")
-             → picks next available gem from pool with matching agent_type
+             → picks next available persona of the folder's roster running that bundle
              → fails if no gems available with that type
           3. Explicit identity + type: name is identity, type attr overrides
              → e.g. name="lapis" type="research"
@@ -11743,7 +11740,9 @@ class HubPlugin(BasePlugin):
 
         # --- Resolve what was requested ---
         # Is agent_name a pool identity? (e.g. "lapis")
-        pool_match = POOL_BY_NAME.get(agent_name)
+        pool_match = find_persona(agent_name)
+        if pool_match and pool_match.name != split_ref(agent_name)[1]:
+            pool_match = None  # lapis-2 is not a persona to spawn
 
         if harness:
             resolved_identity = requested_identity or agent_name
@@ -11751,10 +11750,10 @@ class HubPlugin(BasePlugin):
             effective_skills = []
         elif pool_match:
             # MODE 1 or 3: spawning by identity
-            resolved_identity = agent_name
-            # Type override wins, then pool's agent_type, then fallback to "coder"
+            resolved_identity = pool_match.name
+            # Type override wins, then the persona's agent, then fallback to "coder"
             effective_agent_type = (
-                agent_type_override or pool_match.agent_type or "coder"
+                agent_type_override or pool_match.agent or "coder"
             )
             effective_skills = list(pool_match.skills or [])
         else:
@@ -11765,12 +11764,14 @@ class HubPlugin(BasePlugin):
             effective_skills = []
 
             if requested_identity:
-                requested_pool = POOL_BY_NAME.get(requested_identity)
+                requested_pool = find_persona(requested_identity)
+                if requested_pool and requested_pool.name != split_ref(requested_identity)[1]:
+                    requested_pool = None
                 resolved_identity = requested_identity
                 if requested_pool:
                     effective_agent_type = (
                         agent_type_override
-                        or requested_pool.agent_type
+                        or requested_pool.agent
                         or effective_agent_type
                     )
                     effective_skills = list(requested_pool.skills or [])
@@ -11783,9 +11784,9 @@ class HubPlugin(BasePlugin):
 
             # Find first pool gem with matching agent_type that isn't online
             if not resolved_identity:
-                for gem in POOL_IDENTITIES:
+                for gem in roster_personas():
                     if (
-                        gem.agent_type == agent_name
+                        gem.agent == agent_name
                         and gem.name not in online_identities
                     ):
                         resolved_identity = gem.name
@@ -11802,7 +11803,7 @@ class HubPlugin(BasePlugin):
                 except Exception:
                     agent_def = None
                 if agent_def is not None:
-                    for gem in POOL_IDENTITIES:
+                    for gem in roster_personas():
                         if gem.name not in online_identities:
                             resolved_identity = gem.name
                             effective_skills = list(gem.skills or [])
@@ -11816,8 +11817,8 @@ class HubPlugin(BasePlugin):
             if not resolved_identity:
                 online_with_type = [
                     g.name
-                    for g in POOL_IDENTITIES
-                    if g.agent_type == agent_name and g.name in online_identities
+                    for g in roster_personas()
+                    if g.agent == agent_name and g.name in online_identities
                 ]
                 if online_with_type:
                     return (
@@ -11826,8 +11827,8 @@ class HubPlugin(BasePlugin):
                         f"use hub_msg to assign work to an existing one."
                     )
                 return (
-                    f"no pool gem found with agent_type '{agent_name}'. "
-                    f"check pool.json configuration."
+                    f"no persona found with agent_type '{agent_name}'. "
+                    f"check the roster configuration (plugins.hub.roster)."
                 )
 
         # --- Check if already online ---
@@ -13333,7 +13334,7 @@ class HubPlugin(BasePlugin):
 
         # Static pool identities are the runnable offline targets. Live
         # presence overlays their current state and task.
-        for pool in POOL_IDENTITIES:
+        for pool in roster_personas():
             if pool.name == my_identity:
                 continue
             runtime = live_by_identity.get(pool.name)
@@ -13348,7 +13349,7 @@ class HubPlugin(BasePlugin):
                         if runtime and runtime.description
                         else pool.personality
                     ),
-                    "agent_type": pool.agent_type,
+                    "agent_type": pool.agent,
                     "can_run": runtime is None,
                     "is_coordinator": bool(runtime and runtime.is_coordinator),
                 }
@@ -13475,8 +13476,8 @@ class HubPlugin(BasePlugin):
                 return f"rejected: {details}"
             return f"sent to {target} as {user_name} from {source_agent}"
 
-        if target in POOL_BY_NAME:
-            # An offline pool identity is started with the operator's message
+        if target in roster_names():
+            # An offline roster identity is started with the operator's message
             # as its first task; preserve provenance in the task text because
             # there is no pre-existing socket message to carry the metadata.
             task = f"[message from {user_name} via {source_agent}] {content}"
@@ -13858,37 +13859,30 @@ class HubPlugin(BasePlugin):
         return "\n".join(lines)
 
     async def _handle_org_command(self, args: str) -> str:
-        """Launch an organization."""
-        from .org_launcher import OrgLauncher, get_org_agents, load_organization
+        """Launch a team."""
+        from .org_launcher import OrgLauncher, load_organization
+        from .rosters import team_launch_order
 
         parts = args.strip().split(maxsplit=1)
         if not parts:
-            return "usage: /hub org <name> [mission]"
+            return "usage: /hub org <team> [mission]"
 
         org_name = parts[0]
         mission = parts[1] if len(parts) > 1 else ""
+        project = self._identity.project if self._identity else ""
 
-        org = load_organization(org_name)
-        if not org:
-            return f"organization '{org_name}' not found. try /hub orgs"
+        team = load_organization(org_name, project)
+        if not team:
+            return f"team '{org_name}' not found. try /hub orgs"
 
-        agents = get_org_agents(org)
+        count, _ = OrgLauncher(project).launch_org(org_name, mission)
 
-        launcher = OrgLauncher(self._identity.project if self._identity else "")
-        count, launched = launcher.launch_org(org_name, mission)
-
-        lines = [f"launched org '{org_name}': {count} agents"]
-        for a in agents:
-            level = a.get("level", "member")
-            role = a.get("role", "")
-            team = a.get("team", "")
-            indent = (
-                "  "
-                if level == "director"
-                else "    " if level == "manager" else "      "
-            )
-            team_str = f" [{team}]" if team else ""
-            lines.append(f"{indent}{a['identity']}: {role}{team_str}")
+        lines = [f"launched team '{org_name}': {count} agents"]
+        depth: Dict[str, int] = {}
+        for member in team_launch_order(team):
+            name = member.persona.name
+            depth[name] = depth.get(member.reports_to or "", -1) + 1
+            lines.append(f"{'  ' * depth[name]}{name}: {member.role}")
 
         if mission:
             lines.append(f"\nmission: {mission}")
@@ -13896,19 +13890,19 @@ class HubPlugin(BasePlugin):
         return "\n".join(lines)
 
     def _format_orgs(self) -> str:
-        """List available organizations."""
+        """List available teams."""
         from .org_launcher import list_organizations
 
-        orgs = list_organizations()
-        if not orgs:
-            return "no organizations found"
+        teams = list_organizations(self._identity.project if self._identity else None)
+        if not teams:
+            return "no teams found"
 
-        lines = [f"organizations: {len(orgs)} available"]
-        for org in orgs:
-            source = f" ({org['source']})" if org.get("source") == "user" else ""
-            lines.append(f"  {org['name']}{source}: {org['description']}")
-        lines.append("\nusage: /hub org <name> [mission]")
-        lines.append("custom: create JSON in the user hub organizations directory")
+        lines = [f"teams: {len(teams)} available"]
+        for team in teams:
+            source = f" ({team.source})" if team.source != "bundled" else ""
+            lines.append(f"  {team.name}{source}: {team.description}")
+        lines.append("\nusage: /hub org <team> [mission]")
+        lines.append("custom: add a JSON file to ~/.kollab/teams/ or .kollab/teams/")
         return "\n".join(lines)
 
     async def _handle_feed_command(self) -> str:

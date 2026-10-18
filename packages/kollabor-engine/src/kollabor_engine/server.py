@@ -204,10 +204,14 @@ def create_app() -> FastAPI:
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
     from .routes.prompts import router as prompts_router
+    from .routes.rosters import router as rosters_router
+    from .routes.teams import router as teams_router
 
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(prompts_router)
+    app.include_router(rosters_router)
+    app.include_router(teams_router)
 
     from .routes.workspaces import router as workspaces_router
 
