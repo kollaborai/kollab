@@ -205,7 +205,8 @@ Peer-to-peer agent mesh with persistent identity.
 
 **Core files:**
 - `plugin.py` - Lifecycle, social layer, /hub commands, message display, 33 pipeline tags
-- `models.py` - GemDesignation, HubMessage, WorkSlot, designation pool
+- `models.py` - HubMessage, WorkSlot, AgentState, `desired_bundle_for_identity`
+- `rosters.py` - Persona rosters and teams from JSON (`bundles/rosters`, `bundles/teams` -> `~/.kollab/{rosters,teams}` -> `.kollab/{rosters,teams}`): loader, validation, `find_persona`, `roster_personas`, `team_launch_order`; spec `docs/specs/rosters-and-teams.md`
 - `presence.py` - Heartbeat files, agent discovery, socket liveness checks
 - `coordinator.py` - flock election, work queue, designation assignment
 - `xml_tags.py` - Hub XML tag matching: attributes in any order, either quote style (`tag_pattern`, `tag_attrs`)
@@ -219,12 +220,12 @@ Peer-to-peer agent mesh with persistent identity.
 - `scratchpad.py` - Ephemeral agent notes (survives compaction)
 - `nudge_engine.py` - Behavioral nudges (scratchpad reminders, task checkpoints)
 - `feed.py` - Dashboard content generator
-- `org_launcher.py` - Launch teams from JSON org charts
+- `org_launcher.py` - Launch a team (`/hub org`, `--hub org`, `--org`) as detached processes; each gets its seat's instructions in `KOLLAB_LAUNCH_BRIEF`
 
 **Key concepts:**
 - Agents auto-discover via presence files in `~/.kollab/hub/presence/`
 - First agent becomes coordinator via `flock()` on `hub.lock`
-- Designations are gem-inspired names (lapis, peridot, ruby) with color castes
+- Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.

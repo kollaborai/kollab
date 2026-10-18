@@ -1,0 +1,192 @@
+# Rosters and Teams
+
+Status: implemented (backend and contract). The web UI for picking and launching
+personas and teams is the next piece (see "Not built yet").
+
+An agent's name is not tied to gems. A **persona** is one launchable identity; a
+**roster** is a themed set of personas (the 24 gems, a marketing crew, your own
+cast); a **team** wires personas into a reporting chain. All three are plain JSON.
+
+Code: `plugins/hub/rosters.py` (loader and lookup), `plugins/hub/org_launcher.py`
+(CLI/TUI team launch), `packages/kollabor-engine/src/kollabor_engine/routes/rosters.py`
+and `routes/teams.py` (API). Bundled data: `bundles/rosters/`, `bundles/teams/`.
+
+## Persona
+
+| field | type | meaning |
+|---|---|---|
+| `name` | slug `[a-z][a-z0-9-]*` | required. The hub designation: what `--as <name>` and `hub_msg to=` use |
+| `display_name` | string | what a UI shows; default: `name` in Title Case |
+| `avatar` | object | see Avatars; default: the roster's, else `{"kind": "initials"}` |
+| `color` | `[r, g, b]` 0-255 | message tag and avatar tint; default: a palette color picked by the name (stable) |
+| `agent` | string | agent bundle it runs (`coder`, `research`, ...); empty = the default bundle |
+| `role` | string | job title; shown, and told to the agent |
+| `personality` | string | one-line description (shown in lists; not added to the prompt) |
+| `prompt` | string | added to the agent's hub context when it runs under this name |
+| `skills` | list of strings | skills attached on top of the bundle (applied by `hub_spawn`) |
+| `profile` | string | LLM profile it prefers; used when the launch request names none |
+| `caste`, `role_aliases` | string, list | optional; the gems use them |
+
+An unknown field is ignored. A persona with an invalid field is skipped and
+reported in `problems`; the rest of its roster loads.
+
+## Roster file
+
+```json
+{
+  "name": "marketing-crew",
+  "display_name": "Marketing Crew",
+  "description": "A small marketing team",
+  "avatar": {"kind": "initials"},
+  "personas": [
+    {"name": "maya", "display_name": "Maya Lindqvist", "avatar": {"kind": "emoji", "value": "..."},
+     "color": [92, 138, 214], "agent": "research", "role": "Brand Strategist", "prompt": "..."}
+  ]
+}
+```
+
+`name` defaults to the file name. `avatar` is the default for personas that set none.
+A roster with no valid persona is dropped (reported). Bundled: `gems` (avatar kind
+`gem`, all `agent: coder`) and `marketing-crew` (an example with initials and emoji).
+
+## Team file
+
+```json
+{
+  "name": "marketing",
+  "description": "...",
+  "roster": "marketing-crew",
+  "lead": "omar",
+  "members": [
+    {"persona": "omar", "reports_to": null},
+    {"persona": "maya", "reports_to": "omar"},
+    {"persona": "jonas", "reports_to": "theo", "prompt": "Review Theo's drafts first."},
+    {"persona": {"name": "bot-1", "display_name": "Bot One"}, "role": "Helper", "agent": "coder", "reports_to": "omar"}
+  ]
+}
+```
+
+- `roster`: where bare `persona` names are looked up first (then every roster).
+  A member may also write `"roster/name"`.
+- `persona` is a name, or an **inline persona** (an object with at least `name`) for a
+  seat that is in no roster. Inline personas are found by name afterwards too.
+- `role`, `agent`, `profile` default to the persona's; `prompt` is the team's
+  instructions for that seat.
+- `lead` must be a member. `reports_to` names another member (or null). A member twice,
+  a missing reference or a reporting loop drops the whole team (reported).
+- Launch order: the lead, then each member after the one they report to; listing
+  order within a level.
+
+`engineering` and `startup` (the former org charts) and `marketing` ship bundled.
+
+## Locations and resolution
+
+Like agents and skills; a later file replaces an earlier one **of the same `name`**
+(a whole roster or team, no merging):
+
+1. bundled `bundles/rosters/*.json`, `bundles/teams/*.json`
+2. user `~/.kollab/rosters/`, `~/.kollab/teams/`
+3. project `.kollab/rosters/`, `.kollab/teams/` (of the folder the agent runs in)
+
+Files are re-read when they change; a running agent needs no restart. The old
+`~/.kollab/hub/pool.json` and `~/.kollab/hub/organizations/` lookups are gone (none
+existed on the maintainer's machines).
+
+## A folder's roster and names
+
+`plugins.hub.roster` (config, project `.kollab/config.json` over global; default
+`gems`) names the roster a folder draws from. The hub hands out the next free name
+from it in file order; once all are live it numbers them (`omar-2`).
+
+`kollab --as <name>` takes a persona from **any** roster. A bare name prefers the
+folder's roster, then the others in load order; `--as roster/name` picks one. The
+hub designation is the part after the slash. A numbered name (`lapis-2`) wears its
+base persona. Every folder has its own hub, so a name only has to be free in its folder.
+
+## What a persona does when it runs
+
+- `agent` is the bundle (`desired_bundle_for_identity`): a plain `kollab --as maya`
+  becomes `research`; an explicit `--agent` wins. The web `POST /sessions {"identity"}`
+  fills `agent` and `profile` from the persona when the request leaves them out.
+- `role`, `display_name` and `prompt` are added to the hub context (the first system
+  message), next to "you are <name> on the kollabor hub". A persona with neither role
+  nor prompt (the gems) adds nothing.
+- `skills` attach on `hub_spawn` (existing behavior), not on `--as` or a web launch.
+
+**Launch brief.** A launcher can give an agent extra instructions in the
+`KOLLAB_LAUNCH_BRIEF` environment variable (a team seat's instructions and its
+reporting chain); the hub adds the text to the same context. `POST /sessions`
+takes it as `launch_brief`. (`--system-prompt` cannot carry this: an active agent
+bundle's own prompt always wins over it.)
+
+## Avatars
+
+`{"kind": "gem"}` (the 3D gem), `{"kind": "initials"}`, `{"kind": "emoji", "value": "..."}`,
+`{"kind": "image", "src": "<path inside the roster file's folder, or https URL>"}`.
+A path may not be absolute or contain `..` (the file is rejected at load).
+
+## Engine API
+
+All take an optional `?workspace=<abs folder>` (project rosters/teams and the folder's
+roster setting apply; default: the engine's folder; 400 if it is not a folder).
+
+`GET /rosters`
+
+```json
+{
+  "workspace": "/home/user/work", "default": "gems",
+  "rosters": [{
+    "name": "marketing-crew", "display_name": "Marketing Crew", "description": "...",
+    "avatar": {"kind": "initials"}, "source": "bundled", "path": "/.../marketing-crew.json",
+    "personas": [{
+      "name": "maya", "roster": "marketing-crew", "display_name": "Maya Lindqvist",
+      "avatar": {"kind": "emoji", "value": "..."}, "color": [92, 138, 214],
+      "agent": "research", "role": "Brand Strategist", "personality": "...",
+      "skills": [], "profile": "", "prompt": "...", "caste": "", "role_aliases": []
+    }]
+  }],
+  "problems": [{"file": "/.../broken.json", "message": "..."}]
+}
+```
+
+An image avatar is described as `{"kind": "image", "url": "/rosters/<roster>/avatars/<src>"}`
+(or the https URL). `GET /rosters/{name}/avatars/{file}` serves it from the roster
+file's folder: only png, jpg, gif, webp and svg; anything outside that folder or of
+another type is a 404; the response carries a sandboxing Content-Security-Policy.
+Browsers cannot attach the bearer token to an `<img>`, so a client fetches it with the
+token and uses a blob URL.
+
+`GET /teams`: `{"teams": [{"name", "description", "roster", "lead", "source", "path",
+"members": [{"persona": {...as above...}, "role", "agent", "profile", "prompt",
+"reports_to"}]}], "problems": [...]}`.
+
+`POST /teams/{name}/launch` with `{"workspace": "/abs/folder", "profile": "optional"}`
+starts each member that is not already live **in that folder**, lead first, each through
+`POST /sessions` (same code and registry, so they appear in the sidebar). The agent is
+the member's, the profile is the request's, else the member's, else `default`.
+
+```json
+{"team": "marketing", "workspace": "/abs/folder",
+ "started": ["omar", "maya"], "skipped": [{"persona": "theo", "reason": "live"}],
+ "failed": [{"persona": "priya", "error": "Profile 'x' not found"}],
+ "sessions": [{"session_id": "...", "identity": "marketing-crew/omar", "...": "..."}]}
+```
+
+A second call starts nothing new. A failing member is reported and the others still
+start. 404 for an unknown team.
+
+`GET /agents` rows (the launch list) gain `roster`, `display_name`, `avatar` and `agent`
+(`agent_type` stays); with `?workspace=` the list is that folder's roster.
+
+## CLI and TUI
+
+`kollab --as roster/name`; `/hub orgs` lists teams; `/hub org <team> [mission]` and
+`kollab --hub org <team>` / `--org <team>` launch one (detached processes, each with
+its brief). Help text says "team".
+
+## Not built yet
+
+- The web UI: persona picker with avatars, a Library view of rosters and teams,
+  Launch Team into a folder (plan: `HANDOFF.md` of the roster lane).
+- `skills` on `--as` and web launches; a `GET /rosters` entry for personas that
+  exist only inside a team.

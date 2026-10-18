@@ -206,23 +206,24 @@ Define a team in a JSON org chart and launch them all at once:
 /hub org my-team "build the authentication system"
 ```
 
-Bundled org files live in `plugins/hub/organizations/`; user overrides live in
-`~/.kollab/hub/organizations/`. Each role has an `identity` (the hub name), an
-`agent_bundle` (the behavior package), and an optional role prompt.
+Bundled teams live in `bundles/teams/`; add your own to `~/.kollab/teams/` or a
+project's `.kollab/teams/`. Each member is a persona (the hub name comes from the
+persona) with an optional `agent` (the behavior package), `role` and `prompt`.
+See [rosters and teams](../features/rosters-and-teams.md).
 
 ```json
 {
-  "identity": "qa-eng",
+  "persona": {"name": "qa-eng", "display_name": "QA Engineer"},
   "role": "QA Engineer",
-  "agent_bundle": "research",
+  "agent": "research",
   "prompt": "Test the change and report reproducible failures.",
   "reports_to": "apps-lead"
 }
 ```
 
-The launcher turns that role into `kollab --agent research --as qa-eng` and
-adds the role prompt. Copy a bundled chart to the user override directory when
-you want to customize it without editing the installation.
+The launcher turns that member into `kollab --agent research --as qa-eng` and
+gives it the role prompt and its reporting chain. Copy a bundled team to the user
+directory when you want to customize it without editing the installation.
 
 ```
 /hub orgs
