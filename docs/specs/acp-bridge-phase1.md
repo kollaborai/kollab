@@ -599,6 +599,60 @@ requires explicit scoped authorization. No push, release, installation
 of a Kollab release binary or production deployment occurred. The current
 qualification goal is not complete.
 
+### Claude vendor-session continuity after restore (2026-10-18)
+
+Issue kollaborai/kollab #187. Source @ `5d86ebad` (main, clean tree except this
+file), kollab 0.16.7, pinned managed `@agentclientprotocol/claude-agent-acp`
+0.89.0 with claude CLI 2.1.302, macOS arm64. Isolated scratch workspace
+`/tmp/kacp-issue187-44820/workspace`; `ACPRunner` driven directly, so no kollab
+binding store or client-session store entry was written.
+
+- Conn 1 (fresh): `session/new` returned vendor sessionId
+  `bb2e8a81-2656-40de-8553-271651bf1d99`; one real Claude turn recorded the
+  marker `KOLLAB-ACADEMY-BLUE-47` plus a secret word and answered
+  `MARKER RECORDED` (`end_turn`). Normal `close()` terminated exactly the
+  owned adapter PID 44899 and its SDK helper PID 44916; unrelated Claude.app
+  desktop processes were untouched (matched-process snapshot 25 rows before,
+  23 after, both closes).
+- Conn 2 (restart): a new runner started from conn 1's binding. The wire
+  method was `session/resume` (capabilities `loadSession=true`,
+  `sessionCapabilities.resume` present). The resume response carries no
+  `sessionId` field (`{_meta, configOptions, modes}`); the bridge retains the
+  binding's session id, and that retained id is the continuity mechanism.
+  Adapter logs show `phase=read-transcript-tail`, `phase=resume-transcript`
+  and `session/query ... resume=bb2e8a81-...`. `resume_mode=resumed`; the
+  silent fresh fallback did not fire.
+- Vendor store cross-check: `~/.claude/projects/-private-tmp-kacp-issue187-44820-workspace/`
+  contains exactly one transcript, `bb2e8a81-...jsonl`, with one distinct
+  sessionId and both prompts (22:38:09.999Z marker turn, 22:38:19.815Z recall
+  turn). No replacement session file was created: the vendor session itself
+  resumed.
+- History proof: a blind recall question on conn 2 answered
+  `MARKER=KOLLAB-ACADEMY-BLUE-47 WORD=cactus` exactly (`end_turn`). Conn 2's
+  update stream contained no transcript replay (turn_start 1,
+  available_commands_update 5, usage_update 4, text 5, turn_finished 1; text
+  arrived as five fresh streamed fragments of that answer). Recall came from
+  vendor context, not replayed local transcript text.
+- Verdict: the pinned Claude adapter resumes the original vendor session
+  across a normal stop/restart/resume with a valid binding; no vendor id
+  rotation or replacement session occurs. The 2026-10-14 "Claude vendor IDs
+  rotated" observation corresponds to the silent fallback in `ACPRunner.start`
+  (resume/load failure -> `new_session`, `resume_mode=fresh`); it did not fire
+  here and remains the only known rotation path. Same-host, single-adapter
+  run; cross-device vendor continuity (canonical section 9's "Across machines"
+  row) is not claimed.
+- Cleanup proof: after both closes `pgrep -fl claude-agent-acp` and the SDK
+  helper return nothing (exit 1); the repo tree stayed clean through the run.
+  Evidence retained until qualification review: `/tmp/kacp-issue187-44820/`
+  (`run_issue187.py` driver, `run-log.txt`, `issue187-report.json`,
+  `acp-protocol.jsonl`, `conn1-updates.jsonl`, `conn2-updates.jsonl`) and the
+  vendor transcript above.
+- Numbering note: issue #187 says "record in section 9". In this file "9" is
+  repair item R9 (owned process cleanup); "section 9" properly refers to
+  "Build order and proof" in the canonical spec `docs/specs/acp-bridge.md`.
+  This dated subsection is filed in the qualification-pass section here.
+
+
 ## Audited repair goal after 9a123150
 
 The source audit is complete for this repair scope. It compared the canonical
