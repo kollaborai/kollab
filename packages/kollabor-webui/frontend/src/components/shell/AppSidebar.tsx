@@ -5,7 +5,7 @@ import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
 import type { Activity } from "@/components/gems/gem-face";
-import { bundleName, titleCase } from "@/components/panels/panel-model";
+import { agentStatus, bundleName, titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
 import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -677,9 +677,7 @@ export function AppSidebar({
                                       ? ["Offline", seen].filter(Boolean).join(" · ")
                                       : net.live === false || network.live === false
                                         ? seen || "Not Connected"
-                                        : agent.state
-                                          ? titleCase(agent.state)
-                                          : "Online"}
+                                        : agentStatus(agent.state)}
                                 </span>
                                 {note?.error ? <OpenError text={note.error} /> : null}
                                 <CliBadge harness={cliHarness({ harness: agent.harness })} className="text-muted-foreground text-[0.6875rem]" />

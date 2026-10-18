@@ -108,6 +108,11 @@ export function bundleName(bundle?: string | null): string {
   return titleCase(bundle || "default");
 }
 
+/** An online agent's state for people ("idle" reads "Idle"); one that reports none is Online. Every list of agents reads its status here. */
+export function agentStatus(state?: string | null): string {
+  return state ? titleCase(state) : "Online";
+}
+
 /** What a dropdown option reads as: the label the daemon gave it, else the option itself. */
 export function optionLabel(
   field: { option_labels?: Record<string, string> | null },
