@@ -230,10 +230,11 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   Workspace is disabled in every group, one running only in another folder is free.
   Picking a persona preselects its *Type* (the agent bundle; `agent` in the request,
   which the user can override). With no answer from the folder nobody is offered.
-- **Agents view.** Rosters tab (personas with Name, Type, Model Profile, Skills,
-  Personality, Prompt), Teams tab (outline by `reports_to`, lead marked, Launch Team
-  into the chosen folder: Started, Already Running, Failed), and the `problems` grouped
-  by file. The folder picker applies project rosters and teams.
+- **Agents view.** Rosters tab (personas with Handle, the `@name` people type to
+  message it, Type, Model Profile, Skills, Personality, Prompt), Teams tab (outline
+  by `reports_to`, lead marked, Launch Team into the chosen folder: Started, Already
+  Running, Failed), and the `problems` grouped by file. The folder picker applies
+  project rosters and teams.
 
 ## Not built yet
 
