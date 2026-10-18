@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ChangeEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
-import type { AgentPoolEntry, GemAppearance, GemLook, Session } from "@/api";
+import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, Session } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { isGemAvatar } from "@/components/agents/avatar-model";
 import { titleCase } from "@/components/panels/panel-model";
@@ -30,7 +30,7 @@ import {
 } from "./gem-appearance";
 import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
 import { resolveGemLook, withLook } from "./gem-look";
-import { isPoolGem } from "./gem-specs";
+import { GEM_CUTS, gemSpec, isPoolGem, type GemCut } from "./gem-specs";
 
 type Rgb = [number, number, number];
 
@@ -64,11 +64,11 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 }
 
 /**
- * A session's Properties: the studio on that session's gem alone, plus a Chat
- * tab for the session itself. `hub` is whether its agent is on the hub mesh,
- * null when no agent runs it (nothing to switch). A persona with no gem look
- * (a picture, an emoji or initials) has nothing to dress: its Properties are
- * the Chat alone, under its picture and name.
+ * A session's Properties: the studio on that session's agent alone, plus a
+ * Chat tab for the session itself. `hub` is whether its agent is on the hub
+ * mesh, null when no agent runs it (nothing to switch). Its Avatar tab swaps
+ * the roster's picture for a gem, initials, an emoji or a picture of the
+ * user's; eyes and hat are there only while it is a gem.
  */
 export type StudioFocus = {
   gem: string;
@@ -106,10 +106,10 @@ export function GemStudio({
         )}
       >
         {/* Mounted per open, so each visit starts from what is saved. */}
-        {/* The studio dresses gems. A chat's Properties on a persona with no gem look is its Chat alone. */}
+        {/* The list dresses gems; a chat's Properties dress its agent, whatever its roster drew it as. */}
         <StudioBody
           agents={agents.filter((agent) => isGemAvatar(agent.avatar))}
-          persona={focused && !isGemAvatar(focused.avatar) ? focused : null}
+          pinned={focused ?? null}
           focus={focus}
           onDone={() => onOpenChange(false)}
         />
@@ -120,19 +120,19 @@ export function GemStudio({
 
 function StudioBody({
   agents,
-  persona: pooled,
+  pinned: pooled,
   focus,
   onDone,
 }: {
   agents: readonly AgentPoolEntry[];
-  /** The focused persona when it has no gem look: nothing to dress, only its chat. */
-  persona: AgentPoolEntry | null;
+  /** The focused agent, as the pool has it when the dialog opens. */
+  pinned: AgentPoolEntry | null;
   focus: StudioFocus | null;
   onDone: () => void;
 }) {
   const studio = useGemAppearance();
-  // It opens as what the agent is then: one that exits while it is open leaves the pool, and the dialog must not turn into a gem's.
-  const [persona] = useState(pooled);
+  // It opens as what the agent is then: one that exits while it is open leaves the pool.
+  const [pinned] = useState(pooled);
   const [draft, setDraft] = useState<GemAppearance>(() => studio?.appearance ?? {});
   const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
@@ -142,12 +142,15 @@ function StudioBody({
   const [hub, setHub] = useState(chat?.hub ?? true);
 
   const current: AgentPoolEntry | undefined =
-    persona ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
+    pinned ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
   const name = current ? agentName(current.name, current.display_name) : "No Gems";
   // A chat's Properties dress that agent; the list dresses the gems of the engine's own folder.
   const where = focus?.where;
   const key = useLookKey(current?.name, where);
   const target: GemLook = (key && draft.gems?.[key]) || {};
+  // What it shows now: the user's pick over the roster's. Eyes and hat dress a gem only.
+  const rosterAvatar = pinned?.avatar;
+  const dressGem = isGemAvatar(target.avatar ?? rosterAvatar);
   const born = resolveGemLook({ born: draft.born }, key, GEM_LOOK_VOCABULARY);
   const bornHat = HAT_STYLES.find((hat) => hat.id === born.bornHat)?.label;
   const baseColor = current?.color ?? (isPoolGem(current?.name) ? undefined : born.bornColor);
@@ -163,7 +166,7 @@ function StudioBody({
     setSaving(true);
     setError("");
     try {
-      if (!persona) await studio.save(draft);
+      await studio.save(draft);
       if (chat && chat.hub !== null && hub !== chat.hub) await chat.setHub(hub);
       onDone();
     } catch (err) {
@@ -179,11 +182,9 @@ function StudioBody({
         <DialogTitle>{focus ? name : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
-            ? persona
-              ? "Change how this chat's agent takes part in the hub."
-              : chat
-                ? "Dress this chat's gem, or change how its agent takes part in the hub."
-                : "Dress this chat's gem over the look it was born with; every browser shows the same gem."
+            ? chat
+              ? "Pick this agent's avatar and dress it, or change how it takes part in the hub."
+              : "Pick this agent's avatar and dress it; every browser shows the same look."
             : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems. An agent in another folder or on another computer has its own look: dress it from its chat's Properties."}
         </DialogDescription>
       </DialogHeader>
@@ -228,8 +229,8 @@ function StudioBody({
               <Avatar
                 key={key}
                 gem={current.name}
-                avatar={persona?.avatar}
-                displayName={persona?.display_name}
+                avatar={rosterAvatar}
+                displayName={current.display_name}
                 folder={chat?.session.device ? undefined : chat?.session.workspace}
                 where={where}
                 caste={current.caste}
@@ -247,7 +248,7 @@ function StudioBody({
               <p className="text-lg font-semibold">{name}</p>
               <p className="text-muted-foreground text-xs">{titleCase(current?.caste || "")}</p>
             </div>
-            {persona ? null : (
+            {!dressGem ? null : (
               <>
                 <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
                   {STAGE_ACTIVITIES.map((option) => (
@@ -271,26 +272,69 @@ function StudioBody({
           </section>
 
           <aside className="bg-muted/20 flex shrink-0 flex-col lg:min-h-0">
-            {persona ? (
-              chat ? (
-                <div className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                  <ChatPanel chat={chat} hub={hub} onHub={setHub} />
-                </div>
-              ) : null
-            ) : (
-              <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
-                <TabsList className={cn("mx-3 mt-3 grid shrink-0", chat ? "grid-cols-4" : "grid-cols-3")}>
-                  <TabsTrigger value="eyes">Eyes</TabsTrigger>
-                  <TabsTrigger value="hat">Hat</TabsTrigger>
+            {(
+              <Tabs
+                defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
+                className="flex flex-col gap-0 lg:min-h-0 lg:flex-1"
+              >
+                <TabsList
+                  className="mx-3 mt-3 grid shrink-0"
+                  style={{
+                    gridTemplateColumns: `repeat(${1 + (focus ? 1 : 0) + (dressGem ? 3 : 0) + (chat ? 1 : 0)}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {focus ? <TabsTrigger value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger value="hat">Hat</TabsTrigger> : null}
                   <TabsTrigger value="color">Color</TabsTrigger>
                   {chat ? <TabsTrigger value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
+
+                {focus && current ? (
+                  <TabsContent value="avatar" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                    <AvatarPanel
+                      agent={current}
+                      where={where}
+                      roster={rosterAvatar}
+                      picked={target.avatar}
+                      color={target.color ?? baseColor}
+                      onPick={(avatar) => set({ avatar })}
+                    />
+                  </TabsContent>
+                ) : null}
 
                 {chat ? (
                   <TabsContent value="chat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
                     <ChatPanel chat={chat} hub={hub} onHub={setHub} />
                   </TabsContent>
                 ) : null}
+
+                <TabsContent value="shape" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  {current ? (
+                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
+                      <ShapeTile
+                        active={!target.cut}
+                        onClick={() => set({ cut: undefined })}
+                        label="Born"
+                        agent={current}
+                        where={where}
+                        cut={gemSpec(current.name, current.caste).cut}
+                      />
+                      {GEM_CUTS.map((cut) => (
+                        <ShapeTile
+                          key={cut}
+                          active={target.cut === cut}
+                          onClick={() => set({ cut })}
+                          label={titleCase(cut)}
+                          agent={current}
+                          where={where}
+                          cut={cut}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </TabsContent>
 
                 <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
                   <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
@@ -355,7 +399,7 @@ function StudioBody({
                         <Swatch
                           active={!target.color}
                           rgb={baseColor ?? [128, 128, 128]}
-                          label={current.color ? "Pool Color" : "Born Color"}
+                          label={current.color ? (dressGem ? "Pool Color" : "Roster Color") : "Born Color"}
                           onClick={() => set({ color: undefined })}
                           ring
                         />
@@ -380,7 +424,7 @@ function StudioBody({
                         Custom
                       </label>
                       <p className="text-muted-foreground text-[0.6875rem]">
-                        The ringed swatch is {titleCase(current.name)}'s {current.color ? "pool" : "born"} color.
+                        The ringed swatch is {name}'s {current.color ? (dressGem ? "pool" : "roster") : "born"} color.
                       </p>
                     </div>
                   ) : null}
@@ -418,16 +462,16 @@ function StudioBody({
         <div className="min-w-0 flex-1">
           {error ? (
             <p className="text-destructive text-xs">{error}</p>
-          ) : current && !persona ? (
+          ) : current ? (
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => set({ face: undefined, hat: undefined, color: undefined })}
+              onClick={() => set({ face: undefined, hat: undefined, cut: undefined, color: undefined, avatar: undefined })}
               disabled={!draft.gems?.[key]}
             >
               <RotateCcw className="size-4" />
-              Reset {titleCase(current.name)}
+              Reset {name}
             </Button>
           ) : null}
         </div>
@@ -488,6 +532,38 @@ function ChatPanel({
         </dd>
       </dl>
     </div>
+  );
+}
+
+function ShapeTile({
+  active,
+  onClick,
+  label,
+  agent,
+  where,
+  cut,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  agent: AgentPoolEntry;
+  where?: string | null;
+  cut: GemCut;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-label={`${label} Shape`}
+      onClick={onClick}
+      className={cn(
+        "flex flex-col items-center gap-1 rounded-lg px-1 pt-3 pb-1.5 text-[0.6875rem] transition-colors",
+        active ? "bg-accent" : "bg-muted/30 hover:bg-accent/50",
+      )}
+    >
+      <GemAvatar gem={agent.name} where={where} caste={agent.caste} color={agent.color} cut={cut} state="idle" live season="auto" size={44} />
+      <span className="mt-1.5">{label}</span>
+    </button>
   );
 }
 
@@ -560,5 +636,127 @@ function Swatch({
         active && "outline-primary outline-2 outline-offset-2",
       )}
     />
+  );
+}
+
+/** A picked picture, shrunk to a square the appearance store keeps inline (the engine caps it at 200 KB). */
+const PICTURE_SIZE = 256;
+
+async function shrinkPicture(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = PICTURE_SIZE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("This browser cannot read pictures.");
+  // Center crop to a square, as the tile shows it.
+  ctx.drawImage(
+    bitmap,
+    (bitmap.width - side) / 2,
+    (bitmap.height - side) / 2,
+    side,
+    side,
+    0,
+    0,
+    PICTURE_SIZE,
+    PICTURE_SIZE,
+  );
+  bitmap.close();
+  const webp = canvas.toDataURL("image/webp", 0.85);
+  // Safari draws no WebP and hands back a PNG: JPEG keeps it small.
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.85);
+}
+
+/** The Avatar tab: what the agent shows as, over what its roster drew it as. */
+function AvatarPanel({
+  agent,
+  where,
+  roster,
+  picked,
+  color,
+  onPick,
+}: {
+  agent: AgentPoolEntry;
+  where?: string | null;
+  roster?: AvatarSpec | null;
+  picked?: AvatarSpec;
+  color?: readonly number[];
+  onPick: (avatar: AvatarSpec | undefined) => void;
+}) {
+  const [problem, setProblem] = useState("");
+  const [emoji, setEmoji] = useState(picked?.kind === "emoji" ? picked.value : "");
+  const picture = picked?.kind === "image" ? picked : roster?.kind === "image" ? roster : null;
+  const tile = (avatar: AvatarSpec | null | undefined) =>
+    isGemAvatar(avatar) ? (
+      <GemAvatar gem={agent.name} where={where} caste={agent.caste} color={agent.color} state="idle" live season="auto" size={44} />
+    ) : (
+      // No gem name: the tile draws what it is handed, not the agent's pick.
+      <Avatar gem="" avatar={avatar} displayName={agentName(agent.name, agent.display_name)} color={color ? [...color] : agent.color} size={44} />
+    );
+  const options: { label: string; avatar: AvatarSpec | undefined; active: boolean }[] = [
+    { label: "Roster", avatar: undefined, active: !picked },
+    ...(isGemAvatar(roster) ? [] : [{ label: "Gem", avatar: { kind: "gem" } as AvatarSpec, active: picked?.kind === "gem" }]),
+    { label: "Initials", avatar: { kind: "initials" }, active: picked?.kind === "initials" },
+    { label: "Emoji", avatar: { kind: "emoji", value: emoji || "🙂" }, active: picked?.kind === "emoji" },
+    ...(picture ? [{ label: "Picture", avatar: picture, active: picked?.kind === "image" }] : []),
+  ];
+
+  const upload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setProblem("");
+    try {
+      onPick({ kind: "image", url: await shrinkPicture(file) });
+    } catch {
+      setProblem("That file is not a picture this browser can read.");
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-3 gap-2">
+        {options.map((option) => (
+          <button
+            key={option.label}
+            type="button"
+            aria-pressed={option.active}
+            onClick={() => onPick(option.avatar)}
+            className={cn(
+              "flex flex-col items-center gap-1 rounded-lg px-1 pt-3 pb-1.5 text-[0.6875rem] transition-colors",
+              option.active ? "bg-accent" : "bg-muted/30 hover:bg-accent/50",
+            )}
+          >
+            {tile(option.avatar ?? roster)}
+            <span className="mt-1.5">{option.label}</span>
+          </button>
+        ))}
+      </div>
+      <label className="text-muted-foreground flex items-center gap-2 text-xs">
+        <input
+          aria-label="Emoji"
+          value={emoji}
+          maxLength={16}
+          placeholder="🙂"
+          onChange={(event) => {
+            setEmoji(event.target.value);
+            if (event.target.value.trim()) onPick({ kind: "emoji", value: event.target.value.trim() });
+          }}
+          className="bg-muted/60 text-foreground w-16 rounded-md px-2 py-1.5 text-center text-base"
+        />
+        Emoji
+      </label>
+      <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-xs">
+        <span className="bg-muted/60 text-foreground hover:bg-accent shrink-0 rounded-md px-3 py-1.5 font-medium whitespace-nowrap transition-colors">
+          Upload Picture
+        </span>
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="sr-only" onChange={(event) => void upload(event)} />
+        PNG, JPEG, WebP or GIF; cropped square.
+      </label>
+      {problem ? <p className="text-destructive text-[0.6875rem]">{problem}</p> : null}
+      <p className="text-muted-foreground text-[0.6875rem]">
+        The avatar shows wherever this agent does, in every browser. Roster is what {agentName(agent.name, agent.display_name)}'s roster drew.
+      </p>
+    </div>
   );
 }

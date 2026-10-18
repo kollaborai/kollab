@@ -56,6 +56,31 @@ class TestNormalize:
             "gems": {"lapis": {"hat": "crown"}},
         }
 
+    def test_keeps_a_picked_avatar_and_shape_and_drops_a_bad_one(self):
+        picture = "data:image/webp;base64,UklGRg=="
+        doc = {
+            "born": {"lapis": {"avatar": {"kind": "initials"}, "cut": "heart"}},
+            "gems": {
+                "omar": {"avatar": {"kind": "emoji", "value": " 🦊 "}, "cut": "hex"},
+                "maya": {"avatar": {"kind": "image", "url": picture}},
+                "lapis": {"avatar": {"kind": "initials"}, "color": [1, 2, 3]},
+                "theo": {"avatar": {"kind": "gem", "extra": 1}},
+                "svg": {"avatar": {"kind": "image", "url": "data:image/svg+xml;base64,PHN2Zz4="}},
+                "web": {"avatar": {"kind": "image", "url": "https://example.com/a.png"}},
+                "big": {"avatar": {"kind": "image", "url": "data:image/png;base64," + "A" * 200_000}},
+                "empty": {"avatar": {"kind": "emoji", "value": "  "}},
+                "odd": {"avatar": {"kind": "sticker"}},
+            },
+        }
+        clean = gem_appearance.normalize(doc)
+        assert clean["born"] == {}
+        assert clean["gems"] == {
+            "omar": {"avatar": {"kind": "emoji", "value": "🦊"}, "cut": "hex"},
+            "maya": {"avatar": {"kind": "image", "url": picture}},
+            "lapis": {"avatar": {"kind": "initials"}, "color": [1, 2, 3]},
+            "theo": {"avatar": {"kind": "gem"}},
+        }
+
     def test_non_object_is_empty(self):
         assert gem_appearance.normalize(["nope"]) == EMPTY
 

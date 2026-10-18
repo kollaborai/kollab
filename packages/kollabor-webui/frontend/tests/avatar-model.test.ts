@@ -37,6 +37,9 @@ test("a served image is fetched with the token, an https one is shown as it is",
   });
   const remote = { kind: "image", url: "https://example.org/rae.png" } as const;
   assert.deepEqual(imageSource(remote, "/work"), { direct: "https://example.org/rae.png" });
+  // A picture picked in the studio is stored inline and shown as it is.
+  const picked = { kind: "image", url: "data:image/webp;base64,UklGRg==" } as const;
+  assert.deepEqual(imageSource(picked, "/work"), { direct: "data:image/webp;base64,UklGRg==" });
 });
 
 test("only a roster the folder does not draw from needs its name in the launch identity", () => {

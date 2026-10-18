@@ -5,6 +5,15 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.7] - 2026-10-18
+
+### Added
+- Web: every agent's Properties has an Avatar tab: keep what its roster drew, or make it a gem, its initials, an emoji or a picture you upload (cropped square and shrunk in the browser). Roster personas such as Omar Haddad can now be dressed like gems: pick Gem and the Shape, Eyes, Hat and Color tabs appear. The pick shows wherever the agent does, in every browser.
+- Web: a Shape tab picks a gem's body (Brilliant, Cushion, Heart, Hex, Cloud and ten more) over the one its name draws, in Properties and the Gem Studio. Reset puts the shape, avatar and colors back.
+
+### Fixed
+- Kollab.app: its web UI and engine no longer load packages from `~/.local` (the user site), so a `pip install --user` of another kollab can't replace the app's own code, and the agent shells it starts don't inherit the setting. (#232)
+
 ## [0.16.6] - 2026-10-18
 
 ### Added

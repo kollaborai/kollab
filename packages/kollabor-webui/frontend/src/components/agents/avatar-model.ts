@@ -51,14 +51,14 @@ export function initialsOf(displayName: string | null | undefined, name: string)
 /**
  * Where an image avatar comes from. A served file (`/rosters/<roster>/avatars/...`)
  * needs the bearer token, which an <img> cannot send: it is fetched and shown
- * from a blob. An https address is shown as it is. A project roster's file is
+ * from a blob. An https address, or a picture picked in the studio (a data URL), is shown as it is. A project roster's file is
  * found through the folder it belongs to.
  */
 export function imageSource(
   avatar: Extract<AvatarSpec, { kind: "image" }>,
   folder = "",
 ): { direct: string } | { fetch: string } {
-  if (/^https?:\/\//i.test(avatar.url)) return { direct: avatar.url };
+  if (/^(https?:\/\/|data:image\/)/i.test(avatar.url)) return { direct: avatar.url };
   if (!folder) return { fetch: avatar.url };
   return { fetch: `${avatar.url}${avatar.url.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(folder)}` };
 }
