@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Fresh daemon proof: start kollab with an isolated HOME, route /doctor through
-# the daemon-backed attach client, and assert the proof contracts render.
+# Fresh daemon proof: start kollab with an isolated HOME (and its own project
+# root, so the hub sockets of this checkout's live agents stay out of reach),
+# route /doctor through the daemon-backed attach client, and assert the proof
+# contracts render.
 
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=lib/isolated_home.sh
+source "$REPO_ROOT/tests/tmux/lib/isolated_home.sh"
+isolated_home_setup
+
 TMUX_SOCKET="kollab-fresh-doctor-$$"
 SESSION="fresh-doctor-$$"
-FRESH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/kollab-fresh-home.XXXXXX")"
-CAPTURE_FILE="$FRESH_HOME/capture.txt"
+CAPTURE_FILE="$ISOLATED_HOME/capture.txt"
 TOTAL=0
 PASSED=0
 FAILED=0
@@ -35,6 +40,8 @@ cleanup() {
     tmux -L "$TMUX_SOCKET" send-keys -t "$SESSION" C-c 2>/dev/null || true
     sleep 0.5
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
+    # the daemon outlives the pane; it carries the throwaway HOME, so it is found by that
+    isolated_home_cleanup
 }
 trap cleanup EXIT
 
@@ -42,7 +49,7 @@ echo "============================================================"
 echo "Fresh Daemon Doctor Smoke"
 echo "============================================================"
 echo "socket:     $TMUX_SOCKET"
-echo "fresh home: $FRESH_HOME"
+echo "fresh home: $ISOLATED_HOME"
 echo ""
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -52,7 +59,7 @@ fi
 
 log "starting daemon-backed attach client with isolated HOME"
 tmux -L "$TMUX_SOCKET" new-session -d -s "$SESSION" -x 140 -y 42 \
-    "HOME='$FRESH_HOME' TERM=xterm-256color python main.py --daemon"
+    "$ISOLATED_ENV TERM=xterm-256color $ISOLATED_PYTHON main.py --daemon"
 
 log "waiting for first render"
 for _ in $(seq 1 40); do

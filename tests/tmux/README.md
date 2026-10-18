@@ -31,6 +31,7 @@ tests/tmux/
 ├── run_all_tests.sh        # Run entire test suite
 ├── lib/
 │   ├── test_runner.sh      # JSON-driven test executor
+│   ├── isolated_home.sh    # Sourced by smoke scripts that start kollab without the runner
 │   └── test_helpers.sh     # Bash helper library for custom scripts
 ├── runtime_docker_ui_smoke.sh # Docker runtime UI smoke driver
 ├── specs/
@@ -135,6 +136,14 @@ agents (paid model calls) and write conversation logs and vault entries there.
   test the first-run wizard on an unseeded `HOME`.
 
 `specs/runner_home_isolation.json` checks all of this.
+
+A script that starts kollab without the runner (`phase_4_5_smoke.sh`,
+`phase_4_5_context_smoke.sh`, `fresh_daemon_doctor_smoke.sh`) sources
+`lib/isolated_home.sh` for the same rules: `isolated_home_setup` makes the
+seeded throwaway `HOME` and project root, `$ISOLATED_ENV` prefixes the app
+command, `isolated_run` runs any other command that reads kollab state, and the
+cleanup stops every process carrying that `HOME`. A new script that starts
+kollab uses it too, never a bare `python main.py`.
 
 ### Free Ports and Own Processes
 

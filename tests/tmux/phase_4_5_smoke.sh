@@ -12,9 +12,10 @@
 #   2. The drain log shows "switched to profile: openai-oauth"
 #   3. No error messages about profile switching
 #
-# Runs in its own tmux socket so it does not collide with any existing
-# daemons other operators may have running, and uses a dynamic identity name so
-# reruns don't fight over the same socket path.
+# Runs in its own tmux socket and a throwaway HOME with its own project root
+# (lib/isolated_home.sh), so it never joins the live hub or touches the agents
+# other operators have running, and uses a dynamic identity name so reruns don't
+# fight over the same socket path.
 #
 # Usage:
 #   bash tests/tmux/phase_4_5_smoke.sh
@@ -26,6 +27,11 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+
+# shellcheck source=lib/isolated_home.sh
+source "$REPO_ROOT/tests/tmux/lib/isolated_home.sh"
+# --llm openai-oauth needs a profile of that name; no model call is made
+isolated_home_setup '{"application":{"setup_completed":true},"kollabor":{"llm":{"profiles":{"openai-oauth":{"provider":"custom","model":"fake-echo","base_url":"http://127.0.0.1:9/v1","api_key":"not-a-real-key"}}}}}'
 
 TMUX_SOCKET="kollabor-phase45-$$"
 DAEMON_SESSION="phase45-daemon-$$"
@@ -39,14 +45,9 @@ FAILED=0
 # spawning our daemon and treat the first new one as ours.
 IDENTITY=""
 DAEMON_PID=""
-PRESENCE_DIR=$(uv run python - <<'PY'
+PRESENCE_DIR=$(isolated_run "$ISOLATED_PYTHON" - <<'PY'
 from plugins.hub.presence import get_presence_dir
 print(get_presence_dir())
-PY
-)
-SOCKET_DIR=$(uv run python - <<'PY'
-from plugins.hub.presence import get_socket_dir
-print(get_socket_dir())
 PY
 )
 
@@ -70,32 +71,9 @@ cleanup() {
     log "cleanup: killing tmux sessions for this smoke test"
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
 
-    # Kill our daemon by the PID we captured during discovery. We never
-# kill by identity alone -- another operator might have a daemon with the same
-    # gem name from a previous session (unlikely but possible). PID is
-    # authoritative.
-    if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        log "cleanup: killing our daemon pid=$DAEMON_PID (identity=$IDENTITY)"
-        kill "$DAEMON_PID" 2>/dev/null || true
-        sleep 0.5
-        kill -9 "$DAEMON_PID" 2>/dev/null || true
-    fi
-
-    # Clean up stale presence file if still present
-    if [ -n "$IDENTITY" ]; then
-        for f in "$PRESENCE_DIR"/*.json; do
-            [ -f "$f" ] || continue
-            if grep -q "\"identity\": \"$IDENTITY\"" "$f" 2>/dev/null; then
-                local fpid
-                fpid=$(grep -o '"pid": [0-9]*' "$f" | awk '{print $2}')
-                # Only delete if the pid matches ours (defensive)
-                if [ "$fpid" = "$DAEMON_PID" ]; then
-                    rm -f "$f"
-                fi
-            fi
-        done
-        rm -f "${SOCKET_DIR}/${IDENTITY}.sock" 2>/dev/null || true
-    fi
+    # Everything this script started carries its throwaway HOME, so that is how
+    # it is found and stopped; no pid or identity of the live agents is touched.
+    isolated_home_cleanup
 }
 trap cleanup EXIT
 
@@ -125,7 +103,7 @@ log "step 1b: spawning interactive kollab in tmux (acts as 'daemon' target)"
 # and the attach client can find it via its identity. This matches a common
 # real workflow of leaving kollab running in one tab and attaching from another.
 tmux -L "$TMUX_SOCKET" new-session -d -s "$DAEMON_SESSION" -x 140 -y 40 \
-    "python main.py"
+    "$ISOLATED_ENV $ISOLATED_PYTHON main.py"
 
 # Wait up to 20s for a NEW presence file to appear (not in our initial snapshot).
 log "waiting up to 20s for a NEW hub presence file to appear..."
@@ -166,7 +144,7 @@ pass "daemon spawned, discovered identity=$IDENTITY pid=$DAEMON_PID"
 log "step 2: attaching client with --llm openai-oauth"
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$ATTACH_SESSION" -x 140 -y 40 \
-    "python main.py --attach $IDENTITY --llm openai-oauth"
+    "$ISOLATED_ENV $ISOLATED_PYTHON main.py --attach $IDENTITY --llm openai-oauth"
 
 # Wait for attach to settle (drain flags, render first frame).
 # We need long enough for:
