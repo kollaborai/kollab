@@ -43,16 +43,21 @@ TRENDER_PATTERN = re.compile(
 def _reserve_session_id(
     registry: Dict[str, EngineSession], requested_id: Optional[str]
 ) -> str:
-    """Reserve an ID before any daemon work can begin."""
-    session_id = requested_id or generate_session_name()
+    """Reserve an ID before any daemon work can begin.
+
+    A generated name is one of about 800 a minute, so two members of one team
+    launch can draw the same: redraw it. A requested ID is the caller's to fix.
+    """
     with _session_reservation_lock:
-        if session_id in registry or session_id in _pending_session_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Session '{session_id}' is already in use",
-            )
-        _pending_session_ids.add(session_id)
-    return session_id
+        for _ in range(1 if requested_id else 20):
+            session_id = requested_id or generate_session_name()
+            if session_id not in registry and session_id not in _pending_session_ids:
+                _pending_session_ids.add(session_id)
+                return session_id
+    raise HTTPException(
+        status_code=409,
+        detail=f"Session '{session_id}' is already in use",
+    )
 
 
 def _release_session_id(session_id: str) -> None:
