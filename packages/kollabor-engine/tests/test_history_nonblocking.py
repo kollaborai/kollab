@@ -348,6 +348,130 @@ async def test_coalesced_refresh_single_task(registry, conversations):
 
 
 
+class GrowingState(SilentState):
+    """A daemon that answers get_conversation from a conversation that grows."""
+
+    def __init__(self):
+        self.messages = [_wire("assistant", "hello", "t0")]
+        self.calls = 0
+
+    async def get_conversation(self, since=None, anchor=None):
+        self.calls += 1
+        return SimpleNamespace(
+            messages=list(self.messages),
+            session_id="conv-1",
+            started_at="t0",
+            message_count=len(self.messages),
+            metadata={},
+            anchor="",
+            since=None,
+        )
+
+
+def _wire(role, content, timestamp):
+    return {
+        "role": role,
+        "content": content,
+        "timestamp": timestamp,
+        "metadata": {},
+        "thinking": None,
+    }
+
+
+async def _settled(session):
+    """The coalesced refresh has finished (its handle is cleared in its finally)."""
+    for _ in range(200):
+        if session._history_refresh_task is None:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the background refresh never finished")
+
+
+@pytest.mark.asyncio
+async def test_a_user_message_taken_by_the_daemon_warms_the_mirror(
+    registry, conversations
+):
+    """A window that opens mid-turn finds the message being answered.
+
+    Whoever sent it (another window, the agent's terminal), the daemon announces
+    it with user_message; the mirror follows without telling the open windows.
+    """
+    _, workspace_root = conversations
+    state = GrowingState()
+    events: asyncio.Queue = asyncio.Queue()
+    announced: list = []
+    daemon = _daemon(state)
+    daemon.subscribe = lambda: events
+    daemon.fan_out = announced.append
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = daemon
+    registry[session.session_id] = session
+    await session.refresh_history()  # the warm mirror: one greeting
+    session._event_task = asyncio.create_task(session._track_events())
+    try:
+        state.messages.append(_wire("user", "slowreply please", "t1"))
+        events.put_nowait({"type": "user_message"})
+        for _ in range(200):
+            if len(session.history) == 2:
+                break
+            await asyncio.sleep(0.01)
+        await _settled(session)
+
+        result = await sessions_route.get_history(session.session_id)
+        assert [m["content"] for m in result["history"]] == [
+            "hello",
+            "slowreply please",
+        ]
+        assert result["source"] == "mirror" and result["stale"] is False
+        assert [e for e in announced if e["type"] == "history_updated"] == []
+    finally:
+        session._event_task.cancel()
+        await asyncio.gather(session._event_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_asked_for_during_one_in_flight_runs_again(
+    registry, conversations
+):
+    """The refresh in flight may have asked the daemon before the change.
+
+    A request that arrives while one runs makes it go once more, so the mirror
+    never settles on an answer older than the request.
+    """
+    _, workspace_root = conversations
+    state = GrowingState()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+
+    asked: asyncio.Event = asyncio.Event()
+    release: asyncio.Event = asyncio.Event()
+    answer = state.get_conversation
+
+    async def late_first_answer(since=None, anchor=None):
+        snapshot = await answer(since, anchor)  # the daemon's answer as of now
+        if state.calls == 1:
+            asked.set()
+            await release.wait()  # ... delivered late
+        return snapshot
+
+    state.get_conversation = late_first_answer
+
+    session._schedule_refresh(notify=False)
+    await asked.wait()
+    state.messages.append(_wire("user", "typed after the first ask", "t1"))
+    session._schedule_refresh(notify=False)
+    release.set()
+    await _settled(session)
+
+    assert state.calls == 2
+    assert [m["content"] for m in session.history] == [
+        "hello",
+        "typed after the first ask",
+    ]
+
+
 def test_disk_history_preserves_content_blocks_and_tool_metadata(tmp_path):
     path = tmp_path / "conv.jsonl"
     path.write_text(

@@ -193,9 +193,14 @@ class EngineSession:
         # name). Arrives with the first answered snapshot; before that, disk
         # seeding falls back to the newest log in the workspace's folder.
         self.conversation_id = ""
-        # The coalesced background refresh (get_history_nonblocking). One task
-        # at a time; a request that arrives while one runs reuses it.
+        # The coalesced background refresh (get_history_nonblocking, daemon
+        # events). One task at a time; a request that arrives while one runs
+        # makes it go once more, because the one in flight may have asked the
+        # daemon before the change behind the request.
         self._history_refresh_task: Optional[asyncio.Task] = None
+        self._history_refresh_again = False
+        # Whether the refresh ahead announces what it changed (history_updated).
+        self._history_refresh_notify = False
         # True while a refresh is in flight, for the UI's syncing badge.
         self.history_syncing = False
 
@@ -653,20 +658,34 @@ class EngineSession:
             "stale": self._history_seeded,
         }
 
-    def _schedule_refresh(self) -> None:
-        """One background refresh, however many opens asked for it."""
+    def _schedule_refresh(self, notify: bool = True) -> None:
+        """One background refresh at a time, run again for a request made during it.
+
+        ``notify``: announce what the refresh changed to the open windows
+        (history_updated). Keeping the mirror warm needs no announcement.
+        """
         if not self.alive:
             return
+        self._history_refresh_notify = self._history_refresh_notify or notify
         if (
             self._history_refresh_task is not None
             and not self._history_refresh_task.done()
         ):
+            self._history_refresh_again = True
             return
         self.history_syncing = True
 
         async def _run() -> None:
             try:
-                await self.refresh_history(notify=True)
+                while True:
+                    self._history_refresh_again = False
+                    announce, self._history_refresh_notify = (
+                        self._history_refresh_notify,
+                        False,
+                    )
+                    await self.refresh_history(notify=announce)
+                    if not self._history_refresh_again:
+                        break
             except Exception as e:  # a background refresh never breaks a route
                 logger.debug(
                     "session %s background refresh failed: %s", self.session_id, e
@@ -786,6 +805,14 @@ class EngineSession:
                         else None
                     )
                     turn_error = ""
+
+                elif etype == "user_message":
+                    # The daemon took a human's message into its history, from
+                    # any window or its terminal: a window that opens mid-turn
+                    # must find it in the mirror. The refresh announces nothing
+                    # (open windows reload on turn_complete), so a turn that
+                    # starts never reloads the page that sent it.
+                    self._schedule_refresh(notify=False)
 
                 elif etype in ("hub_message", "tool_result"):
                     # Mid-turn conversation movement (a background message
