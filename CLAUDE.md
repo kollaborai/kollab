@@ -671,7 +671,7 @@ plus raw `<trender>cmd</trender>` shell execution.
 
 Unknown `type=` attributes are left in the prompt as-is (no error, but no render).
 
-**Priority order:** CLI `--system-prompt` arg -> `KOLLAB_SYSTEM_PROMPT` env var -> `KOLLAB_SYSTEM_PROMPT_FILE` env var -> Local `.kollab/agents/default/system_prompt.md` -> Global `~/.kollab/agents/default/system_prompt.md` -> Built-in fallback
+**Priority order:** CLI `--system-prompt` arg -> `KOLLAB_SYSTEM_PROMPT` env var -> `KOLLAB_SYSTEM_PROMPT_FILE` env var -> Local `.kollab/agents/default/system_prompt.md` -> Global `~/.kollab/agents/default/system_prompt.md` -> Bundled `bundles/agents/default/system_prompt.md` -> Built-in fallback
 
 ## Core Architecture Patterns
 
