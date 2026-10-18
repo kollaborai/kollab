@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
+import { Avatar } from "@/components/agents/Avatar";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { titleCase } from "@/components/panels/panel-model";
@@ -507,8 +508,11 @@ export function AppSidebar({
                           className="contents"
                           onDoubleClick={session.identity ? () => openProperties() : undefined}
                         >
-                          <GemAvatar
+                          <Avatar
                             gem={gem}
+                            avatar={pool?.avatar}
+                            displayName={pool?.display_name}
+                            folder={session.device ? undefined : session.workspace}
                             where={session.device || session.workspace}
                             caste={pool?.caste}
                             color={pool?.color}
@@ -567,8 +571,11 @@ export function AppSidebar({
                     className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                     data-testid={`offline-${agent.identity}`}
                   >
-                    <GemAvatar
+                    <Avatar
                       gem={agent.identity}
+                      avatar={poolByName.get(agent.identity)?.avatar}
+                      displayName={poolByName.get(agent.identity)?.display_name}
+                      folder={agent.workspace}
                       where={agent.workspace}
                       caste={poolByName.get(agent.identity)?.caste}
                       color={poolByName.get(agent.identity)?.color}
@@ -654,8 +661,10 @@ export function AppSidebar({
                               title={`Open ${titleCase(agent.name)} on ${agent.device}`}
                               className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                             >
-                              <GemAvatar
+                              <Avatar
                                 gem={agent.name}
+                                avatar={poolByName.get(agent.name)?.avatar}
+                                displayName={poolByName.get(agent.name)?.display_name}
                                 where={agent.device}
                                 caste={poolByName.get(agent.name)?.caste}
                                 color={poolByName.get(agent.name)?.color}
@@ -715,7 +724,7 @@ export function AppSidebar({
                       className="text-muted-foreground h-auto cursor-default gap-3 py-2 pl-2.5"
                       title={`Accepted contact (${contact.trust || "no trust"}): nothing is permitted until /connect allow`}
                     >
-                      <GemAvatar
+                      <Avatar
                         gem={contact.key}
                         where={contact.device || ""}
                         state="offline"

@@ -21,7 +21,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
@@ -47,8 +47,10 @@ const Welcome: FC = () => {
     <div className="mb-6 flex flex-col items-center gap-3 px-4 text-center">
       {gem ? (
         <span className="contents" onDoubleClick={gem.onOpen}>
-          <GemAvatar
+          <Avatar
             gem={gem.name}
+            avatar={gem.pool?.avatar}
+            displayName={gem.pool?.display_name}
             where={where}
             caste={gem.pool?.caste}
             color={gem.pool?.color}
@@ -57,12 +59,12 @@ const Welcome: FC = () => {
             season="auto"
             follow
             size={112}
-            label={titleCase(gem.name)}
+            label={gem.pool?.display_name || titleCase(gem.name)}
           />
         </span>
       ) : null}
       <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
-        {gem ? titleCase(gem.name) : "kollab"}
+        {gem ? gem.pool?.display_name || titleCase(gem.name) : "kollab"}
       </h1>
       <p className="text-muted-foreground fade-in slide-in-from-bottom-1 animate-in fill-mode-both max-w-sm text-sm text-balance duration-200">
         Everything has hooks. Send a message to begin.
@@ -82,13 +84,15 @@ const ComposerGem: FC = () => {
       data-slot="kollab_composer-gem"
       data-activity={gem.activity ?? undefined}
       className="inline-flex shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      aria-label={`Open ${titleCase(gem.name)} Properties`}
-      title={`${titleCase(gem.name)} · Properties`}
+      aria-label={`Open ${gem.pool?.display_name || titleCase(gem.name)} Properties`}
+      title={`${gem.pool?.display_name || titleCase(gem.name)} · Properties`}
       onClick={gem.onOpen}
       disabled={!gem.onOpen}
     >
-      <GemAvatar
+      <Avatar
         gem={gem.name}
+        avatar={gem.pool?.avatar}
+        displayName={gem.pool?.display_name}
         where={where}
         caste={gem.pool?.caste}
         color={gem.pool?.color}
@@ -150,8 +154,10 @@ const HubNoteView: FC<{
 
   return (
     <div className="flex gap-3">
-      <GemAvatar
+      <Avatar
         gem={name}
+        avatar={sender?.avatar}
+        displayName={sender?.display_name}
         where={device || where}
         caste={sender?.caste}
         color={sender?.color}
@@ -188,8 +194,10 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
   const details = lines.slice(1).join("\n").trim();
   const summary = (
     <>
-      <GemAvatar
+      <Avatar
         gem={name}
+        avatar={sender?.avatar}
+        displayName={sender?.display_name}
         where={device || where}
         caste={sender?.caste}
         color={sender?.color}

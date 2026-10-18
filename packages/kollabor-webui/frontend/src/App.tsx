@@ -5,7 +5,7 @@ import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
 import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -909,6 +909,7 @@ export default function App() {
           network={network}
           offline={offline}
           hiddenAgents={hiddenAgents}
+      <AvatarImageProvider api={api}>
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}
@@ -1027,7 +1028,7 @@ export default function App() {
               {/* The next free gem greets here, as it will once its session starts. */}
               <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
                 {nextGem ? (
-                  <GemAvatar
+                  <Avatar
                     gem={nextGem.name}
                     caste={nextGem.caste}
                     color={nextGem.color}
@@ -1036,13 +1037,16 @@ export default function App() {
                     season="auto"
                     follow
                     size={112}
-                    label={titleCase(nextGem.name)}
+                    label={nextGem.display_name || titleCase(nextGem.name)}
                   />
                 ) : (
+                    avatar={nextGem.avatar}
+                    displayName={nextGem.display_name}
+                    folder={workspacePath.trim()}
                   <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
-                  {nextGem ? titleCase(nextGem.name) : "Start a Session"}
+                  {nextGem ? nextGem.display_name || titleCase(nextGem.name) : "Start a Session"}
                 </h1>
                 <p
                   className={
@@ -1084,3 +1088,4 @@ export default function App() {
     </GemAppearanceProvider>
   );
 }
+      </AvatarImageProvider>

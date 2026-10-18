@@ -150,10 +150,23 @@ export type ProfileUpdate = Partial<Omit<ProfileWrite, "name">> & {
   new_name?: string;
 };
 
+/** How an agent is drawn: the 3D gem, or a flat tile (docs/specs/rosters-and-teams.md, Avatars). */
+export type AvatarSpec =
+  | { kind: "gem" }
+  | { kind: "initials" }
+  | { kind: "emoji"; value: string }
+  /** `url` is a path the engine serves (it needs the bearer token) or an https address. */
+  | { kind: "image"; url: string };
+
 export type AgentPoolEntry = {
   name: string;
   identity?: string;
   agent_type?: string;
+  /** The roster the name belongs to ("" for the koordinator). */
+  roster?: string;
+  /** What a UI calls it: "Maya Lindqvist"; a gem's is its name. */
+  display_name?: string;
+  avatar?: AvatarSpec;
   role_aliases?: string[];
   personality?: string;
   caste?: string;
@@ -173,6 +186,77 @@ export type AgentPoolEntry = {
   last_ran?: number | null;
   /** False for a live agent the pool does not name (lapis-2): listed, never launched as. Koordinator is launchable (first in the list). */
   pool?: boolean;
+};
+
+/** A persona as GET /rosters and GET /teams send it. */
+export type Persona = {
+  name: string;
+  roster: string;
+  display_name: string;
+  avatar: AvatarSpec;
+  color: number[];
+  /** The agent bundle it runs; empty is the default one. */
+  agent: string;
+  role: string;
+  personality: string;
+  skills: string[];
+  profile: string;
+  prompt: string;
+  caste: string;
+  role_aliases: string[];
+};
+
+export type Roster = {
+  name: string;
+  display_name: string;
+  description: string;
+  avatar: AvatarSpec;
+  source: "bundled" | "user" | "project";
+  path: string;
+  personas: Persona[];
+};
+
+/** A roster or team file the engine could not use, and why. */
+export type LibraryProblem = { file: string; message: string };
+
+/** GET /rosters: every roster, and the one this folder draws its agent names from. */
+export type RostersResponse = {
+  workspace: string;
+  default: string;
+  rosters: Roster[];
+  problems: LibraryProblem[];
+};
+
+export type TeamMember = {
+  persona: Persona;
+  role: string;
+  agent: string;
+  profile: string;
+  /** The team's instructions for this seat. */
+  prompt: string;
+  reports_to: string | null;
+};
+
+export type Team = {
+  name: string;
+  description: string;
+  roster: string;
+  lead: string;
+  source: "bundled" | "user" | "project";
+  path: string;
+  members: TeamMember[];
+};
+
+export type TeamsResponse = { teams: Team[]; problems: LibraryProblem[] };
+
+/** POST /teams/{name}/launch: who started, who was already running in the folder, who failed. */
+export type TeamLaunchResult = {
+  team: string;
+  workspace: string;
+  started: string[];
+  skipped: { persona: string; reason: string }[];
+  failed: { persona: string; error: string }[];
+  sessions: Session[];
 };
 
 /** GET /agents: the pool, as one folder (or the whole computer) sees it. */
@@ -1012,6 +1096,25 @@ export class EngineApi {
   }
 
   saveGemAppearance(appearance: GemAppearance) {
+  /** Every roster the folder can draw from (its own project rosters included), and files that failed to load. */
+  listRosters(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+    return this.json<RostersResponse>(`/rosters${query}`);
+  }
+
+  listTeams(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+    return this.json<TeamsResponse>(`/teams${query}`);
+  }
+
+  /** Start every member of a team that is not already running in the folder, lead first. */
+  launchTeam(name: string, workspace: string, profile?: string) {
+    return this.json<TeamLaunchResult>(`/teams/${encodeURIComponent(name)}/launch`, {
+      method: "POST",
+      body: JSON.stringify({ workspace, ...(profile ? { profile } : {}) }),
+    });
+  }
+
     return this.json<GemAppearance>("/agents/appearance", {
       method: "PUT",
       body: JSON.stringify(appearance),

@@ -101,7 +101,12 @@ export function GemStudio({
         )}
       >
         {/* Mounted per open, so each visit starts from what is saved. */}
-        <StudioBody agents={agents} focus={focus} onDone={() => onOpenChange(false)} />
+        {/* The studio dresses gems: a persona drawn as a picture, an emoji or initials has no look to dress. */}
+        <StudioBody
+          agents={agents.filter((agent) => !agent.avatar || agent.avatar.kind === "gem")}
+          focus={focus}
+          onDone={() => onOpenChange(false)}
+        />
       </DialogContent>
     </Dialog>
   );
