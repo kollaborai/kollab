@@ -159,7 +159,10 @@ function RuntimeShell({
   );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
-  const sessionLabel = sessionHeading(session);
+  const sessionLabel = sessionHeading(
+    session,
+    targets.agents.find((agent) => agent.name === session.identity)?.display_name,
+  );
   // A typed /restart (/new, /clear) empties the daemon's conversation; once that
   // run ends, reset the thread the way the toolbar's Clear does. Only a run
   // seen in this mount counts, so the reloaded thread cannot loop.
@@ -257,6 +260,7 @@ function RuntimeShell({
           api={api}
           session={session}
           profiles={profiles}
+          pool={targets.agents}
           usage={usageLabel}
           status={transportError || status}
           statusError={Boolean(transportError)}
@@ -1006,6 +1010,7 @@ export default function App() {
             key={activeSession.session_id}
             api={api}
             session={activeSession}
+            displayName={agents.find((agent) => agent.name === activeSession.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
             onOpenChange={setSettingsOpen}

@@ -335,7 +335,12 @@ export type AgentNetwork = {
 export type WorkspaceEntry = { path: string; name: string; live: number };
 
 /** An agent that ran in the engine's folder and is not running: opening it starts it again. */
-export type OfflineAgent = { identity: string; workspace: string; last_ran: number };
+/** An agent that ran here and is not running. Its persona's look (name, picture, color) comes with it when it has one, whichever roster it is from. */
+export type OfflineAgent = Pick<AgentPoolEntry, "display_name" | "avatar" | "color" | "caste"> & {
+  identity: string;
+  workspace: string;
+  last_ran: number;
+};
 
 /** A sidebar row the user hid, for every client of this engine (engine: hidden_agents.py). `key` is hidden-agents.ts's; a running agent's entry names its `instance` and lasts as long as that process. */
 export type HiddenAgent = { key: string; label: string; detail: string; instance?: string };

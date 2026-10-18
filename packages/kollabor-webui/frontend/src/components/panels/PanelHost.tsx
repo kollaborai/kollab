@@ -159,6 +159,7 @@ function RevealCard({
 export function PanelHost({
   api,
   session,
+  displayName,
   profiles,
   open,
   onOpenChange,
@@ -170,6 +171,8 @@ export function PanelHost({
 }: {
   api: EngineApi;
   session: Session;
+  /** The session's agent by its persona name, when it has one. */
+  displayName?: string;
   profiles: Profile[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -656,6 +659,7 @@ export function PanelHost({
             <SessionSettings
               api={api}
               session={session}
+              displayName={displayName}
               profiles={profiles}
               onSessionUpdated={onSessionUpdated}
             />

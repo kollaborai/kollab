@@ -1,13 +1,13 @@
 import { Fragment, useMemo } from "react";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
-import { titleCase } from "@/components/panels/panel-model";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { lastRanLabel } from "@/last-ran";
+import { agentName } from "@/utils/session-display";
 
 /** What a choice is called for people: a persona's display name, else its name in Title Case. */
 export const choiceLabel = (choice: Pick<LaunchChoice, "name" | "display_name">) =>
-  choice.display_name || titleCase(choice.name);
+  agentName(choice.name, choice.display_name);
 
 function Face({ choice, size, folder }: { choice: LaunchChoice; size: number; folder: string }) {
   return (

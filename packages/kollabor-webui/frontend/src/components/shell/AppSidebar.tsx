@@ -23,7 +23,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
 import { sessionFolder, sessionSubtitle } from "@/utils/session-subtitle";
 import {
@@ -259,6 +259,10 @@ export function AppSidebar({
   const instanceOf = (session: Session) => session.instance || session.session_id;
   const sessionKey = (session: Session) => sidebarAgentKey({ instance: instanceOf(session) });
   const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
+  // An offline row wears the persona the engine found for it, else the live pool's entry of that name.
+  const offlineLook = (agent: OfflineAgent) => (agent.avatar ? agent : poolByName.get(agent.identity));
+  const offlineName = (agent: OfflineAgent) => agentName(agent.identity, offlineLook(agent)?.display_name);
+  const remoteName = (name: string) => agentName(name, poolByName.get(name)?.display_name);
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
   const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
@@ -460,6 +464,7 @@ export function AppSidebar({
                 const live = hubLive || session.active !== false;
                 const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
                 const folder = sessionFolder(session);
+                const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
                 const harness = cliHarness(session);
                 const note = opening?.id === session.session_id ? opening : null;
                 const openProperties = (tab?: "chat") => {
@@ -469,8 +474,8 @@ export function AppSidebar({
                 return (
                 <AgentSidebarRow
                   key={session.session_id}
-                  name={sessionHeading(session)}
-                  onHide={() => hide({ key: sessionKey(session), label: sessionHeading(session), detail: session.workspace || workspacePath, instance: instanceOf(session) })}
+                  name={heading}
+                  onHide={() => hide({ key: sessionKey(session), label: heading, detail: session.workspace || workspacePath, instance: instanceOf(session) })}
                   onProperties={session.identity ? () => openProperties("chat") : undefined}
                   onDelete={session.external ? undefined : () => setPendingDelete(session)}
                   busy={busy}
@@ -482,7 +487,7 @@ export function AppSidebar({
                           // the row's Opening… and any reason it failed stay in view.
                           if (await onSelectSession(session.session_id)) setOpenMobile(false);
                         }}
-                        title={[sessionHeading(session), formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
+                        title={[heading, formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
                         // overflow-visible: the gem canvas overhangs its box for hats and props.
                         className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                       >
@@ -508,7 +513,7 @@ export function AppSidebar({
                         </span>
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span className="truncate text-[0.8125rem] leading-tight font-semibold">
-                            {sessionHeading(session)}
+                            {heading}
                           </span>
                           <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
                             {note && !note.error ? (
@@ -541,26 +546,26 @@ export function AppSidebar({
               {visibleOffline.map((agent) => (
                 <AgentSidebarRow
                   key={`offline:${agent.workspace}:${agent.identity}`}
-                  name={titleCase(agent.identity)}
-                  onHide={() => hide({ key: offlineKey(agent), label: titleCase(agent.identity), detail: agent.workspace })}
+                  name={offlineName(agent)}
+                  onHide={() => hide({ key: offlineKey(agent), label: offlineName(agent), detail: agent.workspace })}
                 >
                   <SidebarMenuButton
                     disabled={busy}
                     onClick={async () => {
                       if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
                     }}
-                    title={`Start ${titleCase(agent.identity)} in ${agent.workspace}`}
+                    title={`Start ${offlineName(agent)} in ${agent.workspace}`}
                     className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                     data-testid={`offline-${agent.identity}`}
                   >
                     <Avatar
                       gem={agent.identity}
-                      avatar={poolByName.get(agent.identity)?.avatar}
-                      displayName={poolByName.get(agent.identity)?.display_name}
+                      avatar={offlineLook(agent)?.avatar}
+                      displayName={offlineLook(agent)?.display_name}
                       folder={agent.workspace}
                       where={agent.workspace}
-                      caste={poolByName.get(agent.identity)?.caste}
-                      color={poolByName.get(agent.identity)?.color}
+                      caste={offlineLook(agent)?.caste}
+                      color={offlineLook(agent)?.color}
                       state="offline"
                       live={false}
                       season="auto"
@@ -569,7 +574,7 @@ export function AppSidebar({
                     />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
-                        {titleCase(agent.identity)}
+                        {offlineName(agent)}
                       </span>
                       <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                         Offline · {lastRanLabel(agent.last_ran)}
@@ -627,10 +632,10 @@ export function AppSidebar({
                           return (
                           <AgentSidebarRow
                             key={id || `${agent.name}@${agent.device}`}
-                            name={`${titleCase(agent.name)} on ${agent.device}`}
+                            name={`${remoteName(agent.name)} on ${agent.device}`}
                             onHide={() => hide({
                               key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
-                              label: titleCase(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
+                              label: remoteName(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
                             })}
                           >
                             <SidebarMenuButton
@@ -640,7 +645,7 @@ export function AppSidebar({
                                 // Closes the phone menu only once it opened: a refusal shows here.
                                 if (await onSelectRemote(id)) setOpenMobile(false);
                               }}
-                              title={`Open ${titleCase(agent.name)} on ${agent.device}`}
+                              title={`Open ${remoteName(agent.name)} on ${agent.device}`}
                               className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                             >
                               <Avatar
@@ -659,7 +664,7 @@ export function AppSidebar({
                               />
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <span className="truncate text-[0.8125rem] leading-tight font-medium">
-                                  {titleCase(agent.name)}
+                                  {remoteName(agent.name)}
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                                   {note && !note.error
@@ -824,7 +829,7 @@ export function AppSidebar({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete This Session?</AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingDelete ? sessionHeading(pendingDelete) : "This session"}{" "}
+              {pendingDelete ? sessionHeading(pendingDelete, poolByName.get(pendingDelete.identity || "")?.display_name) : "This session"}{" "}
               will be stopped and its conversation removed. This cannot be
               undone.
             </AlertDialogDescription>

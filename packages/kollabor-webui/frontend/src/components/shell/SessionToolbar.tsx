@@ -1,5 +1,4 @@
-import { GemAvatar } from "@/components/gems/GemAvatar";
-import { titleCase } from "@/components/panels/panel-model";
+import { Avatar } from "@/components/agents/Avatar";
 import {
   useCallback,
   useEffect,
@@ -22,6 +21,7 @@ import {
   Users,
 } from "lucide-react";
 import type {
+  AgentPoolEntry,
   EngineApi,
   HubAgent,
   McpServerConfig,
@@ -58,7 +58,7 @@ import {
   formatApprovalMode,
   normalizeApprovalMode,
 } from "@/utils/approval-mode";
-import { sessionHeading } from "@/utils/session-display";
+import { agentName, sessionHeading } from "@/utils/session-display";
 import {
   Select,
   SelectContent,
@@ -71,6 +71,7 @@ export function SessionToolbar({
   api,
   session,
   profiles,
+  pool,
   usage,
   status,
   statusError = false,
@@ -82,6 +83,8 @@ export function SessionToolbar({
   api: EngineApi;
   session: Session;
   profiles: Profile[];
+  /** Who the agents are (pictures and persona names), by name. */
+  pool: readonly AgentPoolEntry[];
   usage?: string | null;
   status?: string | null;
   statusError?: boolean;
@@ -273,7 +276,10 @@ export function SessionToolbar({
   const allServerNames = Array.from(
     new Set([...configuredServerNames, ...servers.map(([name]) => name)]),
   );
-  const sessionLabel = sessionHeading(session);
+  const sessionLabel = sessionHeading(
+    session,
+    pool.find((agent) => agent.name === session.identity)?.display_name,
+  );
   const connectedCount = servers.filter(
     ([, info]) => info.status === "connected",
   ).length;
@@ -705,14 +711,20 @@ export function SessionToolbar({
                     const identity = String(
                       agent.identity || agent.id || agent.agent_id || "",
                     );
+                    const look = pool.find((entry) => entry.name === identity);
                     return (
                       <div
                         key={identity}
                         className="flex items-center gap-3 rounded-md px-2 py-2"
                       >
-                        <GemAvatar
+                        <Avatar
                           gem={identity}
+                          avatar={look?.avatar}
+                          displayName={look?.display_name}
+                          folder={String(agent.project || "")}
                           where={String(agent.project || "") || session.device || session.workspace}
+                          caste={look?.caste}
+                          color={look?.color}
                           state="idle"
                           live
                           season="auto"
@@ -720,7 +732,7 @@ export function SessionToolbar({
                         />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center justify-between gap-2 text-sm font-medium">
-                            <span className="truncate">{titleCase(identity) || "Agent"}</span>
+                            <span className="truncate">{identity ? agentName(identity, look?.display_name) : "Agent"}</span>
                             <span className="text-muted-foreground text-xs">Online</span>
                           </span>
                           <span className="text-muted-foreground block truncate text-xs">

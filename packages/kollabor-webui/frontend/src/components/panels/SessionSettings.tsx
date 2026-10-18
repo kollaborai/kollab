@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { sessionHeading } from "@/utils/session-display";
+import { agentName, sessionHeading } from "@/utils/session-display";
 import { titleCase } from "./panel-model";
 
 /**
@@ -20,11 +20,14 @@ import { titleCase } from "./panel-model";
 export function SessionSettings({
   api,
   session,
+  displayName,
   profiles,
   onSessionUpdated,
 }: {
   api: EngineApi;
   session: Session;
+  /** The agent's persona name ("Maya Lindqvist"), when it has one. */
+  displayName?: string;
   profiles: Profile[];
   onSessionUpdated: (session: Session) => void;
 }) {
@@ -40,7 +43,7 @@ export function SessionSettings({
     null,
   );
 
-  const sessionLabel = sessionHeading(session);
+  const sessionLabel = sessionHeading(session, displayName);
   const workspace = String(
     settings?.system?.cwd || session.workspace || "current project",
   );
@@ -117,11 +120,11 @@ export function SessionSettings({
           <span className="text-muted-foreground">Session</span>
           <span className="font-mono break-all">{sessionLabel}</span>
           <span className="text-muted-foreground">Agent</span>
-          <span className="break-words">{session.agent || "default"}</span>
-          <span className="text-muted-foreground">Gem</span>
           <span className="break-words">
-            {session.identity ? titleCase(session.identity) : "Unassigned"}
+            {session.identity ? agentName(session.identity, displayName) : "Unassigned"}
           </span>
+          <span className="text-muted-foreground">Type</span>
+          <span className="break-words">{session.agent || "default"}</span>
           <span className="text-muted-foreground">Workspace</span>
           <span className="break-all">{workspace}</span>
         </div>
