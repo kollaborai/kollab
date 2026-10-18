@@ -38,6 +38,12 @@ Agents are resolved from:
 When the same agent name exists at multiple tiers, the higher-priority definition
 wins. The bundled copy remains the install-safe fallback.
 
+The local tier is the folder the agent runs in. A chat the engine starts for the web
+UI or a team launch uses that chat's own folder, not the engine's
+(`AgentManager(project_path=...)`). The hub protocol docs (`system/hub-*.md`) and the
+session-context template (`_base/sections/01-session-context.md`) resolve through the
+same three tiers (`kollabor_config.get_agent_tier_dirs`).
+
 ## Agent Configuration
 
 ### agent.json (Optional)

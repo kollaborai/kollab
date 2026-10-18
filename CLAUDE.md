@@ -625,7 +625,7 @@ Both initialize `TerminalLLMChat` in `kollabor/application.py`.
 **Local directory (`.kollab/` - OPTIONAL):**
 - `agents/` - Project-specific agents (override global)
 
-**Agent resolution:** Local -> Global -> Bundled (`AgentManager.find_agent_dir`, the one resolver: the engine's `POST /sessions` uses it too; app start also seeds the bundled agents into the global dir)
+**Agent resolution:** Local -> Global -> Bundled (`AgentManager.find_agent_dir`, the one resolver: the engine's `POST /sessions` uses it too, with the chat's folder as the local tier (`AgentManager(project_path=...)`); app start also seeds the bundled agents into the global dir)
 
 **Config save targets (`/config` modal, `Ctrl+S`):**
 - Local (`L`): Saves to `.kollab/config.json` in cwd (project-specific overrides)
