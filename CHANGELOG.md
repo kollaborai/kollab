@@ -5,6 +5,11 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Web: hiding an agent in the sidebar hides it in Kollab.app, every browser and the phone, not only the window you clicked in. The engine keeps the list. An agent you launch later under the same name shows even when an older one in that folder was hidden. Agents hidden earlier in one browser are shown again.
+
 ## [0.16.5] - 2026-10-17
 
 ### Removed
