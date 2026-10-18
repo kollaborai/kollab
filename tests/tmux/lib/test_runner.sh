@@ -22,9 +22,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -68,6 +71,143 @@ LAST_OUTPUT = ""
 FAILURES = 0
 STARTED = False
 
+# --- HOME isolation ----------------------------------------------------------
+#
+# A spec must never touch the developer's real ~/.kollab: the app would join the
+# live hub (attach to a running daemon, wake agents that spend paid model calls)
+# and write conversation logs and vault entries. So the app command and every
+# shell step get a throwaway HOME, seeded as a configured machine (setup done,
+# connect guide seen) so specs do not land on the first-run wizard. The env is
+# applied as `env HOME=... <command>`, so a spec that sets its own HOME inside
+# its command (the throwaway-HOME specs) keeps it: the inner assignment wins.
+#
+# The hub's unix sockets live in /tmp/kollabor-hub/<hash of the project root>/,
+# outside HOME, and agents delete socket files they have no presence record
+# for. A spec that runs in this checkout (the owner's live folder) would share
+# that directory with the live agents, so such a spec also gets its own project
+# root (KOLLAB_PROJECT_ROOT, the knob behind `--project`).
+#
+# Opt-outs, in config: "real_home": true runs against the real HOME (loud
+# warning; only for a spec that needs the developer's providers or data),
+# "first_run": true leaves the throwaway HOME unseeded (the first-run wizard).
+REAL_HOME = CONFIG.get("real_home") is True
+FIRST_RUN = CONFIG.get("first_run") is True
+HOME_ENV = re.compile(r"(?<![A-Za-z0-9_])HOME=")
+SOCKET_DIR_ROOT = "/tmp/kollabor-hub/"
+TEST_HOME: Path | None = None
+RUN_ENV: dict[str, str] = {"KOLLAB_NO_KEYRING": "1"}
+
+
+def _start_commands() -> list[str]:
+    commands = [str(CONFIG.get("command") or "python main.py")]
+    for key in ("setup", "steps", "teardown"):
+        for step in SPEC.get(key) or []:
+            if step.get("action") == "start_app" and step.get("command"):
+                commands.append(str(step["command"]))
+    return commands
+
+
+def _setup_home() -> None:
+    """Make the throwaway HOME and the env every spawned command runs with."""
+    global TEST_HOME
+    if REAL_HOME:
+        return
+    TEST_HOME = Path(tempfile.mkdtemp(prefix="kollab-tmux-home-"))
+    (TEST_HOME / "project").mkdir()
+    if not FIRST_RUN:
+        kollab_dir = TEST_HOME / ".kollab"
+        kollab_dir.mkdir()
+        (kollab_dir / "config.json").write_text(
+            json.dumps({"application": {"setup_completed": True}}), encoding="utf-8"
+        )
+        (kollab_dir / "connect-guide-seen").touch()
+    RUN_ENV["HOME"] = str(TEST_HOME)
+    if not any(HOME_ENV.search(command) for command in _start_commands()):
+        RUN_ENV["KOLLAB_PROJECT_ROOT"] = str(TEST_HOME / "project")
+
+
+def _env_prefix() -> str:
+    return "env " + " ".join(f"{k}={shlex.quote(v)}" for k, v in RUN_ENV.items())
+
+
+def _home_pids() -> list[int]:
+    """Pids whose environment says HOME is this run's throwaway HOME.
+
+    The unique mkdtemp path makes the match proof of ownership: only commands
+    this run started carry it. The pane's shell keeps the real HOME, and so
+    does this runner, so neither matches.
+    """
+    out = subprocess.run(
+        ["/bin/ps", "axeww", "-o", "pid=,command="],
+        text=True,
+        capture_output=True,
+        check=False,
+    ).stdout
+    needle = f" HOME={TEST_HOME}"
+    pids = []
+    for line in out.splitlines():
+        pid_text, _, rest = line.strip().partition(" ")
+        at = rest.find(needle)
+        while at != -1:
+            end = at + len(needle)
+            if end == len(rest) or rest[end].isspace():
+                pids.append(int(pid_text))
+                break
+            at = rest.find(needle, end)
+    return [pid for pid in pids if pid != os.getpid()]
+
+
+def _stop_home_processes() -> None:
+    """Stop what the spec left running (daemons outlive the tmux pane)."""
+    if not _home_pids():
+        return
+    python = REPO_ROOT / ".venv" / "bin" / "python"
+    if python.exists():
+        # graceful first: the hub stop only sees presence records in this HOME
+        try:
+            subprocess.run(
+                [str(python), str(REPO_ROOT / "main.py"), "--hub", "stop", "all"],
+                cwd=str(REPO_ROOT),
+                env={**os.environ, **RUN_ENV},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass
+    for sig, grace in ((signal.SIGTERM, 6.0), (signal.SIGKILL, 2.0)):
+        pids = _home_pids()
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + grace
+        while _home_pids() and time.time() < deadline:
+            time.sleep(0.2)
+    if pids := _home_pids():
+        print(f"[WARN] still running under the throwaway HOME: {pids}")
+
+
+def _remove_home() -> None:
+    if TEST_HOME is None:
+        return
+    _stop_home_processes()
+    # A daemon killed hard leaves its socket file behind. Its presence record
+    # names it; drop that file and the (now empty) project directory.
+    for record in TEST_HOME.glob(".kollab/**/presence/*.json"):
+        try:
+            sock = json.loads(record.read_text(encoding="utf-8")).get("socket_path")
+            if isinstance(sock, str) and sock.startswith(SOCKET_DIR_ROOT):
+                Path(sock).unlink(missing_ok=True)
+                Path(sock).parent.rmdir()
+        except (OSError, ValueError):
+            pass
+    shutil.rmtree(TEST_HOME, ignore_errors=True)
+
 
 def _tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", "-L", SOCKET_NAME, *args]
@@ -95,15 +235,18 @@ def _shell(command: str) -> subprocess.CompletedProcess[str]:
         check=False,
         # same reason as _start_app: a shell step that loads profiles must not
         # pop a Keychain dialog
-        env={**os.environ, "KOLLAB_NO_KEYRING": "1"},
+        env={**os.environ, **RUN_ENV},
     )
 
 
 def _cleanup() -> None:
     if KEEP_SESSION:
         print(f"[INFO] keeping tmux socket/session: {SOCKET_NAME}/{SESSION_NAME}")
+        if TEST_HOME:
+            print(f"[INFO] keeping throwaway HOME: {TEST_HOME}")
         return
     _tmux("kill-server", check=False)
+    _remove_home()
 
 
 def _handle_signal(signum: int, _frame: Any) -> None:
@@ -126,6 +269,11 @@ def _print_header() -> None:
     print(f"spec:    {SPEC_PATH}")
     print(f"socket:  {SOCKET_NAME}")
     print(f"session: {SESSION_NAME}")
+    if REAL_HOME:
+        print(f"[WARN] real_home: this spec runs against the real HOME ({Path.home()})")
+        print("[WARN] it can join live agents and spend paid model calls")
+    else:
+        print(f"home:    {TEST_HOME} (throwaway)")
     print("")
 
 
@@ -191,16 +339,16 @@ def _start_app(step: dict[str, Any]) -> None:
         str(TERM_HEIGHT),
     )
     STARTED = True
-    # Never touch the developer's OS keyring from a test: on macOS every
-    # lookup/store of a missing entry pops a Keychain dialog, and a spec that
-    # boots the app with a config key would prompt on every run.
+    # Never touch the developer's OS keyring or real ~/.kollab from a test: on
+    # macOS every lookup/store of a missing keyring entry pops a Keychain
+    # dialog, and the real HOME holds live agents (see "HOME isolation" above).
     #
     # Prefixed with `env` (an external binary) rather than typed as
     # `export VAR=1` or set via tmux's `-e`: `export` is bash/zsh syntax that a
     # fish/csh default shell would reject -- silently booting the app
     # unguarded -- and tmux's session environment does not reach the initial
     # pane's shell (verified: `show-environment` has it, the pane does not).
-    _send_literal(f"env KOLLAB_NO_KEYRING=1 {command}")
+    _send_literal(f"{_env_prefix()} {command}")
     _send_special("Enter")
     time.sleep(float(step.get("sleep", APP_INIT_SLEEP)))
 
@@ -409,6 +557,7 @@ def _run_steps(label: str, steps: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
+    _setup_home()
     _print_header()
     try:
         _run_steps("setup", SPEC.get("setup") or [])
