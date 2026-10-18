@@ -67,8 +67,8 @@ export function FormPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-6">
-        <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 sm:px-6">
+        <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3">
           <div className="relative">
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
             <Input
