@@ -13950,18 +13950,26 @@ class HubPlugin(BasePlugin):
         if not team:
             return f"team '{org_name}' not found. try /hub orgs"
 
-        count, _ = OrgLauncher(project).launch_org(org_name, mission)
+        # Waits for each member to come online: off the event loop, or the hub and the UI freeze.
+        launch = await asyncio.to_thread(OrgLauncher(project).launch_org, org_name, mission)
 
-        lines = [f"launched team '{org_name}': {count} agents"]
-        depth: Dict[str, int] = {}
+        lines = [f"launched team '{org_name}': {len(launch.started)} agents"]
+        reports: Dict[str, list] = {}
         for member in team_launch_order(team):
-            name = member.persona.name
-            depth[name] = depth.get(member.reports_to or "", -1) + 1
-            lines.append(f"{'  ' * depth[name]}{name}: {member.role}")
+            reports.setdefault(member.reports_to or "", []).append(member)
+
+        def add_reports(boss: str, indent: int) -> None:
+            for member in reports.get(boss, []):
+                name = member.persona.name
+                lines.append(f"{'  ' * indent}{name}: {member.role}")
+                add_reports(name, indent + 1)
+
+        add_reports("", 0)
 
         if mission:
             lines.append(f"\nmission: {mission}")
 
+        lines.extend(launch.notes(team, mission))
         return "\n".join(lines)
 
     def _format_orgs(self) -> str:

@@ -1902,13 +1902,18 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
         from plugins.hub.org_launcher import OrgLauncher, load_organization
 
-        if not load_organization(org_name):
+        team = load_organization(org_name)
+        if not team:
             print(f"team '{org_name}' not found")
             sys.exit(1)
 
-        launcher = OrgLauncher()
-        count, identities = launcher.launch_org(org_name, mission=mission)
-        print(f"launched {count} agent(s): {', '.join(identities)}")
+        launch = OrgLauncher().launch_org(org_name, mission=mission)
+        names = f": {', '.join(launch.started)}" if launch.started else ""
+        print(f"launched {len(launch.started)} agent(s){names}")
+        for line in launch.notes(team, mission):
+            print(line)
+        if launch.failed:
+            sys.exit(1)
 
     elif subcmd in ("help", "-h", "--help"):
         _print_hub_help()
