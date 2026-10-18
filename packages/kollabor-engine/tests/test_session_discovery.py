@@ -38,6 +38,28 @@ def test_discover_sessions_lists_every_live_agent_with_a_socket(tmp_path, monkey
     assert found[0]["source"] == "hub_presence"
 
 
+def test_discover_sessions_carries_what_the_agent_publishes(tmp_path, monkeypatch):
+    # The row reads the same before the engine opens the agent as after:
+    # EngineSession.to_dict answers profile and model, so presence must too.
+    socket = tmp_path / "agent.sock"
+    socket.touch()
+    bridge = HubBridge()
+    monkeypatch.setattr(
+        bridge,
+        "get_agents",
+        lambda use_cache=False: [
+            {"agent_id": "a1", "identity": "koordinator", "socket_path": str(socket),
+             "profile_name": "anthropic", "tags": {"model": "claude-opus-5-5"}},
+            {"agent_id": "a2", "identity": "lapis", "socket_path": str(socket)},
+        ],
+    )
+
+    found = bridge.discover_sessions(use_cache=False)
+
+    assert (found[0]["profile"], found[0]["model"]) == ("anthropic", "claude-opus-5-5")
+    assert (found[1]["profile"], found[1]["model"]) == ("", "")
+
+
 def test_discover_sessions_uses_friendly_name_for_opaque_identity(tmp_path, monkeypatch):
     socket = tmp_path / "agent.sock"
     socket.touch()
@@ -81,6 +103,6 @@ async def test_list_sessions_merges_discovered_without_duplicates(monkeypatch):
         result = await sessions_route.list_sessions()
         assert [item["session_id"] for item in result["sessions"]] == ["local", "remote"]
         assert result["active_count"] == 2
-        assert result["discovered"] == [{"session_id": "remote", "discovered": True}]
+        assert result["discovered"] == [{"session_id": "remote", "discovered": True, "instance": "remote"}]
     finally:
         registry.pop("local", None)

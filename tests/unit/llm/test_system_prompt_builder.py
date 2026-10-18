@@ -95,6 +95,22 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(conversation_history[0].content, "new prompt")
 
+    def test_rebuild_keeps_the_initialization_mark(self):
+        """The web UI keeps the prompt out of the chat by this mark."""
+        conversation_history = [
+            ConversationMessage(
+                role="system",
+                content="old prompt",
+                metadata={"system_initialization": True},
+            )
+        ]
+
+        with patch.object(self.builder, "build", return_value="new prompt"):
+            self.builder.rebuild(conversation_history)
+
+        self.assertEqual(conversation_history[0].content, "new prompt")
+        self.assertTrue(conversation_history[0].metadata["system_initialization"])
+
     def test_rebuild_no_system_message(self):
         """Test rebuild fails when no system message found."""
         conversation_history = []

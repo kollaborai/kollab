@@ -481,8 +481,12 @@ class SystemPromptBuilder:
             if conversation_history:
                 first_msg = conversation_history[0]
                 if first_msg.role == "system":
+                    # Keep the metadata: its system_initialization mark is what
+                    # hides the prompt from the web UI's chat.
                     conversation_history[0] = ConversationMessage(
-                        role="system", content=new_prompt
+                        role="system",
+                        content=new_prompt,
+                        metadata=dict(first_msg.metadata or {}),
                     )
                     logger.info(
                         f"System prompt rebuild #{self._rebuild_count} complete "

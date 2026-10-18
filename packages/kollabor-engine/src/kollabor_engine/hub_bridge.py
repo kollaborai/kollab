@@ -181,10 +181,15 @@ class HubBridge:
             # The conversation its terminal shows ("session: nexus-drift"); the
             # web UI drops the log's timestamp prefix.
             log_name = Path(str(agent.get("session_log") or "")).stem
+            tags = agent.get("tags") or {}
             sessions.append({
-                "harness": (agent.get("tags") or {}).get("harness", ""),
-                "provider": (agent.get("tags") or {}).get("provider", ""),
-                "acp_waiting": bool((agent.get("tags") or {}).get("acp_waiting", False)),
+                "harness": tags.get("harness", ""),
+                "provider": tags.get("provider", ""),
+                # What the agent publishes, so a row reads the same before the
+                # engine opens it as after (EngineSession.to_dict).
+                "profile": str(agent.get("profile_name") or ""),
+                "model": str(tags.get("model") or ""),
+                "acp_waiting": bool(tags.get("acp_waiting", False)),
                 "session_id": str(agent.get("agent_id") or identity),
                 "name": log_name or session_display_name(identity),
                 "identity": identity,

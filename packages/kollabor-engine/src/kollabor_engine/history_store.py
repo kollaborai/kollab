@@ -17,6 +17,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.conversation_manager import is_system_initialization_record
+
 logger = logging.getLogger(__name__)
 
 # Guards against pathological one-line files (a truncated tail on a busy
@@ -69,6 +71,11 @@ def _wire_message(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     message["timestamp"] = str(raw.get("timestamp", inner.get("timestamp", "")) or "")
     metadata = inner.get("metadata")
     message["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+    # The logger stores the system prompt as a user record. The daemon marks
+    # the same message system_initialization, which the web UI keeps out of the
+    # chat; the disk seed must carry the mark or the prompt shows as a turn.
+    if is_system_initialization_record(raw):
+        message["metadata"]["system_initialization"] = True
     message["thinking"] = inner.get("thinking")
     return message
 

@@ -25,13 +25,13 @@ from typing import Any, Dict, List, Optional, cast
 
 
 def _presence_tags(tags: Any) -> Dict[str, Any]:
-    """Only public harness and wait state belong in peer presence records."""
+    """Only public harness, model and wait state belong in peer presence records."""
     if not isinstance(tags, dict):
         return {}
     return {
         key: value
         for key, value in tags.items()
-        if (key in {"harness", "provider"} and isinstance(value, str))
+        if (key in {"harness", "provider", "model"} and isinstance(value, str))
         or (key in {"acp_waiting", "acp_ask_waiting"} and type(value) is bool)
     }
 
