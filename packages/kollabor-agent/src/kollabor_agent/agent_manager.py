@@ -557,7 +557,7 @@ class Agent:
         profile: Optional preferred LLM profile
         description: Human-readable description
         default_skills: Skills to auto-load when agent is activated
-        source: 'local' or 'global' - where the agent was loaded from
+        source: 'local', 'global' or 'bundled' - where the agent was loaded from
         overrides_global: True if local agent overrides a global agent with same name
         identity: Hub identity (defaults to agent name when empty)
         capabilities: Capability tags for hub discovery
@@ -597,7 +597,7 @@ class Agent:
 
         Args:
             agent_dir: Path to agent directory
-            source: 'local' or 'global' - where the agent was loaded from
+            source: 'local', 'global' or 'bundled' - where the agent was loaded from
             overrides_global: True if local agent overrides a global agent
             skill_library: Centralized skill library for resolving skill assignments
 
@@ -976,9 +976,14 @@ class AgentManager:
         ]
 
     def find_agent_dir(self, name: str) -> Optional[Tuple[Path, str]]:
-        """Where ``name`` resolves, as ``(directory, tier)``: local, then global, then bundled."""
+        """Where ``name`` resolves, as ``(directory, tier)``: local, then global, then bundled.
+
+        A folder is the agent only with its ``system_prompt.md``: an ``agent.json``
+        left alone in a higher tier (a default-skill toggle writes one) must not
+        hide the whole agent the lower tiers still have.
+        """
         for tier, agents_dir in reversed(self.agent_tiers()):
-            if agents_dir and (agents_dir / name).is_dir():
+            if agents_dir and (agents_dir / name / "system_prompt.md").is_file():
                 return agents_dir / name, tier
         return None
 
@@ -1480,30 +1485,18 @@ class AgentManager:
         if agent_name in self._agents:
             active_skills = self._agents[agent_name].active_skills.copy()
 
-        # Reload from disk (local overrides global)
-        local_path = (
-            self.local_agents_dir / agent_name if self.local_agents_dir else None
-        )
-        global_path = (
-            self.global_agents_dir / agent_name if self.global_agents_dir else None
-        )
-
-        if local_path and local_path.exists():
-            # Check if this overrides a global agent
-            overrides = global_path and global_path.exists()
+        # Reload from disk, from the tier the agent resolves to
+        found = self.find_agent_dir(agent_name)
+        if found:
+            agent_dir, source = found
             agent = Agent.from_directory(
-                local_path,
-                source="local",
-                overrides_global=bool(overrides),
-                skill_library=self.skill_library,
-            )
-            if agent:
-                self._agents[agent_name] = AgentRuntime.from_agent(agent)
-        elif global_path and global_path.exists():
-            agent = Agent.from_directory(
-                global_path,
-                source="global",
-                overrides_global=False,
+                agent_dir,
+                source=source,
+                overrides_global=bool(
+                    source == "local"
+                    and self.global_agents_dir
+                    and (self.global_agents_dir / agent_name).exists()
+                ),
                 skill_library=self.skill_library,
             )
             if agent:

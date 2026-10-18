@@ -248,7 +248,7 @@ kollab -a my-agent --skill debugging
 
 The `AgentManager` (`packages/kollabor-agent/src/kollabor_agent/agent_manager.py`) handles:
 
-- Agent discovery from local and global directories
+- Agent discovery from the local, global and bundled directories (`find_agent_dir` is the one resolver)
 - Skill loading and prompt assembly
 - Metadata caching (24-hour TTL)
 - Profile resolution
