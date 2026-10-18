@@ -475,6 +475,36 @@ def persona_context(persona: Persona) -> List[str]:
     return [head, *([persona.prompt] if persona.prompt else [])]
 
 
+async def attach_persona_skills(persona: Persona, agent_manager: Any, state_service: Any) -> List[str]:
+    """Attach the persona's ``skills`` to the running agent; return a line for each that would not.
+
+    The one place a persona's skills are applied. Every launch (``--as``, ``POST /sessions``,
+    a team launch, ``hub_spawn``) ends in a ``kollab --as <persona>`` process, and the hub calls
+    this once the agent's bundle is settled. A skill the bundle declares activates as is; any
+    other comes from the skill library, as the /skills picker does. A skill already active (a
+    ``--skill`` flag) is left alone. Never raises: a skill that will not attach must not stop
+    an agent from starting.
+    """
+    agent = agent_manager.get_active_agent() if agent_manager else None
+    if agent is None or state_service is None:
+        return [f"{name}: no agent to attach it to" for name in persona.skills]
+    problems = []
+    for name in persona.skills:
+        if name in (agent.active_skills or []):
+            continue
+        library = getattr(agent_manager, "skill_library", None)
+        skill = agent.get_skill(name) or (library.get_skill(name) if library else None)
+        if skill is None:
+            problems.append(f"{name}: not in the skill library")
+            continue
+        agent.skills.setdefault(name, skill)
+        try:
+            await state_service.activate_skill(name)
+        except Exception as exc:  # activate_skill raises ValueError; a broken inject must not stop startup either
+            problems.append(f"{name}: {exc}")
+    return problems
+
+
 def team_launch_order(team: Team) -> List[Member]:
     """Lead first, then each member after the one they report to (listing order within a level)."""
     by_name = {m.persona.name: m for m in team.members}

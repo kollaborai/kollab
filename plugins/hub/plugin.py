@@ -66,6 +66,7 @@ from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive
 from .rosters import (
+    attach_persona_skills,
     find_persona,
     persona_color,
     persona_context,
@@ -4959,6 +4960,19 @@ class HubPlugin(BasePlugin):
                     await self._reconcile_agent_bundle(desired_bundle)
                     self._presence.publish()
 
+            # --- Attach the persona's skills ---
+            # Whatever bundle ended up running (reconciled or pinned with
+            # --agent), the persona's own skills go on top of it. An ACP
+            # harness runs its own tools, so bundle skills are not for it.
+            persona_skill_problems: List[str] = []
+            persona = find_persona(self._persona_ref or self._identity.identity)
+            if persona and persona.skills and self.event_bus:
+                provider = self._agent_profile_provider(self.event_bus.get_service("llm_service"))
+                if provider != "acp":
+                    persona_skill_problems = await attach_persona_skills(
+                        persona, agent_mgr, self.event_bus.get_service("state_service")
+                    )
+
             # Update coordinator state now that identity is populated
             # (try_become_coordinator runs before identity assignment)
             if self._identity.is_coordinator and self._election:
@@ -5461,6 +5475,16 @@ class HubPlugin(BasePlugin):
                 renderer.message_coordinator._display_tap = self._display_tap
 
             self._display_startup_status(renderer, role, existing)
+            if persona_skill_problems and renderer and hasattr(renderer, "message_coordinator"):
+                renderer.message_coordinator.display_message_sequence(
+                    [
+                        (
+                            "system",
+                            f"skills not attached for {persona.name}: " + "; ".join(persona_skill_problems),
+                            {"display_type": "warning"},
+                        )
+                    ]
+                )
 
             # Forward own arrival to bridge
             await self._bridge_forward(f"[hub] {self._identity.identity} came online")
@@ -11747,7 +11771,6 @@ class HubPlugin(BasePlugin):
         if harness:
             resolved_identity = requested_identity or agent_name
             effective_agent_type = ""
-            effective_skills = []
         elif pool_match:
             # MODE 1 or 3: spawning by identity
             resolved_identity = pool_match.name
@@ -11755,13 +11778,11 @@ class HubPlugin(BasePlugin):
             effective_agent_type = (
                 agent_type_override or pool_match.agent or "coder"
             )
-            effective_skills = list(pool_match.skills or [])
         else:
             # MODE 2: spawning by agent_type (e.g. "coder")
             # Find next available gem from pool with matching agent_type
             effective_agent_type = agent_name
             resolved_identity = ""
-            effective_skills = []
 
             if requested_identity:
                 requested_pool = find_persona(requested_identity)
@@ -11774,7 +11795,6 @@ class HubPlugin(BasePlugin):
                         or requested_pool.agent
                         or effective_agent_type
                     )
-                    effective_skills = list(requested_pool.skills or [])
 
             # Get online identities to exclude
             online_identities = set()
@@ -11790,7 +11810,6 @@ class HubPlugin(BasePlugin):
                         and gem.name not in online_identities
                     ):
                         resolved_identity = gem.name
-                        effective_skills = list(gem.skills or [])
                         break
 
             # If the requested name is a real agent bundle but the pool does
@@ -11806,7 +11825,6 @@ class HubPlugin(BasePlugin):
                     for gem in roster_personas():
                         if gem.name not in online_identities:
                             resolved_identity = gem.name
-                            effective_skills = list(gem.skills or [])
                             break
                     if not resolved_identity:
                         return (
@@ -11929,7 +11947,6 @@ class HubPlugin(BasePlugin):
             files=[],
             wait=False,
             agent_type=effective_agent_type,
-            skills=effective_skills,
             identity=resolved_identity,
             profile=resolved_profile,
             **({"harness": True} if harness else {}),
@@ -11941,8 +11958,6 @@ class HubPlugin(BasePlugin):
         description = f"harness: {resolved_profile}" if harness else f"agent type: {effective_agent_type}"
         msg = f"Created agent '{resolved_identity}' ({description})"
         msg += f"\nTask: {task}"
-        if effective_skills:
-            msg += f"\nSkills: {', '.join(effective_skills)}"
 
         # Coordinator signs attestation for spawned agent (pre-approves it)
         if (

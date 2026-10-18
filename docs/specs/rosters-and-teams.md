@@ -23,7 +23,7 @@ and `routes/teams.py` (API). Bundled data: `bundles/rosters/`, `bundles/teams/`.
 | `role` | string | job title; shown, and told to the agent |
 | `personality` | string | one-line description (shown in lists; not added to the prompt) |
 | `prompt` | string | added to the agent's hub context when it runs under this name |
-| `skills` | list of strings | skills attached on top of the bundle (applied by `hub_spawn`) |
+| `skills` | list of strings | skills attached on top of the bundle when the agent starts |
 | `profile` | string | LLM profile it prefers; used when the launch request names none |
 | `caste`, `role_aliases` | string, list | optional; the gems use them |
 
@@ -111,7 +111,13 @@ base persona. Every folder has its own hub, so a name only has to be free in its
 - `role`, `display_name` and `prompt` are added to the hub context (the first system
   message), next to "you are <name> on the kollabor hub". A persona with neither role
   nor prompt (the gems) adds nothing.
-- `skills` attach on `hub_spawn` (existing behavior), not on `--as` or a web launch.
+- `skills` attach once the bundle is settled, whichever way the agent was launched:
+  `--as`, `POST /sessions`, a team launch and `hub_spawn` all end in a `kollab --as`
+  process, and the hub applies them there (`attach_persona_skills`). A skill the bundle
+  declares activates as is; any other comes from the skill library (bundled, `~/.kollab/skills`,
+  `.kollab/skills`), as the `/skills` picker does. One that is in neither is named in a
+  warning line in the agent's window and the rest still attach. A skill already loaded by
+  `--skill` is left alone, and an ACP harness agent gets none.
 
 **Launch brief.** A launcher can give an agent extra instructions in the
 `KOLLAB_LAUNCH_BRIEF` environment variable (a team seat's instructions and its
@@ -188,5 +194,4 @@ its brief). Help text says "team".
 
 - The web UI: persona picker with avatars, a Library view of rosters and teams,
   Launch Team into a folder (plan: `HANDOFF.md` of the roster lane).
-- `skills` on `--as` and web launches; a `GET /rosters` entry for personas that
-  exist only inside a team.
+- A `GET /rosters` entry for personas that exist only inside a team.
