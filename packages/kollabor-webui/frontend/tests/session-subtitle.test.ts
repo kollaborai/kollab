@@ -4,7 +4,7 @@ import test from "node:test";
 import { sessionFolder, sessionSubtitle } from "../src/utils/session-subtitle.ts";
 
 test("an engine-started and a terminal-started agent read the same", () => {
-  const started = { model: "claude-opus-5-5", profile: "anthropic", workspace: "/home/user/dev/kollab" };
+  const started = { model: "claude-opus-5-5", workspace: "/home/user/dev/kollab" };
   const adopted = { ...started, external: true } as typeof started;
   assert.equal(sessionSubtitle(started), "claude-opus-5-5 · kollab");
   assert.equal(sessionSubtitle(adopted), sessionSubtitle(started));
@@ -16,8 +16,9 @@ test("same-name agents in two folders tell apart by folder", () => {
   assert.notEqual(a, b);
 });
 
-test("the profile stands in until the model is known", () => {
-  assert.equal(sessionSubtitle({ profile: "anthropic", workspace: "/w/app" }), "anthropic · app");
+test("an unknown model leaves the folder alone, in the same format", () => {
+  assert.equal(sessionSubtitle({ workspace: "/w/app" }), "app");
+  assert.equal(sessionSubtitle({ model: "", workspace: "/w/app" }), "app");
 });
 
 test("off hub leads, and an agent with nothing known still reads", () => {
