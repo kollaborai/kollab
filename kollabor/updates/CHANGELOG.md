@@ -5,7 +5,7 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.6] - 2026-10-18
 
 ### Added
 - Rosters and teams: an agent's name is no longer tied to gems. A roster is a set of personas (a name, a picture, an agent bundle, a role, a prompt, skills) and a team puts personas in a reporting chain; both are plain JSON in `bundles/`, `~/.kollab/` or a project's `.kollab/`. `kollab --as maya` starts a persona from any roster (`roster/name` when two share a name), `plugins.hub.roster` (the Roster dropdown in `/config`) picks the roster a folder draws its names from, and `kollab --hub org marketing` or `/hub org marketing` launches a team. A persona's skills attach on every launch path, and the engine serves it all at `GET /rosters`, `GET /teams` and `POST /teams/<name>/launch`. See `docs/features/rosters-and-teams.md`.
