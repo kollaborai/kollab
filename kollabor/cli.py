@@ -2188,18 +2188,19 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
 
-    # The app's bundled runtime runs isolated (-I); its children must not pick up
-    # a pip --user kollab from ~/.local, which would shadow the bundled copy.
-    child_env = dict(os.environ)
+    # Kollab.app's runtime runs isolated (-I -B, see scripts/desktop_release.py);
+    # its children run the same way, or a pip --user kollab in ~/.local or a
+    # kollabor/ in the cwd shadows the bundled copy. Flags, not env, so nothing
+    # leaks into the agents' shells. -I ignores PYTHONUNBUFFERED, hence -u.
+    py = [sys.executable]
     if sys.flags.isolated:
-        child_env["PYTHONNOUSERSITE"] = "1"
+        py += ["-I", "-B", *(["-u"] if os.environ.get("PYTHONUNBUFFERED") else [])]
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
         engine_proc = subprocess.Popen(
-            [sys.executable, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
-            env=child_env,
+            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
         )
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
@@ -2212,11 +2213,11 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             _terminate_child(engine_proc)
             sys.exit(1)
 
-    env = child_env
+    env = dict(os.environ)
     env["KOLLAB_ENGINE_URL"] = engine_url
     env["KOLLAB_WEBUI_PORT"] = str(webui_port)
     webui_proc = subprocess.Popen(
-        [sys.executable, "-c", "from kollabor_webui import main; main()"], env=env
+        [*py, "-c", "from kollabor_webui import main; main()"], env=env
     )
 
     import signal as signal_module
