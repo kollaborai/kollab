@@ -58,6 +58,7 @@ import {
   formatApprovalMode,
   normalizeApprovalMode,
 } from "@/utils/approval-mode";
+import { bundleName } from "@/components/panels/panel-model";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import {
   Select,
@@ -736,7 +737,7 @@ export function SessionToolbar({
                             <span className="text-muted-foreground text-xs">Online</span>
                           </span>
                           <span className="text-muted-foreground block truncate text-xs">
-                            {agent.agent_name || agent.profile_name || "agent"}
+                            {agent.agent_name ? bundleName(agent.agent_name) : agent.profile_name || "agent"}
                           </span>
                         </span>
                       </div>
