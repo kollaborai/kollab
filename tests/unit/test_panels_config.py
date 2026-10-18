@@ -160,6 +160,25 @@ def test_save_writes_each_key_notifies_and_returns_the_fresh_panel(home):
     assert str(home / ".kollab" / "config.json") in out["message"]
 
 
+def test_hub_arrival_wake_is_a_dropdown_that_saves_to_the_folder(home):
+    config = FakeConfig({"plugins": {"hub": {"arrival_wake": "none"}}})
+
+    field = fields_of(describe(config))["plugins.hub.arrival_wake"]
+    assert (field["type"], field["label"], field["value"]) == (
+        "dropdown",
+        "Wake on Agent Arrival",
+        "none",
+    )
+    assert field["options"] == ["all", "koordinator", "none"] and field["editable"]
+
+    refused = save(config, {"plugins.hub.arrival_wake": "sometimes"}, "local")
+    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
+
+    saved = save(config, {"plugins.hub.arrival_wake": "koordinator"}, "local")
+    assert saved["ok"]
+    assert config.saved == [("plugins.hub.arrival_wake", "koordinator", "local")]
+
+
 def test_save_refuses_labels_loadout_rows_and_unknown_paths(home):
     config = FakeConfig({"kollabor": {"llm": {"active_profile": "mine"}}})
 

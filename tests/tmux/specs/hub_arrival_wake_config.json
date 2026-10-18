@@ -1,0 +1,113 @@
+{
+  "name": "hub-arrival-wake-config",
+  "description": "Who wakes when an agent comes online is set in /config, per folder. The global file says koordinator and the folder has no file of its own, so /config shows koordinator; changing it to none and saving Local writes <folder>/.kollab/config.json only (the global file keeps its value) and takes effect for that folder's agents: a peer joining wakes nobody. The same HOME's other folder keeps the global value: its coordinator (lapis, the first agent there, so the only one holding the role) wakes for an arrival and its other peer stays asleep. The daemon plus this window, detached peers, a throwaway HOME and a fake model whose replies start with pong:, no keyring (lib/hub_arrival_probe.sh).",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "term_width": 140,
+    "term_height": 40
+  },
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop the agents and the fake model",
+      "command": "sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" stop; true"
+    }
+  ],
+  "steps": [
+    {
+      "action": "section",
+      "title": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME: global arrival_wake koordinator, no file in the folder, a fake model",
+      "command": "sh tests/tmux/lib/hub_arrival_probe.sh setup - koordinator",
+      "assert_contains": "throwaway HOME"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "title": "/config shows the inherited value; none + Local save sets this folder"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/arrival"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: koordinator",
+      "timeout": 15,
+      "description": "the folder has no file, so the global value shows"
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: none",
+      "timeout": 15
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Save to: \\(L\\)ocal",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "l"
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own file holds none; the global file and the other folder are untouched",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; sleep 1; w=$(p set ws); g=$(p set global); o=$(p set ws2); if [ \"$w\" = 'ws: \"arrival_wake\":\"none\"' ] && [ \"$g\" = 'global: \"arrival_wake\":\"koordinator\"' ] && [ \"$o\" = 'ws2: no arrival_wake' ]; then echo 'saved to this folder only'; else echo \"wrong: $w | $g | $o\"; exit 1; fi",
+      "assert_contains": "saved to this folder only"
+    },
+    {
+      "action": "section",
+      "title": "it takes effect for this folder's agents"
+    },
+    {
+      "action": "shell",
+      "description": "lapis joins this folder; its koordinator does not wake",
+      "command": "p() { sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; sleep 3; p join lapis; sleep 10; n=$(p pongs koordinator); if [ \"$n\" = 0 ]; then echo 'this folder: nobody woke'; else echo \"wrong: koordinator answered $n time(s)\"; exit 1; fi",
+      "assert_contains": "this folder: nobody woke"
+    },
+    {
+      "action": "section",
+      "title": "the other folder keeps the global value"
+    },
+    {
+      "action": "shell",
+      "description": "lapis starts the other folder (so it is that folder's coordinator, nobody is named koordinator), sapphire and peridot join: lapis wakes, sapphire stays asleep",
+      "command": "q() { FOLDER=ws2 sh tests/tmux/lib/hub_arrival_probe.sh \"$(cat \"${TMPDIR:-/tmp}/kollab-spec-arrival-wake.path\")\" \"$@\"; }; q join lapis; q join sapphire; q join peridot; for _ in $(seq 1 20); do [ \"$(q pongs lapis)\" -ge 1 ] && break; sleep 1; done; sleep 5; l=$(q pongs lapis); s=$(q pongs sapphire); if [ \"$l\" -ge 1 ] && [ \"$s\" = 0 ]; then echo 'other folder: only its coordinator woke'; else echo \"wrong: lapis $l, sapphire $s\"; exit 1; fi",
+      "assert_contains": "other folder: only its coordinator woke"
+    }
+  ]
+}
