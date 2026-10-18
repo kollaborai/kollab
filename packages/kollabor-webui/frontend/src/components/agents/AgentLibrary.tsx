@@ -95,7 +95,7 @@ function PersonaRow({
         <dl className="bg-muted/40 mx-2 mt-1 mb-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg p-3 text-xs">
           <dt className="text-muted-foreground">Name</dt>
           <dd className="break-words">{persona.name}</dd>
-          <dt className="text-muted-foreground">Agent</dt>
+          <dt className="text-muted-foreground">Bundle</dt>
           <dd>{bundle}</dd>
           <dt className="text-muted-foreground">Model Profile</dt>
           <dd>{seat?.profile || persona.profile || "Default"}</dd>
