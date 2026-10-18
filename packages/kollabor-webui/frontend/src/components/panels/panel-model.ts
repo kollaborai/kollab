@@ -103,6 +103,11 @@ export function titleCase(id: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/** An agent bundle's name for people ("creative-writer" reads "Creative Writer"); none is the default one. The API keeps the id. */
+export function bundleName(bundle?: string | null): string {
+  return titleCase(bundle || "default");
+}
+
 /** Summary rows as label/value pairs, whichever of the usual shapes arrives. */
 export function summaryRows(
   summary: unknown,

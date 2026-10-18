@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { agentName, sessionHeading } from "@/utils/session-display";
-import { titleCase } from "./panel-model";
+import { bundleName, titleCase } from "./panel-model";
 
 /**
  * The Session tab: profile / model / effort overrides for this daemon only.
@@ -124,7 +124,7 @@ export function SessionSettings({
             {session.identity ? agentName(session.identity, displayName) : "Unassigned"}
           </span>
           <span className="text-muted-foreground">Type</span>
-          <span className="break-words">{session.agent || "default"}</span>
+          <span className="break-words">{bundleName(session.agent)}</span>
           <span className="text-muted-foreground">Workspace</span>
           <span className="break-all">{workspace}</span>
         </div>

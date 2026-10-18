@@ -13,7 +13,7 @@ import {
 } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { launchLines, teamRows } from "@/components/agents/team-model";
-import { titleCase } from "@/components/panels/panel-model";
+import { bundleName, titleCase } from "@/components/panels/panel-model";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -59,7 +59,7 @@ function PersonaRow({
   // A role that only repeats the name (an inline team seat) adds nothing under it.
   const named = seat?.role || persona.role;
   const role = named === persona.display_name ? "" : named;
-  const bundle = seat?.agent || persona.agent || "default";
+  const bundle = bundleName(seat?.agent || persona.agent);
   const prompt = persona.prompt.trim();
   return (
     <li style={indent ? { paddingLeft: `${indent * 1.5}rem` } : undefined}>

@@ -5,7 +5,7 @@ import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
 import type { Activity } from "@/components/gems/gem-face";
-import { titleCase } from "@/components/panels/panel-model";
+import { bundleName, titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
 import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -369,7 +369,7 @@ export function AppSidebar({
                 </Label>
                 <Select value={selectedBundle || "default"} onValueChange={onBundleChange}>
                   <SelectTrigger id="new-session-agent" size="sm" className="w-full">
-                    <SelectValue placeholder="default" />
+                    <SelectValue placeholder={bundleName()} />
                   </SelectTrigger>
                   <SelectContent>
                     {bundleOptions.map((bundle) => (
@@ -377,7 +377,7 @@ export function AppSidebar({
                         {/* No profile suffix: a web session always sends the Model
                             field's profile, so the bundle's preferred one never
                             applies ("coder · default" also read as two agents). */}
-                        {bundle.name}
+                        {bundleName(bundle.name)}
                       </SelectItem>
                     ))}
                   </SelectContent>
