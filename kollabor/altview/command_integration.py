@@ -158,22 +158,14 @@ class AltViewCommandIntegrator:
             # Re-executing the same file creates a distinct class object and makes
             # isinstance checks fail when a slash command opens the view.
             module = sys.modules.get(module_name)
-            if module is not None:
-                for attr_name in dir(module):
-                    attr = getattr(module, attr_name)
-                    if (
-                        isinstance(attr, type)
-                        and issubclass(attr, AltView)
-                        and attr is not AltView
-                    ):
-                        return attr
-            spec = importlib.util.spec_from_file_location(module_name, plugin_file)
-            if not spec or not spec.loader:
-                return None
+            if module is None:
+                spec = importlib.util.spec_from_file_location(module_name, plugin_file)
+                if not spec or not spec.loader:
+                    return None
 
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
 
             # Find AltView subclass (skip the base class itself)
             for attr_name in dir(module):
@@ -185,7 +177,9 @@ class AltViewCommandIntegrator:
                 ):
                     return attr
 
-            logger.warning("No AltView subclass found in %s", plugin_file.name)
+            # The directory also holds helper modules (connect_style paints the
+            # Connect screens); one without a view is not a fault.
+            logger.debug("%s defines no AltView subclass", plugin_file.name)
             return None
 
         except Exception as e:

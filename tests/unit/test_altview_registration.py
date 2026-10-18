@@ -86,6 +86,8 @@ def test_discovery_logs_no_error_for_any_altview(caplog, restore_altview_modules
 
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     assert errors == []
+    # connect_style.py is a helper beside the views: skipped, not warned about.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "AltView subclass" in r.getMessage()]
     assert registered >= len(FILES) - 1  # every file with a class registers
     assert "knocks" in integrator.get_registered_plugins()
 
