@@ -561,7 +561,7 @@ def _offline_agents(
     brings back what it knew).
     """
     from ..folders import hub_folder
-    from .agents import ran_in
+    from .agents import persona_in, ran_in
 
     here = os.path.realpath(os.getcwd())
 
@@ -580,11 +580,15 @@ def _offline_agents(
         for s in registry.values()
         if in_here(getattr(s, "workspace", None) or here)
     )
-    return [
-        {"identity": name, "workspace": here, "last_ran": last_ran}
-        for name, last_ran in sorted(ran_in(here).items(), key=lambda item: -item[1])
-        if name not in running
-    ]
+    rows = []
+    for name, last_ran in sorted(ran_in(here).items(), key=lambda item: -item[1]):
+        if name in running:
+            continue
+        # A persona of any roster keeps its name, picture and color offline.
+        known = persona_in(name, here)
+        look = {key: known[key] for key in ("display_name", "avatar", "color", "caste") if known.get(key)}
+        rows.append({"identity": name, "workspace": here, "last_ran": last_ran, **look})
+    return rows
 
 
 @router.get("")

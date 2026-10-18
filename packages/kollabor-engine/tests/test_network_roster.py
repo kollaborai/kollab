@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+from kollabor_engine.routes import agents as agents_routes
 from kollabor_engine.routes import sessions as sessions_route
 
 LAPIS = {"name": "lapis", "device": "prod-box", "handle": "lapis@prod-box", "state": "idle"}
@@ -116,3 +117,26 @@ def test_agents_that_ran_here_and_are_not_running_are_offline(tmp_path, monkeypa
 
     assert [row["identity"] for row in offline] == ["lapis"]
     assert offline[0]["workspace"] == str(tmp_path) and offline[0]["last_ran"]
+
+
+def test_an_offline_persona_keeps_its_look(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    vaults = tmp_path / "hub" / "vaults"
+    for name in ("maya", "koordinator"):
+        (vaults / name).mkdir(parents=True)
+        (vaults / name / "stream.jsonl").write_text("{}\n")
+    maya = {
+        "display_name": "Maya Lindqvist",
+        "avatar": {"kind": "emoji", "value": "\U0001f3af"},
+        "color": [90, 140, 220],
+        "caste": "",
+    }
+    # Which roster a name is in is the roster library's business; here the route's wiring is under test.
+    monkeypatch.setattr(agents_routes, "persona_in", lambda name, folder: maya if name == "maya" else {})
+
+    offline = {row["identity"]: row for row in sessions_route._offline_agents([], {})}
+
+    assert offline["maya"]["display_name"] == "Maya Lindqvist"
+    assert offline["maya"]["avatar"] == {"kind": "emoji", "value": "\U0001f3af"}
+    assert offline["maya"]["color"] == [90, 140, 220] and "caste" not in offline["maya"]
+    assert set(offline["koordinator"]) == {"identity", "workspace", "last_ran"}
