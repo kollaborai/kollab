@@ -97,7 +97,7 @@ Session and message endpoints:
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/sessions` | create a session |
+| `POST` | `/sessions` | create a session; `workspace` is the folder its daemon runs in (default the engine's own), and the answer and every session row report that folder, never null |
 | `GET` | `/sessions` | list sessions |
 | `GET` | `/sessions/{session_id}` | inspect one session |
 | `DELETE` | `/sessions/{session_id}` | shut down and remove a session |
