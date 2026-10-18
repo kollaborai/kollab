@@ -35,6 +35,7 @@ isolated_home_setup() {
     printf '%s' "$config" > "$ISOLATED_HOME/.kollab/config.json"
     touch "$ISOLATED_HOME/.kollab/connect-guide-seen"
     # KOLLAB_WEBUI_HOSTS is the developer's VPN address: a web UI would listen there too
+    # shellcheck disable=SC2034  # read by the scripts that source this file
     ISOLATED_ENV="env -u KOLLAB_WEBUI_HOSTS KOLLAB_NO_KEYRING=1 HOME=$ISOLATED_HOME KOLLAB_PROJECT_ROOT=$ISOLATED_HOME/project"
 }
 

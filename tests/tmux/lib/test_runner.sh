@@ -52,7 +52,9 @@ def _load_spec(path: Path) -> dict[str, Any]:
 # 7433, the web UI on 8080). `{{port}}` in any string of a spec (commands,
 # patterns, shell steps) becomes one free TCP port, the same number everywhere
 # in the run; `{{port:name}}` is another port, per name. The OS hands them out
-# from the ephemeral range, so they never collide with those defaults.
+# from the ephemeral range, so they never collide with those defaults. A port is
+# free when picked, not reserved: another process could take it before the app
+# binds it (rare; rerun the spec).
 PORT_TOKEN = re.compile(r"\{\{port(?::([A-Za-z0-9_-]+))?\}\}")
 PORTS: dict[str, int] = {}
 
