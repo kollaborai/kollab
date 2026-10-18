@@ -108,6 +108,14 @@ export function bundleName(bundle?: string | null): string {
   return titleCase(bundle || "default");
 }
 
+/** What a dropdown option reads as: the label the daemon gave it, else the option itself. */
+export function optionLabel(
+  field: { option_labels?: Record<string, string> | null },
+  option: string,
+): string {
+  return field.option_labels?.[option] ?? option;
+}
+
 /** Summary rows as label/value pairs, whichever of the usual shapes arrives. */
 export function summaryRows(
   summary: unknown,

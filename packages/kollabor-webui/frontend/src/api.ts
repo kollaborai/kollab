@@ -544,6 +544,8 @@ export type PanelField = {
   max_value?: number | null;
   step?: number | null;
   options?: string[] | null;
+  /** Dropdown only: option -> the text to show; the option is still what is saved. */
+  option_labels?: Record<string, string> | null;
   placeholder?: string | null;
   editable: boolean;
   managed_by?: string | null;
