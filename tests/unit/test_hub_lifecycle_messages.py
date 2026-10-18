@@ -43,6 +43,27 @@ def _runtime(identity, agent_id, *, name="coder"):
     return AgentRuntime(name=name, identity=identity, agent_id=agent_id)
 
 
+def test_presence_model_follows_the_live_profile():
+    plugin = HubPlugin()
+    plugin._identity = _runtime("lapis", "lapis-id")
+    profile = SimpleNamespace(
+        name="main", get_provider=lambda: "openai", get_model=lambda: "gpt-a", get_effort=lambda: ""
+    )
+    manager = SimpleNamespace(get_active_profile=lambda: profile)
+    plugin.event_bus = _EventBus({"profile_manager": manager})
+
+    plugin._refresh_presence_model()
+    assert plugin._identity.to_presence_dict()["tags"]["model"] == "gpt-a"
+
+    profile.get_model = lambda: "gpt-b"  # a /model switch, however it happened
+    plugin._refresh_presence_model()
+    assert plugin._identity.to_presence_dict()["tags"]["model"] == "gpt-b"
+
+    manager.get_active_profile = lambda: None  # a lookup that fails keeps the last model
+    plugin._refresh_presence_model()
+    assert plugin._identity.to_presence_dict()["tags"]["model"] == "gpt-b"
+
+
 @pytest.mark.asyncio
 async def test_model_switch_notice_is_delivered_to_each_peer():
     plugin = HubPlugin()
