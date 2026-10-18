@@ -132,7 +132,7 @@ def _sanitize_system_prompt(prompt: Optional[str]) -> Optional[str]:
 
 
 def _resolve_agent(name: str) -> Optional[dict]:
-    """Load agent definition by name from the agents directory.
+    """Load agent definition by name: local, then global, then bundled (AgentManager's order).
 
     Returns a dict with resolved keys:
       system_prompt: str - fully rendered (trender includes resolved)
@@ -143,36 +143,18 @@ def _resolve_agent(name: str) -> Optional[dict]:
     Returns None if the agent is not found.
     """
     try:
-        from kollabor_agent.agent_manager import (
-            Agent,
-            AgentManager,
-            get_global_agents_dir,
-            get_local_agents_dir,
-        )
+        from kollabor_agent.agent_manager import Agent, AgentManager
     except ImportError:
         logger.warning("kollabor_agent not available — cannot resolve agent")
         return None
 
     try:
-        # Search global then local agents dirs (local overrides global)
-        agent_obj = None
-        for agents_dir_fn in [get_global_agents_dir, get_local_agents_dir]:
-            try:
-                agents_dir = agents_dir_fn()
-            except Exception:
-                continue
-            if not agents_dir or not agents_dir.exists():
-                continue
-            agent_dir = agents_dir / name
-            if agent_dir.is_dir():
-                candidate = Agent.from_directory(agent_dir)
-                if candidate:
-                    agent_obj = candidate
-
+        am = AgentManager()
+        found = am.find_agent_dir(name)
+        agent_obj = Agent.from_directory(found[0], source=found[1]) if found else None
         if not agent_obj:
             return None
 
-        am = AgentManager()
         system_prompt = agent_obj.get_full_system_prompt(agent_manager=am)
 
         # Read mcp_servers from agent.json directly (not parsed by Agent.from_directory)

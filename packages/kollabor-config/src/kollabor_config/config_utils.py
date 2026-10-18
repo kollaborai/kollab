@@ -238,6 +238,11 @@ def get_global_agents_dir() -> Path:
     return resolve_global_path("agents")
 
 
+def get_bundled_agents_dir() -> Path | None:
+    """Get the bundled agents (``bundles/agents/<name>/``), if present."""
+    return _get_bundled_dir("agents")
+
+
 # ── Skill library directories ──────────────────────────────────────
 
 

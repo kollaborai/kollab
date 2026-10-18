@@ -34,7 +34,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -48,6 +48,7 @@ from kollabor_ai.prompt_overrides import (
     get_default_store as get_default_override_store,
 )
 from kollabor_config.config_utils import (
+    get_bundled_agents_dir,
     get_config_directory,
     get_global_agents_dir,
     get_local_agents_dir,
@@ -930,10 +931,12 @@ class AgentManager:
     Manages agent discovery, loading, and skill management.
 
     Searches for agents in:
-    1. Local: .kollab/agents/ (project-specific, higher priority)
-    2. Global: ~/.kollab/agents/ (user defaults)
+    1. Local: .kollab/agents/ (project-specific, highest priority)
+    2. Global: ~/.kollab/agents/ (user defaults; app start seeds the bundled agents here)
+    3. Bundled: bundles/agents/ (shipped with the app, so a process nothing has
+       seeded yet, such as the engine on a new machine, still finds them)
 
-    Local agents override global agents with the same name.
+    Local agents override global agents, and global ones bundled ones, with the same name.
     """
 
     def __init__(self, config=None, event_bus=None):
@@ -950,9 +953,8 @@ class AgentManager:
         self._active_agent_name: Optional[str] = None
         self._on_agent_changed = None  # Callback: fn(agent_or_none) called on activate/clear
 
-        # Agent directories (in discovery order, lowest to highest priority)
-        # 1. Global: ~/.kollab/agents/ (user defaults)
-        # 2. Local: .kollab/agents/ (project-specific, where agents are created)
+        # Agent directories (see agent_tiers for the priority order)
+        self.bundled_agents_dir = get_bundled_agents_dir()
         self.global_agents_dir = get_global_agents_dir()
         self.local_agents_dir = get_local_agents_dir()
 
@@ -964,6 +966,21 @@ class AgentManager:
         self._agent_names: List[str] = []  # Just names, not full agent objects
         self._agents_loaded = False
         self._discover_agent_names()
+
+    def agent_tiers(self) -> List[Tuple[str, Optional[Path]]]:
+        """Agent directories by tier, lowest priority first."""
+        return [
+            ("bundled", self.bundled_agents_dir),
+            ("global", self.global_agents_dir),
+            ("local", self.local_agents_dir),
+        ]
+
+    def find_agent_dir(self, name: str) -> Optional[Tuple[Path, str]]:
+        """Where ``name`` resolves, as ``(directory, tier)``: local, then global, then bundled."""
+        for tier, agents_dir in reversed(self.agent_tiers()):
+            if agents_dir and (agents_dir / name).is_dir():
+                return agents_dir / name, tier
+        return None
 
     def _discover_agent_names(self) -> None:
         """Discover agent names only (lazy loading - full data loaded on first access).
@@ -981,29 +998,18 @@ class AgentManager:
             "system",
         }
 
-        # Discover names from global first (lowest priority)
-        if self.global_agents_dir and self.global_agents_dir.exists():
-            for agent_dir in self.global_agents_dir.iterdir():
+        for tier, agents_dir in self.agent_tiers():
+            if not agents_dir or not agents_dir.exists():
+                continue
+            for agent_dir in agents_dir.iterdir():
                 if (
                     agent_dir.is_dir()
                     and agent_dir.name not in skip_dirs
                     and not agent_dir.name.startswith(".")
+                    and agent_dir.name not in self._agent_names
                 ):
-                    if agent_dir.name not in self._agent_names:
-                        self._agent_names.append(agent_dir.name)
-                        logger.debug(f"Discovered global agent name: {agent_dir.name}")
-
-        # Discover names from local (higher priority)
-        if self.local_agents_dir and self.local_agents_dir.exists():
-            for agent_dir in self.local_agents_dir.iterdir():
-                if (
-                    agent_dir.is_dir()
-                    and agent_dir.name not in skip_dirs
-                    and not agent_dir.name.startswith(".")
-                ):
-                    if agent_dir.name not in self._agent_names:
-                        self._agent_names.append(agent_dir.name)
-                        logger.debug(f"Discovered local agent name: {agent_dir.name}")
+                    self._agent_names.append(agent_dir.name)
+                    logger.debug(f"Discovered {tier} agent name: {agent_dir.name}")
 
         logger.info(
             f"Discovered {len(self._agent_names)} agent names (lazy load enabled)"
@@ -1035,28 +1041,15 @@ class AgentManager:
 
         # Check cache validity for each agent
         for agent_name in self._agent_names:
-            # Try local first, then global
-            agent_dir = None
-            source = "unknown"
-            overrides_global = False
-
-            if self.local_agents_dir and (self.local_agents_dir / agent_name).exists():
-                agent_dir = self.local_agents_dir / agent_name
-                source = "local"
-                if (
-                    self.global_agents_dir
-                    and (self.global_agents_dir / agent_name).exists()
-                ):
-                    overrides_global = True
-            elif (
-                self.global_agents_dir
-                and (self.global_agents_dir / agent_name).exists()
-            ):
-                agent_dir = self.global_agents_dir / agent_name
-                source = "global"
-
-            if not agent_dir:
+            found = self.find_agent_dir(agent_name)
+            if not found:
                 continue
+            agent_dir, source = found
+            overrides_global = bool(
+                source == "local"
+                and self.global_agents_dir
+                and (self.global_agents_dir / agent_name).exists()
+            )
 
             # Check cache
             if agent_name in cached_agents:
