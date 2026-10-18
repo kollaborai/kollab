@@ -97,6 +97,13 @@ def test_local_beats_global_beats_bundled_on_the_page(machine):
     assert "LOCAL CODER" in prompt and "GLOBAL CODER" not in prompt
 
 
+def test_the_default_agent_is_listed_once_as_the_default_prompt(machine):
+    bundles = machine.client.get("/prompts").json()["bundles"]
+
+    assert [b["default"] for b in bundles if b["bundle"] == "default"] == [True]
+    assert "coder" in [b["bundle"] for b in bundles]
+
+
 def test_an_unknown_bundle_is_still_not_found(machine):
     assert machine.client.get("/prompts/no-such-agent/sections").status_code == 404
     assert machine.client.get("/prompts/no-such-agent/preview").status_code == 404

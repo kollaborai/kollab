@@ -76,7 +76,7 @@ async def list_prompts() -> Dict[str, Any]:
     try:
         for agent in get_walker().agent_manager.list_agents():
             name = str(getattr(agent, "name", "") or "")
-            if not name:
+            if not name or name == DEFAULT_BUNDLE:  # the default row below is it
                 continue
             bundles.append(
                 {
