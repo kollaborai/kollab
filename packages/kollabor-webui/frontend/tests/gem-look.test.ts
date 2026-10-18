@@ -116,3 +116,19 @@ test("a style added later takes only the agents it wins; the others keep their l
   assert.deepEqual(keys.map((key) => drawn(key, "hat", [...hats].reverse())), before);
   assert.equal(drawn("lapis", "hat", []), undefined);
 });
+
+test("a picked avatar and a known shape come through; an unknown shape does not", () => {
+  const cuts = { ...VOCABULARY, cuts: new Set(["heart", "hex"]) };
+  const appearance = {
+    gems: {
+      omar: { avatar: { kind: "emoji", value: "🦊" } as const, cut: "heart" },
+      maya: { cut: "blob" },
+    },
+  };
+  const omar = resolveGemLook(appearance, "omar", cuts);
+  assert.deepEqual(omar.avatar, { kind: "emoji", value: "🦊" });
+  assert.equal(omar.cut, "heart");
+  assert.equal(resolveGemLook(appearance, "maya", cuts).cut, undefined);
+  // A vocabulary with no shapes ignores a picked one.
+  assert.equal(resolveGemLook(appearance, "omar", VOCABULARY).cut, undefined);
+});

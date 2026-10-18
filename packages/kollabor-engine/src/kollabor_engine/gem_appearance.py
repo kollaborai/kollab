@@ -11,7 +11,9 @@ pointed at this engine shows the same gems::
 ``born`` is the random eyes and hat a gem gets the first time the engine sees
 it alive (``record_births``, from ``GET /agents``). It sticks: nothing rolls it
 again, and the studio's save keeps it from disk whatever the request says.
-``gems`` holds the user's picks, drawn over the born look.
+``gems`` holds the user's picks, drawn over the born look. A pick may also
+carry an ``avatar`` that replaces the roster's for that agent everywhere: a
+gem, initials, an emoji, or a small picture stored inline as a data URL.
 
 A name repeats across folders and computers (a koordinator per project), and
 each of those agents dresses on its own. A bare name is the agent in the
@@ -42,6 +44,10 @@ APPEARANCE_FILE = "appearance.json"
 MAX_GEMS = 256
 _SLUG = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # A pick's key: a gem name, alone or @ the folder or device the agent runs in.
+# A picture the studio uploads: shrunk in the browser, stored inline. No SVG (it can carry script).
+_PICTURE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$")
+MAX_PICTURE = 200_000
+MAX_EMOJI = 16
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}(@[^\x00-\x1f\x7f]{1,1024})?$")
 
 # What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
@@ -67,6 +73,21 @@ def _color(value: Any) -> Optional[List[int]]:
     return list(value)
 
 
+def _avatar(value: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("kind")
+    if kind in ("gem", "initials"):
+        return {"kind": kind}
+    emoji = value.get("value")
+    if kind == "emoji" and isinstance(emoji, str) and 0 < len(emoji.strip()) <= MAX_EMOJI:
+        return {"kind": "emoji", "value": emoji.strip()}
+    url = value.get("url")
+    if kind == "image" and isinstance(url, str) and len(url) <= MAX_PICTURE and _PICTURE.match(url):
+        return {"kind": "image", "url": url}
+    return None
+
+
 def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -75,9 +96,17 @@ def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
         slug = _slug(value.get(key))
         if slug:
             look[key] = slug
+    # A picked body shape (gem-specs.ts GEM_CUTS); like color, never born.
+    cut = _slug(value.get("cut")) if allow_color else None
+    if cut:
+        look["cut"] = cut
     color = _color(value.get("color")) if allow_color else None
     if color:
         look["color"] = color
+    # The user's picks only, like color: nothing is born with an avatar.
+    avatar = _avatar(value.get("avatar")) if allow_color else None
+    if avatar:
+        look["avatar"] = avatar
     return look
 
 

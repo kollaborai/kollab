@@ -29,7 +29,7 @@ import {
 } from "./gem-face";
 import { drawn } from "./gem-look";
 import { HOLDS, drawHeld, drawProps } from "./gem-props";
-import { gemMood, gemSpec, type GemMood, type GemSpec } from "./gem-specs";
+import { gemMood, gemSpec, type GemCut, type GemMood, type GemSpec } from "./gem-specs";
 import {
   BLINK,
   DANCE,
@@ -108,6 +108,8 @@ export type GemProps = {
   season?: Season | "auto";
   /** Whose look this is (gem-look.ts lookKey): two agents of one name move out of step. */
   lookKey?: string;
+  /** The body shape the user picked; absent, the one its name draws. */
+  cut?: GemCut | null;
   /** How the body moves; absent, the agent's born motion. */
   motion?: GemMotion | null;
 };
@@ -585,7 +587,7 @@ class GemEngine {
     const ctx = canvas.getContext("2d");
     if (!ctx) return false;
     const now = performance.now() / 1000;
-    const spec = gemSpec(props.gem, props.caste);
+    const spec = gemSpec(props.gem, props.caste, props.cut);
     const mood = gemMood(props.state, props.live !== false);
     const activity = activityFor(props, mood);
     const home = homeWeights(spec.cut);
@@ -701,7 +703,7 @@ class GemEngine {
   /** Who the gem is: its cut, color, motion and the quirks drawn from its name. */
   private identify(avatar: Avatar, props: GemProps) {
     avatar.props = props;
-    avatar.spec = gemSpec(props.gem, props.caste);
+    avatar.spec = gemSpec(props.gem, props.caste, props.cut);
     avatar.home = homeWeights(avatar.spec.cut);
     avatar.motion = motionFor(props);
     avatar.seed = hashSeed(whose(props));

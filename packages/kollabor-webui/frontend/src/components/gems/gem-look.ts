@@ -1,4 +1,4 @@
-import type { GemAppearance, GemLook } from "@/api";
+import type { AvatarSpec, GemAppearance, GemLook } from "@/api";
 
 /**
  * The ids a saved look may use (gem-face.ts's eye, hat and season styles), and
@@ -8,6 +8,8 @@ export type GemLookVocabulary = {
   faces: ReadonlySet<string>;
   hats: ReadonlySet<string>;
   seasons: ReadonlySet<string>;
+  /** Body shapes (gem-specs.ts GemCut); absent, a picked shape is ignored. */
+  cuts?: ReadonlySet<string>;
   birthFaces: readonly string[];
   birthHats: readonly string[];
   birthColors: readonly (readonly [number, number, number])[];
@@ -23,6 +25,10 @@ export type ResolvedGemLook = {
   color?: [number, number, number];
   /** Worn when neither the user nor the pool gives it a color. */
   bornColor?: [number, number, number];
+  /** The body shape the user picked over the one its name draws. */
+  cut?: string;
+  /** The avatar the user picked over the roster's. */
+  avatar?: AvatarSpec;
 };
 
 /**
@@ -98,6 +104,11 @@ export function resolveGemLook(
   if (season) look.season = season;
   if (isColor(own.color)) look.color = own.color;
   if (bornColor) look.bornColor = [...bornColor];
+  if (own.avatar?.kind) look.avatar = own.avatar;
+  if (vocabulary.cuts) {
+    const cut = known(own.cut, vocabulary.cuts);
+    if (cut) look.cut = cut;
+  }
   return look;
 }
 

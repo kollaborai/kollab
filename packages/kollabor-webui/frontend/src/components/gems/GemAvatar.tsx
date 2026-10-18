@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import { useGemLook, useLookKey } from "./gem-appearance";
 import { GEM_PAD, gemEngine, type GemProps } from "./gem-engine";
 import { seasonFor, type EyeStyle, type HatStyle, type Season } from "./gem-face";
-import { gemSpec, isPoolGem } from "./gem-specs";
+import { gemSpec, isPoolGem, type GemCut } from "./gem-specs";
 
 export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
   size?: number;
@@ -42,6 +42,7 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
     face: own.face ?? (look.face as EyeStyle | undefined),
     hat: own.hat ?? ((look.hat ?? (inSeason ? undefined : look.bornHat)) as HatStyle | "auto" | undefined),
     season,
+    cut: own.cut ?? (look.cut as GemCut | undefined),
     color: look.color ?? own.color ?? (isPoolGem(own.gem) ? undefined : look.bornColor),
     lookKey: key,
   };

@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { AvatarSpec, EngineApi } from "@/api";
 import { GemAvatar, type GemAvatarProps } from "@/components/gems/GemAvatar";
+import { useGemLook, useLookKey } from "@/components/gems/gem-appearance";
 import { cn } from "@/lib/utils";
 import { imageSource, initialsOf, inkFor, isGemAvatar, tileColor } from "./avatar-model";
 
@@ -83,11 +84,22 @@ function useAvatarPicture(avatar: AvatarSpec | null | undefined, folder: string)
 /**
  * One agent's picture, wherever a gem shows. A gem (or no avatar) is the 3D
  * GemAvatar, unchanged. Anything else is a flat square tile on the persona's
- * color in the same layout box: a picture, an emoji, or initials.
+ * color in the same layout box: a picture, an emoji, or initials. An avatar
+ * picked in the studio (Properties → Avatar) replaces the roster's.
  */
 export function Avatar({ avatar, displayName, folder, ...gem }: AvatarProps) {
-  if (isGemAvatar(avatar)) return <GemAvatar {...gem} />;
-  return <FlatAvatar avatar={avatar} displayName={displayName} folder={folder ?? ""} {...gem} />;
+  const look = useGemLook(useLookKey(gem.gem, gem.where));
+  const shown = look.avatar ?? avatar;
+  if (isGemAvatar(shown)) return <GemAvatar {...gem} />;
+  return (
+    <FlatAvatar
+      avatar={shown}
+      displayName={displayName}
+      folder={folder ?? ""}
+      {...gem}
+      color={look.color ?? gem.color}
+    />
+  );
 }
 
 function FlatAvatar({

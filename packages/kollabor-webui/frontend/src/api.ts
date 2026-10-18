@@ -32,7 +32,8 @@ export type Session = {
 };
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
-export type GemLook = { face?: string; hat?: string; color?: number[] };
+/** `avatar` replaces the roster's picture for that agent everywhere (a picture is an inline data URL). */
+export type GemLook = { face?: string; hat?: string; cut?: string; color?: number[]; avatar?: AvatarSpec };
 
 /** The Gem Studio's saved looks (engine: ~/.kollab/hub/appearance.json). */
 export type GemAppearance = {

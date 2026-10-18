@@ -114,6 +114,9 @@ const CUTS: readonly GemCut[] = [
   "pear", "trillion", "heart", "hopper", "hex", "ingot", "octahedron",
 ];
 
+/** Every shape a user can pick in the studio, in the order it shows them. */
+export const GEM_CUTS: readonly GemCut[] = [...CUTS, "cloud"];
+
 /** A gem of the pool: it wears the pool's color, never a born one. */
 export const isPoolGem = (name?: string | null): boolean => Boolean(name && GEMS[name.toLowerCase()]);
 
@@ -134,7 +137,13 @@ function fnv(text: string): number {
 
 const outside = new Map<string, GemSpec>();
 
-export function gemSpec(name?: string | null, caste?: string | null): GemSpec {
+/** The gem `name` is, in the shape the user picked when there is one. */
+export function gemSpec(name?: string | null, caste?: string | null, cut?: GemCut | null): GemSpec {
+  const spec = namedSpec(name, caste);
+  return cut && cut !== spec.cut ? { ...spec, cut } : spec;
+}
+
+function namedSpec(name?: string | null, caste?: string | null): GemSpec {
   const key = (name || "").toLowerCase();
   const known = GEMS[key];
   if (known) return known;
