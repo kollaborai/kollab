@@ -120,7 +120,7 @@ export function GemStudio({
 
 function StudioBody({
   agents,
-  persona,
+  persona: pooled,
   focus,
   onDone,
 }: {
@@ -131,6 +131,8 @@ function StudioBody({
   onDone: () => void;
 }) {
   const studio = useGemAppearance();
+  // It opens as what the agent is then: one that exits while it is open leaves the pool, and the dialog must not turn into a gem's.
+  const [persona] = useState(pooled);
   const [draft, setDraft] = useState<GemAppearance>(() => studio?.appearance ?? {});
   const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
