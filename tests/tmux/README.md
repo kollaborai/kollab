@@ -105,6 +105,33 @@ Tests are defined in JSON files with a simple schema:
 | `term_height` | 35 | Terminal height in rows |
 | `key_delay` | 0.3 | Delay after sending keys (seconds) |
 | `menu_delay` | 0.5 | Delay for menu animations (seconds) |
+| `real_home` | `false` | Run against the real `HOME` (prints a warning); see HOME Isolation |
+| `first_run` | `false` | Leave the throwaway `HOME` unseeded, so the first-run wizard shows |
+
+### HOME Isolation
+
+A spec never runs against the developer's real `~/.kollab`: a plain
+`python main.py` would attach to a live daemon, join the live hub, wake running
+agents (paid model calls) and write conversation logs and vault entries there.
+
+- The app command and every `shell` step run with `HOME` set to a fresh
+  throwaway directory, seeded as a configured machine (`application.setup_completed`
+  and the connect-guide marker). The runner prints it as `home:`.
+- The hub's unix sockets live in `/tmp/kollabor-hub/<project hash>/`, outside
+  `HOME`, so a spec without its own `HOME` also gets `KOLLAB_PROJECT_ROOT`
+  inside the throwaway `HOME` (its agents no longer share a socket directory
+  with the agents of this checkout).
+- A spec that sets `HOME` inside its own command (the usual throwaway-`HOME`
+  idiom) keeps it, and keeps its own project folders.
+- When the spec ends the runner runs `--hub stop all`, then stops every
+  process whose environment carries that `HOME` (daemons outlive the tmux pane),
+  removes leftover socket files and deletes the directory.
+  `KOLLAB_TMUX_KEEP=1` keeps the tmux session and the `HOME`.
+- Opt-outs, both in `config`: `"real_home": true` for a spec that truly needs the
+  developer's providers or data (loud warning, avoid it), `"first_run": true` to
+  test the first-run wizard on an unseeded `HOME`.
+
+`specs/runner_home_isolation.json` checks all of this.
 
 ### Available Actions
 

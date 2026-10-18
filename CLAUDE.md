@@ -572,6 +572,19 @@ an `api_key` in its config prompts on every run. The harness exports
 `keyring_enabled()` (`kollabor_ai.providers.security`) is off automatically
 under pytest. Any new harness must do the same.
 
+**Never let a test touch the real `~/.kollab`.** The harness runs the app command
+and every `shell` step with `HOME` set to a throwaway directory (seeded with
+`application.setup_completed` and the connect-guide marker), so a spec cannot
+attach to a live daemon, join the developer's hub, wake running agents or write
+to their conversations and vaults. A spec without its own `HOME` also gets its
+own `KOLLAB_PROJECT_ROOT`, because hub sockets live in
+`/tmp/kollabor-hub/<project hash>/`, outside `HOME`. When the spec ends the
+harness stops every process whose environment carries that `HOME` and removes
+the directory. A spec that sets `HOME` in its own command keeps it. Opt-outs in
+`config`: `"real_home": true` (loud warning; only for a spec that needs the
+developer's real providers) and `"first_run": true` (unseeded `HOME`, for the
+first-run wizard). Any new harness must isolate `HOME` the same way.
+
 4. **Report:**
 ```
 implementation complete:
