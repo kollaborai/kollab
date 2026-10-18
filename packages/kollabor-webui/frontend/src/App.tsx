@@ -304,12 +304,17 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  // What New Session can start in the chosen folder: every folder has its own hub, so a
+  // gem running elsewhere is free here. `agents` stays the whole computer's live state.
+  const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
   const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [offline, setOffline] = useState<OfflineAgent[]>([]);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
+  const workspacePathRef = useRef(workspacePath);
+  workspacePathRef.current = workspacePath;
   const [studioOpen, setStudioOpen] = useState(false);
   // Null: the whole Gem Studio; a gem: that session's Properties.
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
@@ -330,12 +335,13 @@ export default function App() {
   // (plugins/hub/plugin.py, "Reconcile agent bundle to hub role"), so showing
   // "default" there was false.
   const [pickedBundle, setPickedBundle] = useState<string | null>(null);
-  const gemBundle = agents.find((agent) => agent.name === selectedIdentity)?.agent_type;
+  const pickedAgent = launchPool.find((agent) => agent.name === selectedIdentity);
+  const gemBundle = pickedAgent?.agent_type;
   const selectedBundle =
     pickedBundle ??
     (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
   // What New Session will use, for the empty state's greeting.
-  const nextGem = agents.find((agent) => agent.name === selectedIdentity);
+  const nextGem = pickedAgent;
   const selectedModelLabel =
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
     selectedProfile ||
@@ -398,23 +404,48 @@ export default function App() {
     return next;
   }, []);
 
+  // The folder's pool; an agent taken there cannot be the one New Session starts, so the
+  // pick falls to the first free one (the next free gem in that folder).
+  const applyLaunchPool = useCallback((next: AgentPoolEntry[]) => {
+    setLaunchPool((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
+    setSelectedIdentity((current) =>
+      next.some((agent) => agent.name === current && agent.available)
+        ? current
+        : next.find((agent) => agent.available)?.name || "",
+    );
+  }, []);
+
   const refreshAgentPool = useCallback(async () => {
     try {
-      const result = await api.listAgentPool(true);
+      const [result, launch] = await Promise.all([
+        api.listAgentPool(true),
+        api.listLaunchPool(workspacePathRef.current.trim()),
+      ]);
       const next = result.agents || [];
       setAgents(next);
-      setSelectedIdentity((current) =>
-        next.some((agent) => agent.name === current && agent.available)
-          ? current
-          : next.find((agent) => agent.available)?.name || "",
-      );
+      applyLaunchPool(launch.agents || []);
       return next;
     } catch {
       setAgents([]);
+      setLaunchPool([]);
       setSelectedIdentity("");
       return [];
     }
-  }, []);
+  }, [applyLaunchPool]);
+
+  // Another folder lists other free agents: ask again when the pick changes.
+  useEffect(() => {
+    let stale = false;
+    api
+      .listLaunchPool(workspacePath.trim())
+      .then((result) => {
+        if (!stale) applyLaunchPool(result.agents || []);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath, applyLaunchPool]);
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
@@ -517,6 +548,8 @@ export default function App() {
           if (!controller.signal.aborted) {
             setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
           }
+          const launch = (await api.listLaunchPool(workspacePathRef.current.trim())).agents || [];
+          if (!controller.signal.aborted) applyLaunchPool(launch);
         } catch {
           // Keep the last known sidebar while the daemon is unavailable.
         }
@@ -528,7 +561,7 @@ export default function App() {
       controller.abort();
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
     };
-  }, [abortRecovery, loadSessions]);
+  }, [abortRecovery, applyLaunchPool, loadSessions]);
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
@@ -594,7 +627,6 @@ export default function App() {
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );
-      setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
       // Restore this engine's newest chat; an agent started elsewhere opens on a click.
       const first = [...result].reverse().find((session) => !session.external);
       if (first) {
@@ -868,6 +900,7 @@ export default function App() {
           profiles={profiles}
           api={api}
           agents={agents}
+          launchAgents={launchPool}
           network={network}
           offline={offline}
           bundles={bundles}

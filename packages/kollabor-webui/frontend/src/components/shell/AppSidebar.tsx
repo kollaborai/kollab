@@ -109,6 +109,7 @@ export function AppSidebar({
   profiles,
   api,
   agents,
+  launchAgents,
   network,
   offline,
   bundles,
@@ -145,6 +146,8 @@ export function AppSidebar({
   /** For the workspace picker's folder lists. */
   api: EngineApi;
   agents: AgentPoolEntry[];
+  /** What New Session can start in the chosen folder (a gem running in another folder is free here). */
+  launchAgents: AgentPoolEntry[];
   network: AgentNetwork;
   /** Agents that ran in this folder and are not running; a click starts one. */
   offline: OfflineAgent[];
@@ -225,14 +228,14 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
-  // Free gems first; the ones a live session holds stay listed, disabled.
+  // Free gems first; the ones the chosen folder already runs stay listed, disabled.
   // Live agents outside the pool (pool: false) are shown, never launched as.
   const gemOptions = useMemo(
     () =>
-      agents
+      launchAgents
         .filter((agent) => agent.pool !== false)
         .sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
-    [agents],
+    [launchAgents],
   );
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
@@ -283,7 +286,7 @@ export function AppSidebar({
   const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
-  const pickedGem = poolByName.get(selectedIdentity);
+  const pickedGem = launchAgents.find((agent) => agent.name === selectedIdentity);
   const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
   const modelLabel =
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
@@ -389,7 +392,7 @@ export function AppSidebar({
                 <Select
                   value={selectedIdentity}
                   onValueChange={onIdentityChange}
-                  disabled={!agents.length}
+                  disabled={!launchAgents.length}
                 >
                   <SelectTrigger id="new-session-gem" size="sm" className="w-full">
                     {/* The name only: the list's "Ran 3d Ago" tag would crowd the field. */}

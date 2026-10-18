@@ -167,10 +167,17 @@ export type AgentPoolEntry = {
   solo?: boolean;
   /** The folder the live agent runs in, on this computer. */
   project?: string;
-  /** When it last ran in the engine's folder (epoch seconds, its vault stream); null if never. */
+  /** When it last ran in the asked folder (epoch seconds, its vault stream); null if never. */
   last_ran?: number | null;
   /** False for a live agent the pool does not name (lapis-2): listed, never launched as. Koordinator is launchable (first in the list). */
   pool?: boolean;
+};
+
+/** GET /agents: the pool, as one folder (or the whole computer) sees it. */
+export type AgentPoolResponse = {
+  agents: AgentPoolEntry[];
+  available?: string[];
+  active?: string[];
 };
 
 export type AgentBundleEntry = {
@@ -968,12 +975,17 @@ export class EngineApi {
     }>(`/profiles/${encodeURIComponent(name)}/test`, { method: "POST" });
   }
 
+  /** Every gem's live state on this computer, whatever folder it runs in: the sidebar's view. */
   listAgentPool(refresh = false) {
-    return this.json<{
-      agents: AgentPoolEntry[];
-      available?: string[];
-      active?: string[];
-    }>(`/agents${refresh ? "?refresh=true" : ""}`);
+    return this.json<AgentPoolResponse>(`/agents?scope=computer${refresh ? "&refresh=true" : ""}`);
+  }
+
+  /** What New Session may start in one folder (empty: the engine's own).
+   * `available` / `active` are that folder's only: a gem running in another folder is free here. */
+  listLaunchPool(workspace = "") {
+    const query = new URLSearchParams({ refresh: "true" });
+    if (workspace) query.set("workspace", workspace);
+    return this.json<AgentPoolResponse>(`/agents?${query}`);
   }
 
   getGemAppearance() {
