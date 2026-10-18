@@ -1,0 +1,95 @@
+{
+  "name": "hub-org-launch",
+  "description": "/hub org marketing launches the whole bundled team from a throwaway HOME with a fake model: the UI keeps redrawing while the members come up one at a time, all six are online in the folder, a second launch starts nobody and names them, and /hub stop all leaves no team process behind. Plain kollab (--no-daemon), PATH puts the checkout first so the members run this code, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-org-launch.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 PATH=\"$R/.venv/bin:$PATH\" exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model; stops what an interrupted run left behind",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-org-launch.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && { (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1); kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null; }; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-org-launch.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}},\"permissions\":{\"approval_mode\":\"trust_all\"}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\"",
+      "assert_contains": "fake model on port"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "launch the team"
+    },
+    {
+      "action": "type",
+      "text": "/hub org marketing"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\\* \\+[1-5] \\+ mcp",
+      "timeout": 30,
+      "description": "the status bar redraws with part of the team online: the loop is not blocked while members start"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "\\* \\+6 \\+ mcp",
+      "timeout": 60,
+      "description": "all six members joined"
+    },
+    {
+      "action": "shell",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-org-launch.path\"); R=$(pwd); n=$(cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub status 2>&1 | grep -cE '^  (omar|maya|theo|priya|luz|jonas) '); echo \"team members online: $n\"",
+      "assert_contains": "team members online: 6"
+    },
+    {
+      "action": "section",
+      "label": "a second launch starts nobody"
+    },
+    {
+      "action": "type",
+      "text": "/hub org marketing"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "launched team 'marketing': 0 agents",
+      "timeout": 30
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "already online: omar, maya, theo, priya, luz, jonas"
+    },
+    {
+      "action": "section",
+      "label": "stop all leaves nothing"
+    },
+    {
+      "action": "type",
+      "text": "/hub stop all"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "shell",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-org-launch.path\"); R=$(pwd); sleep 4; n=$(/bin/ps eww -axo command | grep -F \"$H\" | grep -F -e '--detached' | grep -v grep | wc -l | tr -d \" \"); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; echo \"team processes left: $n\"",
+      "assert_contains": "team processes left: 0"
+    }
+  ]
+}

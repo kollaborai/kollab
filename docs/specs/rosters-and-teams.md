@@ -196,6 +196,15 @@ persona (the koordinator) carries none of them; the client falls back to its poo
 `kollab --hub org <team>` / `--org <team>` launch one (detached processes, each with
 its brief). Help text says "team".
 
+A launch starts the members one at a time, lead first, and waits for each to be online
+(its presence is live in the folder's hub) before starting the next, so the lead holds
+the coordinator seat on a slow start too. A member already online in that folder is left
+alone and named (`already online: ...`); when the lead is one of them the mission is not
+sent (`kollab --hub msg <lead> <mission>` does that). The launch stops at the first member
+that does not come online within 30 s and names it; the same command launches the rest.
+`/hub org` and `--org` run it off the event loop, and `/hub org` lists each member under
+who they report to. `kollab --hub org` exits 1 when a member fails.
+
 ## Web UI
 
 Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `AgentPicker`,
