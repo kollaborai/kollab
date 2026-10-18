@@ -180,7 +180,7 @@ and never finds processes by a pattern over the whole machine
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
-| `send_keys` | `keys` | Send raw keys to tmux (bulk - triggers paste detection) |
+| `send_keys` | `keys` | Send raw keys to tmux (bulk - triggers paste detection). A named key (`Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Up`/`Down`/`Left`/`Right`, `F1`-`F12`, `C-x`) is sent as that key, anything else as literal text |
 | `type` | `text`, `delay` (optional, default 0.05) | Type char-by-char (no paste detection) |
 | `slash_command` | `command`, `subcommand` (optional) | Execute a slash command with filtering |
 | `control` | `key` | Send Ctrl+key (e.g., `"key": "c"` for Ctrl+C) |

@@ -355,6 +355,7 @@ SPECIAL_KEYS = {
     "Left": "Left",
     "Right": "Right",
     "Space": "Space",
+    **{f"F{n}": f"F{n}" for n in range(1, 13)},
 }
 
 

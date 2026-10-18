@@ -1,6 +1,6 @@
 {
   "name": "runner-step-helpers",
-  "description": "What a spec uses to stay off the developer's live app: the port placeholder gives a free port (the same number everywhere in the run, a named one another), the developer's KOLLAB_WEBUI_HOSTS is not inherited, signal and assert_no_process act only on this run's processes and a second start_app reuses the pane.",
+  "description": "What a spec uses to stay off the developer's live app: the port placeholder gives a free port (the same number everywhere in the run, a named one another), the developer's KOLLAB_WEBUI_HOSTS is not inherited, signal and assert_no_process act only on this run's processes, a second start_app reuses the pane and send_keys F1 sends the key.",
   "config": {
     "command": "python -m http.server {{port}} --bind 127.0.0.1",
     "app_init_sleep": 2,
@@ -55,6 +55,27 @@
       "action": "assert_contains",
       "pattern": "^second-start-42$",
       "description": "a second start_app runs its command in the same pane"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "start_app",
+      "command": "cat -v",
+      "sleep": 1
+    },
+    {
+      "action": "send_keys",
+      "keys": "F1"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\\^\\[OP",
+      "description": "send_keys F1 sends the key (cat -v shows ^[OP, not the letters F1)"
     }
   ]
 }
