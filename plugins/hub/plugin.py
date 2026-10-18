@@ -732,7 +732,8 @@ class HubPlugin(BasePlugin):
                     "bridge_target_agent": "",
                     "route_untagged_to_coordinator": True,
                     # Who wakes for a model call when an agent comes online:
-                    # "all", "koordinator" or "none" (see _wakes_on_arrival).
+                    # "all", "koordinator" (only the folder's coordinator) or
+                    # "none" (see _wakes_on_arrival).
                     "arrival_wake": "all",
                     "allowed_runtimes": ["kollab"],
                     "require_auth": False,
@@ -995,8 +996,8 @@ class HubPlugin(BasePlugin):
                     "options": ["all", "koordinator", "none"],
                     "help": (
                         "Who wakes for a model call when an agent comes online: "
-                        "all agents, only the koordinator, or none. The others "
-                        "still see the notice on their next turn."
+                        "all agents, only the folder's coordinator, or none. "
+                        "The others still see the notice on their next turn."
                     ),
                 },
                 {
@@ -7497,15 +7498,19 @@ class HubPlugin(BasePlugin):
         """Whether this agent spends a model call when a peer comes online.
 
         `plugins.hub.arrival_wake` is read through the config service, so a
-        folder's .kollab/config.json beats the global file. An unknown value
-        wakes everyone, as "all" does.
+        folder's .kollab/config.json beats the global file. "koordinator" is
+        the folder's coordinator: the agent holding the role (the first one
+        started, whatever its name) or the one named koordinator. An unknown
+        value wakes everyone, as "all" does.
         """
         mode = (
             self.config.get("plugins.hub.arrival_wake", "all") if self.config else "all"
         )
         if mode == "koordinator":
-            me = self._identity.identity if self._identity else ""
-            return me == COORDINATOR_IDENTITY
+            me = self._identity
+            if me is None:
+                return False
+            return me.is_coordinator or me.identity == COORDINATOR_IDENTITY
         if mode == "none":
             return False
         if mode != "all":

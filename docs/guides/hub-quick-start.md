@@ -87,7 +87,7 @@ Wake on Agent Arrival, saved Local, or `.kollab/config.json`):
 | Value | Who wakes |
 |-------|-----------|
 | `all` (default) | Every agent in the folder |
-| `koordinator` | Only the agent named koordinator |
+| `koordinator` | Only the folder's coordinator (the first agent started, normally named koordinator) |
 | `none` | Nobody |
 
 Agents that stay asleep still see the notice and read it on their next turn.

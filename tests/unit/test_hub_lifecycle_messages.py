@@ -308,10 +308,11 @@ def _arrival(to):
     )
 
 
-def _peer(identity, config=None):
+def _peer(identity, config=None, *, holds_the_role=False):
     plugin = HubPlugin()
     plugin._task_ledger = None
     plugin._identity = _runtime(identity, f"{identity}-id")
+    plugin._identity.is_coordinator = holds_the_role
     plugin.config = config
     return plugin
 
@@ -339,21 +340,27 @@ async def test_arrival_notice_is_tagged_and_still_delivered_plainly():
 
 
 @pytest.mark.parametrize(
-    ("setting", "me", "wakes"),
+    ("setting", "me", "holds_the_role", "wakes"),
     [
-        (None, "lapis", True),  # unset: every peer wakes, as always
-        ("all", "lapis", True),
-        ("all", "koordinator", True),
-        ("koordinator", "koordinator", True),
-        ("koordinator", "lapis", False),
-        ("none", "koordinator", False),
-        ("none", "lapis", False),
+        (None, "lapis", False, True),  # unset: every peer wakes, as always
+        ("all", "lapis", False, True),
+        ("all", "koordinator", True, True),
+        ("koordinator", "koordinator", True, True),
+        ("koordinator", "koordinator", False, True),  # named, not the holder
+        ("koordinator", "lapis", True, True),  # lapis led first
+        ("koordinator", "lapis", False, False),
+        ("none", "koordinator", True, False),
+        ("none", "lapis", True, False),
     ],
 )
-def test_arrival_wake_decides_who_spends_a_model_call(setting, me, wakes):
+def test_arrival_wake_decides_who_spends_a_model_call(
+    setting, me, holds_the_role, wakes
+):
     config = None if setting is None else _Config(arrival_wake=setting)
 
-    decision = _decide(_peer(me, config), _arrival(to=me))
+    decision = _decide(
+        _peer(me, config, holds_the_role=holds_the_role), _arrival(to=me)
+    )
 
     assert (decision.mode, decision.should_trigger) == (
         ("wake", True) if wakes else ("observe", False)

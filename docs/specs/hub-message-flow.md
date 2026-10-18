@@ -220,7 +220,8 @@ on it is the project's `plugins.hub.arrival_wake` (`/config` > Hub >
 Wake on Agent Arrival; a folder's .kollab/config.json beats the global file):
 
   all          every peer wakes (default)
-  koordinator  only the agent named koordinator wakes
+  koordinator  only the folder's coordinator wakes: the agent holding the
+               coordinator role (the first one started) or named koordinator
   none         nobody wakes
 
 a peer that does not wake still shows the notice (feed, HUD, web chips) and
