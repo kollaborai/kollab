@@ -357,9 +357,11 @@ export default function App() {
   const launchChoices = useMemo(() => buildLaunchChoices(launchPool, library), [launchPool, library]);
   const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
   const gemBundle = pickedAgent?.bundle;
+  // A Type picked in one folder may not exist in the next (a project-local agent).
+  const offered = (name?: string | null): name is string =>
+    Boolean(name) && (name === "default" || bundles.some((bundle) => bundle.name === name));
   const selectedBundle =
-    pickedBundle ??
-    (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
+    (offered(pickedBundle) ? pickedBundle : null) ?? (offered(gemBundle) ? gemBundle : "default");
   // What New Session will use, for the empty state's greeting.
   const nextGem = pickedAgent;
   const selectedModelLabel =
@@ -471,6 +473,22 @@ export default function App() {
       stale = true;
     };
   }, [workspacePath, applyLaunchPool]);
+
+  // A folder's own .kollab/agents add Types the others lack: ask again when the pick changes.
+  useEffect(() => {
+    let stale = false;
+    api
+      .listAgentBundles(workspacePath.trim())
+      .then((result) => {
+        if (!stale) setBundles(result.bundles || []);
+      })
+      .catch(() => {
+        if (!stale) setBundles([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath]);
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
@@ -653,18 +671,16 @@ export default function App() {
       setBusy(true);
       setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
-      const [result, profileResult, agentResult, bundleResult] = await Promise.all([
+      const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
         api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
         refreshAgentPool(),
-        api.listAgentBundles().catch(() => ({ bundles: [] })),
       ]);
       if (!mounted || operation !== operationRef.current) return;
       const nextProfiles = profileResult.profiles || [];
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
-      setBundles(bundleResult.bundles || []);
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );

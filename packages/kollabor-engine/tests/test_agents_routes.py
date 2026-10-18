@@ -342,6 +342,41 @@ class TestAgentPoolFolders:
         assert in_other["lapis"]["active"] and in_other["lapis"]["agent_id"] == "g1"
 
 
+@pytest.mark.asyncio
+class TestAgentBundles:
+    """GET /agents/bundles lists the folder's own .kollab/agents, the folder POST /sessions resolves in."""
+
+    @pytest.fixture
+    def folders(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no global tier: only bundled + local
+        mine = tmp_path / "mine"
+        agent = mine / ".kollab" / "agents" / "localonly"
+        agent.mkdir(parents=True)
+        (agent / "system_prompt.md").write_text("The project's own agent.")
+        other = tmp_path / "other"
+        other.mkdir()
+        return mine, other
+
+    async def names(self, client, **params):
+        body = (await client.get("/agents/bundles", params=params)).json()
+        return {bundle["name"] for bundle in body["bundles"]}
+
+    async def test_a_folders_own_agent_is_listed_only_when_that_folder_is_chosen(self, client, folders):
+        mine, other = folders
+
+        assert "localonly" in await self.names(client, workspace=str(mine))
+        assert "localonly" not in await self.names(client, workspace=str(other))
+        assert "coder" in await self.names(client, workspace=str(other))  # the bundled tier is everywhere
+
+    async def test_no_workspace_is_the_engines_folder(self, client, folders, monkeypatch):
+        mine, other = folders
+
+        monkeypatch.chdir(mine)
+        assert "localonly" in await self.names(client)
+        monkeypatch.chdir(other)
+        assert "localonly" not in await self.names(client)
+
+
 class TestSnapshotDiff:
     def test_snapshot_carries_current_task(self):
         snapshot = hub_ws._snapshot_agents(

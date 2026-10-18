@@ -1165,11 +1165,13 @@ export class EngineApi {
   /**
    * Agent bundles (`--agent <name>` in the CLI): the prompt+metadata tier,
    * distinct from the gem identity pool. Any of these can be passed as the
-   * `agent` field when creating a session.
+   * `agent` field when creating a session in the same folder: `workspace`
+   * (empty: the engine's own) adds that folder's own `.kollab/agents`.
    */
-  listAgentBundles() {
+  listAgentBundles(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
     return this.json<{ bundles: AgentBundleEntry[]; count?: number }>(
-      "/agents/bundles",
+      `/agents/bundles${query}`,
     );
   }
 

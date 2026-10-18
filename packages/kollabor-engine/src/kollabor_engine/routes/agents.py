@@ -270,13 +270,17 @@ async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]
 
 
 @router.get("/bundles")
-async def list_agent_bundles() -> Dict[str, Any]:
+async def list_agent_bundles(
+    workspace: str = Query("", description="Folder whose project-local agents are listed; empty is the engine's own"),
+) -> Dict[str, Any]:
     """List agent bundles the daemon can launch with (``--agent <name>``).
 
     This is the bundle tier -- system prompts + agent.json metadata -- not the
     gem identity pool above. Session creation accepts ``agent`` for any of
     these names; the web UI needs the same list the CLI's ``/agent`` picker
     shows. Local overrides global, matching AgentManager's resolution order.
+    The local tier is ``workspace``'s own ``.kollab/agents``, the folder
+    POST /sessions resolves ``agent`` in, so a listed name launches there.
     """
     try:
         from kollabor_agent.agent_manager import AgentManager
@@ -285,7 +289,9 @@ async def list_agent_bundles() -> Dict[str, Any]:
 
     bundles: list = []
     try:
-        manager = AgentManager()
+        manager = AgentManager(
+            project_path=Path(workspace).expanduser().resolve() if workspace else None
+        )
         for agent in manager.list_agents():
             description = str(getattr(agent, "description", "") or "")
             profile = getattr(agent, "profile", None)
