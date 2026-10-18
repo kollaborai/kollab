@@ -66,8 +66,10 @@ from .notifier import HubNotifier
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive
 from .rosters import (
+    DEFAULT_ROSTER,
     attach_persona_skills,
     find_persona,
+    load_library,
     persona_color,
     persona_context,
     roster_names,
@@ -701,6 +703,7 @@ class HubPlugin(BasePlugin):
                     "enabled": True,
                     "heartbeat_interval": 5,
                     "identity": "",
+                    "roster": DEFAULT_ROSTER,
                     "auto_help": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
@@ -799,6 +802,13 @@ class HubPlugin(BasePlugin):
                     "config_path": "plugins.hub.identity",
                     "placeholder": "auto",
                     "help": "Custom identity (leave empty for auto-assign)",
+                },
+                {
+                    "type": "dropdown",
+                    "label": "Roster",
+                    "config_path": "plugins.hub.roster",
+                    "options": list(load_library().rosters),
+                    "help": "Roster this folder draws agent names from (bundled, ~/.kollab/rosters, .kollab/rosters)",
                 },
                 {
                     "type": "text_input",

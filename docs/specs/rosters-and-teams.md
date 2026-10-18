@@ -97,6 +97,7 @@ existed on the maintainer's machines).
 `plugins.hub.roster` (config, project `.kollab/config.json` over global; default
 `gems`) names the roster a folder draws from. The hub hands out the next free name
 from it in file order; once all are live it numbers them (`omar-2`).
+Pick it in `/config` (Hub, Roster; Ctrl+S then L keeps it in the folder's `.kollab/config.json`).
 
 `kollab --as <name>` takes a persona from **any** roster. A bare name prefers the
 folder's roster, then the others in load order; `--as roster/name` picks one. The

@@ -258,3 +258,14 @@ def test_the_bundled_org_charts_launch_in_order(home, proj):
     assert order[0] == "director" and len(order) == 9
     assert order.index("platform-lead") < order.index("backend-eng")
     assert order.index("apps-lead") < order.index("qa-eng")
+
+
+def test_config_modal_offers_the_rosters_a_folder_can_pick(home, proj, monkeypatch):
+    from plugins.hub.plugin import HubPlugin
+
+    write(proj / ".kollab/rosters/crew.json", crew())
+    monkeypatch.chdir(proj)
+    row = next(w for w in HubPlugin.get_config_widgets()["widgets"] if w["config_path"] == "plugins.hub.roster")
+    assert row["type"] == "dropdown" and row["label"] == "Roster"
+    assert row["options"][0] == "gems" and set(row["options"]) == {"gems", "marketing-crew", "crew"}
+    assert HubPlugin.get_default_config()["plugins"]["hub"]["roster"] == "gems"
