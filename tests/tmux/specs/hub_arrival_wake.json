@@ -122,7 +122,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Wake on Agent Arrival: koordinator",
+      "pattern": "Wake on Agent Arrival: (?-i:Koordinator)",
       "timeout": 15,
       "description": "the Hub dropdown reads the folder file's value"
     },

@@ -49,7 +49,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Roster: gems",
+      "pattern": "Roster: (?-i:Gems)",
       "timeout": 15
     },
     {
@@ -58,7 +58,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Roster: marketing-crew",
+      "pattern": "Roster: Marketing Crew",
       "timeout": 15
     },
     {
@@ -169,7 +169,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Roster: marketing-crew",
+      "pattern": "Roster: Marketing Crew",
       "timeout": 15
     },
     {

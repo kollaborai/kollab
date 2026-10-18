@@ -115,7 +115,8 @@ def test_describe_has_the_wire_shape(home):
     assert set(view["save_targets"]) == {"local", "global"}
     assert view["actions"][0]["id"] == "save"
     wanted = {"path", "type", "label", "help", "value", "min_value", "max_value"}
-    wanted |= {"step", "options", "placeholder", "editable", "managed_by"}
+    wanted |= {"step", "options", "option_labels", "placeholder", "editable"}
+    wanted |= {"managed_by"}
     wanted |= {"secret", "is_set"}
     for field in fields_of(view).values():
         assert wanted <= set(field)
@@ -177,6 +178,40 @@ def test_hub_arrival_wake_is_a_dropdown_that_saves_to_the_folder(home):
     saved = save(config, {"plugins.hub.arrival_wake": "koordinator"}, "local")
     assert saved["ok"]
     assert config.saved == [("plugins.hub.arrival_wake", "koordinator", "local")]
+
+
+def test_hub_dropdowns_name_their_options_for_people_and_save_the_ids(home):
+    config = FakeConfig({"plugins": {"hub": {"roster": "marketing-crew"}}})
+    fields = fields_of(describe(config))
+
+    roster = fields["plugins.hub.roster"]
+    assert roster["options"] == ["gems", "marketing-crew"]
+    assert roster["option_labels"] == {"gems": "Gems", "marketing-crew": "Marketing Crew"}
+    assert roster["value"] == "marketing-crew"  # the saved id, not its label
+    assert fields["plugins.hub.arrival_wake"]["option_labels"] == {
+        "all": "All",
+        "koordinator": "Koordinator",
+        "none": "None",
+    }
+    assert fields["plugins.hub.bridge_platform"]["option_labels"] == {
+        "telegram": "Telegram"
+    }
+
+    refused = save(config, {"plugins.hub.arrival_wake": "None"}, "local")
+    assert refused["errors"] == {"plugins.hub.arrival_wake": "not one of the options"}
+    save(config, {"plugins.hub.arrival_wake": "none", "plugins.hub.roster": "gems"})
+    assert ("plugins.hub.arrival_wake", "none", "global") in config.saved
+    assert ("plugins.hub.roster", "gems", "global") in config.saved
+
+
+def test_option_labels_only_name_options_and_only_dropdowns_carry_them(home):
+    for field in fields_of(describe(FakeConfig())).values():
+        labels = field["option_labels"]
+        if field["type"] != "dropdown":
+            assert labels is None, field["path"]
+        elif labels:
+            assert set(labels) <= set(field["options"]), field["path"]
+            assert all(isinstance(text, str) and text for text in labels.values())
 
 
 def test_save_refuses_labels_loadout_rows_and_unknown_paths(home):

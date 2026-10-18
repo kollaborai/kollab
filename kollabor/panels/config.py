@@ -295,6 +295,7 @@ def _field(row: dict, config_service: Any, managed, global_settings) -> dict:
         max_value=row.get("max_value"),
         step=row.get("step"),
         options=row.get("options"),
+        option_labels=row.get("option_labels"),
         placeholder=row.get("placeholder"),
         managed_by=owner,
         secret=is_secret_path(path, row),

@@ -57,7 +57,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Wake on Agent Arrival: koordinator",
+      "pattern": "Wake on Agent Arrival: (?-i:Koordinator)",
       "timeout": 15,
       "description": "the folder has no file, so the global value shows"
     },
@@ -67,7 +67,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Wake on Agent Arrival: none",
+      "pattern": "Wake on Agent Arrival: (?-i:None)",
       "timeout": 15
     },
     {
@@ -120,7 +120,7 @@
     },
     {
       "action": "wait_for",
-      "pattern": "Wake on Agent Arrival: none",
+      "pattern": "Wake on Agent Arrival: (?-i:None)",
       "timeout": 15,
       "description": "the reopened modal reads the folder file, not the value it first opened with"
     },

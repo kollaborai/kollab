@@ -19,13 +19,20 @@ class DropdownWidget(BaseWidget):
         """Initialize dropdown widget.
 
         Args:
-            config: Widget configuration containing 'options' list.
+            config: Widget configuration containing 'options' list and, when the
+                values are ids people should not read raw, 'option_labels'
+                (value -> display text; the value is still what is saved).
             config_path: Dot-notation path to config value.
             config_service: ConfigService instance for reading/writing config values.
         """
         super().__init__(config, config_path, config_service)
         self.options = config.get("options", [])
+        self.option_labels = config.get("option_labels") or {}
         self._expanded = False
+
+    def option_label(self, value: Any) -> str:
+        """The text shown for a stored value; a value with no label shows as itself."""
+        return str(self.option_labels.get(str(value), value))
 
     def render(self) -> List[str]:
         """Render dropdown with current selection.
@@ -37,7 +44,9 @@ class DropdownWidget(BaseWidget):
         label = self.get_label()
 
         # Display current selection with dropdown indicator
-        display_value = str(current_value) if current_value is not None else "None"
+        display_value = (
+            self.option_label(current_value) if current_value is not None else "None"
+        )
 
         if self.focused:
             main_line = f"{S.BOLD}  {label}: [{display_value} ▼]{S.RESET_BOLD}"
@@ -50,7 +59,7 @@ class DropdownWidget(BaseWidget):
         if self._expanded and self.focused:
             for i, option in enumerate(self.options):
                 prefix = "    > " if option == current_value else "      "
-                option_line = f"{S.DIM}{prefix}{option}{S.RESET_DIM}"
+                option_line = f"{S.DIM}{prefix}{self.option_label(option)}{S.RESET_DIM}"
                 lines.append(option_line)
 
         return lines
@@ -90,7 +99,7 @@ class DropdownWidget(BaseWidget):
             use_gradient = False
 
         # Build lines - main label + value, then options if expanded
-        lines = [f" {label}: {current_value}"]
+        lines = [f" {label}: {self.option_label(current_value)}"]
         tag_chars = [icon]
 
         # Show options list when expanded with bullet indicators
@@ -101,7 +110,7 @@ class DropdownWidget(BaseWidget):
                     prefix = "●"  # Filled bullet
                 else:
                     prefix = "○"  # Empty bullet
-                lines.append(f"     {prefix} {option}")
+                lines.append(f"     {prefix} {self.option_label(option)}")
                 tag_chars.append("   ")
 
         rendered = TagBox.render(

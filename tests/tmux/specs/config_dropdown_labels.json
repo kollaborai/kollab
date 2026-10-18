@@ -1,0 +1,185 @@
+{
+  "name": "config-dropdown-labels",
+  "description": "A /config dropdown whose values are ids shows each value by name: the Hub Roster reads Gems / Marketing Crew (the rosters' own display names), Wake on Agent Arrival reads All / Koordinator / None. The id is still what is saved: a Local save puts marketing-crew and none in the folder's .kollab/config.json, and reopening /config shows the names again. Plain kollab (--no-daemon) in the runner's throwaway HOME, no keyring, no model call.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); mkdir -p \"$HOME/ws\" && cd \"$HOME/ws\" && exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.5
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "the throwaway HOME gets a profile that is never called",
+      "command": "mkdir -p \"$HOME/ws\" && printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:9/v1\",\"api_key\":\"not-a-real-key\"}}}}}' > \"$HOME/.kollab/config.json\"; echo \"throwaway home ready\"",
+      "assert_contains": "throwaway home ready"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "the Roster dropdown shows roster names, not ids"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/roster"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: (?-i:Gems)",
+      "timeout": 15,
+      "description": "the default roster reads by its display name"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "(?-i:Roster: gems)",
+      "description": "not the raw id"
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: Marketing Crew",
+      "timeout": 15
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "marketing-crew",
+      "description": "the id never shows"
+    },
+    {
+      "action": "section",
+      "label": "Wake on Agent Arrival reads All / Koordinator / None"
+    },
+    {
+      "action": "send_keys",
+      "keys": "/arrival"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: (?-i:All)",
+      "timeout": 15
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: (?-i:Koordinator)",
+      "timeout": 15
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: (?-i:None)",
+      "timeout": 15
+    },
+    {
+      "action": "section",
+      "label": "a Local save writes the ids"
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Save to: \\(L\\)ocal",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "l"
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own config holds the ids, not the names",
+      "command": "sleep 1; tr -d ' \\n' < \"$HOME/ws/.kollab/config.json\"; echo",
+      "assert_contains": "\"roster\":\"marketing-crew\".*\"arrival_wake\":\"none\"|\"arrival_wake\":\"none\".*\"roster\":\"marketing-crew\""
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "(?-i:Marketing Crew|\"None\")",
+      "description": "no display name reached the file"
+    },
+    {
+      "action": "section",
+      "label": "reopened, the names are back"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "back at the prompt"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/roster"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: Marketing Crew",
+      "timeout": 15,
+      "description": "the saved id shows as its roster's name"
+    },
+    {
+      "action": "send_keys",
+      "keys": "/arrival"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Wake on Agent Arrival: (?-i:None)",
+      "timeout": 15
+    }
+  ]
+}

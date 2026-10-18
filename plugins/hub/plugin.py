@@ -772,6 +772,7 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def get_config_widgets() -> Dict[str, Any]:
+        rosters = load_library().rosters
         return {
             "title": "Hub (Agent Mesh)",
             "widgets": [
@@ -811,7 +812,10 @@ class HubPlugin(BasePlugin):
                     "type": "dropdown",
                     "label": "Roster",
                     "config_path": "plugins.hub.roster",
-                    "options": list(load_library().rosters),
+                    "options": list(rosters),
+                    "option_labels": {
+                        name: roster.display_name for name, roster in rosters.items()
+                    },
                     "help": "Roster this folder draws agent names from (bundled, ~/.kollab/rosters, .kollab/rosters)",
                 },
                 {
@@ -950,6 +954,7 @@ class HubPlugin(BasePlugin):
                     "label": "Bridge Platform",
                     "config_path": "plugins.hub.bridge_platform",
                     "options": ["telegram"],
+                    "option_labels": {"telegram": "Telegram"},
                     "help": "Platform for messaging bridge",
                 },
                 {
@@ -994,6 +999,11 @@ class HubPlugin(BasePlugin):
                     "label": "Wake on Agent Arrival",
                     "config_path": "plugins.hub.arrival_wake",
                     "options": ["all", "koordinator", "none"],
+                    "option_labels": {
+                        "all": "All",
+                        "koordinator": "Koordinator",
+                        "none": "None",
+                    },
                     "help": (
                         "Who wakes for a model call when an agent comes online: "
                         "all agents, only the folder's coordinator, or none. "

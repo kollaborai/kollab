@@ -158,11 +158,17 @@ current value:
 ```json
 { "path": "terminal.render_fps", "type": "slider", "label": "...", "help": "...",
   "value": 20, "min_value": 1, "max_value": 60, "step": 1, "options": null,
-  "placeholder": null, "editable": true, "managed_by": null,
-  "secret": false, "is_set": true }
+  "option_labels": null, "placeholder": null, "editable": true,
+  "managed_by": null, "secret": false, "is_set": true }
 ```
 
 `type` is one of `checkbox | slider | spinbox | dropdown | text_input | label`.
+A dropdown's `options` are the values that get saved. When they are ids, the
+widget dict also carries `option_labels` (`{"koordinator": "Koordinator"}`):
+the text the terminal's `/config` dropdown and the web select show for each
+option. An option with no label shows as itself, labels never reach `save`
+(it validates the option), and values that are user data (model names, paths)
+carry none.
 `editable` is false for `label` rows, for the loadout rows that
 `_with_loadout_rows` injects, and for managed paths.
 

@@ -203,6 +203,7 @@ def make_field(
     max_value: Any = None,
     step: Any = None,
     options: Optional[list[str]] = None,
+    option_labels: Optional[dict[str, str]] = None,
     placeholder: Optional[str] = None,
     editable: bool = True,
     managed_by: Optional[str] = None,
@@ -213,8 +214,10 @@ def make_field(
 
     A secret never carries its value: ``value`` is None and ``is_set`` says
     whether one exists. ``editable`` is forced false for ``label`` rows and for
-    managed paths. ``options`` is a list of strings (dropdown). A picker control
-    sets ``action``: the browser posts ``{path: value}`` to that action.
+    managed paths. ``options`` is a list of strings (dropdown); ``option_labels``
+    maps an option to the text people read (the option stays what is saved, one
+    with no label shows as itself). A picker control sets ``action``: the browser
+    posts ``{path: value}`` to that action.
     """
     field = {
         "path": path,
@@ -226,6 +229,7 @@ def make_field(
         "max_value": max_value,
         "step": step,
         "options": options,
+        "option_labels": option_labels,
         "placeholder": placeholder,
         "editable": bool(editable) and managed_by is None and type != "label",
         "managed_by": managed_by,
