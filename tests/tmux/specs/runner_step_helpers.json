@@ -1,0 +1,60 @@
+{
+  "name": "runner-step-helpers",
+  "description": "What a spec uses to stay off the developer's live app: the port placeholder gives a free port (the same number everywhere in the run, a named one another), the developer's KOLLAB_WEBUI_HOSTS is not inherited, signal and assert_no_process act only on this run's processes and a second start_app reuses the pane.",
+  "config": {
+    "command": "python -m http.server {{port}} --bind 127.0.0.1",
+    "app_init_sleep": 2,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "shell",
+      "description": "the app listens on {{port}}",
+      "command": "curl -s -o /dev/null -w 'status=%{http_code}' http://127.0.0.1:{{port}}/",
+      "assert_contains": "status=200"
+    },
+    {
+      "action": "shell",
+      "description": "named ports differ from each other and from the defaults the live app uses",
+      "command": "if [ {{port}} != {{port:other}} ] && [ {{port}} -gt 10000 ] && [ {{port:other}} -gt 10000 ]; then echo ports-ok; else echo ports-bad; fi",
+      "assert_contains": "ports-ok"
+    },
+    {
+      "action": "shell",
+      "description": "the developer's KOLLAB_WEBUI_HOSTS reaches neither a shell step nor the app",
+      "command": "if /bin/ps axeww -o command= | grep -F 'http.server {{port}} ' | grep -q '[K]OLLAB_WEBUI_HOSTS='; then echo app-hosts-set; else echo app-hosts-unset; fi; echo \"shell-hosts=[${KOLLAB_WEBUI_HOSTS-}]\"",
+      "assert_contains": "app-hosts-unset\\s+shell-hosts=\\[\\]"
+    },
+    {
+      "action": "signal",
+      "match": "http\\.server {{port}} ",
+      "signal": "TERM"
+    },
+    {
+      "action": "assert_no_process",
+      "match": "http\\.server {{port}} ",
+      "timeout": 5,
+      "description": "the app is gone after the signal"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "start_app",
+      "command": "echo second-start-$((20+22))",
+      "sleep": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "^second-start-42$",
+      "description": "a second start_app runs its command in the same pane"
+    }
+  ]
+}

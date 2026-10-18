@@ -127,11 +127,35 @@ agents (paid model calls) and write conversation logs and vault entries there.
   process whose environment carries that `HOME` (daemons outlive the tmux pane),
   removes leftover socket files and deletes the directory.
   `KOLLAB_TMUX_KEEP=1` keeps the tmux session and the `HOME`.
+- `KOLLAB_WEBUI_HOSTS` (the developer's VPN address) is dropped from the app
+  command and every `shell` step, so a web UI a spec starts listens on
+  `127.0.0.1` only.
 - Opt-outs, both in `config`: `"real_home": true` for a spec that truly needs the
   developer's providers or data (loud warning, avoid it), `"first_run": true` to
   test the first-run wizard on an unseeded `HOME`.
 
 `specs/runner_home_isolation.json` checks all of this.
+
+### Free Ports and Own Processes
+
+The developer's live app holds the default ports (engine 7433, web UI 8080), and
+its processes look like the ones a spec starts. A spec never uses a fixed port
+and never finds processes by a pattern over the whole machine
+(`pkill -f`, `pgrep -f`).
+
+- `{{port}}` in any string of a spec (the command, a `shell` step, a pattern)
+  becomes one free TCP port, the same number everywhere in the run;
+  `{{port:name}}` is another port per name. The runner prints them as `ports:`.
+  They come from the OS's ephemeral range, never the defaults. The text
+  `{{port` cannot appear in a spec for any other purpose.
+- `signal` (`match`, `signal`, default `TERM`) signals the processes of this run
+  whose command line matches the regex; it fails when none does.
+- `assert_no_process` (`match`, `timeout`, `description`) waits until no process
+  of this run matches, the check for "nothing is left running after Ctrl+C".
+- "This run" means a process whose environment carries the run's throwaway
+  `HOME`, the same test the runner uses to stop what a spec leaves behind.
+
+`specs/runner_step_helpers.json` checks all of this.
 
 ### Available Actions
 
@@ -139,7 +163,9 @@ agents (paid model calls) and write conversation logs and vault entries there.
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
-| `start_app` | `command` (optional) | Start the application. Uses `config.command` or defaults to `python main.py` |
+| `start_app` | `command` (optional), `sleep` (optional) | Start the application. Uses `config.command` or defaults to `python main.py`. A second `start_app` types its command into the same pane once the first app has exited (restart tests) |
+| `signal` | `match`, `signal` (default `TERM`) | Signal this run's processes whose command line matches the regex |
+| `assert_no_process` | `match`, `timeout` (default 5), `description` | Assert no process of this run matches the regex, polling until the timeout |
 
 #### Input Actions
 

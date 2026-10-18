@@ -25,6 +25,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -45,7 +46,46 @@ def _load_spec(path: Path) -> dict[str, Any]:
         sys.exit(2)
 
 
-SPEC = _load_spec(SPEC_PATH)
+# --- Free ports --------------------------------------------------------------
+#
+# A spec must never bind a port the developer's live app uses (the engine on
+# 7433, the web UI on 8080). `{{port}}` in any string of a spec (commands,
+# patterns, shell steps) becomes one free TCP port, the same number everywhere
+# in the run; `{{port:name}}` is another port, per name. The OS hands them out
+# from the ephemeral range, so they never collide with those defaults.
+PORT_TOKEN = re.compile(r"\{\{port(?::([A-Za-z0-9_-]+))?\}\}")
+PORTS: dict[str, int] = {}
+
+
+def _fill_ports(value: Any) -> Any:
+    held: list[socket.socket] = []  # kept open until all are picked: no repeats
+
+    def port_for(match: re.Match[str]) -> str:
+        name = match.group(1) or ""
+        if name not in PORTS:
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            held.append(sock)
+            PORTS[name] = sock.getsockname()[1]
+        return str(PORTS[name])
+
+    def fill(item: Any) -> Any:
+        if isinstance(item, str):
+            return PORT_TOKEN.sub(port_for, item)
+        if isinstance(item, list):
+            return [fill(entry) for entry in item]
+        if isinstance(item, dict):
+            return {key: fill(entry) for key, entry in item.items()}
+        return item
+
+    try:
+        return fill(value)
+    finally:
+        for sock in held:
+            sock.close()
+
+
+SPEC = _fill_ports(_load_spec(SPEC_PATH))
 CONFIG = SPEC.get("config") or {}
 NAME = str(SPEC.get("name") or SPEC_PATH.stem)
 SAFE_NAME = re.sub(r"[^A-Za-z0-9_.-]+", "-", NAME).strip("-") or "kollab-test"
@@ -96,6 +136,9 @@ HOME_ENV = re.compile(r"(?<![A-Za-z0-9_])HOME=")
 SOCKET_DIR_ROOT = "/tmp/kollabor-hub/"
 TEST_HOME: Path | None = None
 RUN_ENV: dict[str, str] = {"KOLLAB_NO_KEYRING": "1"}
+# Variables of the developer's shell a spec must not inherit: the web UI would
+# also listen on that address (their VPN) and hand out the engine token there.
+UNSET_ENV = ("KOLLAB_WEBUI_HOSTS",)
 
 
 def _start_commands() -> list[str]:
@@ -127,15 +170,24 @@ def _setup_home() -> None:
 
 
 def _env_prefix() -> str:
-    return "env " + " ".join(f"{k}={shlex.quote(v)}" for k, v in RUN_ENV.items())
+    unset = "".join(f"-u {name} " for name in UNSET_ENV)
+    return "env " + unset + " ".join(f"{k}={shlex.quote(v)}" for k, v in RUN_ENV.items())
 
 
-def _home_pids() -> list[int]:
+def _child_env() -> dict[str, str]:
+    """The environment of what the runner itself starts (shell steps, cleanup)."""
+    env = {k: v for k, v in os.environ.items() if k not in UNSET_ENV}
+    env.update(RUN_ENV)
+    return env
+
+
+def _home_pids(match: str = "") -> list[int]:
     """Pids whose environment says HOME is this run's throwaway HOME.
 
     The unique mkdtemp path makes the match proof of ownership: only commands
     this run started carry it. The pane's shell keeps the real HOME, and so
-    does this runner, so neither matches.
+    does this runner, so neither matches. *match* narrows to the processes
+    whose command line (or environment) matches that regex.
     """
     out = subprocess.run(
         ["/bin/ps", "axeww", "-o", "pid=,command="],
@@ -147,6 +199,8 @@ def _home_pids() -> list[int]:
     pids = []
     for line in out.splitlines():
         pid_text, _, rest = line.strip().partition(" ")
+        if match and not re.search(match, rest):
+            continue
         at = rest.find(needle)
         while at != -1:
             end = at + len(needle)
@@ -168,7 +222,7 @@ def _stop_home_processes() -> None:
             subprocess.run(
                 [str(python), str(REPO_ROOT / "main.py"), "--hub", "stop", "all"],
                 cwd=str(REPO_ROOT),
-                env={**os.environ, **RUN_ENV},
+                env=_child_env(),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=20,
@@ -235,7 +289,7 @@ def _shell(command: str) -> subprocess.CompletedProcess[str]:
         check=False,
         # same reason as _start_app: a shell step that loads profiles must not
         # pop a Keychain dialog
-        env={**os.environ, **RUN_ENV},
+        env=_child_env(),
     )
 
 
@@ -269,6 +323,8 @@ def _print_header() -> None:
     print(f"spec:    {SPEC_PATH}")
     print(f"socket:  {SOCKET_NAME}")
     print(f"session: {SESSION_NAME}")
+    if PORTS:
+        print("ports:   " + " ".join(f"{name or 'port'}={port}" for name, port in PORTS.items()))
     if REAL_HOME:
         print(f"[WARN] real_home: this spec runs against the real HOME ({Path.home()})")
         print("[WARN] it can join live agents and spend paid model calls")
@@ -324,21 +380,22 @@ def _send_keys(keys: str) -> None:
 def _start_app(step: dict[str, Any]) -> None:
     global STARTED
     command = str(step.get("command") or CONFIG.get("command") or "python main.py")
-    if STARTED:
-        _info("start_app requested after app already started; ignoring")
-        return
 
-    _tmux(
-        "new-session",
-        "-d",
-        "-s",
-        SESSION_NAME,
-        "-x",
-        str(TERM_WIDTH),
-        "-y",
-        str(TERM_HEIGHT),
-    )
-    STARTED = True
+    # The first start_app opens the pane; a later one types its command into
+    # the same pane (the shell prompt a finished app left), always with the
+    # throwaway HOME below.
+    if not STARTED:
+        _tmux(
+            "new-session",
+            "-d",
+            "-s",
+            SESSION_NAME,
+            "-x",
+            str(TERM_WIDTH),
+            "-y",
+            str(TERM_HEIGHT),
+        )
+        STARTED = True
     # Never touch the developer's OS keyring or real ~/.kollab from a test: on
     # macOS every lookup/store of a missing keyring entry pops a Keychain
     # dialog, and the real HOME holds live agents (see "HOME isolation" above).
@@ -424,6 +481,45 @@ def _wait_for(
             print(_tail(LAST_OUTPUT))
             return
         time.sleep(interval)
+
+
+def _signal_processes(match: str, name: str) -> None:
+    """Signal this run's processes whose command line matches *match*.
+
+    Scoped by the throwaway HOME, so a pattern can never reach the developer's
+    live processes the way a bare `pkill -f` would.
+    """
+    global FAILURES
+    sig = getattr(signal, "SIG" + name.upper().removeprefix("SIG"), None)
+    pids = _home_pids(match) if TEST_HOME and match else []
+    if sig is None or not pids:
+        FAILURES += 1
+        print(f"[FAIL] signal {name}: no process of this run matches '{match}'")
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+    _info(f"sent {name} to {pids}")
+
+
+def _assert_no_process(match: str, timeout: float, description: str = "") -> None:
+    """Poll until no process of this run (its throwaway HOME) matches *match*."""
+    global FAILURES
+    label = description or f"no process left matching: {match}"
+    if TEST_HOME is None or not match:
+        FAILURES += 1
+        print(f"[FAIL] {label}: needs a throwaway HOME and a match")
+        return
+    deadline = time.time() + timeout
+    while _home_pids(match) and time.time() < deadline:
+        time.sleep(0.25)
+    if left := _home_pids(match):
+        FAILURES += 1
+        print(f"[FAIL] {label}: still running {left}")
+        return
+    print(f"[PASS] {label}")
 
 
 def _type_text(text: str, delay: float) -> None:
@@ -534,6 +630,14 @@ def _execute_step(step: dict[str, Any]) -> None:
         _info(str(step.get("message") or ""))
     elif action == "shell":
         _run_shell_step(step)
+    elif action == "signal":
+        _signal_processes(str(step.get("match", "")), str(step.get("signal", "TERM")))
+    elif action == "assert_no_process":
+        _assert_no_process(
+            str(step.get("match", "")),
+            float(step.get("timeout", 5)),
+            str(step.get("description") or step.get("name") or ""),
+        )
     else:
         global FAILURES
         FAILURES += 1
