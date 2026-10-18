@@ -550,12 +550,13 @@ def _offline_agents(
     The sidebar lists them as offline; opening one starts it again (its vault
     brings back what it knew).
     """
-    from .agents import ran_here
+    from ..folders import hub_folder
+    from .agents import ran_in
 
     here = os.path.realpath(os.getcwd())
 
     def in_here(folder: Any) -> bool:
-        return bool(folder) and os.path.realpath(str(folder)) == here
+        return bool(folder) and hub_folder(folder) == hub_folder(here)
 
     running = {
         str(row.get("identity") or "") for row in found if in_here(row.get("workspace"))
@@ -571,7 +572,7 @@ def _offline_agents(
     )
     return [
         {"identity": name, "workspace": here, "last_ran": last_ran}
-        for name, last_ran in sorted(ran_here().items(), key=lambda item: -item[1])
+        for name, last_ran in sorted(ran_in(here).items(), key=lambda item: -item[1])
         if name not in running
     ]
 

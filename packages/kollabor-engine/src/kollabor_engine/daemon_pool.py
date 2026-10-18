@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from .folders import agents_in_folder
 from .hub_bridge import HubBridge
 
 logger = logging.getLogger(__name__)
@@ -403,26 +404,20 @@ class DaemonPool:
         serialized, and delegate the actual pool ordering to the hub's
         ``IdentityAssigner``.
         """
-        active = self._bridge.get_agents(use_cache=False)
         requested = (preferred or "").strip()
-        if requested == "koordinator":
-            # Every folder has its own koordinator; only this folder's holds it.
-            here = os.path.realpath(folder or os.getcwd())
-            active = [
-                agent
-                for agent in active
-                if isinstance(agent, dict)
-                and os.path.realpath(str(agent.get("project") or "")) == here
-            ]
+        # Every folder has its own hub, a koordinator and every gem each: only
+        # an agent in this folder's hub holds a name here.
+        here = os.path.realpath(folder or os.getcwd())
         taken = {
             str(agent.get("identity") or "")
-            for agent in active
-            if isinstance(agent, dict) and agent.get("identity")
+            for agent in agents_in_folder(self._bridge.get_agents(use_cache=False), here)
+            if agent.get("identity")
         }
 
         if requested and requested in taken:
             raise ValueError(
-                f"hub identity '{requested}' is already in use; choose another agent"
+                f"hub identity '{requested}' is already in use in {here}; "
+                "open it from the sidebar or choose another agent"
             )
 
         try:
