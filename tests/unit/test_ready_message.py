@@ -1,6 +1,5 @@
 """Unit tests for ready message collection system."""
 
-import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -174,12 +173,6 @@ class TestReadyMessageCollector(unittest.TestCase):
         result = self.collector.format_for_display(max_items=5)
         self.assertIn("85 hooks active", result)
         self.assertIn("agent mode enabled", result)
-
-
-def run_async_test(coro):
-    """Helper to run async tests."""
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(coro)
 
 
 if __name__ == "__main__":

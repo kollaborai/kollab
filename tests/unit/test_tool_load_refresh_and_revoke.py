@@ -367,6 +367,28 @@ class TestRevokeWiring(unittest.TestCase):
         self.assertEqual(coord.revoked, ["file-edit"])
         self.assertEqual(coord.tool_executor._bundle_tools, ["terminal"])
 
+    def test_agent_change_revoke_helper_schedules_on_the_running_loop(self):
+        from kollabor.state.local import LocalStateService
+
+        coord = _RevokeFakeCoordinator()
+        state = SimpleNamespace(
+            _llm_service=SimpleNamespace(
+                tool_executor=coord.tool_executor,
+                inject_tool_revoke=coord.inject_tool_revoke,
+            ),
+            _pending_revokes=[],
+        )
+        coord.tool_executor.set_bundle_scope(["terminal", "file-edit"])
+
+        async def switch():
+            LocalStateService._revoke_tools_outside_scope(state, ["terminal"])
+            self.assertEqual(len(state._pending_revokes), 1)
+            await asyncio.gather(*state._pending_revokes)
+
+        _run(switch())
+
+        self.assertEqual(coord.revoked, ["file-edit"])
+
     def test_revoke_removes_from_callable_set(self):
         """The contract end-state: a revoked tool fails the scope check."""
         _ensure_registry()

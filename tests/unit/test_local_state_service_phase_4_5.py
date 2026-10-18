@@ -14,7 +14,6 @@ in step 10.
 
 from __future__ import annotations
 
-import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -29,11 +28,6 @@ from kollabor.state import (
     SkillListSnapshot,
     SystemPromptSnapshot,
 )
-
-
-def _run(coro):
-    """Run an async coroutine to completion, returning the result."""
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 def _make_skill(
