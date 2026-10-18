@@ -162,6 +162,8 @@ export type AgentPoolEntry = {
   name: string;
   identity?: string;
   agent_type?: string;
+  /** The agent bundle it runs (the same word as agent_type); empty is the default one. */
+  agent?: string;
   /** The roster the name belongs to ("" for the koordinator). */
   roster?: string;
   /** What a UI calls it: "Maya Lindqvist"; a gem's is its name. */
@@ -1096,11 +1098,6 @@ export class EngineApi {
     return this.json<AgentPoolResponse>(`/agents?${query}`);
   }
 
-  getGemAppearance() {
-    return this.json<GemAppearance>("/agents/appearance");
-  }
-
-  saveGemAppearance(appearance: GemAppearance) {
   /** Every roster the folder can draw from (its own project rosters included), and files that failed to load. */
   listRosters(workspace = "") {
     const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
@@ -1120,6 +1117,11 @@ export class EngineApi {
     });
   }
 
+  getGemAppearance() {
+    return this.json<GemAppearance>("/agents/appearance");
+  }
+
+  saveGemAppearance(appearance: GemAppearance) {
     return this.json<GemAppearance>("/agents/appearance", {
       method: "PUT",
       body: JSON.stringify(appearance),

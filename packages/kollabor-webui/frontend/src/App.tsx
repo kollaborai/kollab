@@ -6,6 +6,7 @@ import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
 import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -322,6 +323,7 @@ export default function App() {
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
@@ -916,6 +918,7 @@ export default function App() {
 
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
+      <AvatarImageProvider api={api}>
       <SidebarProvider>
         <AppSidebar
           sessions={sessions}
@@ -926,7 +929,6 @@ export default function App() {
           network={network}
           offline={offline}
           hiddenAgents={hiddenAgents}
-      <AvatarImageProvider api={api}>
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}
@@ -942,6 +944,7 @@ export default function App() {
           onIdentityChange={setSelectedIdentity}
           onBundleChange={setPickedBundle}
           onApps={() => setAppsOpen(true)}
+          onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
           onStudio={() => {
             setStudioFocus(null);
@@ -956,6 +959,16 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        <AgentLibrary
+          api={api}
+          open={agentsOpen}
+          onOpenChange={setAgentsOpen}
+          workspace={workspacePath.trim()}
+          onLaunched={() => {
+            void loadSessions();
+            void refreshAgentPool();
+          }}
+        />
         <SetupGuide
           api={api}
           open={setupGuideOpen}
@@ -1047,6 +1060,9 @@ export default function App() {
                 {nextGem ? (
                   <Avatar
                     gem={nextGem.name}
+                    avatar={nextGem.avatar}
+                    displayName={nextGem.display_name}
+                    folder={workspacePath.trim()}
                     caste={nextGem.caste}
                     color={nextGem.color}
                     state={busy ? "working" : "idle"}
@@ -1057,9 +1073,6 @@ export default function App() {
                     label={nextGem.display_name || titleCase(nextGem.name)}
                   />
                 ) : (
-                    avatar={nextGem.avatar}
-                    displayName={nextGem.display_name}
-                    folder={workspacePath.trim()}
                   <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
@@ -1102,7 +1115,7 @@ export default function App() {
           )}
         </SidebarInset>
       </SidebarProvider>
+      </AvatarImageProvider>
     </GemAppearanceProvider>
   );
 }
-      </AvatarImageProvider>

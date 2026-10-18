@@ -13,10 +13,13 @@ export function WorkspacePicker({
   api,
   value,
   onChange,
+  id = "new-session-workspace",
 }: {
   api: EngineApi;
   value: string;
   onChange: (path: string) => void;
+  /** The trigger's id, for the label that names it. */
+  id?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [home, setHome] = useState<WorkspaceEntry | null>(null);
@@ -99,7 +102,7 @@ export function WorkspacePicker({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          id="new-session-workspace"
+          id={id}
           type="button"
           variant="outline"
           size="sm"

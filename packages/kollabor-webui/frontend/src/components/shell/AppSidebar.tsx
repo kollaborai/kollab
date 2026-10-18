@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal } from "lucide-react";
+import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { GemAvatar } from "@/components/gems/GemAvatar";
@@ -130,6 +130,7 @@ export function AppSidebar({
   onBundleChange,
   onWorkspaceChange,
   onApps,
+  onAgents,
   onSettings,
   onStudio,
   onManageProfiles,
@@ -173,6 +174,8 @@ export function AppSidebar({
   onBundleChange: (bundle: string) => void;
   onWorkspaceChange: (path: string) => void;
   onApps: () => void;
+  /** Opens the Agents view: every roster and team this folder can start. */
+  onAgents: () => void;
   onSettings: () => void;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
@@ -793,6 +796,17 @@ export function AppSidebar({
             >
               <LayoutGrid className="size-4" />
               <span>Apps</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                setOpenMobile(false);
+                onAgents();
+              }}
+            >
+              <Users className="size-4" />
+              <span>Agents</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
