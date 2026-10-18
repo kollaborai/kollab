@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from kollabor.binary import kollab_argv
 from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
 
 
@@ -41,29 +42,10 @@ class TestCreateSessionInitialTask(unittest.TestCase):
         proc.stdout.readline = MagicMock(return_value=b"")
         return proc
 
-    def test_find_command_prefers_same_environment_script(self):
-        """Installed tools should not fall through to pyenv/homebrew shims."""
-
-        def fake_exists(path):
-            text = str(path)
-            if text.endswith("/main.py"):
-                return False
-            return text == "/tmp/kollab-tool/bin/kollab"
-
-        with (
-            patch(
-                "plugins.agent_orchestrator.orchestrator.sys.executable",
-                "/tmp/kollab-tool/bin/python",
-            ),
-            patch(
-                "plugins.agent_orchestrator.orchestrator.Path.exists",
-                fake_exists,
-            ),
-        ):
-            self.assertEqual(
-                self.orch._find_kollab_command(),
-                ["/tmp/kollab-tool/bin/kollab"],
-            )
+    def test_find_command_is_this_kollab_not_the_first_on_path(self):
+        """A child agent runs the code that spawned it, never another install's shim."""
+        with patch("shutil.which", return_value="/usr/local/bin/kollab"):
+            self.assertEqual(self.orch._find_kollab_command(), kollab_argv())
 
     @patch("plugins.agent_orchestrator.orchestrator.threading.Thread")
     @patch("plugins.agent_orchestrator.orchestrator.subprocess.Popen")

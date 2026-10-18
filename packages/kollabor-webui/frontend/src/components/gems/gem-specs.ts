@@ -4,7 +4,7 @@
  * (`build`), finish (`material`) and temperament (`pace`, `energy`), so a
  * roster reads as a cast: no two gems of a caste share a cut, and gems of
  * close colors never do. The temperaments follow the pool's personalities
- * (`plugins/hub/organizations/pool.json`). The engine's GET /agents sends the
+ * (`bundles/rosters/gems.json`). The engine's GET /agents sends the
  * real pool color, so `color` here only covers a missing or older engine.
  * Names outside this table (custom pools, koordinator) draw a cut from their
  * name, so they join the cast too.

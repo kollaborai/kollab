@@ -144,8 +144,10 @@ class EngineSession:
         identity: Optional[str] = None,
         solo: bool = False,
         stop_on_owner_exit: bool = False,
+        launch_brief: Optional[str] = None,
     ):
         self.session_id = session_id
+        self.launch_brief = launch_brief or ""
         self.solo = solo
         self.stop_on_owner_exit = stop_on_owner_exit
         self.user_token = user_token
@@ -182,14 +184,23 @@ class EngineSession:
         self._raw_history: List[Dict[str, Any]] = []
         self._history_anchor = ""
         self._history_lock = asyncio.Lock()
+        # The mirror holds a disk seed the daemon has not replaced yet. A seed
+        # is no prefix of the daemon's history (hub messages are logged apart),
+        # so a page showing it replaces its thread whole when the daemon answers.
+        self._history_seeded = False
 
         # The daemon's own conversation id (its conversations/<id>.jsonl
         # name). Arrives with the first answered snapshot; before that, disk
         # seeding falls back to the newest log in the workspace's folder.
         self.conversation_id = ""
-        # The coalesced background refresh (get_history_nonblocking). One task
-        # at a time; a request that arrives while one runs reuses it.
+        # The coalesced background refresh (get_history_nonblocking, daemon
+        # events). One task at a time; a request that arrives while one runs
+        # makes it go once more, because the one in flight may have asked the
+        # daemon before the change behind the request.
         self._history_refresh_task: Optional[asyncio.Task] = None
+        self._history_refresh_again = False
+        # Whether the refresh ahead announces what it changed (history_updated).
+        self._history_refresh_notify = False
         # True while a refresh is in flight, for the UI's syncing badge.
         self.history_syncing = False
 
@@ -210,12 +221,13 @@ class EngineSession:
         self._facts_task: Optional[asyncio.Task] = None
 
     @staticmethod
-    def _resolve_workspace(workspace: Optional[str]) -> Optional[str]:
-        """Normalize and validate a caller-provided daemon working directory."""
-        if not workspace:
-            return None
+    def _resolve_workspace(workspace: Optional[str]) -> str:
+        """Normalize and validate the daemon's working directory.
 
-        path = Path(workspace).expanduser().resolve()
+        With no folder named the daemon runs in this engine's own, so that is
+        the folder the session reports: a null left every reader to guess it.
+        """
+        path = Path(workspace or Path.cwd()).expanduser().resolve()
         if not path.exists():
             raise ValueError(f"Workspace does not exist: {workspace}")
         if not path.is_dir():
@@ -245,6 +257,7 @@ class EngineSession:
             identity=self.requested_identity,
             workspace=self.workspace,
             system_prompt=self.system_prompt or None,
+            launch_brief=self.launch_brief or None,
             user_token=self.user_token,
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
@@ -322,9 +335,17 @@ class EngineSession:
         from it, never set, and closing the session only detaches.
         """
         session_id = str(found["session_id"])
+        # What presence says it runs: the row keeps its model while a busy
+        # daemon is slow to answer _read_agent_facts, which then replaces this.
+        seed = ProfileSnapshot(
+            name=str(found.get("profile") or ""),
+            model=str(found.get("model") or ""),
+            provider=str(found.get("provider") or ""),
+            description=str(found.get("harness") or ""),
+        )
         session = cls(
             session_id=session_id,
-            profile=None,
+            profile=seed if seed.name or seed.model else None,
             approval_mode="",
             agent=str(found.get("agent") or "") or None,
             identity=str(found.get("identity") or "") or None,
@@ -467,15 +488,19 @@ class EngineSession:
                 )
         await self.state.reload_mcp_servers()
 
-    async def refresh_history(self) -> List[Dict[str, Any]]:
+    async def refresh_history(self, notify: bool = False) -> List[Dict[str, Any]]:
         """Pull the daemon's conversation into the local mirror.
 
         Asks for only the messages past the ones already held, with the digest
         the daemon gave for them; a daemon whose history changed (compaction,
         /clear, /resume), or one too old to know, sends all of it.
+
+        Subscribers hear ``history_updated`` when the answer replaces a disk
+        seed (whoever asked) or, with ``notify``, when it changed anything.
         """
         async with self._history_lock:
             held = self._raw_history
+            before = anchor_digest(held)
             try:
                 snapshot = await asyncio.wait_for(
                     self.state.get_conversation(
@@ -555,6 +580,9 @@ class EngineSession:
                     logger.debug("session %s display provenance unavailable: %s", self.session_id, exc)
             # XML tool turns in the shape the web renders for native tools.
             self.history = web_history(display_history)
+            seed_replaced, self._history_seeded = self._history_seeded, False
+            if seed_replaced or (notify and anchor_digest(self._raw_history) != before):
+                self._emit_event({"type": "history_updated"})
             return self.history
 
     # --- nonblocking open path -------------------------------------------
@@ -594,10 +622,9 @@ class EngineSession:
         machine's disk. A background refresh (coalesced: one task, however
         many requests arrive) reconciles with the daemon afterward, and the
         ``history_updated`` event it emits when it lands brings late
-        replies to the page instead of throwing them away.
+        replies to the page instead of throwing them away. Until it lands the
+        answer says ``stale``: the page replaces what it built from the seed.
         """
-        stale = False
-        source = "mirror"
         if not self.history:
             conversations_dir = self._disk_conversation_dir()
             if conversations_dir is not None:
@@ -606,12 +633,13 @@ class EngineSession:
                     seeded = await read_history_from_disk_async(
                         conversations_dir, conversation_id, limit
                     )
-                    if seeded:
+                    # The daemon may have answered while the disk was read.
+                    if seeded and not self.history:
                         self.history = seeded
                         self._history_anchor = (
                             ""  # seed is not anchor-safe: refetch whole
                         )
-                        source, stale = "disk", True
+                        self._history_seeded = True
         history = self.history[-limit:] if limit else self.history
         self._schedule_refresh()
         turn_error = dict(self.last_turn_error) if self.last_turn_error else None
@@ -626,27 +654,38 @@ class EngineSession:
             "session_id": self.session_id,
             "history": history,
             "last_turn_error": turn_error,
-            "source": source,
-            "stale": stale,
+            "source": "disk" if self._history_seeded else "mirror",
+            "stale": self._history_seeded,
         }
 
-    def _schedule_refresh(self) -> None:
-        """One background refresh, however many opens asked for it."""
+    def _schedule_refresh(self, notify: bool = True) -> None:
+        """One background refresh at a time, run again for a request made during it.
+
+        ``notify``: announce what the refresh changed to the open windows
+        (history_updated). Keeping the mirror warm needs no announcement.
+        """
         if not self.alive:
             return
+        self._history_refresh_notify = self._history_refresh_notify or notify
         if (
             self._history_refresh_task is not None
             and not self._history_refresh_task.done()
         ):
+            self._history_refresh_again = True
             return
         self.history_syncing = True
 
         async def _run() -> None:
-            before = anchor_digest(self._raw_history)
-            changed = False
             try:
-                await self.refresh_history()
-                changed = anchor_digest(self._raw_history) != before
+                while True:
+                    self._history_refresh_again = False
+                    announce, self._history_refresh_notify = (
+                        self._history_refresh_notify,
+                        False,
+                    )
+                    await self.refresh_history(notify=announce)
+                    if not self._history_refresh_again:
+                        break
             except Exception as e:  # a background refresh never breaks a route
                 logger.debug(
                     "session %s background refresh failed: %s", self.session_id, e
@@ -654,8 +693,6 @@ class EngineSession:
             finally:
                 self.history_syncing = False
                 self._history_refresh_task = None
-                if changed:
-                    self._emit_event({"type": "history_updated"})
 
         self._history_refresh_task = asyncio.get_running_loop().create_task(
             _run(), name=f"session-history-{self.session_id}"
@@ -769,6 +806,14 @@ class EngineSession:
                     )
                     turn_error = ""
 
+                elif etype == "user_message":
+                    # The daemon took a human's message into its history, from
+                    # any window or its terminal: a window that opens mid-turn
+                    # must find it in the mirror. The refresh announces nothing
+                    # (open windows reload on turn_complete), so a turn that
+                    # starts never reloads the page that sent it.
+                    self._schedule_refresh(notify=False)
+
                 elif etype in ("hub_message", "tool_result"):
                     # Mid-turn conversation movement (a background message
                     # landed, a tool wrote its result): keep the mirror warm
@@ -823,9 +868,13 @@ class EngineSession:
             self.agent or (self.daemon.agent_name if self.daemon else "") or "default"
         )
         model = getattr(self.profile, "model", "")
+        provider = getattr(self.profile, "provider", "")
+        harness = ""
+        if provider == "acp":
+            harness = getattr(self.profile, "description", "") or getattr(self.profile, "name", "")
         return {
-            "harness": (getattr(self.profile, "description", "") or getattr(self.profile, "name", "")) if getattr(self.profile, "provider", "") == "acp" else "",
-            "provider": getattr(self.profile, "provider", ""),
+            "harness": harness,
+            "provider": provider,
             "acp_waiting": self.acp_waiting,
             "acp_usage": self.acp_usage,
             "acp_plan": self.acp_plan,
@@ -836,9 +885,7 @@ class EngineSession:
             "model": model,
             # What the daemon will send next (mirrored by apply_profile_mirror).
             "effort": getattr(self.profile, "effort", "") or "",
-            "supports_vision": supports_vision(
-                model, getattr(self.profile, "provider", "")
-            ),
+            "supports_vision": supports_vision(model, provider),
             "agent": agent_name,
             "workspace": self.workspace,
             "device": self.device,

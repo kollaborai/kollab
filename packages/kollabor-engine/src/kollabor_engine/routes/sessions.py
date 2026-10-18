@@ -18,11 +18,13 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from .. import hidden_agents
 from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry
 from ..session import INLINE_PROFILE, EngineSession
+from .rosters import apply_persona
 from .workspaces import remember_workspace
 
 logger = logging.getLogger(__name__)
@@ -41,16 +43,21 @@ TRENDER_PATTERN = re.compile(
 def _reserve_session_id(
     registry: Dict[str, EngineSession], requested_id: Optional[str]
 ) -> str:
-    """Reserve an ID before any daemon work can begin."""
-    session_id = requested_id or generate_session_name()
+    """Reserve an ID before any daemon work can begin.
+
+    A generated name is one of about 800 a minute, so two members of one team
+    launch can draw the same: redraw it. A requested ID is the caller's to fix.
+    """
     with _session_reservation_lock:
-        if session_id in registry or session_id in _pending_session_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Session '{session_id}' is already in use",
-            )
-        _pending_session_ids.add(session_id)
-    return session_id
+        for _ in range(1 if requested_id else 20):
+            session_id = requested_id or generate_session_name()
+            if session_id not in registry and session_id not in _pending_session_ids:
+                _pending_session_ids.add(session_id)
+                return session_id
+    raise HTTPException(
+        status_code=409,
+        detail=f"Session '{session_id}' is already in use",
+    )
 
 
 def _release_session_id(session_id: str) -> None:
@@ -79,10 +86,16 @@ class Credentials(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    profile: str = "default"
+    # None (or the placeholder "default") names no profile: the persona's or the
+    # agent's applies, else the active profile, which New Session also starts on.
+    profile: Optional[str] = None
     agent: Optional[str] = None
     identity: Optional[str] = None
     system_prompt: Optional[str] = None
+    # Instructions for this agent from whoever launched it (a team seat: role,
+    # reporting chain). The daemon adds them to its hub context
+    # (KOLLAB_LAUNCH_BRIEF); a bundle's own prompt is untouched.
+    launch_brief: Optional[str] = None
     workspace: Optional[str] = None
     approval_mode: str = "trust_all"
     mcp_servers: List[str] = []
@@ -125,8 +138,12 @@ def _sanitize_system_prompt(prompt: Optional[str]) -> Optional[str]:
     return prompt
 
 
-def _resolve_agent(name: str) -> Optional[dict]:
-    """Load agent definition by name from the agents directory.
+def _resolve_agent(name: str, workspace: Optional[str] = None) -> Optional[dict]:
+    """Load agent definition by name: local, then global, then bundled (AgentManager's order).
+
+    The local tier is ``workspace``'s own ``.kollab/agents``, the folder the
+    daemon will run in (the engine's folder when none is given), never the
+    engine's cwd when the chat is elsewhere.
 
     Returns a dict with resolved keys:
       system_prompt: str - fully rendered (trender includes resolved)
@@ -137,36 +154,19 @@ def _resolve_agent(name: str) -> Optional[dict]:
     Returns None if the agent is not found.
     """
     try:
-        from kollabor_agent.agent_manager import (
-            Agent,
-            AgentManager,
-            get_global_agents_dir,
-            get_local_agents_dir,
-        )
+        from kollabor_agent.agent_manager import Agent, AgentManager
     except ImportError:
         logger.warning("kollabor_agent not available — cannot resolve agent")
         return None
 
     try:
-        # Search global then local agents dirs (local overrides global)
-        agent_obj = None
-        for agents_dir_fn in [get_global_agents_dir, get_local_agents_dir]:
-            try:
-                agents_dir = agents_dir_fn()
-            except Exception:
-                continue
-            if not agents_dir or not agents_dir.exists():
-                continue
-            agent_dir = agents_dir / name
-            if agent_dir.is_dir():
-                candidate = Agent.from_directory(agent_dir)
-                if candidate:
-                    agent_obj = candidate
-
+        project = Path(workspace).expanduser().resolve() if workspace else None
+        am = AgentManager(project_path=project)
+        found = am.find_agent_dir(name)
+        agent_obj = Agent.from_directory(found[0], source=found[1]) if found else None
         if not agent_obj:
             return None
 
-        am = AgentManager()
         system_prompt = agent_obj.get_full_system_prompt(agent_manager=am)
 
         # Read mcp_servers from agent.json directly (not parsed by Agent.from_directory)
@@ -204,10 +204,13 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # Resolve user_token: body takes priority, header is fallback (proxy injects it)
     user_token = body.user_token or request.headers.get("x-mentiko-session-token")
 
+    # A persona names its own bundle and profile; what the caller set wins.
+    apply_persona(body)
+
     # Resolve agent definition if requested
     agent_data = None
     if body.agent:
-        agent_data = _resolve_agent(body.agent)
+        agent_data = _resolve_agent(body.agent, body.workspace)
         if agent_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{body.agent}' not found"
@@ -224,10 +227,13 @@ async def create_session(body: CreateSessionRequest, request: Request):
     safe_system_prompt = effective_system_prompt
 
     # Determine effective profile:
-    # caller's profile wins; agent profile used only when caller sends "default"
+    # caller's profile wins; agent profile used only when the caller names none.
+    # "default" in a bundle's agent.json (coder has it) is no preference, only the
+    # built-in auto-detect profile's own name.
     effective_profile = body.profile
-    if agent_data and agent_data.get("profile") and body.profile == "default":
-        effective_profile = agent_data["profile"]
+    agent_profile = agent_data.get("profile") if agent_data else None
+    if agent_profile not in (None, "", "default") and body.profile in (None, "default"):
+        effective_profile = agent_profile
 
     # Merge MCP servers: deduplicate, agent's list appended to caller's
     effective_mcp_servers = list(body.mcp_servers)
@@ -261,6 +267,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
         from kollabor_ai import ProfileManager
 
         pm = ProfileManager()
+        effective_profile = effective_profile or pm.active_profile_name
         profile = pm.get_profile(effective_profile)
         if not profile:
             raise HTTPException(
@@ -284,6 +291,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 user_token=user_token,
                 agent=body.agent,
                 identity=body.identity,
+                launch_brief=body.launch_brief,
                 # Bundles with "hub": false (product assistants) get a solo
                 # daemon: attachable by this engine, invisible to the mesh.
                 solo=bool(agent_data) and agent_data.get("hub") is False,
@@ -550,12 +558,13 @@ def _offline_agents(
     The sidebar lists them as offline; opening one starts it again (its vault
     brings back what it knew).
     """
-    from .agents import ran_here
+    from ..folders import hub_folder
+    from .agents import persona_in, ran_in
 
     here = os.path.realpath(os.getcwd())
 
     def in_here(folder: Any) -> bool:
-        return bool(folder) and os.path.realpath(str(folder)) == here
+        return bool(folder) and hub_folder(folder) == hub_folder(here)
 
     running = {
         str(row.get("identity") or "") for row in found if in_here(row.get("workspace"))
@@ -569,11 +578,15 @@ def _offline_agents(
         for s in registry.values()
         if in_here(getattr(s, "workspace", None) or here)
     )
-    return [
-        {"identity": name, "workspace": here, "last_ran": last_ran}
-        for name, last_ran in sorted(ran_here().items(), key=lambda item: -item[1])
-        if name not in running
-    ]
+    rows = []
+    for name, last_ran in sorted(ran_in(here).items(), key=lambda item: -item[1]):
+        if name in running:
+            continue
+        # A persona of any roster keeps its name, picture and color offline.
+        known = persona_in(name, here)
+        look = {key: known[key] for key in ("display_name", "avatar", "color", "caste") if known.get(key)}
+        rows.append({"identity": name, "workspace": here, "last_ran": last_ran, **look})
+    return rows
 
 
 @router.get("")
@@ -602,11 +615,15 @@ async def list_sessions():
         and item.get("daemon_pid") not in local_pids
         and not pool.owns(item)
     ]
+    rows = sessions + discovered
+    hidden_agents.stamp_instances(rows, found)
     return {
-        "sessions": sessions + discovered,
+        "sessions": rows,
         "discovered": discovered,
         "active_count": len(sessions) + len(discovered),
         "offline": _offline_agents(found, registry),
+        # The rows the user hid, for every client of this engine (hidden_agents.py).
+        "hidden": hidden_agents.visible({row["instance"] for row in rows}),
         "network": merge_view_and_memberships(
             _network_view(await _network_snapshot(registry))
         ),
@@ -905,7 +922,8 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     # Never waits on the daemon: the warm mirror, or a disk seed, answers at
     # once; the reconciling refresh runs in the background and its result
     # arrives as a history_updated event. source says where the history came
-    # from and stale whether a refresh is still reconciling it.
+    # from and stale whether it is still the disk seed (every answer before
+    # the daemon's replaces it, not only the first).
     return await session.get_history_nonblocking(limit)
 
 

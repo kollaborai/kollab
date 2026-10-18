@@ -13,13 +13,18 @@
 #        - no 'failed on daemon' error
 #   4. Verify the context registry file on disk contains both contexts.
 #
-# Runs in its own tmux socket and cleans up only its own daemon.
+# Runs in its own tmux socket and a throwaway HOME with its own project root
+# (lib/isolated_home.sh): it never joins the live hub, and it stops only what it started.
 # ============================================================================
 
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+
+# shellcheck source=lib/isolated_home.sh
+source "$REPO_ROOT/tests/tmux/lib/isolated_home.sh"
+isolated_home_setup
 
 TMUX_SOCKET="kollabor-phase45ctx-$$"
 DAEMON_SESSION="phase45ctx-daemon-$$"
@@ -51,33 +56,9 @@ cleanup() {
     log "cleanup: killing tmux sessions"
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
 
-    if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        log "cleanup: killing our daemon pid=$DAEMON_PID (identity=$IDENTITY)"
-        kill "$DAEMON_PID" 2>/dev/null || true
-        sleep 0.5
-        kill -9 "$DAEMON_PID" 2>/dev/null || true
-    fi
-
-    if [ -n "$IDENTITY" ]; then
-        for f in "$HOME/.kollab/hub/presence/"*.json; do
-            [ -f "$f" ] || continue
-            if grep -q "\"identity\": \"$IDENTITY\"" "$f" 2>/dev/null; then
-                local fpid
-                fpid=$(grep -o '"pid": [0-9]*' "$f" | awk '{print $2}')
-                if [ "$fpid" = "$DAEMON_PID" ]; then
-                    rm -f "$f"
-                fi
-            fi
-        done
-        rm -f "/tmp/kollabor-hub/${IDENTITY}.sock" 2>/dev/null || true
-
-        # Clean up context file we may have created
-        local ctx_file="$HOME/.kollab/hub/contexts/${IDENTITY}.json"
-        if [ -f "$ctx_file" ]; then
-            log "cleanup: removing test context file $ctx_file"
-            rm -f "$ctx_file"
-        fi
-    fi
+    # Everything this script started carries its throwaway HOME, so that is how
+    # it is found and stopped (presence, socket and context files go with it).
+    isolated_home_cleanup
 }
 trap cleanup EXIT
 
@@ -93,13 +74,19 @@ echo ""
 # ---------------------------------------------------------------------------
 log "step 1: recording existing presence files"
 
-PRESENCE_DIR="$HOME/.kollab/hub/presence"
+# The hub directory follows the project scope, so ask the app where it is.
+HUB_DIR=$(isolated_run "$ISOLATED_PYTHON" - <<'PY'
+from plugins.hub.presence import get_hub_dir
+print(get_hub_dir())
+PY
+)
+PRESENCE_DIR="$HUB_DIR/presence"
 mkdir -p "$PRESENCE_DIR"
 EXISTING_PRESENCE=$(ls -1 "$PRESENCE_DIR"/*.json 2>/dev/null | sort)
 
 log "step 1b: spawning interactive kollab in tmux"
 tmux -L "$TMUX_SOCKET" new-session -d -s "$DAEMON_SESSION" -x 140 -y 40 \
-    "python main.py"
+    "$ISOLATED_ENV $ISOLATED_PYTHON main.py"
 
 log "waiting up to 20s for hub presence file..."
 DAEMON_PRESENCE=""
@@ -134,7 +121,7 @@ pass "daemon spawned, identity=$IDENTITY pid=$DAEMON_PID"
 log "step 2: attaching with --context $CONTEXT_NAME"
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$ATTACH_SESSION" -x 140 -y 40 \
-    "python main.py --attach $IDENTITY --context $CONTEXT_NAME"
+    "$ISOLATED_ENV $ISOLATED_PYTHON main.py --attach $IDENTITY --context $CONTEXT_NAME"
 
 log "waiting 10s for drain + refresh..."
 sleep 10
@@ -166,7 +153,7 @@ else
 fi
 
 # Assertion 3: Context registry file exists on disk with our identity
-CONTEXT_FILE="$HOME/.kollab/hub/contexts/${IDENTITY}.json"
+CONTEXT_FILE="$HUB_DIR/contexts/${IDENTITY}.json"
 if [ -f "$CONTEXT_FILE" ]; then
     pass "context registry file exists at $CONTEXT_FILE"
 else

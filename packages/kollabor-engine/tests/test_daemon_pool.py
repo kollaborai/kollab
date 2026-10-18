@@ -1,6 +1,8 @@
 """Daemon-pool lifecycle regressions."""
 
 import asyncio
+import os
+import subprocess
 from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -43,9 +45,10 @@ def test_close_current_event_loop_releases_policy_resource() -> None:
 
 def test_web_sessions_use_the_hub_identity_pool() -> None:
     pool = daemon_pool.DaemonPool()
+    here = os.getcwd()
     pool._bridge.get_agents = lambda use_cache=False: [
-        {"identity": "lapis"},
-        {"identity": "sapphire"},
+        {"identity": "lapis", "project": here},
+        {"identity": "sapphire", "project": here},
     ]
 
     identity = pool._assign_identity()
@@ -56,23 +59,46 @@ def test_web_sessions_use_the_hub_identity_pool() -> None:
 
 def test_requested_busy_identity_is_rejected() -> None:
     pool = daemon_pool.DaemonPool()
-    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis"}]
+    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis", "project": os.getcwd()}]
 
     with pytest.raises(ValueError, match="lapis.*already in use"):
         pool._assign_identity("lapis")
 
 
-def test_koordinator_is_held_per_folder(tmp_path) -> None:
+@pytest.mark.parametrize("name", ["koordinator", "lapis"])
+def test_every_identity_is_held_per_folder(name, tmp_path) -> None:
     pool = daemon_pool.DaemonPool()
-    elsewhere = {"identity": "koordinator", "project": str(tmp_path / "other")}
+    elsewhere = {"identity": name, "project": str(tmp_path / "other")}
     pool._bridge.get_agents = lambda use_cache=False: [elsewhere]
 
-    assert pool._assign_identity("koordinator", str(tmp_path)) == "koordinator"
+    assert pool._assign_identity(name, str(tmp_path)) == name
+    # "Next Free Gem" in this folder does not skip a gem that runs elsewhere.
+    assert pool._assign_identity(None, str(tmp_path)) == "lapis"
 
-    here = {"identity": "koordinator", "project": str(tmp_path)}
+    here = {"identity": name, "project": str(tmp_path)}
     pool._bridge.get_agents = lambda use_cache=False: [elsewhere, here]
-    with pytest.raises(ValueError, match="koordinator.*already in use"):
-        pool._assign_identity("koordinator", str(tmp_path))
+    with pytest.raises(ValueError, match=f"{name}.*already in use"):
+        pool._assign_identity(name, str(tmp_path))
+
+
+def test_a_folder_inside_a_repo_shares_the_repos_hub(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis", "project": str(repo)}]
+
+    with pytest.raises(ValueError, match="lapis.*already in use"):
+        pool._assign_identity("lapis", str(repo / "pkg"))
+
+
+def test_a_global_hub_holds_every_name_for_every_folder(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+    pool = daemon_pool.DaemonPool()
+    pool._bridge.get_agents = lambda use_cache=False: [{"identity": "lapis", "project": str(tmp_path / "other")}]
+
+    with pytest.raises(ValueError, match="lapis.*already in use"):
+        pool._assign_identity("lapis", str(tmp_path))
 
 
 @pytest.mark.asyncio

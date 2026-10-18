@@ -204,13 +204,19 @@ def create_app() -> FastAPI:
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
     from .routes.prompts import router as prompts_router
+    from .routes.rosters import router as rosters_router
+    from .routes.teams import router as teams_router
 
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(prompts_router)
+    app.include_router(rosters_router)
+    app.include_router(teams_router)
 
+    from .routes.sidebar import router as sidebar_router
     from .routes.workspaces import router as workspaces_router
 
+    app.include_router(sidebar_router)
     app.include_router(workspaces_router)
 
     from .routes.hub_ws import router as hub_ws_router
@@ -252,8 +258,8 @@ def create_app() -> FastAPI:
             except Exception:
                 return "unknown"
 
-        # The providers in use. An opened agent's profile is None until its daemon
-        # answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
+        # The providers in use. An opened agent's profile is what presence says
+        # until its daemon answers. MCP servers belong to each daemon: GET /sessions/{id}/mcp.
         providers = sorted(
             {getattr(s.profile, "provider", "") or "" for s in _sessions.values()} - {""}
         )

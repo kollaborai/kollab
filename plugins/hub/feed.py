@@ -16,38 +16,16 @@ from kollabor_tui.color_contrast import readable_agent_color
 from kollabor_tui.design_system import T
 
 from .presence import get_presence_dir
+from .rosters import persona_color
 from .vault import find_active_stream, get_vaults_dir
 
 logger = logging.getLogger(__name__)
 
-# Fallback colors for non-gem identities
-_FALLBACK_COLORS = [
-    (120, 200, 255),
-    (255, 180, 100),
-    (150, 255, 150),
-    (255, 140, 180),
-    (200, 170, 255),
-    (100, 240, 220),
-]
-
 
 def _color(identity: str) -> Tuple[int, int, int]:
-    """Get gem color for identity, or hash-based fallback."""
-    from .models import GEM_BY_NAME
-
-    gem = GEM_BY_NAME.get(identity)
-    if gem:
-        raw_color = gem.color_rgb
-    else:
-        base = identity.rsplit("-", 1)[0] if "-" in identity else identity
-        gem = GEM_BY_NAME.get(base)
-        if gem:
-            raw_color = gem.color_rgb
-        else:
-            raw_color = _FALLBACK_COLORS[hash(identity) % len(_FALLBACK_COLORS)]
-
+    """Get the persona color for an identity, or a stable palette fallback."""
     return readable_agent_color(
-        raw_color,
+        persona_color(identity),
         background=T().dark[0],
         target=T().text,
         muted_target=T().text_dim,

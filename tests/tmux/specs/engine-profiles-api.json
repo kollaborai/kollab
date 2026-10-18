@@ -2,7 +2,7 @@
   "name": "engine-profiles-api",
   "description": "Test profiles API endpoints - list, get, create, update, delete, test",
   "config": {
-    "command": "python -m kollabor_engine serve",
+    "command": "python -m kollabor_engine serve --port {{port}}",
     "show_captures": true,
     "app_init_sleep": 3,
     "term_width": 100,
@@ -39,7 +39,7 @@
     },
     {
       "action": "assert_contains",
-      "pattern": "Application startup complete|Uvicorn running|Engine started",
+      "pattern": "READY:{{port}}|Application startup complete|Uvicorn running|Engine started",
       "description": "Server started successfully"
     },
 
@@ -49,7 +49,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:{{port}}/profiles | jq .",
       "description": "List all profiles"
     },
     {
@@ -69,7 +69,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles/default | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:{{port}}/profiles/default | jq .",
       "description": "Get default profile"
     },
     {
@@ -89,7 +89,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:7433/profiles/unknown-profile-xyz",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:{{port}}/profiles/unknown-profile-xyz",
       "description": "Request unknown profile"
     },
     {
@@ -109,7 +109,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\", \"base_url\": \"http://localhost:9999/v1\", \"description\": \"Created via API\"}' | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:{{port}}/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\", \"base_url\": \"http://localhost:9999/v1\", \"description\": \"Created via API\"}' | jq .",
       "description": "Create new profile via API"
     },
     {
@@ -125,17 +125,17 @@
 
     {
       "action": "section",
-      "title": "Test 6: POST /profiles - 400 for duplicate name"
+      "title": "Test 6: POST /profiles - 409 for duplicate name"
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X POST http://127.0.0.1:7433/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\"}'",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X POST http://127.0.0.1:{{port}}/profiles -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"name\": \"api-test-profile\", \"provider\": \"custom\", \"model\": \"test-model\"}'",
       "description": "Try to create duplicate profile"
     },
     {
       "action": "assert_contains",
-      "pattern": "HTTP_STATUS:400",
-      "description": "Returns 400 for duplicate"
+      "pattern": "HTTP_STATUS:409",
+      "description": "Returns 409 for duplicate"
     },
     {
       "action": "assert_contains",
@@ -149,7 +149,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:7433/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"description\": \"Updated via API\", \"temperature\": 0.5}' | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:{{port}}/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"description\": \"Updated via API\", \"temperature\": 0.5}' | jq .",
       "description": "Update profile description and temperature"
     },
     {
@@ -174,7 +174,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:7433/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"new_name\": \"renamed-api-profile\"}' | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X PUT http://127.0.0.1:{{port}}/profiles/api-test-profile -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"new_name\": \"renamed-api-profile\"}' | jq .",
       "description": "Rename profile"
     },
     {
@@ -189,7 +189,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X DELETE http://127.0.0.1:7433/profiles/renamed-api-profile -H \"Authorization: Bearer $TOKEN\" | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X DELETE http://127.0.0.1:{{port}}/profiles/renamed-api-profile -H \"Authorization: Bearer $TOKEN\" | jq .",
       "description": "Delete profile"
     },
     {
@@ -204,7 +204,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X DELETE http://127.0.0.1:7433/profiles/default -H \"Authorization: Bearer $TOKEN\"",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -w \"\\nHTTP_STATUS:%{http_code}\" -X DELETE http://127.0.0.1:{{port}}/profiles/default -H \"Authorization: Bearer $TOKEN\"",
       "description": "Try to delete built-in profile"
     },
     {
@@ -224,7 +224,7 @@
     },
     {
       "action": "shell",
-      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:7433/profiles/default/test -H \"Authorization: Bearer $TOKEN\" | jq .",
+      "command": "TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo '') && curl -s -X POST http://127.0.0.1:{{port}}/profiles/default/test -H \"Authorization: Bearer $TOKEN\" | jq .",
       "description": "Test default profile"
     },
     {
@@ -239,7 +239,7 @@
     },
     {
       "action": "shell",
-      "command": "curl -s -w \"\\nHTTP_STATUS:%{http_code}\" http://127.0.0.1:7433/profiles",
+      "command": "curl -s -w \"\\nHTTP_STATUS:%{http_code}\" http://127.0.0.1:{{port}}/profiles",
       "description": "Request without auth token"
     },
     {
@@ -254,7 +254,7 @@
     },
     {
       "action": "shell",
-      "command": "curl -s http://127.0.0.1:7433/health | jq .",
+      "command": "curl -s http://127.0.0.1:{{port}}/health | jq .",
       "description": "Check health endpoint"
     },
     {

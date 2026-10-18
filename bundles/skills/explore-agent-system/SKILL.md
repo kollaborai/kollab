@@ -172,7 +172,8 @@ highest to lowest priority:
   3. kollabor_system_prompt_file environment variable (file path)
   4. local .kollab/agents/default/system_prompt.md
   5. global ~/.kollab/agents/default/system_prompt.md
-  6. fallback minimal default
+  6. bundled bundles/agents/default/system_prompt.md
+  7. fallback minimal default
 
 
 phase 1: discover agents

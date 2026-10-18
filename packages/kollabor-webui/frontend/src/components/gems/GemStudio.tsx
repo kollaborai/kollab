@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
 import type { AgentPoolEntry, GemAppearance, GemLook, Session } from "@/api";
+import { Avatar } from "@/components/agents/Avatar";
+import { isGemAvatar } from "@/components/agents/avatar-model";
 import { titleCase } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
-import { formatSessionName } from "@/utils/session-display";
+import { agentName, formatSessionName } from "@/utils/session-display";
 import { GemAvatar } from "./GemAvatar";
 import {
   EVERYDAY_FACES,
@@ -64,7 +66,9 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 /**
  * A session's Properties: the studio on that session's gem alone, plus a Chat
  * tab for the session itself. `hub` is whether its agent is on the hub mesh,
- * null when no agent runs it (nothing to switch).
+ * null when no agent runs it (nothing to switch). A persona with no gem look
+ * (a picture, an emoji or initials) has nothing to dress: its Properties are
+ * the Chat alone, under its picture and name.
  */
 export type StudioFocus = {
   gem: string;
@@ -92,6 +96,7 @@ export function GemStudio({
   agents: readonly AgentPoolEntry[];
   focus?: StudioFocus | null;
 }) {
+  const focused = focus ? agents.find((agent) => agent.name === focus.gem) : undefined;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -101,7 +106,13 @@ export function GemStudio({
         )}
       >
         {/* Mounted per open, so each visit starts from what is saved. */}
-        <StudioBody agents={agents} focus={focus} onDone={() => onOpenChange(false)} />
+        {/* The studio dresses gems. A chat's Properties on a persona with no gem look is its Chat alone. */}
+        <StudioBody
+          agents={agents.filter((agent) => isGemAvatar(agent.avatar))}
+          persona={focused && !isGemAvatar(focused.avatar) ? focused : null}
+          focus={focus}
+          onDone={() => onOpenChange(false)}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -109,14 +120,19 @@ export function GemStudio({
 
 function StudioBody({
   agents,
+  persona: pooled,
   focus,
   onDone,
 }: {
   agents: readonly AgentPoolEntry[];
+  /** The focused persona when it has no gem look: nothing to dress, only its chat. */
+  persona: AgentPoolEntry | null;
   focus: StudioFocus | null;
   onDone: () => void;
 }) {
   const studio = useGemAppearance();
+  // It opens as what the agent is then: one that exits while it is open leaves the pool, and the dialog must not turn into a gem's.
+  const [persona] = useState(pooled);
   const [draft, setDraft] = useState<GemAppearance>(() => studio?.appearance ?? {});
   const [selected, setSelected] = useState(focus?.gem ?? "");
   const [activity, setActivity] = useState<Activity>("idle");
@@ -125,7 +141,9 @@ function StudioBody({
   const chat = focus?.chat;
   const [hub, setHub] = useState(chat?.hub ?? true);
 
-  const current = agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
+  const current: AgentPoolEntry | undefined =
+    persona ?? agents.find((agent) => agent.name === selected) ?? (focus ? { name: focus.gem } : agents[0]);
+  const name = current ? agentName(current.name, current.display_name) : "No Gems";
   // A chat's Properties dress that agent; the list dresses the gems of the engine's own folder.
   const where = focus?.where;
   const key = useLookKey(current?.name, where);
@@ -145,7 +163,7 @@ function StudioBody({
     setSaving(true);
     setError("");
     try {
-      await studio.save(draft);
+      if (!persona) await studio.save(draft);
       if (chat && chat.hub !== null && hub !== chat.hub) await chat.setHub(hub);
       onDone();
     } catch (err) {
@@ -158,12 +176,14 @@ function StudioBody({
   return (
     <>
       <DialogHeader className="px-5 py-4 text-left">
-        <DialogTitle>{focus ? titleCase(focus.gem) : "Gem Studio"}</DialogTitle>
+        <DialogTitle>{focus ? name : "Gem Studio"}</DialogTitle>
         <DialogDescription>
           {focus
-            ? chat
-              ? "Dress this chat's gem, or change how its agent takes part in the hub."
-              : "Dress this chat's gem over the look it was born with; every browser shows the same gem."
+            ? persona
+              ? "Change how this chat's agent takes part in the hub."
+              : chat
+                ? "Dress this chat's gem, or change how its agent takes part in the hub."
+                : "Dress this chat's gem over the look it was born with; every browser shows the same gem."
             : "Agents are born with a random look that sticks. Dress them over it; every browser shows the same gems. An agent in another folder or on another computer has its own look: dress it from its chat's Properties."}
         </DialogDescription>
       </DialogHeader>
@@ -205,9 +225,12 @@ function StudioBody({
 
           <section className="flex min-h-[19rem] min-w-0 shrink-0 flex-col items-center justify-center gap-4 px-4 py-10 sm:px-6">
             {current ? (
-              <GemAvatar
+              <Avatar
                 key={key}
                 gem={current.name}
+                avatar={persona?.avatar}
+                displayName={persona?.display_name}
+                folder={chat?.session.device ? undefined : chat?.session.workspace}
                 where={where}
                 caste={current.caste}
                 color={current.color}
@@ -217,174 +240,153 @@ function StudioBody({
                 season="auto"
                 follow
                 size={phone ? 120 : 150}
-                label={titleCase(current.name)}
+                label={name}
               />
             ) : null}
             <div className="text-center">
-              <p className="text-lg font-semibold">{current ? titleCase(current.name) : "No Gems"}</p>
+              <p className="text-lg font-semibold">{name}</p>
               <p className="text-muted-foreground text-xs">{titleCase(current?.caste || "")}</p>
             </div>
-            <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
-              {STAGE_ACTIVITIES.map((option) => (
-                <Chip key={option} active={option === activity} onClick={() => setActivity(option)}>
-                  {titleCase(option)}
-                </Chip>
-              ))}
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => set({ face: pick(EVERYDAY_FACES), hat: pick(EVERYDAY_HATS) })}
-              disabled={!current}
-            >
-              <Dices className="size-4" />
-              Random Look
-            </Button>
+            {persona ? null : (
+              <>
+                <div className="flex flex-wrap justify-center gap-1.5" role="group" aria-label="Preview activity">
+                  {STAGE_ACTIVITIES.map((option) => (
+                    <Chip key={option} active={option === activity} onClick={() => setActivity(option)}>
+                      {titleCase(option)}
+                    </Chip>
+                  ))}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => set({ face: pick(EVERYDAY_FACES), hat: pick(EVERYDAY_HATS) })}
+                  disabled={!current}
+                >
+                  <Dices className="size-4" />
+                  Random Look
+                </Button>
+              </>
+            )}
           </section>
 
           <aside className="bg-muted/20 flex shrink-0 flex-col lg:min-h-0">
-            <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
-              <TabsList className={cn("mx-3 mt-3 grid shrink-0", chat ? "grid-cols-4" : "grid-cols-3")}>
-                <TabsTrigger value="eyes">Eyes</TabsTrigger>
-                <TabsTrigger value="hat">Hat</TabsTrigger>
-                <TabsTrigger value="color">Color</TabsTrigger>
-                {chat ? <TabsTrigger value="chat">Chat</TabsTrigger> : null}
-              </TabsList>
+            {persona ? (
+              chat ? (
+                <div className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <ChatPanel chat={chat} hub={hub} onHub={setHub} />
+                </div>
+              ) : null
+            ) : (
+              <Tabs defaultValue={focus?.tab ?? "eyes"} className="flex flex-col gap-0 lg:min-h-0 lg:flex-1">
+                <TabsList className={cn("mx-3 mt-3 grid shrink-0", chat ? "grid-cols-4" : "grid-cols-3")}>
+                  <TabsTrigger value="eyes">Eyes</TabsTrigger>
+                  <TabsTrigger value="hat">Hat</TabsTrigger>
+                  <TabsTrigger value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger value="chat">Chat</TabsTrigger> : null}
+                </TabsList>
 
-              {chat ? (
-                <TabsContent value="chat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                  <div className="flex flex-col gap-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex flex-col gap-0.5">
-                        <label htmlFor="studio-hub" className="text-sm font-medium">
-                          Hub
-                        </label>
-                        <p className="text-muted-foreground text-[0.6875rem]">
-                          {chat.hub === null
-                            ? "This session has no running agent, so there is nothing to switch."
-                            : hub
-                              ? "On the hub: it can see and message your other agents."
-                              : "Off the hub: your other agents can't see it or message it. Your chat with it keeps working."}
-                        </p>
-                      </div>
-                      <Switch
-                        id="studio-hub"
-                        checked={hub}
-                        onCheckedChange={setHub}
-                        disabled={chat.hub === null}
+                {chat ? (
+                  <TabsContent value="chat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                    <ChatPanel chat={chat} hub={hub} onHub={setHub} />
+                  </TabsContent>
+                ) : null}
+
+                <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
+                    {current ? (
+                      <EyeTile
+                        active={!target.face}
+                        onClick={() => set({ face: undefined })}
+                        label="Born"
+                        agent={current}
+                        where={where}
+                        face={(born.face ?? "pill") as EyeStyle}
                       />
-                    </div>
-                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg bg-muted/40 p-3 text-xs">
-                      <dt className="text-muted-foreground">Session</dt>
-                      <dd className="truncate">
-                        {formatSessionName(chat.session.name, chat.session.session_id)}
-                      </dd>
-                      <dt className="text-muted-foreground">Model</dt>
-                      <dd className="truncate">{chat.session.model || chat.session.profile || "Default"}</dd>
-                      <dt className="text-muted-foreground">Workspace</dt>
-                      <dd className="truncate" title={chat.session.workspace ?? undefined}>
-                        {chat.session.workspace || "Default"}
-                      </dd>
-                    </dl>
+                    ) : null}
+                    {current
+                      ? EYE_STYLES.map((style) => (
+                          <EyeTile
+                            key={style.id}
+                            active={target.face === style.id}
+                            onClick={() => set({ face: style.id })}
+                            label={style.label}
+                            agent={current}
+                            where={where}
+                            face={style.id}
+                          />
+                        ))
+                      : null}
                   </div>
                 </TabsContent>
-              ) : null}
 
-              <TabsContent value="eyes" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-6 lg:grid-cols-3">
-                  {current ? (
-                    <EyeTile
-                      active={!target.face}
-                      onClick={() => set({ face: undefined })}
-                      label="Born"
-                      agent={current}
-                      where={where}
-                      face={(born.face ?? "pill") as EyeStyle}
-                    />
-                  ) : null}
-                  {current
-                    ? EYE_STYLES.map((style) => (
-                        <EyeTile
-                          key={style.id}
-                          active={target.face === style.id}
-                          onClick={() => set({ face: style.id })}
-                          label={style.label}
-                          agent={current}
-                          where={where}
-                          face={style.id}
-                        />
-                      ))
-                    : null}
-                </div>
-              </TabsContent>
-
-              <TabsContent value="hat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-wrap gap-1.5">
-                    <Chip active={!target.hat} onClick={() => set({ hat: undefined })}>
-                      Born
-                    </Chip>
-                    <Chip active={target.hat === "auto"} onClick={() => set({ hat: "auto" })}>
-                      Auto
-                    </Chip>
+                <TabsContent value="hat" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <div className="flex flex-col gap-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      <Chip active={!target.hat} onClick={() => set({ hat: undefined })}>
+                        Born
+                      </Chip>
+                      <Chip active={target.hat === "auto"} onClick={() => set({ hat: "auto" })}>
+                        Auto
+                      </Chip>
+                    </div>
+                    <p className="text-muted-foreground text-[0.6875rem]">
+                      Born hat: {bornHat ?? "None"}. Seasonal costumes cover it; Auto picks a hat for its caste.
+                    </p>
+                    {HAT_GROUPS.map((group) => (
+                      <div key={group} className="flex flex-col gap-1.5">
+                        <p className="text-muted-foreground text-[0.6875rem] font-medium">{group}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {HAT_STYLES.filter((hat) => hat.group === group).map((hat) => (
+                            <Chip key={hat.id} active={target.hat === hat.id} onClick={() => set({ hat: hat.id })}>
+                              {hat.label}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <p className="text-muted-foreground text-[0.6875rem]">
-                    Born hat: {bornHat ?? "None"}. Seasonal costumes cover it; Auto picks a hat for its caste.
-                  </p>
-                  {HAT_GROUPS.map((group) => (
-                    <div key={group} className="flex flex-col gap-1.5">
-                      <p className="text-muted-foreground text-[0.6875rem] font-medium">{group}</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {HAT_STYLES.filter((hat) => hat.group === group).map((hat) => (
-                          <Chip key={hat.id} active={target.hat === hat.id} onClick={() => set({ hat: hat.id })}>
-                            {hat.label}
-                          </Chip>
+                </TabsContent>
+
+                <TabsContent value="color" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  {current ? (
+                    <div className="flex flex-col gap-3">
+                      <div className="grid grid-cols-6 gap-2">
+                        <Swatch
+                          active={!target.color}
+                          rgb={baseColor ?? [128, 128, 128]}
+                          label={current.color ? "Pool Color" : "Born Color"}
+                          onClick={() => set({ color: undefined })}
+                          ring
+                        />
+                        {GEM_SWATCHES.map((rgb) => (
+                          <Swatch
+                            key={rgb.join(",")}
+                            active={sameColor(target.color, rgb)}
+                            rgb={rgb}
+                            label={toHex(rgb)}
+                            onClick={() => set({ color: rgb })}
+                          />
                         ))}
                       </div>
-                    </div>
-                  ))}
-                </div>
-              </TabsContent>
-
-              <TabsContent value="color" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-                {current ? (
-                  <div className="flex flex-col gap-3">
-                    <div className="grid grid-cols-6 gap-2">
-                      <Swatch
-                        active={!target.color}
-                        rgb={baseColor ?? [128, 128, 128]}
-                        label={current.color ? "Pool Color" : "Born Color"}
-                        onClick={() => set({ color: undefined })}
-                        ring
-                      />
-                      {GEM_SWATCHES.map((rgb) => (
-                        <Swatch
-                          key={rgb.join(",")}
-                          active={sameColor(target.color, rgb)}
-                          rgb={rgb}
-                          label={toHex(rgb)}
-                          onClick={() => set({ color: rgb })}
+                      <label className="text-muted-foreground flex items-center gap-2 text-xs">
+                        <input
+                          type="color"
+                          aria-label="Custom Color"
+                          value={toHex(target.color ?? baseColor ?? [128, 128, 128])}
+                          onChange={(event) => set({ color: fromHex(event.target.value) })}
+                          className="size-8 cursor-pointer rounded-md bg-muted/60 p-0.5"
                         />
-                      ))}
+                        Custom
+                      </label>
+                      <p className="text-muted-foreground text-[0.6875rem]">
+                        The ringed swatch is {titleCase(current.name)}'s {current.color ? "pool" : "born"} color.
+                      </p>
                     </div>
-                    <label className="text-muted-foreground flex items-center gap-2 text-xs">
-                      <input
-                        type="color"
-                        aria-label="Custom Color"
-                        value={toHex(target.color ?? baseColor ?? [128, 128, 128])}
-                        onChange={(event) => set({ color: fromHex(event.target.value) })}
-                        className="size-8 cursor-pointer rounded-md bg-muted/60 p-0.5"
-                      />
-                      Custom
-                    </label>
-                    <p className="text-muted-foreground text-[0.6875rem]">
-                      The ringed swatch is {titleCase(current.name)}'s {current.color ? "pool" : "born"} color.
-                    </p>
-                  </div>
-                ) : null}
-              </TabsContent>
-            </Tabs>
+                  ) : null}
+                </TabsContent>
+              </Tabs>
+            )}
 
             {focus ? null : (
               <div className="bg-muted/30 shrink-0 p-3">
@@ -416,7 +418,7 @@ function StudioBody({
         <div className="min-w-0 flex-1">
           {error ? (
             <p className="text-destructive text-xs">{error}</p>
-          ) : current ? (
+          ) : current && !persona ? (
             <Button
               type="button"
               variant="ghost"
@@ -438,6 +440,54 @@ function StudioBody({
         </Button>
       </DialogFooter>
     </>
+  );
+}
+
+/** What a chat's Properties hold apart from the look: the hub switch, and the session's own facts. */
+function ChatPanel({
+  chat,
+  hub,
+  onHub,
+}: {
+  chat: NonNullable<StudioFocus["chat"]>;
+  hub: boolean;
+  onHub: (enabled: boolean) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <label htmlFor="studio-hub" className="text-sm font-medium">
+            Hub
+          </label>
+          <p className="text-muted-foreground text-[0.6875rem]">
+            {chat.hub === null
+              ? "This session has no running agent, so there is nothing to switch."
+              : hub
+                ? "On the hub: it can see and message your other agents."
+                : "Off the hub: your other agents can't see it or message it. Your chat with it keeps working."}
+          </p>
+        </div>
+        <Switch
+          id="studio-hub"
+          checked={hub}
+          onCheckedChange={onHub}
+          disabled={chat.hub === null}
+        />
+      </div>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg bg-muted/40 p-3 text-xs">
+        <dt className="text-muted-foreground">Session</dt>
+        <dd className="truncate">
+          {formatSessionName(chat.session.name, chat.session.session_id)}
+        </dd>
+        <dt className="text-muted-foreground">Model</dt>
+        <dd className="truncate">{chat.session.model || chat.session.profile || "Default"}</dd>
+        <dt className="text-muted-foreground">Workspace</dt>
+        <dd className="truncate" title={chat.session.workspace ?? undefined}>
+          {chat.session.workspace || "Default"}
+        </dd>
+      </dl>
+    </div>
   );
 }
 

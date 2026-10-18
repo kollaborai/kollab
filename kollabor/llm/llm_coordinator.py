@@ -41,6 +41,7 @@ from kollabor_config import LLMTaskConfig
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
+from kollabor_tui.display_tap import publish_semantic
 
 from .agent_hud import (
     AgentHudEntry,
@@ -142,6 +143,10 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
+        if role == "user":
+            # What mirrors this conversation (the engine) follows it by these,
+            # so a window opened mid-turn shows the message being answered.
+            publish_semantic(getattr(self, "event_bus", None), "user_message")
 
         return cast(str, message_uuid)
 

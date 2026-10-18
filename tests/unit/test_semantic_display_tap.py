@@ -426,3 +426,47 @@ class TestSendMessage:
         assert len(llm.submissions) == 1
         assert llm.submissions[0][0] == "hi"
         assert llm.submissions[0][1].value == "state_rpc"
+
+
+class TestUserMessageEvent:
+    """A reader that mirrors the conversation (the engine) learns of a human's
+    message by user_message, so a window opened mid-turn shows it."""
+
+    def _service(self, tap):
+        from kollabor.llm.llm_coordinator import LLMService
+
+        class Bus:
+            def get_service(self, name):
+                return tap if name == "display_tap" else None
+
+        service = LLMService.__new__(LLMService)
+        service.conversation_history = []
+        service.event_bus = Bus()
+        return service
+
+    def test_a_user_message_is_announced_after_it_is_in_the_history(self, monkeypatch):
+        tap = DisplayTap()
+        service = self._service(tap)
+        seen = []
+        real = publish_semantic
+
+        def spy(source, event_type, **fields):
+            seen.append((event_type, len(service.conversation_history)))
+            real(source, event_type, **fields)
+
+        monkeypatch.setattr("kollabor.llm.llm_coordinator.publish_semantic", spy)
+        q = tap.subscribe("test")
+
+        service._add_conversation_message("user", "slowreply please")
+
+        assert seen == [("user_message", 1)]
+        assert [e["type"] for e in _drain(q)] == ["user_message"]
+
+    def test_the_models_own_messages_are_not_announced(self):
+        tap = DisplayTap()
+        service = self._service(tap)
+        q = tap.subscribe("test")
+
+        service._add_conversation_message("assistant", "pong")
+
+        assert _drain(q) == []

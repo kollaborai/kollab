@@ -103,6 +103,24 @@ export function titleCase(id: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/** An agent bundle's name for people ("creative-writer" reads "Creative Writer"); none is the default one. The API keeps the id. */
+export function bundleName(bundle?: string | null): string {
+  return titleCase(bundle || "default");
+}
+
+/** An online agent's state for people ("idle" reads "Idle"); one that reports none is Online. Every list of agents reads its status here. */
+export function agentStatus(state?: string | null): string {
+  return state ? titleCase(state) : "Online";
+}
+
+/** What a dropdown option reads as: the label the daemon gave it, else the option itself. */
+export function optionLabel(
+  field: { option_labels?: Record<string, string> | null },
+  option: string,
+): string {
+  return field.option_labels?.[option] ?? option;
+}
+
 /** Summary rows as label/value pairs, whichever of the usual shapes arrives. */
 export function summaryRows(
   summary: unknown,

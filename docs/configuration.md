@@ -261,7 +261,8 @@ System prompts define the AI's behavior. They support dynamic content via `<tren
 2. `KOLLAB_SYSTEM_PROMPT_FILE` environment variable (file path)
 3. `.kollab/agents/default/system_prompt.md` (local project)
 4. `~/.kollab/agents/default/system_prompt.md` (global)
-5. Built-in fallback
+5. `bundles/agents/default/system_prompt.md` (bundled, for a computer nothing has seeded yet)
+6. Built-in fallback
 
 ### Dynamic Tags
 

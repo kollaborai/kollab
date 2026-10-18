@@ -1,0 +1,88 @@
+{
+  "name": "hub-config-roster",
+  "description": "The /config modal lists the Hub Roster dropdown (the folder's roster, default gems); picking another and saving to Local lands plugins.hub.roster in the folder's .kollab/config.json. Plain kollab (--no-daemon) in a throwaway HOME, no keyring, no model call.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-roster.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.5
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME: a profile that is never called",
+      "command": "P=\"${TMPDIR:-/tmp}/kollab-spec-config-roster.path\"; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-config-roster.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:9/v1\",\"api_key\":\"not-a-real-key\"}}}}}' > \"$H/.kollab/config.json\"; echo \"throwaway home ready\"",
+      "assert_contains": "throwaway home ready"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "the modal lists the Roster dropdown"
+    },
+    {
+      "action": "slash_command",
+      "command": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "System Configuration",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "/roster"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: (?-i:Gems)",
+      "timeout": 15
+    },
+    {
+      "action": "section",
+      "label": "a Local save lands in the folder's .kollab/config.json"
+    },
+    {
+      "action": "arrow",
+      "direction": "right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Roster: Marketing Crew",
+      "timeout": 15
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Save to: \\(L\\)ocal",
+      "timeout": 15
+    },
+    {
+      "action": "send_keys",
+      "keys": "l"
+    },
+    {
+      "action": "shell",
+      "description": "the folder's own config holds the choice",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-config-roster.path\"); sleep 1; tr -d ' \\n' < \"$H/ws/.kollab/config.json\"; echo",
+      "assert_contains": "\"roster\":\"marketing-crew\""
+    }
+  ]
+}

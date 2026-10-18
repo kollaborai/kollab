@@ -21,11 +21,11 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
-import { titleCase } from "@/components/panels/panel-model";
+import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
 
 type WelcomeGem = { name: string; pool?: AgentPoolEntry; activity?: Activity | null; onOpen?: () => void };
@@ -47,8 +47,10 @@ const Welcome: FC = () => {
     <div className="mb-6 flex flex-col items-center gap-3 px-4 text-center">
       {gem ? (
         <span className="contents" onDoubleClick={gem.onOpen}>
-          <GemAvatar
+          <Avatar
             gem={gem.name}
+            avatar={gem.pool?.avatar}
+            displayName={gem.pool?.display_name}
             where={where}
             caste={gem.pool?.caste}
             color={gem.pool?.color}
@@ -57,12 +59,12 @@ const Welcome: FC = () => {
             season="auto"
             follow
             size={112}
-            label={titleCase(gem.name)}
+            label={agentName(gem.name, gem.pool?.display_name)}
           />
         </span>
       ) : null}
       <h1 className="fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
-        {gem ? titleCase(gem.name) : "kollab"}
+        {gem ? agentName(gem.name, gem.pool?.display_name) : "kollab"}
       </h1>
       <p className="text-muted-foreground fade-in slide-in-from-bottom-1 animate-in fill-mode-both max-w-sm text-sm text-balance duration-200">
         Everything has hooks. Send a message to begin.
@@ -82,13 +84,15 @@ const ComposerGem: FC = () => {
       data-slot="kollab_composer-gem"
       data-activity={gem.activity ?? undefined}
       className="inline-flex shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      aria-label={`Open ${titleCase(gem.name)} Properties`}
-      title={`${titleCase(gem.name)} · Properties`}
+      aria-label={`Open ${agentName(gem.name, gem.pool?.display_name)} Properties`}
+      title={`${agentName(gem.name, gem.pool?.display_name)} · Properties`}
       onClick={gem.onOpen}
       disabled={!gem.onOpen}
     >
-      <GemAvatar
+      <Avatar
         gem={gem.name}
+        avatar={gem.pool?.avatar}
+        displayName={gem.pool?.display_name}
         where={where}
         caste={gem.pool?.caste}
         color={gem.pool?.color}
@@ -104,9 +108,10 @@ const ComposerGem: FC = () => {
 };
 
 // "lapis@devbox" is lapis on another computer.
-const agentLabel = (id: string) => {
+const agentLabel = (id: string, pool: readonly AgentPoolEntry[]) => {
   const [name, device] = id.split("@");
-  return device ? `${titleCase(name)} on ${device}` : titleCase(id);
+  const label = agentName(name, pool.find((agent) => agent.name === name)?.display_name);
+  return device ? `${label} on ${device}` : label;
 };
 
 // A hub message, sent or received: the sender's gem, "From → To" and the
@@ -139,19 +144,21 @@ const HubNoteView: FC<{
 
   const resolvedTo = to ? resolveAgentSender(to, { agents: pool, remoteAgents }) : "";
   const recipient = resolvedTo
-    ? agentLabel(resolvedTo)
+    ? agentLabel(resolvedTo, pool)
     : gem?.name
-      ? agentLabel(gem.name)
+      ? agentLabel(gem.name, pool)
       : "All";
 
   const label = isReply
     ? `Replied to ${recipient}`
-    : `${agentLabel(resolvedFrom)} → ${recipient}`;
+    : `${agentLabel(resolvedFrom, pool)} → ${recipient}`;
 
   return (
     <div className="flex gap-3">
-      <GemAvatar
+      <Avatar
         gem={name}
+        avatar={sender?.avatar}
+        displayName={sender?.display_name}
         where={device || where}
         caste={sender?.caste}
         color={sender?.color}
@@ -188,8 +195,10 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
   const details = lines.slice(1).join("\n").trim();
   const summary = (
     <>
-      <GemAvatar
+      <Avatar
         gem={name}
+        avatar={sender?.avatar}
+        displayName={sender?.display_name}
         where={device || where}
         caste={sender?.caste}
         color={sender?.color}
@@ -197,7 +206,7 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
         size={18}
         className="shrink-0"
       />
-      <span className="min-w-0 truncate text-start">{titleCase(name)} {note.presence === "offline" ? "went offline" : "came online"}</span>
+      <span className="min-w-0 truncate text-start">{agentName(name, sender?.display_name)} {note.presence === "offline" ? "went offline" : "came online"}</span>
       {details ? <ChevronDownIcon className="size-3 shrink-0 transition-transform group-data-[state=open]/chip:rotate-180" /> : null}
     </>
   );
@@ -207,7 +216,7 @@ const PresenceChip: FC<{ note: HubNote }> = ({ note }) => {
       <Collapsible defaultOpen={false}>
         <CollapsibleTrigger
           data-slot="kollab_online-chip-trigger"
-          title={agentLabel(resolvedFrom)}
+          title={agentLabel(resolvedFrom, pool)}
           className="group/chip inline-flex max-w-full cursor-pointer items-center gap-2 rounded-sm py-1 text-xs text-muted-foreground transition-colors select-none hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {summary}
@@ -334,7 +343,7 @@ export const Thread: FC<{
       }
     >
       <ComposerPlaceholderContext.Provider
-        value={identity ? `Message ${titleCase(identity)}…` : "Send a message..."}
+        value={identity ? `Message ${agentName(identity, agents.find((agent) => agent.name === identity)?.display_name)}…` : "Send a message..."}
       >
         {HUB_SEND_TOOL_UIS.map((HubSendToolUI, index) => (
           <HubSendToolUI key={index} />

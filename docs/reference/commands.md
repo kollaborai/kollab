@@ -667,9 +667,9 @@ type / in the input box to open the command menu.
     capture <name|all> [lines]    capture agent output
     agents                        list all active agents
 
-  organizations:
-    org <name> [mission]          launch an organization
-    orgs                          list available organizations
+  teams:
+    org <name> [mission]          launch a team
+    orgs                          list available teams
 
   vaults (persistent memory):
     vault [name]                  show vault info

@@ -180,34 +180,33 @@ class SkillCommandHandler(BaseCommandHandler):
         skills = active_agent.list_skills()
         active_skills = active_agent.active_skills
 
-        # Check project and global defaults
+        # Check project and global defaults, and the bundled ones for an agent
+        # nothing has copied to the global folder yet
         import json
 
-        local_config = (
-            self.agent_manager.local_agents_dir / active_agent.name / "agent.json"
-            if self.agent_manager.local_agents_dir
-            else None
-        )
-        global_config = (
-            self.agent_manager.global_agents_dir / active_agent.name / "agent.json"
-        )
-
-        project_defaults = set()
-        global_defaults = set()
-
-        if local_config and local_config.exists():
+        def read_defaults(config_file, tier: str) -> set:
+            if not config_file or not config_file.exists():
+                return set()
             try:
-                config_data = json.loads(local_config.read_text(encoding="utf-8"))
-                project_defaults = set(config_data.get("default_skills", []))
+                config_data = json.loads(config_file.read_text(encoding="utf-8"))
+                return set(config_data.get("default_skills", []))
             except Exception as e:
-                logger.debug(f"Failed to load local skill config: {e}")
+                logger.debug(f"Failed to load {tier} skill config: {e}")
+                return set()
 
-        if global_config.exists():
-            try:
-                config_data = json.loads(global_config.read_text(encoding="utf-8"))
-                global_defaults = set(config_data.get("default_skills", []))
-            except Exception as e:
-                logger.debug(f"Failed to load global skill config: {e}")
+        agent_name = active_agent.name
+        local_dir = self.agent_manager.local_agents_dir
+        project_defaults = read_defaults(
+            local_dir / agent_name / "agent.json" if local_dir else None, "local"
+        )
+        global_defaults = read_defaults(
+            self.agent_manager.global_agents_dir / agent_name / "agent.json", "global"
+        )
+        bundled_defaults = (
+            read_defaults(active_agent.directory / "agent.json", "bundled")
+            if active_agent.source == "bundled"
+            else set()
+        )
 
         if not skills:
             return None
@@ -218,6 +217,7 @@ class SkillCommandHandler(BaseCommandHandler):
             is_loaded = skill.name in active_skills
             is_proj_default = skill.name in project_defaults
             is_global_default = skill.name in global_defaults
+            is_bundled_default = skill.name in bundled_defaults
 
             action = "unload_skill" if is_loaded else "load_skill"
             description = skill.description or "no description"
@@ -228,6 +228,8 @@ class SkillCommandHandler(BaseCommandHandler):
                 status_parts.append("proj")
             if is_global_default:
                 status_parts.append("global")
+            if is_bundled_default:
+                status_parts.append("bundled")
             if status_parts:
                 description = f"[{'+'.join(status_parts)}] {description}"
 
@@ -238,13 +240,15 @@ class SkillCommandHandler(BaseCommandHandler):
                     "skill_name": skill.name,
                     "action": action,
                     "loaded": is_loaded,
-                    "is_default": is_proj_default or is_global_default,
+                    "is_default": (
+                        is_proj_default or is_global_default or is_bundled_default
+                    ),
                 }
             )
 
         loaded_count = len(active_skills)
         total_count = len(skills)
-        default_count = len(project_defaults | global_defaults)
+        default_count = len(project_defaults | global_defaults | bundled_defaults)
 
         # Management options
         management_items = [

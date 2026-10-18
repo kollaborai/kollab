@@ -32,7 +32,7 @@ SESSION_STAT_KEYS = (
 )
 
 
-def _is_system_initialization_record(record: Any) -> bool:
+def is_system_initialization_record(record: Any) -> bool:
     if not isinstance(record, dict) or record.get("type") != "user":
         return False
     intelligence = record.get("kollabor_intelligence")
@@ -56,7 +56,7 @@ def matches_system_initialization_provenance(
         return False
     if displayed_message.get("role") != "user" or saved_message.get("role") != "user":
         return False
-    if not _is_system_initialization_record(logged_record):
+    if not is_system_initialization_record(logged_record):
         return False
     original = logged_record.get("message")
     content = saved_message.get("content")
@@ -1046,7 +1046,7 @@ class ConversationManager:
                         # The logger stores initial system context as a user
                         # record. Preserve that wire role and recover only its
                         # explicit provenance, never classify by prompt text.
-                        if _is_system_initialization_record(data):
+                        if is_system_initialization_record(data):
                             message["metadata"]["system_initialization"] = True
                         if tool_uses:
                             # Browsers read these directly; resume promotes them

@@ -21,6 +21,8 @@ export type Session = {
   total_output_tokens?: number;
   identity?: string;
   daemon_pid?: number;
+  /** The running agent itself: its daemon's hub presence agent id, new for every process and the same whichever way this engine met it. A relaunched agent has another; what hiding a row keys on. */
+  instance?: string;
   /** Started outside this engine (a terminal, another engine): it opens on first use and Delete is not offered, since the engine only detaches from it. */
   external?: boolean;
   /** The computer an agent opened through the network runs on (its id is agent@device); empty for this one. */
@@ -148,10 +150,25 @@ export type ProfileUpdate = Partial<Omit<ProfileWrite, "name">> & {
   new_name?: string;
 };
 
+/** How an agent is drawn: the 3D gem, or a flat tile (docs/specs/rosters-and-teams.md, Avatars). */
+export type AvatarSpec =
+  | { kind: "gem" }
+  | { kind: "initials" }
+  | { kind: "emoji"; value: string }
+  /** `url` is a path the engine serves (it needs the bearer token) or an https address. */
+  | { kind: "image"; url: string };
+
 export type AgentPoolEntry = {
   name: string;
   identity?: string;
   agent_type?: string;
+  /** The agent bundle it runs (the same word as agent_type); empty is the default one. */
+  agent?: string;
+  /** The roster the name belongs to ("" for the koordinator). */
+  roster?: string;
+  /** What a UI calls it: "Maya Lindqvist"; a gem's is its name. */
+  display_name?: string;
+  avatar?: AvatarSpec;
   role_aliases?: string[];
   personality?: string;
   caste?: string;
@@ -167,10 +184,103 @@ export type AgentPoolEntry = {
   solo?: boolean;
   /** The folder the live agent runs in, on this computer. */
   project?: string;
-  /** When it last ran in the engine's folder (epoch seconds, its vault stream); null if never. */
+  /** When it last ran in the asked folder (epoch seconds, its vault stream); null if never. */
   last_ran?: number | null;
   /** False for a live agent the pool does not name (lapis-2): listed, never launched as. Koordinator is launchable (first in the list). */
   pool?: boolean;
+};
+
+/** A persona as GET /rosters and GET /teams send it. */
+export type Persona = {
+  name: string;
+  roster: string;
+  display_name: string;
+  avatar: AvatarSpec;
+  color: number[];
+  /** The agent bundle it runs; empty is the default one. */
+  agent: string;
+  role: string;
+  personality: string;
+  skills: string[];
+  profile: string;
+  prompt: string;
+  caste: string;
+  role_aliases: string[];
+};
+
+export type Roster = {
+  name: string;
+  display_name: string;
+  description: string;
+  avatar: AvatarSpec;
+  source: "bundled" | "user" | "project";
+  path: string;
+  personas: Persona[];
+};
+
+/** A roster or team file the engine could not use, and why. */
+export type LibraryProblem = { file: string; message: string };
+
+/** GET /rosters: every roster, and the one this folder draws its agent names from. */
+export type RostersResponse = {
+  workspace: string;
+  default: string;
+  rosters: Roster[];
+  problems: LibraryProblem[];
+};
+
+export type TeamMember = {
+  persona: Persona;
+  role: string;
+  agent: string;
+  profile: string;
+  /** The team's instructions for this seat. */
+  prompt: string;
+  reports_to: string | null;
+};
+
+export type Team = {
+  name: string;
+  description: string;
+  roster: string;
+  lead: string;
+  source: "bundled" | "user" | "project";
+  path: string;
+  members: TeamMember[];
+};
+
+export type TeamsResponse = { teams: Team[]; problems: LibraryProblem[] };
+
+/** POST /teams/{name}/launch: who started, who was already running in the folder, who failed. */
+export type TeamLaunchResult = {
+  team: string;
+  workspace: string;
+  started: string[];
+  skipped: { persona: string; reason: string }[];
+  failed: { persona: string; error: string }[];
+  sessions: Session[];
+};
+
+/** One running hub agent (a presence row). A name can run in several folders at once, so only `agent_id` tells two apart: it is a session's `instance`. */
+export type LiveAgent = {
+  name: string;
+  agent_id: string;
+  state: string;
+  current_task: string;
+  /** Live but off the hub mesh: peers do not see it. */
+  solo: boolean;
+  /** The folder it runs in. */
+  project: string;
+};
+
+/** GET /agents: the pool, as one folder (or the whole computer) sees it. */
+export type AgentPoolResponse = {
+  /** One entry per name; where several folders run a name, this folder's agent speaks for it. */
+  agents: AgentPoolEntry[];
+  available?: string[];
+  active?: string[];
+  /** Every running agent in that scope, one per process (`agents` has one per name). */
+  live?: LiveAgent[];
 };
 
 export type AgentBundleEntry = {
@@ -240,7 +350,15 @@ export type AgentNetwork = {
 export type WorkspaceEntry = { path: string; name: string; live: number };
 
 /** An agent that ran in the engine's folder and is not running: opening it starts it again. */
-export type OfflineAgent = { identity: string; workspace: string; last_ran: number };
+/** An agent that ran here and is not running. Its persona's look (name, picture, color) comes with it when it has one, whichever roster it is from. */
+export type OfflineAgent = Pick<AgentPoolEntry, "display_name" | "avatar" | "color" | "caste"> & {
+  identity: string;
+  workspace: string;
+  last_ran: number;
+};
+
+/** A sidebar row the user hid, for every client of this engine (engine: hidden_agents.py). `key` is hidden-agents.ts's; a running agent's entry names its `instance` and lasts as long as that process. */
+export type HiddenAgent = { key: string; label: string; detail: string; instance?: string };
 
 export type SlashParameter = {
   name: string;
@@ -426,6 +544,8 @@ export type PanelField = {
   max_value?: number | null;
   step?: number | null;
   options?: string[] | null;
+  /** Dropdown only: option -> the text to show; the option is still what is saved. */
+  option_labels?: Record<string, string> | null;
   placeholder?: string | null;
   editable: boolean;
   managed_by?: string | null;
@@ -697,7 +817,21 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork }>("/sessions");
+    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork; hidden?: HiddenAgent[] }>("/sessions");
+  }
+
+  /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
+  hideAgent(entry: HiddenAgent) {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
+  }
+
+  /** Show a hidden row again. */
+  showAgent(key: string) {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/unhide", { method: "POST", body: JSON.stringify({ key }) });
+  }
+
+  showAllAgents() {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/unhide", { method: "POST", body: JSON.stringify({ all: true }) });
   }
 
 
@@ -829,17 +963,22 @@ export class EngineApi {
    * Follow the daemon's existing turn after a browser reload. The endpoint is
    * SSE and terminates at turn_complete; callers provide an AbortSignal so a
    * session switch can stop the reconnect without leaking a subscription.
+   * onOpen runs once the engine holds the subscription (it subscribes before
+   * it answers): an event that fired earlier is gone, so a caller that may
+   * have missed one reloads then.
    */
   async streamEvents(
     sessionId: string,
     signal?: AbortSignal,
     onEvent?: (event: SessionEvent) => void,
+    onOpen?: () => void,
   ): Promise<void> {
     const response = await this.request(
       `/sessions/${encodeURIComponent(sessionId)}/events`,
       { method: "GET", signal },
     );
     if (!response.body) throw new Error("event stream response has no body");
+    onOpen?.();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -968,12 +1107,36 @@ export class EngineApi {
     }>(`/profiles/${encodeURIComponent(name)}/test`, { method: "POST" });
   }
 
+  /** Every gem's live state on this computer, whatever folder it runs in: the sidebar's view. */
   listAgentPool(refresh = false) {
-    return this.json<{
-      agents: AgentPoolEntry[];
-      available?: string[];
-      active?: string[];
-    }>(`/agents${refresh ? "?refresh=true" : ""}`);
+    return this.json<AgentPoolResponse>(`/agents?scope=computer${refresh ? "&refresh=true" : ""}`);
+  }
+
+  /** What New Session may start in one folder (empty: the engine's own).
+   * `available` / `active` are that folder's only: a gem running in another folder is free here. */
+  listLaunchPool(workspace = "") {
+    const query = new URLSearchParams({ refresh: "true" });
+    if (workspace) query.set("workspace", workspace);
+    return this.json<AgentPoolResponse>(`/agents?${query}`);
+  }
+
+  /** Every roster the folder can draw from (its own project rosters included), and files that failed to load. */
+  listRosters(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+    return this.json<RostersResponse>(`/rosters${query}`);
+  }
+
+  listTeams(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+    return this.json<TeamsResponse>(`/teams${query}`);
+  }
+
+  /** Start every member of a team that is not already running in the folder, lead first. */
+  launchTeam(name: string, workspace: string, profile?: string) {
+    return this.json<TeamLaunchResult>(`/teams/${encodeURIComponent(name)}/launch`, {
+      method: "POST",
+      body: JSON.stringify({ workspace, ...(profile ? { profile } : {}) }),
+    });
   }
 
   getGemAppearance() {
@@ -1002,11 +1165,13 @@ export class EngineApi {
   /**
    * Agent bundles (`--agent <name>` in the CLI): the prompt+metadata tier,
    * distinct from the gem identity pool. Any of these can be passed as the
-   * `agent` field when creating a session.
+   * `agent` field when creating a session in the same folder: `workspace`
+   * (empty: the engine's own) adds that folder's own `.kollab/agents`.
    */
-  listAgentBundles() {
+  listAgentBundles(workspace = "") {
+    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
     return this.json<{ bundles: AgentBundleEntry[]; count?: number }>(
-      "/agents/bundles",
+      `/agents/bundles${query}`,
     );
   }
 

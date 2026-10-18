@@ -31,6 +31,7 @@ def test_engine_history_keeps_message_metadata_and_thinking() -> None:
         session.history = []
         session._raw_history = []
         session._history_anchor = ""
+        session._history_seeded = False
         session._history_lock = asyncio.Lock()
 
         history = await session.refresh_history()

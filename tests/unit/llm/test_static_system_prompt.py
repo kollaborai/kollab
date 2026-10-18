@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kollabor_ai import SystemPromptBuilder
+from kollabor_config.config_utils import get_bundled_agents_dir
 from kollabor_events.data_models import ConversationMessage
 
 
@@ -226,6 +227,45 @@ class TestVolatileRailBlocks(unittest.TestCase):
         )
         blocks = self._rail_blocks(builder)
         self.assertEqual(blocks, [])
+
+    def test_rail_session_context_comes_from_the_first_tier_that_has_it(self):
+        """Local, then global, then bundled: a computer nothing has seeded has the block."""
+        tag = '<trender type="include" path="01-session-context.md" />'
+        seen = {}
+        builder = _make_builder(
+            {"kollabor.llm.system_prompt.include_project_structure": False}
+        )
+
+        def render(text, **kw):
+            seen[text] = kw["base_path"]
+            return "x"
+
+        builder._util_imports = {"render_system_prompt": render}
+
+        def sections(agents_dir):
+            folder = agents_dir / "_base" / "sections"
+            folder.mkdir(parents=True)
+            (folder / "01-session-context.md").write_text("ctx")
+            return folder
+
+        def session_base(cwd):
+            with patch("kollabor_config.config_utils.Path.cwd", return_value=cwd):
+                builder.build_volatile_context()
+            return seen[tag]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project = Path(tmp) / "home", Path(tmp) / "proj"
+            home.mkdir()
+            project.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                self.assertEqual(
+                    session_base(project),
+                    get_bundled_agents_dir() / "_base" / "sections",
+                )
+                global_sections = sections(home / ".kollab" / "agents")
+                self.assertEqual(session_base(project), global_sections)
+                local_sections = sections(project / ".kollab" / "agents")
+                self.assertEqual(session_base(project), local_sections)
 
 
 if __name__ == "__main__":

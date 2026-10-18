@@ -1,12 +1,15 @@
 """Agent identity pool routes for the web UI."""
 
 import os
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query  # type: ignore[import-not-found]
 
+from ..folders import agents_in_folder, hub_folder
 from ..gem_appearance import load_appearance, record_births, save_appearance
 from ..hub_bridge import HubBridge
+from .rosters import avatar_descriptor, persona_dict
 
 # plugins.hub.models.COORDINATOR_IDENTITY; kept here so the route imports no plugin.
 COORDINATOR_IDENTITY = "koordinator"
@@ -15,18 +18,33 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 _bridge = HubBridge()
 
 
-def ran_here() -> Dict[str, float]:
-    """Every agent that ran in this folder -> when it last did (epoch seconds).
+def _hub_dir(folder: str) -> Path:
+    """The hub (presence, vaults) an agent started in ``folder`` joins.
+
+    Looked up, never created: the New Session picker asks about folders nobody
+    has run in. This engine's own folder is the hub the rest of the engine reads.
+    """
+    from plugins.hub.presence import get_hub_dir
+
+    if hub_folder(folder) == hub_folder(os.getcwd()):
+        return get_hub_dir()
+    from kollabor_config.config_utils import get_project_data_dir
+    from plugins.hub.project_scope import resolve_project_root
+
+    return get_project_data_dir(resolve_project_root(folder)) / "hub"
+
+
+def ran_in(folder: str) -> Dict[str, float]:
+    """Every agent that ran in ``folder`` -> when it last did (epoch seconds).
 
     An agent's vault stream (hub/vaults/<name>/stream.jsonl) gets a line
-    every session, so its mtime is the last time it ran here. ``_shared`` and
+    every session, so its mtime is the last time it ran there. ``_shared`` and
     ``_archived`` are not agents.
     """
     try:
-        from plugins.hub.presence import get_hub_dir
         from plugins.hub.vault import find_active_stream
 
-        vaults = list((get_hub_dir() / "vaults").iterdir())
+        vaults = list((_hub_dir(folder) / "vaults").iterdir())
     except Exception:
         return {}
     ran: Dict[str, float] = {}
@@ -42,93 +60,139 @@ def ran_here() -> Dict[str, float]:
     return ran
 
 
+def pool_identities(folder: Optional[str] = None) -> List[Any]:
+    """The personas of ``folder``'s roster (name, color, caste, ...); none if the hub is unavailable."""
+    try:
+        from plugins.hub.rosters import roster_personas
+
+        return list(roster_personas(folder))
+    except Exception:
+        return []
+
+
+def persona_in(name: str, folder: str) -> Dict[str, Any]:
+    """A name's persona (any roster, a numbered ``lapis-2`` wears ``lapis``) as the UI reads it; {} if none."""
+    try:
+        from plugins.hub.rosters import find_persona
+
+        persona = find_persona(name, folder)
+    except Exception:
+        return {}
+    return persona_dict(persona) if persona else {}
+
+
+def _pool_entry(
+    name: str, current: Optional[Dict[str, Any]], last_ran: Optional[float], **who: Any
+) -> Dict[str, Any]:
+    """One launchable name: who it is, and the agent of that name that is live (if any)."""
+    live = current or {}
+    return {
+        "name": name,
+        "identity": name,
+        **who,
+        "available": current is None,
+        "active": current is not None,
+        "pool": True,
+        "state": live.get("state") if current else "available",
+        "current_task": live.get("current_task", ""),
+        # The live hub agent, for /hub/agents/{agent_id}/output.
+        "agent_id": live.get("agent_id", ""),
+        # Live but off the hub mesh (its presence says so).
+        "solo": bool(live.get("solo")),
+        # The folder it runs in (presence covers every project here).
+        "project": str(live.get("project") or ""),
+        "last_ran": last_ran,
+    }
+
+
+def _live_row(agent: Dict[str, Any]) -> Dict[str, Any]:
+    """One running hub agent: a name can run in several folders at once, so only its ``agent_id`` tells two apart."""
+    return {
+        "name": str(agent["identity"]),
+        "agent_id": str(agent.get("agent_id") or ""),
+        "state": str(agent.get("state") or ""),
+        "current_task": str(agent.get("current_task") or ""),
+        "solo": bool(agent.get("solo")),
+        "project": str(agent.get("project") or ""),
+    }
+
+
 @router.get("")
 async def list_agent_pool(
     refresh: bool = Query(False, description="Bypass the hub presence cache"),
+    workspace: str = Query("", description="Folder to launch in; empty is the engine's own"),
+    scope: str = Query(
+        "folder",
+        pattern="^(folder|computer)$",
+        description="folder: only agents in that folder's hub; computer: any folder, that one first",
+    ),
 ) -> Dict[str, Any]:
-    """Return the same gem/identity pool used by normal CLI launches.
+    """Return the same gem/identity pool used by normal CLI launches, for one folder.
 
     This is deliberately separate from ``/hub/agents``: that endpoint is the
     live roster, while this endpoint tells a new web session which identities
-    it may launch under.
+    it may launch under. Every folder has its own hub (a koordinator and every
+    gem each), so ``available`` / ``active`` / ``state`` / ``agent_id`` /
+    ``project`` / ``last_ran`` describe ``workspace`` only: a gem running in
+    another folder does not take it here. ``scope=computer`` is the sidebar's
+    view instead: an agent running in any folder shows its state (this
+    folder's wins when a name runs in several). ``live`` lists every running
+    agent in that scope, one per process, so a row finds its own by ``agent_id``.
     """
-    try:
-        from plugins.hub.models import load_pool_identities
-
-        pool = load_pool_identities()
-    except Exception:
-        pool = []
-
-    live = _bridge.get_agents(use_cache=not refresh)
-    live_by_identity = {
-        str(agent.get("identity")): agent
-        for agent in live
+    folder = os.path.realpath(os.path.expanduser(workspace)) if workspace else os.path.realpath(os.getcwd())
+    pool = pool_identities(folder)
+    live = [
+        agent
+        for agent in _bridge.get_agents(use_cache=not refresh)
         if isinstance(agent, dict) and agent.get("identity")
-    }
+    ]
+    in_folder = agents_in_folder(live, folder)
+    live_by_identity = {str(agent["identity"]): agent for agent in in_folder}
+    if scope == "computer":
+        live_by_identity = {**{str(agent["identity"]): agent for agent in live}, **live_by_identity}
 
     # The first agent in a folder is its koordinator, as with a plain `kollab`
     # (the hub's flock winner): offer it first while this folder has none.
-    # Each folder has its own, so one running elsewhere does not take it.
-    here = os.path.realpath(os.getcwd())
-    last_ran = ran_here().get
-    coordinator = next(
-        (
-            agent
-            for agent in live
-            if isinstance(agent, dict)
-            and agent.get("identity") == COORDINATOR_IDENTITY
-            and os.path.realpath(str(agent.get("project") or "")) == here
-        ),
-        None,
-    )
+    last_ran = ran_in(folder).get
     agents = [
-        {
-            "name": COORDINATOR_IDENTITY,
-            "identity": COORDINATOR_IDENTITY,
-            "agent_type": COORDINATOR_IDENTITY,
-            "role_aliases": [],
-            "personality": "",
-            "caste": "",
-            # Not a pool gem: the web UI gives it a born color.
-            "color": None,
-            "available": coordinator is None,
-            "active": coordinator is not None,
-            "pool": True,
-            "state": coordinator.get("state") if coordinator else "available",
-            "current_task": coordinator.get("current_task", "") if coordinator else "",
-            "agent_id": coordinator.get("agent_id", "") if coordinator else "",
-            "solo": bool(coordinator.get("solo")) if coordinator else False,
-            "project": here if coordinator else "",
-            "last_ran": last_ran(COORDINATOR_IDENTITY),
-        }
+        _pool_entry(
+            COORDINATOR_IDENTITY,
+            live_by_identity.get(COORDINATOR_IDENTITY),
+            last_ran(COORDINATOR_IDENTITY),
+            agent_type=COORDINATOR_IDENTITY,
+            agent=COORDINATOR_IDENTITY,
+            roster="",
+            display_name="Koordinator",
+            avatar={"kind": "gem"},
+            role_aliases=[],
+            personality="",
+            caste="",
+            # Not a persona: the web UI gives it a born gem and color.
+            color=None,
+        )
     ]
     for identity in pool:
         name = str(getattr(identity, "name", "") or "")
         if not name:
             continue
-        current = live_by_identity.get(name)
         agents.append(
-            {
-                "name": name,
-                "identity": name,
-                "agent_type": str(getattr(identity, "agent_type", "") or ""),
-                "role_aliases": list(getattr(identity, "role_aliases", []) or []),
-                "personality": str(getattr(identity, "personality", "") or ""),
-                "caste": str(getattr(identity, "caste", "") or ""),
-                "color": list(getattr(identity, "color_rgb", None) or (128, 128, 128)),
-                "available": current is None,
-                "active": current is not None,
-                "pool": True,
-                "state": current.get("state") if current else "available",
-                "current_task": current.get("current_task", "") if current else "",
-                # The live hub agent, for /hub/agents/{agent_id}/output.
-                "agent_id": current.get("agent_id", "") if current else "",
-                # Live but off the hub mesh (its presence says so).
-                "solo": bool(current.get("solo")) if current else False,
-                # The folder it runs in (presence covers every project here).
-                "project": str(current.get("project") or "") if current else "",
-                "last_ran": last_ran(name),
-            }
+            _pool_entry(
+                name,
+                live_by_identity.get(name),
+                last_ran(name),
+                agent_type=str(getattr(identity, "agent", "") or ""),
+                agent=str(getattr(identity, "agent", "") or ""),
+                roster=str(getattr(identity, "roster", "") or ""),
+                display_name=str(getattr(identity, "display_name", "") or name),
+                avatar=avatar_descriptor(
+                    getattr(identity, "avatar", None) or {"kind": "initials"},
+                    str(getattr(identity, "roster", "") or ""),
+                ),
+                role_aliases=list(getattr(identity, "role_aliases", []) or []),
+                personality=str(getattr(identity, "personality", "") or ""),
+                caste=str(getattr(identity, "caste", "") or ""),
+                color=list(getattr(identity, "color", None) or (128, 128, 128)),
+            )
         )
 
     # A gem's first time alive is its birth: it gets the random look it keeps.
@@ -136,24 +200,30 @@ async def list_agent_pool(
     if alive:
         record_births(alive)
 
-    # Live agents the pool does not name (koordinator, numbered gems like
-    # lapis-2) are listed too, so the sidebar shows every agent. "pool": False
-    # keeps them out of the launch list; a numbered gem wears its base's color.
+    # Live agents the pool does not name (numbered gems like lapis-2, a persona
+    # of another roster) are listed too, so the sidebar shows every agent.
+    # "pool": False keeps them out of the launch list; a numbered gem wears its
+    # base's look, a persona of another roster its own.
     by_name = {agent["name"]: agent for agent in agents}
     for name, current in sorted(live_by_identity.items()):
         if name in by_name:
             continue
         base = by_name.get(name.rsplit("-", 1)[0], {})
+        known = persona_in(name, folder)
         agents.append(
             {
                 "name": name,
                 "identity": name,
-                "agent_type": "",
+                "agent_type": known.get("agent", ""),
+                "agent": known.get("agent", ""),
+                "roster": known.get("roster", ""),
+                "display_name": known.get("display_name") or base.get("display_name") or name,
+                "avatar": known.get("avatar") or base.get("avatar") or {"kind": "initials"},
                 "role_aliases": [],
                 "personality": "",
-                "caste": base.get("caste", ""),
-                # None when no pool gem is its base: the web UI gives it a born color.
-                "color": base.get("color"),
+                "caste": base.get("caste") or known.get("caste", ""),
+                # None when no persona is its base: the web UI gives it a born color.
+                "color": base.get("color") or known.get("color"),
                 "available": False,
                 "active": True,
                 "pool": False,
@@ -165,11 +235,18 @@ async def list_agent_pool(
             }
         )
 
+    # ``agents`` holds one entry per name (this folder's wins a name running in
+    # several), so a row that must know *its* agent reads this: one per process.
+    running = sorted(
+        (_live_row(agent) for agent in (live if scope == "computer" else in_folder)),
+        key=lambda row: (row["project"], row["name"], row["agent_id"]),
+    )
     return {
         "agents": agents,
         "available": [agent["name"] for agent in agents if agent["available"]],
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
+        "live": running,
     }
 
 
@@ -193,13 +270,17 @@ async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]
 
 
 @router.get("/bundles")
-async def list_agent_bundles() -> Dict[str, Any]:
+async def list_agent_bundles(
+    workspace: str = Query("", description="Folder whose project-local agents are listed; empty is the engine's own"),
+) -> Dict[str, Any]:
     """List agent bundles the daemon can launch with (``--agent <name>``).
 
     This is the bundle tier -- system prompts + agent.json metadata -- not the
     gem identity pool above. Session creation accepts ``agent`` for any of
     these names; the web UI needs the same list the CLI's ``/agent`` picker
     shows. Local overrides global, matching AgentManager's resolution order.
+    The local tier is ``workspace``'s own ``.kollab/agents``, the folder
+    POST /sessions resolves ``agent`` in, so a listed name launches there.
     """
     try:
         from kollabor_agent.agent_manager import AgentManager
@@ -208,7 +289,9 @@ async def list_agent_bundles() -> Dict[str, Any]:
 
     bundles: list = []
     try:
-        manager = AgentManager()
+        manager = AgentManager(
+            project_path=Path(workspace).expanduser().resolve() if workspace else None
+        )
         for agent in manager.list_agents():
             description = str(getattr(agent, "description", "") or "")
             profile = getattr(agent, "profile", None)

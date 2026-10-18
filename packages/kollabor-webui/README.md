@@ -30,14 +30,27 @@ if Node/npm is unavailable.
 ## Interface
 
 - **Sidebar**: New Session starts a session with the current picks in one
-  click; the options button next to it opens Agent, Gem, Model and Workspace.
-  The gem list starts with koordinator while this folder runs none (a terminal
-  makes the first agent in a folder its koordinator) and says when each gem
-  last ran here ("Ran 3d Ago", from its vault). Workspace is a folder picker:
+  click; the options button next to it opens Agent, Type, Model and Workspace.
+  Agent is a persona with its picture, name and job title, grouped by roster:
+  the chosen Workspace's roster first, then every other roster's personas
+  (they start as `roster/name`). Picking one sets its Type, the agent bundle it
+  runs. The list is the chosen Workspace's: every folder has its own hub, so an
+  agent or koordinator running in another folder is free here and "In Use"
+  means in use in that folder, whichever roster it came from (a folder inside
+  a git repo shares the repo's hub). It starts with koordinator while the
+  folder runs none (a terminal makes the first agent in a folder its
+  koordinator) and says when each gem last ran there ("Ran 3d Ago", from its
+  vault). Workspace is a folder picker:
   the engine's folder, recent folders with their live agents, a folder
   browser, or a typed path.
-  Each session row shows its gem as a live 3D avatar that acts out what the
-  agent is doing (thinking, typing, searching, messaging, error).
+  Each session row shows its agent under its display name: a live 3D gem that
+  acts out what the agent is doing (thinking, typing, searching, messaging,
+  error), or the persona's picture, emoji or initials when its roster has no
+  gems.
+- **Agents**: the sidebar's Agents button lists every roster and team (bundled,
+  yours and the chosen folder's own) with each persona's details and the files
+  that failed to load. Launch Team starts a team into a folder, its lead first;
+  a member already running there is skipped.
 - **Agents by computer**: the sidebar lists every agent under the computer it
   runs on. This computer comes first: its chats and every agent running in a
   terminal or as a daemon, each one click from a full chat (the web UI only
@@ -53,6 +66,12 @@ if Node/npm is unavailable.
   computer's trust allows: under `open` (the default) every computer of your
   network, under `agents` only the agents it lets this one message, under
   `manual` none.
+- **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
+  every window that uses this engine (Kollab.app, browsers, the phone); the
+  footer's Hidden Agents list shows it again. The engine keeps the list
+  (`~/.kollab/hub/hidden-agents.json`) and sends it with `GET /sessions` as
+  `hidden`. A running agent is hidden as the process it is (its `instance`), so
+  one launched later under the same name shows.
 - **Multi-network (#158)**: when this device belongs to more than one network,
   the sidebar nests them — NETWORKS > DEVICES > WORKSPACES > AGENTS — with
   the devices and workspaces of every membership (`network.networks` on

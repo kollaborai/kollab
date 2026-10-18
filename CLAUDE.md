@@ -205,7 +205,8 @@ Peer-to-peer agent mesh with persistent identity.
 
 **Core files:**
 - `plugin.py` - Lifecycle, social layer, /hub commands, message display, 33 pipeline tags
-- `models.py` - GemDesignation, HubMessage, WorkSlot, designation pool
+- `models.py` - HubMessage, WorkSlot, AgentState, `desired_bundle_for_identity`
+- `rosters.py` - Persona rosters and teams from JSON (`bundles/rosters`, `bundles/teams` -> `~/.kollab/{rosters,teams}` -> `.kollab/{rosters,teams}`): loader, validation, `find_persona`, `roster_personas`, `team_launch_order`; spec `docs/specs/rosters-and-teams.md`
 - `presence.py` - Heartbeat files, agent discovery, socket liveness checks
 - `coordinator.py` - flock election, work queue, designation assignment
 - `xml_tags.py` - Hub XML tag matching: attributes in any order, either quote style (`tag_pattern`, `tag_attrs`)
@@ -219,12 +220,12 @@ Peer-to-peer agent mesh with persistent identity.
 - `scratchpad.py` - Ephemeral agent notes (survives compaction)
 - `nudge_engine.py` - Behavioral nudges (scratchpad reminders, task checkpoints)
 - `feed.py` - Dashboard content generator
-- `org_launcher.py` - Launch teams from JSON org charts
+- `org_launcher.py` - Launch a team (`/hub org`, `--hub org`, `--org`) as detached processes; each gets its seat's instructions in `KOLLAB_LAUNCH_BRIEF`
 
 **Key concepts:**
 - Agents auto-discover via presence files in `~/.kollab/hub/presence/`
 - First agent becomes coordinator via `flock()` on `hub.lock`
-- Designations are gem-inspired names (lapis, peridot, ruby) with color castes
+- Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)
 - Off-box mesh: `plugins.hub.endpoint_enabled` binds a TCP/TLS listener sharing the
   same `_handle_connection` handler; remote agents complete the same Ed25519 handshake.
@@ -571,6 +572,19 @@ an `api_key` in its config prompts on every run. The harness exports
 `keyring_enabled()` (`kollabor_ai.providers.security`) is off automatically
 under pytest. Any new harness must do the same.
 
+**Never let a test touch the real `~/.kollab`.** The harness runs the app command
+and every `shell` step with `HOME` set to a throwaway directory (seeded with
+`application.setup_completed` and the connect-guide marker), so a spec cannot
+attach to a live daemon, join the developer's hub, wake running agents or write
+to their conversations and vaults. A spec without its own `HOME` also gets its
+own `KOLLAB_PROJECT_ROOT`, because hub sockets live in
+`/tmp/kollabor-hub/<project hash>/`, outside `HOME`. When the spec ends the
+harness stops every process whose environment carries that `HOME` and removes
+the directory. A spec that sets `HOME` in its own command keeps it. Opt-outs in
+`config`: `"real_home": true` (loud warning; only for a spec that needs the
+developer's real providers) and `"first_run": true` (unseeded `HOME`, for the
+first-run wizard). Any new harness must isolate `HOME` the same way.
+
 4. **Report:**
 ```
 implementation complete:
@@ -611,7 +625,7 @@ Both initialize `TerminalLLMChat` in `kollabor/application.py`.
 **Local directory (`.kollab/` - OPTIONAL):**
 - `agents/` - Project-specific agents (override global)
 
-**Agent resolution:** Local -> Global
+**Agent resolution:** Local -> Global -> Bundled (`AgentManager.find_agent_dir`, the one resolver: the engine's `POST /sessions` uses it too, with the chat's folder as the local tier (`AgentManager(project_path=...)`); app start also seeds the bundled agents into the global dir)
 
 **Config save targets (`/config` modal, `Ctrl+S`):**
 - Local (`L`): Saves to `.kollab/config.json` in cwd (project-specific overrides)
@@ -657,7 +671,7 @@ plus raw `<trender>cmd</trender>` shell execution.
 
 Unknown `type=` attributes are left in the prompt as-is (no error, but no render).
 
-**Priority order:** CLI `--system-prompt` arg -> `KOLLAB_SYSTEM_PROMPT` env var -> `KOLLAB_SYSTEM_PROMPT_FILE` env var -> Local `.kollab/agents/default/system_prompt.md` -> Global `~/.kollab/agents/default/system_prompt.md` -> Built-in fallback
+**Priority order:** CLI `--system-prompt` arg -> `KOLLAB_SYSTEM_PROMPT` env var -> `KOLLAB_SYSTEM_PROMPT_FILE` env var -> Local `.kollab/agents/default/system_prompt.md` -> Global `~/.kollab/agents/default/system_prompt.md` -> Bundled `bundles/agents/default/system_prompt.md` -> Built-in fallback
 
 ## Core Architecture Patterns
 
@@ -757,7 +771,7 @@ def get_config_widgets() -> Dict[str, Any]:
     }
 ```
 
-Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox`. Each widget requires `type`, `label`, `config_path`, and `help`. Additional keys depend on the widget type (e.g., `min_value`/`max_value`/`step` for slider, `options` for dropdown).
+Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox`. Each widget requires `type`, `label`, `config_path`, and `help`. Additional keys depend on the widget type (e.g., `min_value`/`max_value`/`step` for slider, `options` for dropdown, plus an optional `option_labels` mapping each option to the text people read when the options are ids; the option is still what is saved).
 
 **Important:** every `config_path` in a widget must have a matching entry in `get_default_config()`. If the default is missing, the widget will display an empty or incorrect value regardless of what the user sets. This is the single most common bug in config widgets — always verify the `config_path` key appears in both `get_config_widgets()` and `get_default_config()`.
 

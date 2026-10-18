@@ -1,0 +1,127 @@
+{
+  "name": "web-open-midturn-shows-message",
+  "description": "A window that opens an agent mid-turn finds the message being answered, whoever sent it (2026-10-17: a second web window opened a koordinator a few seconds after another window sent a turn and showed its saved history without that message until the answer landed, because the engine's warm mirror only followed the daemon at turn end). Here the agent's own terminal sends the turn: plain kollab (daemon + this window) in a throwaway HOME, the engine from this checkout opens the agent first, a fake model holds its answer (fake_llm.py 'slowreply'), no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "title": "a web window has the agent open"
+    },
+    {
+      "action": "shell",
+      "description": "start the engine and open the agent once",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" start",
+      "assert_contains": "has opened"
+    },
+    {
+      "action": "section",
+      "title": "the agent's terminal starts a turn"
+    },
+    {
+      "action": "type",
+      "text": "slowreply from the terminal"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2.5
+    },
+    {
+      "action": "section",
+      "title": "a second window opens the agent mid-turn"
+    },
+    {
+      "action": "shell",
+      "description": "the history it first gets holds the message being answered",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" history \"slowreply from the terminal\"",
+      "assert_contains": "user copies=1 assistant copies=0"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: slowreply from the terminal",
+      "timeout": 30,
+      "description": "the reply shows in the agent's terminal"
+    },
+    {
+      "action": "section",
+      "title": "after the answer"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "shell",
+      "description": "each message once",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" history \"slowreply from the terminal\"",
+      "assert_contains": "user copies=1 assistant copies=1"
+    },
+    {
+      "action": "section",
+      "title": "a window that never opened the agent opens it mid-turn"
+    },
+    {
+      "action": "shell",
+      "description": "restart the engine; it lists the agent but has not opened it",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" stop; sleep 1; HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" start --cold",
+      "assert_contains": "has listed"
+    },
+    {
+      "action": "type",
+      "text": "slowreply from the terminal again"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "sleep",
+      "seconds": 2.5
+    },
+    {
+      "action": "shell",
+      "description": "its first history request holds the message being answered",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" history \"slowreply from the terminal again\"",
+      "assert_contains": "user copies=1 assistant copies=0"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong: slowreply from the terminal again",
+      "timeout": 30,
+      "description": "the reply shows in the agent's terminal"
+    },
+    {
+      "action": "section",
+      "title": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the engine, the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-web-midturn.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/web_open_midturn.py\" stop); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

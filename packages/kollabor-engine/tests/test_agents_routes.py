@@ -1,6 +1,8 @@
 """Tests for the agent pool colors and the hub feed's live state events."""
 
 import json
+import os
+import subprocess
 import time
 from types import SimpleNamespace
 
@@ -14,7 +16,16 @@ from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from plugins.hub.models import PoolIdentity
+
+def gem(name, color_rgb=(128, 128, 128), role_aliases=(), personality="", caste=""):
+    """A pool gem as the route reads it (the roster's class is not under test here)."""
+    return SimpleNamespace(
+        name=name,
+        color=color_rgb,
+        role_aliases=list(role_aliases),
+        personality=personality,
+        caste=caste,
+    )
 
 
 class StubBridge:
@@ -36,6 +47,11 @@ def presence(agent_id, identity, state, task=""):
     }
 
 
+def live(agent_id, identity, state="idle", task="", project=None):
+    """A presence row for an agent running in ``project`` (default: the engine's own folder)."""
+    return {**presence(agent_id, identity, state, task), "project": project or os.getcwd()}
+
+
 @pytest_asyncio.fixture
 async def client():
     async with AsyncClient(
@@ -51,28 +67,20 @@ class TestAgentPoolColor:
     @pytest.fixture
     def pool(self, monkeypatch):
         identities = [
-            PoolIdentity(
-                name="lapis",
+            gem(
+                "lapis",
                 color_rgb=(30, 90, 180),
                 role_aliases=["herald"],
                 personality="calm mediator",
                 caste="communication",
             ),
-            PoolIdentity(
-                name="ruby",
-                color_rgb=(200, 20, 60),
-                role_aliases=[],
-                personality="bold",
-                caste="defense",
-            ),
+            gem("ruby", color_rgb=(200, 20, 60), personality="bold", caste="defense"),
         ]
-        monkeypatch.setattr(
-            "plugins.hub.models.load_pool_identities", lambda *a, **k: identities
-        )
+        monkeypatch.setattr(agents_routes, "pool_identities", lambda *_: identities)
 
     async def test_every_entry_carries_its_gem_color(self, client, pool, monkeypatch):
-        live = presence("a1", "lapis", "working", "fix tests")
-        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live]))
+        row = live("a1", "lapis", "working", "fix tests")
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([row]))
 
         body = (await client.get("/agents")).json()
 
@@ -83,8 +91,8 @@ class TestAgentPoolColor:
         assert body["count"] == 3
 
     async def test_live_fields_still_flow(self, client, pool, monkeypatch):
-        live = presence("a1", "lapis", "working", "fix tests")
-        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live]))
+        row = live("a1", "lapis", "working", "fix tests")
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([row]))
 
         body = (await client.get("/agents")).json()
 
@@ -100,7 +108,7 @@ class TestAgentPoolColor:
         assert body["available"] == ["koordinator", "ruby"]
 
     async def test_a_solo_agent_is_live_but_off_the_hub(self, client, pool, monkeypatch):
-        solo = {**presence("a1", "lapis", "idle"), "solo": True}
+        solo = {**live("a1", "lapis"), "solo": True}
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge([solo]))
 
         body = (await client.get("/agents")).json()
@@ -111,18 +119,18 @@ class TestAgentPoolColor:
         assert by_name["ruby"]["solo"] is False
 
     async def test_a_live_agent_names_its_folder(self, client, pool, monkeypatch):
-        live = {**presence("a1", "lapis", "idle"), "project": "/home/dev/kollab"}
-        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live]))
+        there = live("a1", "lapis", project="/home/dev/kollab")
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([there]))
 
-        body = (await client.get("/agents")).json()
+        body = (await client.get("/agents", params={"workspace": "/home/dev/kollab"})).json()
 
         by_name = {agent["name"]: agent for agent in body["agents"]}
         assert by_name["lapis"]["project"] == "/home/dev/kollab"
         assert by_name["ruby"]["project"] == ""
 
     async def test_every_live_agent_is_listed_but_only_pool_gems_launch(self, client, pool, monkeypatch):
-        live = [presence("a2", "lapis-2", "working"), presence("a3", "zoe", "idle")]
-        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(live))
+        rows = [live("a2", "lapis-2", "working"), live("a3", "zoe")]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
 
         body = (await client.get("/agents")).json()
 
@@ -172,7 +180,7 @@ class TestAgentPoolColor:
         assert [agent["name"] for agent in body["agents"]].count("koordinator") == 1
 
     async def test_a_live_gem_is_born_once(self, client, pool, monkeypatch, appearance_store):
-        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([presence("a1", "lapis", "idle")]))
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("a1", "lapis")]))
 
         await client.get("/agents")
         born = json.loads(appearance_store.read_text())["born"]
@@ -182,15 +190,191 @@ class TestAgentPoolColor:
         assert json.loads(appearance_store.read_text())["born"] == born
 
     async def test_missing_color_falls_back_to_neutral_gray(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "plugins.hub.models.load_pool_identities",
-            lambda *a, **k: [SimpleNamespace(name="opal")],
-        )
+        monkeypatch.setattr(agents_routes, "pool_identities", lambda *_: [SimpleNamespace(name="opal")])
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
 
         _, agent = (await client.get("/agents")).json()["agents"]  # koordinator, opal
 
         assert agent["color"] == [128, 128, 128]
+
+
+@pytest.mark.asyncio
+class TestAgentPoolFolders:
+    """Every folder has its own hub: a name live in one folder is free in the others."""
+
+    @pytest.fixture
+    def folders(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            agents_routes, "pool_identities", lambda *_: [gem("lapis", color_rgb=(30, 90, 180)), gem("ruby")]
+        )
+        home, other = tmp_path / "home", tmp_path / "other"
+        home.mkdir()
+        other.mkdir()
+        monkeypatch.chdir(home)  # the engine's own folder
+        return home, other
+
+    @staticmethod
+    async def pool(client, **params):
+        body = (await client.get("/agents", params=params)).json()
+        return {agent["name"]: agent for agent in body["agents"]}
+
+    async def test_koordinator_in_one_folder_is_free_in_another(self, client, folders, monkeypatch):
+        home, other = folders
+        row = live("k1", "koordinator", "working", project=str(home))
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([row]))
+
+        in_home = await self.pool(client, workspace=str(home))
+        in_other = await self.pool(client, workspace=str(other))
+
+        assert in_home["koordinator"]["active"] and in_home["koordinator"]["agent_id"] == "k1"
+        assert not in_home["koordinator"]["available"]
+        assert in_other["koordinator"]["available"] and not in_other["koordinator"]["active"]
+        assert in_other["koordinator"]["agent_id"] == "" and in_other["koordinator"]["project"] == ""
+
+    async def test_a_gem_in_one_folder_is_free_in_another(self, client, folders, monkeypatch):
+        home, other = folders
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("g1", "lapis", project=str(home))]))
+
+        in_home = await self.pool(client, workspace=str(home))
+        in_other = await self.pool(client, workspace=str(other))
+
+        assert in_home["lapis"]["active"] and in_home["ruby"]["available"]
+        assert in_other["lapis"]["available"] and in_other["lapis"]["state"] == "available"
+
+    async def test_no_workspace_is_the_engines_folder(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [live("g1", "lapis", project=str(home)), live("k2", "koordinator", project=str(other))]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        bare = await self.pool(client)
+
+        assert bare["lapis"]["active"] and bare["koordinator"]["available"]
+
+    async def test_the_computer_view_shows_an_agent_in_any_folder(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [live("g1", "lapis", "working", project=str(other)), live("g2", "ruby", project=str(home))]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        everywhere = await self.pool(client, scope="computer")
+
+        assert everywhere["lapis"]["active"] and everywhere["lapis"]["state"] == "working"
+        assert everywhere["lapis"]["project"] == str(other)
+        assert everywhere["ruby"]["project"] == str(home)
+
+    async def test_this_folders_agent_wins_the_computer_view(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [live("g1", "lapis", project=str(other)), live("g2", "lapis", project=str(home))]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        assert (await self.pool(client, scope="computer"))["lapis"]["agent_id"] == "g2"
+        assert (await self.pool(client, scope="computer", workspace=str(other)))["lapis"]["agent_id"] == "g1"
+
+    async def test_the_computer_view_lists_every_process_of_a_name(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [
+            live("k2", "koordinator", "working", "slow job", project=str(other)),
+            {**live("k1", "koordinator", project=str(home)), "solo": True},
+        ]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        body = (await client.get("/agents", params={"scope": "computer"})).json()
+
+        # `agents` keeps one koordinator (this folder's); `live` has both, each its own.
+        assert [a["agent_id"] for a in body["agents"] if a["name"] == "koordinator"] == ["k1"]
+        assert body["live"] == [
+            {
+                "name": "koordinator",
+                "agent_id": "k1",
+                "state": "idle",
+                "current_task": "",
+                "solo": True,
+                "project": str(home),
+            },
+            {
+                "name": "koordinator",
+                "agent_id": "k2",
+                "state": "working",
+                "current_task": "slow job",
+                "solo": False,
+                "project": str(other),
+            },
+        ]
+
+    async def test_the_folder_view_lists_only_that_folders_processes(self, client, folders, monkeypatch):
+        home, other = folders
+        rows = [live("k1", "koordinator", project=str(home)), live("k2", "koordinator", project=str(other))]
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
+
+        body = (await client.get("/agents", params={"workspace": str(other)})).json()
+
+        assert [row["agent_id"] for row in body["live"]] == ["k2"]
+
+    async def test_last_ran_is_the_asked_folders(self, client, folders, monkeypatch, tmp_path):
+        home, other = folders
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge())
+        stream = tmp_path / "vaults" / "lapis" / "stream.jsonl"
+        stream.parent.mkdir(parents=True)
+        stream.write_text('{"type": "session_start"}\n')
+        monkeypatch.setattr(
+            agents_routes, "_hub_dir", lambda folder: tmp_path if folder == str(other) else tmp_path / "none"
+        )
+
+        assert (await self.pool(client, workspace=str(other)))["lapis"]["last_ran"] == stream.stat().st_mtime
+        assert (await self.pool(client, workspace=str(home)))["lapis"]["last_ran"] is None
+
+    async def test_a_folder_inside_a_repo_shares_the_repos_hub(self, client, folders, monkeypatch, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "pkg").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("g1", "lapis", project=str(repo))]))
+
+        inside = await self.pool(client, workspace=str(repo / "pkg"))
+
+        assert inside["lapis"]["active"] and inside["lapis"]["agent_id"] == "g1"
+
+    async def test_a_global_hub_is_one_hub_for_every_folder(self, client, folders, monkeypatch):
+        home, other = folders
+        monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("g1", "lapis", project=str(home))]))
+
+        in_other = await self.pool(client, workspace=str(other))
+
+        assert in_other["lapis"]["active"] and in_other["lapis"]["agent_id"] == "g1"
+
+
+@pytest.mark.asyncio
+class TestAgentBundles:
+    """GET /agents/bundles lists the folder's own .kollab/agents, the folder POST /sessions resolves in."""
+
+    @pytest.fixture
+    def folders(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no global tier: only bundled + local
+        mine = tmp_path / "mine"
+        agent = mine / ".kollab" / "agents" / "localonly"
+        agent.mkdir(parents=True)
+        (agent / "system_prompt.md").write_text("The project's own agent.")
+        other = tmp_path / "other"
+        other.mkdir()
+        return mine, other
+
+    async def names(self, client, **params):
+        body = (await client.get("/agents/bundles", params=params)).json()
+        return {bundle["name"] for bundle in body["bundles"]}
+
+    async def test_a_folders_own_agent_is_listed_only_when_that_folder_is_chosen(self, client, folders):
+        mine, other = folders
+
+        assert "localonly" in await self.names(client, workspace=str(mine))
+        assert "localonly" not in await self.names(client, workspace=str(other))
+        assert "coder" in await self.names(client, workspace=str(other))  # the bundled tier is everywhere
+
+    async def test_no_workspace_is_the_engines_folder(self, client, folders, monkeypatch):
+        mine, other = folders
+
+        monkeypatch.chdir(mine)
+        assert "localonly" in await self.names(client)
+        monkeypatch.chdir(other)
+        assert "localonly" not in await self.names(client)
 
 
 class TestSnapshotDiff:

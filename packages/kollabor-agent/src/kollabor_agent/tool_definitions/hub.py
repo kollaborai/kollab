@@ -295,7 +295,7 @@ hub_spawn = ToolDefinition(
         "use hub_spawn to create NEW agents",
         "use hub_msg to assign work to EXISTING agents already on the hub",
         "if identity is already online, returns 'already online' with instructions to use hub_msg",
-        "spawning by agent_type picks the next available gem from pool.json",
+        "spawning by agent_type picks the next free persona of the folder's roster running that bundle",
     ],
 )
 

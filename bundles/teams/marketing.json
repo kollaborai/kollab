@@ -1,0 +1,14 @@
+{
+  "name": "marketing",
+  "description": "A small marketing crew: a campaign lead, a strategist, a copywriter, an analyst, an editor and a social lead.",
+  "roster": "marketing-crew",
+  "lead": "omar",
+  "members": [
+    {"persona": "omar", "reports_to": null},
+    {"persona": "maya", "reports_to": "omar"},
+    {"persona": "theo", "reports_to": "omar"},
+    {"persona": "priya", "reports_to": "omar"},
+    {"persona": "jonas", "reports_to": "theo", "prompt": "Review Theo's drafts before they reach Omar."},
+    {"persona": "luz", "reports_to": "omar"}
+  ]
+}

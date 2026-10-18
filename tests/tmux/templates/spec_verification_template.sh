@@ -8,10 +8,19 @@
 #    tests/tmux/verify_[spec-name].sh
 # chmod +x tests/tmux/verify_[spec-name].sh
 #
-# IMPORTANT: Uses dynamic socket/session names for parallel-safe testing
+# IMPORTANT: Uses dynamic socket/session names for parallel-safe testing, and a
+# throwaway HOME with its own project root (lib/isolated_home.sh): the app never
+# touches the developer's real ~/.kollab, live hub or running agents. Start kollab
+# only through $ISOLATED_ENV, never a bare `python main.py`.
 # ============================================================================
 
 set -e
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+# shellcheck source=../lib/isolated_home.sh
+source "$REPO_ROOT/tests/tmux/lib/isolated_home.sh"
+isolated_home_setup
 
 # ============================================================================
 # CONFIGURATION - Customize these for your spec
@@ -47,6 +56,7 @@ cleanup() {
     echo ""
     echo "Cleaning up tmux session..."
     tmux -L "$SOCKET_NAME" kill-server 2>/dev/null || true
+    isolated_home_cleanup
 }
 trap cleanup EXIT
 
@@ -87,7 +97,7 @@ capture() {
 # START APPLICATION
 # ============================================================================
 echo "Starting application..."
-tmux -L "$SOCKET_NAME" new-session -d -s "$SESSION_NAME" -x 120 -y 35 "python main.py"
+tmux -L "$SOCKET_NAME" new-session -d -s "$SESSION_NAME" -x 120 -y 35 "$ISOLATED_ENV $ISOLATED_PYTHON main.py"
 sleep 3
 
 # Verify app started

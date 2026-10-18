@@ -31,6 +31,7 @@ tests/tmux/
 ├── run_all_tests.sh        # Run entire test suite
 ├── lib/
 │   ├── test_runner.sh      # JSON-driven test executor
+│   ├── isolated_home.sh    # Sourced by smoke scripts that start kollab without the runner
 │   └── test_helpers.sh     # Bash helper library for custom scripts
 ├── runtime_docker_ui_smoke.sh # Docker runtime UI smoke driver
 ├── specs/
@@ -105,6 +106,66 @@ Tests are defined in JSON files with a simple schema:
 | `term_height` | 35 | Terminal height in rows |
 | `key_delay` | 0.3 | Delay after sending keys (seconds) |
 | `menu_delay` | 0.5 | Delay for menu animations (seconds) |
+| `real_home` | `false` | Run against the real `HOME` (prints a warning); see HOME Isolation |
+| `first_run` | `false` | Leave the throwaway `HOME` unseeded, so the first-run wizard shows |
+
+### HOME Isolation
+
+A spec never runs against the developer's real `~/.kollab`: a plain
+`python main.py` would attach to a live daemon, join the live hub, wake running
+agents (paid model calls) and write conversation logs and vault entries there.
+
+- The app command and every `shell` step run with `HOME` set to a fresh
+  throwaway directory, seeded as a configured machine (`application.setup_completed`
+  and the connect-guide marker). The runner prints it as `home:`.
+- The hub's unix sockets live in `/tmp/kollabor-hub/<project hash>/`, outside
+  `HOME`, so a spec without its own `HOME` also gets `KOLLAB_PROJECT_ROOT`
+  inside the throwaway `HOME` (its agents no longer share a socket directory
+  with the agents of this checkout).
+- A spec that sets `HOME` inside its own command (the usual throwaway-`HOME`
+  idiom) keeps it, and keeps its own project folders.
+- When the spec ends the runner runs `--hub stop all`, then stops every
+  process whose environment carries that `HOME` (daemons outlive the tmux pane),
+  removes leftover socket files and the project's empty socket directory, and
+  deletes the directory.
+  `KOLLAB_TMUX_KEEP=1` keeps the tmux session and the `HOME`.
+- `KOLLAB_WEBUI_HOSTS` (the developer's VPN address) is dropped from the app
+  command and every `shell` step, so a web UI a spec starts listens on
+  `127.0.0.1` only.
+- Opt-outs, both in `config`: `"real_home": true` for a spec that truly needs the
+  developer's providers or data (loud warning, avoid it), `"first_run": true` to
+  test the first-run wizard on an unseeded `HOME`.
+
+`specs/runner_home_isolation.json` checks all of this.
+
+A script that starts kollab without the runner (`phase_4_5_smoke.sh`,
+`phase_4_5_context_smoke.sh`, `fresh_daemon_doctor_smoke.sh`) sources
+`lib/isolated_home.sh` for the same rules: `isolated_home_setup` makes the
+seeded throwaway `HOME` and project root, `$ISOLATED_ENV` prefixes the app
+command, `isolated_run` runs any other command that reads kollab state, and the
+cleanup stops every process carrying that `HOME`. A new script that starts
+kollab uses it too, never a bare `python main.py`.
+
+### Free Ports and Own Processes
+
+The developer's live app holds the default ports (engine 7433, web UI 8080), and
+its processes look like the ones a spec starts. A spec never uses a fixed port
+and never finds processes by a pattern over the whole machine
+(`pkill -f`, `pgrep -f`).
+
+- `{{port}}` in any string of a spec (the command, a `shell` step, a pattern)
+  becomes one free TCP port, the same number everywhere in the run;
+  `{{port:name}}` is another port per name. The runner prints them as `ports:`.
+  They come from the OS's ephemeral range, never the defaults. The text
+  `{{port` cannot appear in a spec for any other purpose.
+- `signal` (`match`, `signal`, default `TERM`) signals the processes of this run
+  whose command line matches the regex; it fails when none does.
+- `assert_no_process` (`match`, `timeout`, `description`) waits until no process
+  of this run matches, the check for "nothing is left running after Ctrl+C".
+- "This run" means a process whose environment carries the run's throwaway
+  `HOME`, the same test the runner uses to stop what a spec leaves behind.
+
+`specs/runner_step_helpers.json` checks all of this.
 
 ### Available Actions
 
@@ -112,13 +173,15 @@ Tests are defined in JSON files with a simple schema:
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
-| `start_app` | `command` (optional) | Start the application. Uses `config.command` or defaults to `python main.py` |
+| `start_app` | `command` (optional), `sleep` (optional) | Start the application. Uses `config.command` or defaults to `python main.py`. A second `start_app` types its command into the same pane once the first app has exited (restart tests) |
+| `signal` | `match`, `signal` (default `TERM`) | Signal this run's processes whose command line matches the regex |
+| `assert_no_process` | `match`, `timeout` (default 5), `description` | Assert no process of this run matches the regex, polling until the timeout |
 
 #### Input Actions
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
-| `send_keys` | `keys` | Send raw keys to tmux (bulk - triggers paste detection) |
+| `send_keys` | `keys` | Send raw keys to tmux (bulk - triggers paste detection). A named key (`Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Up`/`Down`/`Left`/`Right`, `F1`-`F12`, `C-x`) is sent as that key, anything else as literal text |
 | `type` | `text`, `delay` (optional, default 0.05) | Type char-by-char (no paste detection) |
 | `slash_command` | `command`, `subcommand` (optional) | Execute a slash command with filtering |
 | `control` | `key` | Send Ctrl+key (e.g., `"key": "c"` for Ctrl+C) |

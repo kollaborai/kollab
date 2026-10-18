@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional
 
 from kollabor_agent.runtime import AgentRuntime
 
-from .models import DESIGNATION_POOL, WorkSlot
+from .models import WorkSlot
 from .presence import _atomic_write, get_hub_dir
+from .rosters import roster_names
 
 logger = logging.getLogger(__name__)
 
@@ -146,11 +147,16 @@ class CoordinatorElection:
 
 
 class IdentityAssigner:
-    """Assigns unique identities to agents from the pool."""
+    """Assigns unique identities to agents from a roster.
 
-    def __init__(self, pool: Optional[List[str]] = None):
+    With no ``pool`` the names come from the roster of ``folder`` (default: the
+    current directory), read on each ``assign``.
+    """
+
+    def __init__(self, pool: Optional[List[str]] = None, folder: Optional[str] = None):
         self._hub_dir = get_hub_dir()
-        self._pool = pool if pool is not None else DESIGNATION_POOL
+        self._pool = pool
+        self._folder = folder
 
     def assign(self, taken: List[str], preferred: str = "") -> str:
         """Assign an identity from the pool.
@@ -165,13 +171,14 @@ class IdentityAssigner:
         if preferred and preferred not in taken:
             return preferred
 
-        for name in self._pool:
+        pool = self._pool if self._pool is not None else roster_names(self._folder)
+        for name in pool:
             if name not in taken:
                 return name
 
         # Pool exhausted - use numbered names across the full pool
         for i in range(2, 100):
-            for name in self._pool:
+            for name in pool:
                 candidate = f"{name}-{i}"
                 if candidate not in taken:
                     return candidate

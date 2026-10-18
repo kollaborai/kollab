@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 import re
-import sys
 from typing import Callable, List, Optional
 
 from .methodologies import Methodology, select_methodologies
@@ -256,37 +255,10 @@ class ThoughtOrchestrator:
         return "\n".join(parts)
 
     def _find_kollab_command(self) -> List[str]:
-        """Find the command to launch kollabor."""
-        from kollabor.binary import own_launcher
+        """The command that starts this same kollab (see ``kollabor.binary.kollab_argv``)."""
+        from kollabor.binary import kollab_argv
 
-        # The binary or Kollab.app this runs from, never another kollab on PATH.
-        launcher = own_launcher()
-        if launcher is not None:
-            return [str(launcher)]
-
-        project_root = self._find_project_root()
-        if project_root:
-            main_py = project_root / "main.py"
-            if main_py.exists():
-                return [sys.executable, str(main_py)]
-
-        import shutil
-
-        kollab_path = shutil.which("kollab")
-        if kollab_path:
-            return [kollab_path]
-
-        return [sys.executable, "-m", "kollabor"]
-
-    def _find_project_root(self):
-        """Find the kollabor project root directory."""
-        from pathlib import Path
-
-        current = Path(__file__).resolve()
-        for parent in current.parents:
-            if (parent / "main.py").exists() and (parent / "kollabor").is_dir():
-                return parent
-        return None
+        return kollab_argv()
 
     async def _cleanup_children(self):
         """Kill any remaining child processes."""

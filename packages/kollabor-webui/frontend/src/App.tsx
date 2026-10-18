@@ -5,7 +5,9 @@ import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { useThreadActivity } from "@/components/gems/activity";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { AgentLibrary } from "@/components/agents/AgentLibrary";
+import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
 import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
@@ -13,6 +15,7 @@ import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
+import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import type {
   PanelIntent,
@@ -36,6 +39,7 @@ import {
   type AgentNetwork,
   type OfflineAgent,
   type AgentPoolEntry,
+  type LiveAgent,
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
@@ -49,8 +53,11 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
+import { useHiddenAgents } from "@/hooks/use-hidden-agents";
+import { chatToRestore } from "@/restore-chat";
+import { useRosters } from "@/hooks/use-rosters";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -110,6 +117,7 @@ function RuntimeShell({
   session,
   profiles,
   agents,
+  liveAgents,
   remoteAgents,
   onSessionUpdated,
   onOpenSettings,
@@ -124,6 +132,8 @@ function RuntimeShell({
   session: Session;
   profiles: Profile[];
   agents: AgentPoolEntry[];
+  /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
+  liveAgents: LiveAgent[];
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -150,12 +160,16 @@ function RuntimeShell({
     () =>
       session.device
         ? targetsOn(session.device, remoteAgents, session.network, session.workspace ?? undefined)
-        : { agents, remote: remoteAgents },
-    [session.device, agents, remoteAgents, session.network, session.workspace],
+        : { agents: poolSeenBy(agents, liveAgents, session), remote: remoteAgents },
+    // The chat's own fields, not `session`: its object is new on every poll.
+    [session.device, agents, liveAgents, remoteAgents, session.network, session.workspace, session.identity, session.instance],
   );
   const profile = profiles.find((item) => item.name === session.profile);
   const model = session.model || profile?.model;
-  const sessionLabel = sessionHeading(session);
+  const sessionLabel = sessionHeading(
+    session,
+    targets.agents.find((agent) => agent.name === session.identity)?.display_name,
+  );
   // A typed /restart (/new, /clear) empties the daemon's conversation; once that
   // run ends, reset the thread the way the toolbar's Clear does. Only a run
   // seen in this mount counts, so the reloaded thread cannot loop.
@@ -253,6 +267,7 @@ function RuntimeShell({
           api={api}
           session={session}
           profiles={profiles}
+          pool={targets.agents}
           usage={usageLabel}
           status={transportError || status}
           statusError={Boolean(transportError)}
@@ -304,17 +319,25 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
+  const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
+  // What New Session can start in the chosen folder: every folder has its own hub, so a
+  // gem running elsewhere is free here. `agents` stays the whole computer's live state.
+  const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
   const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [offline, setOffline] = useState<OfflineAgent[]>([]);
+  const hiddenAgents = useHiddenAgents(api);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
+  const workspacePathRef = useRef(workspacePath);
+  workspacePathRef.current = workspacePath;
   const [studioOpen, setStudioOpen] = useState(false);
   // Null: the whole Gem Studio; a gem: that session's Properties.
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
@@ -325,17 +348,23 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const intentNonceRef = useRef(0);
-  // The agent a new session runs, shown in New Session. Until the user picks
-  // one it is the gem's pool bundle: the hub moves an unpinned gem onto it
+  // The Type a new session runs, shown in New Session. Until the user picks
+  // one it is the agent's own bundle: the hub moves an unpinned gem onto it
   // (plugins/hub/plugin.py, "Reconcile agent bundle to hub role"), so showing
   // "default" there was false.
   const [pickedBundle, setPickedBundle] = useState<string | null>(null);
-  const gemBundle = agents.find((agent) => agent.name === selectedIdentity)?.agent_type;
+  // Everyone the chosen folder can start: its own list, then the other rosters' personas.
+  const { library } = useRosters(api, workspacePath.trim());
+  const launchChoices = useMemo(() => buildLaunchChoices(launchPool, library), [launchPool, library]);
+  const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
+  const gemBundle = pickedAgent?.bundle;
+  // A Type picked in one folder may not exist in the next (a project-local agent).
+  const offered = (name?: string | null): name is string =>
+    Boolean(name) && (name === "default" || bundles.some((bundle) => bundle.name === name));
   const selectedBundle =
-    pickedBundle ??
-    (gemBundle && bundles.some((bundle) => bundle.name === gemBundle) ? gemBundle : "default");
+    (offered(pickedBundle) ? pickedBundle : null) ?? (offered(gemBundle) ? gemBundle : "default");
   // What New Session will use, for the empty state's greeting.
-  const nextGem = agents.find((agent) => agent.name === selectedIdentity);
+  const nextGem = pickedAgent;
   const selectedModelLabel =
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
     selectedProfile ||
@@ -361,11 +390,16 @@ export default function App() {
     [activeId, sessions],
   );
   const operationRef = useRef(0);
+  // True once a chat is open or being opened, by the person or by the restore on load: the
+  // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
+  const openedRef = useRef(false);
   const recoveryRef = useRef<{
     sessionId: string;
     controller: AbortController;
   } | null>(null);
   const refreshSignalRef = useRef(0);
+  // Sessions whose thread was built from the engine's disk seed (stale).
+  const staleHistoryRef = useRef(new Set<string>());
 
   const abortRecovery = useCallback(() => {
     recoveryRef.current?.controller.abort();
@@ -383,12 +417,15 @@ export default function App() {
 
   useEffect(() => abortRecovery, [abortRecovery]);
 
+  const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const loadSessions = useCallback(async () => {
+    const hiddenStamp = stampHidden();
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
     setNetwork(result.network ?? { device: "", remote: [] });
     setOffline(result.offline ?? []);
+    syncHidden(hiddenStamp, result.hidden);
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -396,25 +433,66 @@ export default function App() {
       .then((p) => setProfiles(p.profiles || []))
       .catch(() => {});
     return next;
+  }, [stampHidden, syncHidden]);
+
+  const applyLaunchPool = useCallback((next: AgentPoolEntry[]) => {
+    setLaunchPool((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
   }, []);
+
+  // An agent taken in the folder cannot be the one New Session starts, so the pick
+  // falls to the first free one (the next free agent in that folder).
+  useEffect(() => {
+    setSelectedIdentity((current) => keepPick(current, launchChoices));
+  }, [launchChoices]);
 
   const refreshAgentPool = useCallback(async () => {
     try {
-      const result = await api.listAgentPool(true);
+      const [result, launch] = await Promise.all([
+        api.listAgentPool(true),
+        api.listLaunchPool(workspacePathRef.current.trim()),
+      ]);
       const next = result.agents || [];
       setAgents(next);
-      setSelectedIdentity((current) =>
-        next.some((agent) => agent.name === current && agent.available)
-          ? current
-          : next.find((agent) => agent.available)?.name || "",
-      );
+      setLiveAgents(result.live || []);
+      applyLaunchPool(launch.agents || []);
       return next;
     } catch {
       setAgents([]);
-      setSelectedIdentity("");
+      setLiveAgents([]);
+      setLaunchPool([]);
       return [];
     }
-  }, []);
+  }, [applyLaunchPool]);
+
+  // Another folder lists other free agents: ask again when the pick changes.
+  useEffect(() => {
+    let stale = false;
+    api
+      .listLaunchPool(workspacePath.trim())
+      .then((result) => {
+        if (!stale) applyLaunchPool(result.agents || []);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath, applyLaunchPool]);
+
+  // A folder's own .kollab/agents add Types the others lack: ask again when the pick changes.
+  useEffect(() => {
+    let stale = false;
+    api
+      .listAgentBundles(workspacePath.trim())
+      .then((result) => {
+        if (!stale) setBundles(result.bundles || []);
+      })
+      .catch(() => {
+        if (!stale) setBundles([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath]);
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
@@ -426,6 +504,10 @@ export default function App() {
         api.getHistory(sessionId),
         api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);
+      // The daemon's answer comes as history_updated, which can fire before
+      // the stream below is open; see followEvents.
+      if (history.stale) staleHistoryRef.current.add(sessionId);
+      else staleHistoryRef.current.delete(sessionId);
       return buildInitialState(
         sessionId,
         nextSessions,
@@ -442,11 +524,17 @@ export default function App() {
     const retryTimerRef = { current: null as number | null };
     const refreshActiveState = async (sessionId: string) => {
       try {
+        // A thread built from the engine's disk seed is no prefix of the
+        // daemon's history, so the daemon's answer replaces it whole.
+        const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
         const nextState = await loadState(sessionId, nextSessions);
         if (controller.signal.aborted || activeId !== sessionId) return;
+        // Still the seed: the daemon's answer comes as history_updated.
+        if (seeded && staleHistoryRef.current.has(sessionId)) return;
         setInitialState(nextState);
+        if (seeded) setRuntimeEpoch((epoch) => epoch + 1);
         refreshSignalRef.current += 1;
         setRefreshSignal(refreshSignalRef.current);
       } catch {
@@ -474,6 +562,11 @@ export default function App() {
               void refreshActiveState(activeId);
             }
             if (type === "turn_complete") midTurn = false;
+          }, () => {
+            // Open, so nothing slips past from here. The history_updated that
+            // replaces a seed can have fired before this stream existed: ask
+            // again now.
+            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -513,10 +606,13 @@ export default function App() {
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
-          const pool = (await api.listAgentPool(true)).agents || [];
+          const { agents: pool = [], live: running = [] } = await api.listAgentPool(true);
           if (!controller.signal.aborted) {
             setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
+            setLiveAgents((current) => (JSON.stringify(current) === JSON.stringify(running) ? current : running));
           }
+          const launch = (await api.listLaunchPool(workspacePathRef.current.trim())).agents || [];
+          if (!controller.signal.aborted) applyLaunchPool(launch);
         } catch {
           // Keep the last known sidebar while the daemon is unavailable.
         }
@@ -528,7 +624,7 @@ export default function App() {
       controller.abort();
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
     };
-  }, [abortRecovery, loadSessions]);
+  }, [abortRecovery, applyLaunchPool, loadSessions]);
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
@@ -573,34 +669,34 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Startup runs once: a run that finds a chat open or being opened leaves it alone.
+    if (openedRef.current) return;
     let mounted = true;
     const operation = ++operationRef.current;
     (async () => {
       setBusy(true);
       setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
-      const [result, profileResult, agentResult, bundleResult] = await Promise.all([
+      const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
         api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
         refreshAgentPool(),
-        api.listAgentBundles().catch(() => ({ bundles: [] })),
       ]);
       if (!mounted || operation !== operationRef.current) return;
       const nextProfiles = profileResult.profiles || [];
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
-      setBundles(bundleResult.bundles || []);
       setSelectedProfile(
         profileResult.active || nextProfiles[0]?.name || "default",
       );
-      setSelectedIdentity(nextAgents.find((agent) => agent.available)?.name || "");
-      // Restore this engine's newest chat; an agent started elsewhere opens on a click.
-      const first = [...result].reverse().find((session) => !session.external);
+      // Restore this engine's newest chat unless the person has opened one.
+      const first = chatToRestore(result, openedRef.current);
       if (first) {
         setBusyMessage("Restoring session…");
         const firstState = await loadState(first.session_id, result);
-        if (!mounted || operation !== operationRef.current) return;
+        if (!mounted || operation !== operationRef.current || openedRef.current) return;
+        openedRef.current = true;
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
@@ -625,6 +721,7 @@ export default function App() {
 
   /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
   const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -684,6 +781,7 @@ export default function App() {
   /** Open an agent on another computer. With no agent here on its network, start the
    * koordinator of that network's folder to carry it first (GET /sessions `network`). */
   const selectRemote = async (handle: string): Promise<boolean> => {
+    openedRef.current = true;
     const on = networkOf(network, handle);
     if (on.live) return selectSession(handle);
     setOpening({ id: handle });
@@ -723,6 +821,7 @@ export default function App() {
   };
 
   const deleteSession = async (sessionId: string) => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -770,6 +869,7 @@ export default function App() {
 
   /** Resolves true once the chat is open (false if it failed or a newer click took over). */
   const selectSession = async (sessionId: string): Promise<boolean> => {
+    openedRef.current = true;
     abortRecovery();
     const operation = ++operationRef.current;
     setBusy(true);
@@ -831,14 +931,14 @@ export default function App() {
     if (!session || !gem) return;
     // Presence is the truth for the switch: whether the agent is live, and
     // whether it is on the mesh.
-    const pool = agents.find((agent) => agent.name === gem);
+    const agent = liveAgentOf(session, liveAgents);
     setStudioFocus({
       gem,
       where: session.device || session.workspace,
       tab,
       chat: {
         session,
-        hub: pool?.active ? !pool.solo : null,
+        hub: agent ? !agent.solo : null,
         setHub: async (enabled) => {
           const result = await api.setSessionHub(sessionId, enabled);
           // An engine that predates the switch answers ok and ignores it.
@@ -862,14 +962,18 @@ export default function App() {
 
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
+      <AvatarImageProvider api={api}>
       <SidebarProvider>
         <AppSidebar
           sessions={sessions}
           profiles={profiles}
           api={api}
           agents={agents}
+          liveAgents={liveAgents}
+          launchChoices={launchChoices}
           network={network}
           offline={offline}
+          hiddenAgents={hiddenAgents}
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}
@@ -882,9 +986,14 @@ export default function App() {
           busy={busy}
           creationError={creationError}
           onProfileChange={setSelectedProfile}
-          onIdentityChange={setSelectedIdentity}
+          onIdentityChange={(ref) => {
+            // A new pick brings its own Type along.
+            setSelectedIdentity(ref);
+            setPickedBundle(null);
+          }}
           onBundleChange={setPickedBundle}
           onApps={() => setAppsOpen(true)}
+          onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
           onStudio={() => {
             setStudioFocus(null);
@@ -899,6 +1008,17 @@ export default function App() {
           onProperties={openProperties}
         />
         <GemStudio open={studioOpen} onOpenChange={setStudioOpen} agents={agents} focus={studioFocus} />
+        <AgentLibrary
+          api={api}
+          open={agentsOpen}
+          onOpenChange={setAgentsOpen}
+          workspace={workspacePath.trim()}
+          profile={selectedProfile}
+          onLaunched={() => {
+            void loadSessions();
+            void refreshAgentPool();
+          }}
+        />
         <SetupGuide
           api={api}
           open={setupGuideOpen}
@@ -929,6 +1049,7 @@ export default function App() {
             key={activeSession.session_id}
             api={api}
             session={activeSession}
+            displayName={agents.find((agent) => agent.name === activeSession.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
             onOpenChange={setSettingsOpen}
@@ -967,6 +1088,7 @@ export default function App() {
                 session={activeSession}
                 profiles={profiles}
                 agents={agents}
+                liveAgents={liveAgents}
                 remoteAgents={network.remote}
                 refreshSignal={refreshSignal}
                 onSessionUpdated={handleSessionUpdated}
@@ -988,8 +1110,11 @@ export default function App() {
               {/* The next free gem greets here, as it will once its session starts. */}
               <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
                 {nextGem ? (
-                  <GemAvatar
+                  <Avatar
                     gem={nextGem.name}
+                    avatar={nextGem.avatar}
+                    displayName={nextGem.display_name}
+                    folder={workspacePath.trim()}
                     caste={nextGem.caste}
                     color={nextGem.color}
                     state={busy ? "working" : "idle"}
@@ -997,13 +1122,13 @@ export default function App() {
                     season="auto"
                     follow
                     size={112}
-                    label={titleCase(nextGem.name)}
+                    label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
                   <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
-                  {nextGem ? titleCase(nextGem.name) : "Start a Session"}
+                  {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}
                 </h1>
                 <p
                   className={
@@ -1042,6 +1167,7 @@ export default function App() {
           )}
         </SidebarInset>
       </SidebarProvider>
+      </AvatarImageProvider>
     </GemAppearanceProvider>
   );
 }

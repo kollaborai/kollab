@@ -151,15 +151,20 @@ class PromptSectionWalker:
         self.store = store or PromptOverrideStore()
         self.agent_manager = agent_manager
 
-    def _base_prompt_info(self, bundle: str) -> tuple[str, Path]:
+    def base_prompt_info(self, bundle: str) -> tuple[str, Path]:
         """The bundle's raw system_prompt.md and its directory."""
+        base_dir = None
         if bundle != DEFAULT_BUNDLE and self.agent_manager is not None:
             agent = self.agent_manager.get_agent(bundle)
-            if agent is not None and agent.system_prompt:
-                return agent.system_prompt, Path(agent.directory)
+            if agent is not None:
+                if agent.system_prompt:
+                    return agent.system_prompt, Path(agent.directory)
+                # the manager's disk cache hands agents out without their prompt text
+                base_dir = Path(agent.directory)
         # Bundled/local/global default prompt via AgentManager discovery,
         # falling back to the bundled default bundle directory.
-        base_dir = self._default_prompt_dir(bundle)
+        if base_dir is None:
+            base_dir = self._default_prompt_dir(bundle)
         prompt_path = base_dir / "system_prompt.md"
         try:
             return prompt_path.read_text(encoding="utf-8"), base_dir
@@ -183,9 +188,9 @@ class PromptSectionWalker:
             except Exception:
                 pass
             try:
-                from kollabor_config.config_utils import _get_bundled_dir
+                from kollabor_config.config_utils import get_bundled_agents_dir
 
-                bundled = _get_bundled_dir("agents")
+                bundled = get_bundled_agents_dir()
                 if bundled:
                     candidates.append(bundled / DEFAULT_BUNDLE)
             except Exception:
@@ -195,9 +200,9 @@ class PromptSectionWalker:
                     return candidate
         elif self.agent_manager is None:
             try:
-                from kollabor_config.config_utils import _get_bundled_dir
+                from kollabor_config.config_utils import get_bundled_agents_dir
 
-                bundled = _get_bundled_dir("agents")
+                bundled = get_bundled_agents_dir()
                 if bundled and (bundled / bundle / "system_prompt.md").exists():
                     return bundled / bundle
             except Exception:
@@ -216,7 +221,7 @@ class PromptSectionWalker:
         PromptRenderer._include_file), de-duplicates by resolved path, and
         orders by position of the include in the assembled document.
         """
-        base_prompt, base_dir = self._base_prompt_info(bundle)
+        base_prompt, base_dir = self.base_prompt_info(bundle)
         sections: List[SectionInfo] = []
         seen_paths: set = set()
         order = 0

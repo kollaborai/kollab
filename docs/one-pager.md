@@ -122,7 +122,7 @@ register shell commands as hooks without writing python.
 - `<trender>` tags in system prompts render at runtime: project tree, file
   contents, timestamps, hub identity, hub roster, vault contents
 - priority: `KOLLAB_SYSTEM_PROMPT` env → `_FILE` env → local default →
-  global default → built-in fallback
+  global default → bundled default → built-in fallback
 
 ## key stdout rule
 

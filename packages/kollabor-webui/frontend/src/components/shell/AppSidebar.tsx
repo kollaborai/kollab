@@ -1,14 +1,18 @@
-import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal } from "lucide-react";
-import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
-import { GemAvatar } from "@/components/gems/GemAvatar";
+import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
+import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
+import { Avatar } from "@/components/agents/Avatar";
+import type { LaunchChoice } from "@/components/agents/launch-choices";
 import type { Activity } from "@/components/gems/gem-face";
-import { titleCase } from "@/components/panels/panel-model";
+import { agentStatus, bundleName, titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
+import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
-import { HIDDEN_AGENTS_KEY, readHiddenAgents, sidebarAgentKey, type HiddenAgent } from "@/components/shell/hidden-agents";
+import { sidebarAgentKey } from "@/components/shell/hidden-agents";
+import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
@@ -20,8 +24,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
+import { sessionFolder, sessionSubtitle } from "@/utils/session-subtitle";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -108,8 +113,11 @@ export function AppSidebar({
   profiles,
   api,
   agents,
+  liveAgents,
+  launchChoices,
   network,
   offline,
+  hiddenAgents,
   bundles,
   selectedProfile,
   selectedIdentity,
@@ -125,6 +133,7 @@ export function AppSidebar({
   onBundleChange,
   onWorkspaceChange,
   onApps,
+  onAgents,
   onSettings,
   onStudio,
   onManageProfiles,
@@ -144,9 +153,15 @@ export function AppSidebar({
   /** For the workspace picker's folder lists. */
   api: EngineApi;
   agents: AgentPoolEntry[];
+  /** Every running agent, one per process: a row finds its own by its instance, never by name. */
+  liveAgents: LiveAgent[];
+  /** What New Session can start in the chosen folder: its roster, then the other rosters (an agent running in another folder is free here). */
+  launchChoices: LaunchChoice[];
   network: AgentNetwork;
   /** Agents that ran in this folder and are not running; a click starts one. */
   offline: OfflineAgent[];
+  /** The rows hidden for every window of this engine, and how to change that. */
+  hiddenAgents: HiddenAgents;
   bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
@@ -164,6 +179,8 @@ export function AppSidebar({
   onBundleChange: (bundle: string) => void;
   onWorkspaceChange: (path: string) => void;
   onApps: () => void;
+  /** Opens the Agents view: every roster and team this folder can start. */
+  onAgents: () => void;
   onSettings: () => void;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
@@ -180,32 +197,8 @@ export function AppSidebar({
   onProperties: (id: string, tab?: "chat") => void;
 }) {
   const { setOpenMobile } = useSidebar();
-  const [hiddenAgents, setHiddenAgents] = useState<HiddenAgent[]>(() => {
-    try { return readHiddenAgents(localStorage.getItem(HIDDEN_AGENTS_KEY)); }
-    catch { return []; }
-  });
-  useEffect(() => {
-    const sync = (event: StorageEvent) => {
-      if (event.key === HIDDEN_AGENTS_KEY || event.key === null) {
-        setHiddenAgents(readHiddenAgents(event.newValue));
-      }
-    };
-    window.addEventListener("storage", sync);
-    return () => window.removeEventListener("storage", sync);
-  }, []);
-  const changeHidden = (change: (previous: HiddenAgent[]) => HiddenAgent[]) => {
-    setHiddenAgents((previous) => {
-      const next = change(previous);
-      try { localStorage.setItem(HIDDEN_AGENTS_KEY, JSON.stringify(next)); }
-      catch { /* Hiding remains available when browser storage is blocked. */ }
-      return next;
-    });
-  };
-  const hide = (entry: HiddenAgent) => changeHidden((previous) => [
-    ...previous.filter((agent) => agent.key !== entry.key), entry,
-  ]);
-  const show = (key: string) => changeHidden((previous) => previous.filter((agent) => agent.key !== key));
-  const hiddenKeys = useMemo(() => new Set(hiddenAgents.map((agent) => agent.key)), [hiddenAgents]);
+  const { hidden: hiddenList, error: hiddenError, hide, show, showAll } = hiddenAgents;
+  const hiddenKeys = useMemo(() => new Set(hiddenList.map((agent) => agent.key)), [hiddenList]);
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
@@ -224,15 +217,6 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
-  // Free gems first; the ones a live session holds stay listed, disabled.
-  // Live agents outside the pool (pool: false) are shown, never launched as.
-  const gemOptions = useMemo(
-    () =>
-      agents
-        .filter((agent) => agent.pool !== false)
-        .sort((a, b) => Number(Boolean(a.active)) - Number(Boolean(b.active))),
-    [agents],
-  );
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -275,15 +259,18 @@ export function AppSidebar({
     });
   // An agent opened on another computer is a session too; it stays in its computer's group.
   const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
-  const sessionKey = (session: Session) => sidebarAgentKey({
-    name: session.identity || session.agent, workspace: session.workspace || workspacePath,
-    sessionId: session.session_id,
-  });
+  // A running agent is hidden as the process it is, not as its name in a folder.
+  const instanceOf = (session: Session) => session.instance || session.session_id;
+  const sessionKey = (session: Session) => sidebarAgentKey({ instance: instanceOf(session) });
   const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
+  // An offline row wears the persona the engine found for it, else the live pool's entry of that name.
+  const offlineLook = (agent: OfflineAgent) => (agent.avatar ? agent : poolByName.get(agent.identity));
+  const offlineName = (agent: OfflineAgent) => agentName(agent.identity, offlineLook(agent)?.display_name);
+  const remoteName = (name: string) => agentName(name, poolByName.get(name)?.display_name);
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
-  const pickedGem = poolByName.get(selectedIdentity);
-  const identityLabel = selectedIdentity ? titleCase(selectedIdentity) : "Next Free Gem";
+  const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
+  const identityLabel = pickedAgent ? choiceLabel(pickedAgent) : "Next Free Agent";
   const modelLabel =
     profiles.find((profile) => profile.name === selectedProfile)?.model ||
     selectedProfile ||
@@ -346,10 +333,13 @@ export function AppSidebar({
               className="w-80 p-0"
             >
               <div className="bg-foreground/[0.04] flex items-center gap-3 px-4 py-3">
-                <GemAvatar
-                  gem={selectedIdentity}
-                  caste={pickedGem?.caste}
-                  color={pickedGem?.color}
+                <Avatar
+                  gem={pickedAgent?.name ?? ""}
+                  avatar={pickedAgent?.avatar}
+                  displayName={pickedAgent?.display_name}
+                  folder={workspacePath.trim()}
+                  caste={pickedAgent?.caste}
+                  color={pickedAgent?.color}
                   state="idle"
                   live
                   season="auto"
@@ -364,12 +354,22 @@ export function AppSidebar({
                 </div>
               </div>
               <div className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 px-4 py-3">
-                <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
+                <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
                   Agent
+                </Label>
+                <AgentPicker
+                  id="new-session-gem"
+                  choices={launchChoices}
+                  value={selectedIdentity}
+                  onChange={onIdentityChange}
+                  folder={workspacePath.trim()}
+                />
+                <Label htmlFor="new-session-agent" className="text-muted-foreground text-xs font-normal">
+                  Type
                 </Label>
                 <Select value={selectedBundle || "default"} onValueChange={onBundleChange}>
                   <SelectTrigger id="new-session-agent" size="sm" className="w-full">
-                    <SelectValue placeholder="default" />
+                    <SelectValue placeholder={bundleName()} />
                   </SelectTrigger>
                   <SelectContent>
                     {bundleOptions.map((bundle) => (
@@ -377,33 +377,7 @@ export function AppSidebar({
                         {/* No profile suffix: a web session always sends the Model
                             field's profile, so the bundle's preferred one never
                             applies ("coder · default" also read as two agents). */}
-                        {bundle.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Label htmlFor="new-session-gem" className="text-muted-foreground text-xs font-normal">
-                  Gem
-                </Label>
-                <Select
-                  value={selectedIdentity}
-                  onValueChange={onIdentityChange}
-                  disabled={!agents.length}
-                >
-                  <SelectTrigger id="new-session-gem" size="sm" className="w-full">
-                    {/* The name only: the list's "Ran 3d Ago" tag would crowd the field. */}
-                    <SelectValue placeholder="Next Free Gem">
-                      {selectedIdentity ? titleCase(selectedIdentity) : undefined}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {gemOptions.map((agent) => (
-                      <SelectItem key={agent.name} value={agent.name} disabled={agent.active}>
-                        {titleCase(agent.name)}
-                        {agent.active ? " · In Use" : ""}
-                        {!agent.active && agent.last_ran ? (
-                          <span className="text-muted-foreground"> · {lastRanLabel(agent.last_ran)}</span>
-                        ) : null}
+                        {bundleName(bundle.name)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -484,16 +458,17 @@ export function AppSidebar({
             <SidebarMenu>
               {visibleSessions.map((session) => {
                 const gem = session.identity || session.agent || "";
-                // Hub presence when the identity is live; otherwise the engine's
-                // own word on whether a daemon backs the session.
-                const pool = poolByName.get(session.identity || "");
-                // Gem names repeat across folders (a koordinator per project), so
-                // an agent started elsewhere reads only its own presence entry.
-                const ownPool = !session.external || pool?.agent_id === session.session_id;
-                const hubLive = ownPool && Boolean(pool?.active);
+                // Hub presence when this very agent is live; otherwise the engine's
+                // own word on whether a daemon backs the session. Gem names repeat
+                // across folders (a koordinator per project), so presence is read
+                // by the row's instance and the pool only dresses the gem.
+                const agent = liveAgentOf(session, liveAgents);
+                const look = poolByName.get(session.identity || "");
+                const hubLive = Boolean(agent);
                 const live = hubLive || session.active !== false;
-                const task = hubLive && pool?.state === "working" ? pool.current_task?.trim() : "";
-                const folder = session.workspace?.split("/").filter(Boolean).pop();
+                const task = agent?.state === "working" ? agent.current_task.trim() : "";
+                const folder = sessionFolder(session);
+                const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
                 const harness = cliHarness(session);
                 const note = opening?.id === session.session_id ? opening : null;
                 const openProperties = (tab?: "chat") => {
@@ -503,8 +478,8 @@ export function AppSidebar({
                 return (
                 <AgentSidebarRow
                   key={session.session_id}
-                  name={sessionHeading(session)}
-                  onHide={() => hide({ key: sessionKey(session), label: sessionHeading(session), detail: session.workspace || workspacePath })}
+                  name={heading}
+                  onHide={() => hide({ key: sessionKey(session), label: heading, detail: session.workspace || workspacePath, instance: instanceOf(session) })}
                   onProperties={session.identity ? () => openProperties("chat") : undefined}
                   onDelete={session.external ? undefined : () => setPendingDelete(session)}
                   busy={busy}
@@ -516,7 +491,7 @@ export function AppSidebar({
                           // the row's Opening… and any reason it failed stay in view.
                           if (await onSelectSession(session.session_id)) setOpenMobile(false);
                         }}
-                        title={[sessionHeading(session), formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
+                        title={[heading, formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
                         // overflow-visible: the gem canvas overhangs its box for hats and props.
                         className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                       >
@@ -524,12 +499,15 @@ export function AppSidebar({
                           className="contents"
                           onDoubleClick={session.identity ? () => openProperties() : undefined}
                         >
-                          <GemAvatar
+                          <Avatar
                             gem={gem}
+                            avatar={look?.avatar}
+                            displayName={look?.display_name}
+                            folder={session.device ? undefined : session.workspace}
                             where={session.device || session.workspace}
-                            caste={pool?.caste}
-                            color={pool?.color}
-                            state={hubLive ? pool?.state : live ? "idle" : "offline"}
+                            caste={look?.caste}
+                            color={look?.color}
+                            state={agent ? agent.state : live ? "idle" : "offline"}
                             live={live}
                             activity={session.session_id === activeId ? activeActivity : null}
                             season="auto"
@@ -539,7 +517,7 @@ export function AppSidebar({
                         </span>
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span className="truncate text-[0.8125rem] leading-tight font-semibold">
-                            {sessionHeading(session)}
+                            {heading}
                           </span>
                           <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
                             {note && !note.error ? (
@@ -548,13 +526,8 @@ export function AppSidebar({
                               <CliBadge harness={harness} />
                             ) : task ? (
                               task
-                            ) : session.external ? (
-                              folder ? `In ${folder}` : "Running"
                             ) : (
-                              <>
-                                {pool?.active && pool.solo ? "Off Hub · " : ""}
-                                {session.model || session.profile || "default"}
-                              </>
+                              sessionSubtitle(session, Boolean(agent?.solo))
                             )}
                           </span>
                           {task && harness ? (
@@ -563,9 +536,9 @@ export function AppSidebar({
                           {session.acp_waiting && (
                             <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
                           )}
-                          {harness && ((pool?.active && pool.solo) || (session.external && folder)) ? (
+                          {harness && (agent?.solo || folder) ? (
                             <span className="text-muted-foreground truncate text-[0.6875rem]">
-                              {[pool?.active && pool.solo ? "Off Hub" : "", session.external && folder ? `In ${folder}` : ""].filter(Boolean).join(" · ")}
+                              {[agent?.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
                             </span>
                           ) : null}
                           {note?.error ? <OpenError text={note.error} /> : null}
@@ -577,23 +550,26 @@ export function AppSidebar({
               {visibleOffline.map((agent) => (
                 <AgentSidebarRow
                   key={`offline:${agent.workspace}:${agent.identity}`}
-                  name={titleCase(agent.identity)}
-                  onHide={() => hide({ key: offlineKey(agent), label: titleCase(agent.identity), detail: agent.workspace })}
+                  name={offlineName(agent)}
+                  onHide={() => hide({ key: offlineKey(agent), label: offlineName(agent), detail: agent.workspace })}
                 >
                   <SidebarMenuButton
                     disabled={busy}
                     onClick={async () => {
                       if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
                     }}
-                    title={`Start ${titleCase(agent.identity)} in ${agent.workspace}`}
+                    title={`Start ${offlineName(agent)} in ${agent.workspace}`}
                     className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                     data-testid={`offline-${agent.identity}`}
                   >
-                    <GemAvatar
+                    <Avatar
                       gem={agent.identity}
+                      avatar={offlineLook(agent)?.avatar}
+                      displayName={offlineLook(agent)?.display_name}
+                      folder={agent.workspace}
                       where={agent.workspace}
-                      caste={poolByName.get(agent.identity)?.caste}
-                      color={poolByName.get(agent.identity)?.color}
+                      caste={offlineLook(agent)?.caste}
+                      color={offlineLook(agent)?.color}
                       state="offline"
                       live={false}
                       season="auto"
@@ -602,7 +578,7 @@ export function AppSidebar({
                     />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
-                        {titleCase(agent.identity)}
+                        {offlineName(agent)}
                       </span>
                       <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                         Offline · {lastRanLabel(agent.last_ran)}
@@ -660,10 +636,10 @@ export function AppSidebar({
                           return (
                           <AgentSidebarRow
                             key={id || `${agent.name}@${agent.device}`}
-                            name={`${titleCase(agent.name)} on ${agent.device}`}
+                            name={`${remoteName(agent.name)} on ${agent.device}`}
                             onHide={() => hide({
                               key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
-                              label: titleCase(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
+                              label: remoteName(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
                             })}
                           >
                             <SidebarMenuButton
@@ -673,11 +649,13 @@ export function AppSidebar({
                                 // Closes the phone menu only once it opened: a refusal shows here.
                                 if (await onSelectRemote(id)) setOpenMobile(false);
                               }}
-                              title={`Open ${titleCase(agent.name)} on ${agent.device}`}
+                              title={`Open ${remoteName(agent.name)} on ${agent.device}`}
                               className="h-auto gap-3 overflow-visible py-2 pl-2.5"
                             >
-                              <GemAvatar
+                              <Avatar
                                 gem={agent.name}
+                                avatar={poolByName.get(agent.name)?.avatar}
+                                displayName={poolByName.get(agent.name)?.display_name}
                                 where={agent.device}
                                 caste={poolByName.get(agent.name)?.caste}
                                 color={poolByName.get(agent.name)?.color}
@@ -690,7 +668,7 @@ export function AppSidebar({
                               />
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <span className="truncate text-[0.8125rem] leading-tight font-medium">
-                                  {titleCase(agent.name)}
+                                  {remoteName(agent.name)}
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
                                   {note && !note.error
@@ -699,9 +677,7 @@ export function AppSidebar({
                                       ? ["Offline", seen].filter(Boolean).join(" · ")
                                       : net.live === false || network.live === false
                                         ? seen || "Not Connected"
-                                        : agent.state
-                                          ? titleCase(agent.state)
-                                          : "Online"}
+                                        : agentStatus(agent.state)}
                                 </span>
                                 {note?.error ? <OpenError text={note.error} /> : null}
                                 <CliBadge harness={cliHarness({ harness: agent.harness })} className="text-muted-foreground text-[0.6875rem]" />
@@ -737,7 +713,7 @@ export function AppSidebar({
                       className="text-muted-foreground h-auto cursor-default gap-3 py-2 pl-2.5"
                       title={`Accepted contact (${contact.trust || "no trust"}): nothing is permitted until /connect allow`}
                     >
-                      <GemAvatar
+                      <Avatar
                         gem={contact.key}
                         where={contact.device || ""}
                         state="offline"
@@ -766,17 +742,22 @@ export function AppSidebar({
 
       <SidebarFooter className="p-2">
         <SidebarMenu>
-          {hiddenAgents.length ? (
+          {hiddenError ? (
+            <SidebarMenuItem>
+              <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
+            </SidebarMenuItem>
+          ) : null}
+          {hiddenList.length ? (
             <SidebarMenuItem>
               <Popover>
                 <PopoverTrigger asChild>
-                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenAgents.length})</span></SidebarMenuButton>
+                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenList.length})</span></SidebarMenuButton>
                 </PopoverTrigger>
                 <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
                   <p className="text-sm font-semibold">Hidden Agents</p>
-                  <p className="text-muted-foreground mt-1 text-xs">Hidden in this browser.</p>
+                  <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
                   <ul className="my-2 max-h-64 overflow-y-auto">
-                    {hiddenAgents.map((agent) => (
+                    {hiddenList.map((agent) => (
                       <li key={agent.key} className="flex items-center gap-2 py-1.5">
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm">{agent.label}</p>
@@ -786,7 +767,7 @@ export function AppSidebar({
                       </li>
                     ))}
                   </ul>
-                  <Button size="sm" variant="outline" className="w-full" onClick={() => changeHidden(() => [])}>Show All</Button>
+                  <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
                 </PopoverContent>
               </Popover>
             </SidebarMenuItem>
@@ -801,6 +782,17 @@ export function AppSidebar({
             >
               <LayoutGrid className="size-4" />
               <span>Apps</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => {
+                setOpenMobile(false);
+                onAgents();
+              }}
+            >
+              <Users className="size-4" />
+              <span>Agents</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
@@ -839,7 +831,7 @@ export function AppSidebar({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete This Session?</AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingDelete ? sessionHeading(pendingDelete) : "This session"}{" "}
+              {pendingDelete ? sessionHeading(pendingDelete, poolByName.get(pendingDelete.identity || "")?.display_name) : "This session"}{" "}
               will be stopped and its conversation removed. This cannot be
               undone.
             </AlertDialogDescription>

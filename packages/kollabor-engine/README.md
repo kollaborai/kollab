@@ -97,7 +97,7 @@ Session and message endpoints:
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/sessions` | create a session |
+| `POST` | `/sessions` | create a session; `workspace` is the folder its daemon runs in (default the engine's own), and the session it creates reports that folder, never null |
 | `GET` | `/sessions` | list sessions |
 | `GET` | `/sessions/{session_id}` | inspect one session |
 | `DELETE` | `/sessions/{session_id}` | shut down and remove a session |
@@ -131,8 +131,9 @@ Profiles, MCP, and hub routes:
 | `GET` | `/sessions/{session_id}/mcp` | session MCP connection status |
 | `POST` | `/sessions/{session_id}/mcp/{server_name}/connect` | intended session connect endpoint |
 | `POST` | `/sessions/{session_id}/mcp/{server_name}/disconnect` | disconnect session server |
-| `GET` | `/agents` | gem identity pool: name, caste, `color` as `[r, g, b]`, live state and task; a gem listed alive for the first time is born (gets its random look) |
+| `GET` | `/agents` | gem identity pool for one folder (`?workspace=<abs folder>`, default the engine's own): name, caste, `color` as `[r, g, b]`, and `available` / `active` / `state` / `task` / `agent_id` / `project` / `last_ran` for the agents in that folder's hub only, so a gem or koordinator running in another folder is free here (a folder inside a git repo shares the repo's hub). `?scope=computer` is the sidebar's view: an agent running in any folder shows its state, this folder's first. `live` lists every running agent in that scope, one per process (`name`, `agent_id`, `state`, `current_task`, `solo`, `project`), because `agents` holds one entry per name: a row reads its own agent by its `instance` (= `agent_id`), never by name. A gem listed alive for the first time is born (gets its random look). `POST /sessions` with `identity` + `workspace` applies the same rule and answers 409 when that folder already runs the name |
 | `GET`/`PUT` | `/agents/appearance` | gem looks: `season`, `born.<name>` (`face`, `hat`: rolled once, the first time `GET /agents` lists the gem alive; PUT never changes them) and the user's `gems.<name>` (`face`, `hat`, `color`); PUT normalizes (unknown keys dropped, at most 256 gems) and writes `~/.kollab/hub/appearance.json` atomically |
+| `GET` | `/agents/bundles` | agent bundles a session can run (`agent` of `POST /sessions`): bundled, global, and the folder's own `.kollab/agents` (`?workspace=<abs folder>`, default the engine's own), so every listed name launches in that folder |
 | `GET` | `/hub/agents` | list active hub agents |
 | `GET` | `/hub/feed` | snapshot SSE feed |
 | `WS` | `/ws/hub/feed?token=<engine token>` | polling WebSocket feed (closed with 1008 without a valid token): `hub_snapshot` on connect, then `agent_joined`, `agent_left` and `agent_state_changed` (fires on a state or `current_task` change; carries `identity`, `state`, `old_state`, `current_task`) |

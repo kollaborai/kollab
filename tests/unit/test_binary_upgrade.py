@@ -223,11 +223,74 @@ def test_a_relay_unit_runs_the_binary(binary, tmp_path):
     assert exec_line.startswith(f"ExecStart={binary} relay serve ")
 
 
-def test_engine_daemons_run_the_engines_own_binary(binary, monkeypatch):
+def decoy_kollab_first_on_path(tmp_path, monkeypatch):
+    """Another `kollab` (an older install) that PATH finds before anything else."""
+    decoy = tmp_path / "decoy" / "kollab"
+    decoy.parent.mkdir()
+    decoy.write_text("#!/bin/sh\n")
+    decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{decoy.parent}{os.pathsep}{os.environ['PATH']}")
+    return decoy
+
+
+async def engine_daemon_argv(monkeypatch):
+    """The argv a web chat's daemon starts with; nothing really starts."""
+    from unittest.mock import patch
+
     from kollabor_engine import daemon_pool
 
-    monkeypatch.setattr(daemon_pool.shutil, "which", lambda name: "/elsewhere/kollab")
-    assert daemon_pool._kollab_command() == [str(binary)]
+    started = []
+
+    def popen(argv, **kwargs):
+        started.append(argv)
+        return SimpleNamespace(pid=1)
+
+    pool = daemon_pool.DaemonPool()
+    handle = SimpleNamespace(connect=AsyncMock(), identity="web-argv")
+    monkeypatch.setattr(daemon_pool.subprocess, "Popen", popen)
+    with (
+        patch.object(daemon_pool, "DaemonHandle", return_value=handle),
+        patch.object(pool, "_await_socket", AsyncMock(return_value="/tmp/k.sock")),
+    ):
+        await pool.spawn("sess_argv", workspace="/tmp")
+    return next(argv for argv in started if "--detached" in argv)
+
+
+def team_member_argv(monkeypatch):
+    """The argv a launched team member starts with; nothing really starts."""
+    from plugins.hub import org_launcher
+
+    started = []
+    monkeypatch.setattr(
+        org_launcher.subprocess, "Popen", lambda argv, **kwargs: started.append(argv) or SimpleNamespace(pid=1)
+    )
+    org_launcher.OrgLauncher("/tmp")._launch_agent("omar", "brief")
+    return started[0]
+
+
+@pytest.mark.asyncio
+async def test_engine_daemons_run_the_engines_own_binary(binary, tmp_path, monkeypatch):
+    decoy_kollab_first_on_path(tmp_path, monkeypatch)
+    assert (await engine_daemon_argv(monkeypatch))[:1] == [str(binary)]
+    assert team_member_argv(monkeypatch)[:1] == [str(binary)]
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_starts_its_own_interpreter_whatever_kollab_path_finds(tmp_path, monkeypatch):
+    # An engine from a checkout once started the release binary for every daemon: same
+    # version string, older code. Every spawner takes kollab_argv(), never a PATH lookup.
+    from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
+    from plugins.deep_thought.orchestrator import ThoughtOrchestrator
+
+    monkeypatch.delenv("SCIE", raising=False)
+    decoy = decoy_kollab_first_on_path(tmp_path, monkeypatch)
+    own = [sys.executable, "-m", "kollabor_cli_main"]
+
+    assert (await engine_daemon_argv(monkeypatch))[:3] == own
+    assert team_member_argv(monkeypatch)[:3] == own
+    assert AgentOrchestrator._find_kollab_command(object.__new__(AgentOrchestrator)) == own
+    assert ThoughtOrchestrator._find_kollab_command(object.__new__(ThoughtOrchestrator)) == own
+    assert str(decoy) not in own
 
 
 @pytest.mark.asyncio
@@ -272,13 +335,13 @@ def test_the_app_runtime_never_updates_itself(app_runtime, monkeypatch):
     assert "Kollab.app" in result.message
 
 
-def test_app_agents_and_daemons_start_the_apps_kollab(app_runtime, monkeypatch):
-    from kollabor_engine import daemon_pool
-
+@pytest.mark.asyncio
+async def test_app_agents_and_daemons_start_the_apps_kollab(app_runtime, tmp_path, monkeypatch):
     from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
     from plugins.deep_thought.orchestrator import ThoughtOrchestrator
 
-    monkeypatch.setattr(daemon_pool.shutil, "which", lambda name: "/elsewhere/kollab")
-    assert daemon_pool._kollab_command() == [str(app_runtime)]
+    decoy_kollab_first_on_path(tmp_path, monkeypatch)
+    assert (await engine_daemon_argv(monkeypatch))[:1] == [str(app_runtime)]
+    assert team_member_argv(monkeypatch)[:1] == [str(app_runtime)]
     assert AgentOrchestrator._find_kollab_command(object.__new__(AgentOrchestrator)) == [str(app_runtime)]
     assert ThoughtOrchestrator._find_kollab_command(object.__new__(ThoughtOrchestrator)) == [str(app_runtime)]

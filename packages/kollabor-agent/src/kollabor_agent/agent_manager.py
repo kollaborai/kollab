@@ -34,7 +34,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -48,6 +48,7 @@ from kollabor_ai.prompt_overrides import (
     get_default_store as get_default_override_store,
 )
 from kollabor_config.config_utils import (
+    get_bundled_agents_dir,
     get_config_directory,
     get_global_agents_dir,
     get_local_agents_dir,
@@ -300,10 +301,11 @@ class SkillLibrary:
       2. global:   ~/.kollab/skills/  (user-installed)
       3. local:    .kollab/skills/    (project-specific, highest priority)
 
-    Local overrides global overrides bundled when names collide.
+    Local overrides global overrides bundled when names collide. The local tier
+    is ``project_path``'s, or the current folder's when none is given.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, project_path: Optional[Path] = None) -> None:
         from kollabor_config.config_utils import (
             get_bundled_skills_dir,
             get_global_skills_dir,
@@ -312,7 +314,7 @@ class SkillLibrary:
 
         self.bundled_dir = get_bundled_skills_dir()
         self.global_dir = get_global_skills_dir()
-        self.local_dir = get_local_skills_dir()
+        self.local_dir = get_local_skills_dir(project_path)
         self._skills: Dict[str, Skill] = {}
         self._skill_dirs: Dict[str, tuple[Path, str]] = {}  # name -> (dir, source)
         self._loaded = False
@@ -556,7 +558,7 @@ class Agent:
         profile: Optional preferred LLM profile
         description: Human-readable description
         default_skills: Skills to auto-load when agent is activated
-        source: 'local' or 'global' - where the agent was loaded from
+        source: 'local', 'global' or 'bundled' - where the agent was loaded from
         overrides_global: True if local agent overrides a global agent with same name
         identity: Hub identity (defaults to agent name when empty)
         capabilities: Capability tags for hub discovery
@@ -596,7 +598,7 @@ class Agent:
 
         Args:
             agent_dir: Path to agent directory
-            source: 'local' or 'global' - where the agent was loaded from
+            source: 'local', 'global' or 'bundled' - where the agent was loaded from
             overrides_global: True if local agent overrides a global agent
             skill_library: Centralized skill library for resolving skill assignments
 
@@ -727,7 +729,9 @@ class Agent:
         # Condensed hub protocol: appended, never prepended, and only when
         # this process is actually on the hub. A hub-disabled or solo
         # process gets none, so its prompt stays identical to a plain run.
-        hub_protocol = self._load_hub_protocol(renderer)
+        hub_protocol = self._load_hub_protocol(
+            renderer, getattr(agent_manager, "project_path", None)
+        )
         if hub_protocol:
             parts.append(hub_protocol)
 
@@ -775,7 +779,7 @@ class Agent:
 
         return "\n".join(parts)
 
-    def _load_hub_protocol(self, renderer) -> str:
+    def _load_hub_protocol(self, renderer, project_path: Optional[Path] = None) -> str:
         """Load the condensed hub protocol doc, when the hub is on.
 
         Replaces the legacy agents/system/*.md prepend: the hub docs are
@@ -785,15 +789,13 @@ class Agent:
 
         Args:
             renderer: PromptRenderer instance for processing trender tags.
+            project_path: Folder whose local tier applies (default: the cwd's).
 
         Returns:
             Rendered hub protocol markdown, or empty string when the hub
             is off or no hub doc is present.
         """
-        from kollabor_config.config_utils import (
-            get_global_agents_dir,
-            get_local_agents_dir,
-        )
+        from kollabor_config.config_utils import get_agent_tier_dirs
 
         # The hub docs teach the mesh. A solo or hub-disabled process is
         # not on it (env set by the engine / kollabor.hub_env), so it gets
@@ -809,16 +811,13 @@ class Agent:
         if hub_off or not hub_on:
             return ""
 
-        # Local overrides global by filename; the first hub-*.md wins.
-        candidates: List[Path] = []
-        local_agents = get_local_agents_dir()
-        if local_agents:
-            local_system = local_agents / "system"
-            if local_system.is_dir():
-                candidates.extend(sorted(local_system.glob("hub-*.md")))
-        global_system = get_global_agents_dir() / "system"
-        if global_system.is_dir():
-            candidates.extend(sorted(global_system.glob("hub-*.md")))
+        # Local overrides global overrides bundled by filename (the bundled
+        # tier is all a computer nothing has seeded has); the first hub-*.md wins.
+        candidates: List[Path] = [
+            path
+            for agents_dir in get_agent_tier_dirs(project_path)
+            for path in sorted((agents_dir / "system").glob("hub-*.md"))
+        ]
 
         seen: set = set()
         for path in candidates:
@@ -930,40 +929,67 @@ class AgentManager:
     Manages agent discovery, loading, and skill management.
 
     Searches for agents in:
-    1. Local: .kollab/agents/ (project-specific, higher priority)
-    2. Global: ~/.kollab/agents/ (user defaults)
+    1. Local: .kollab/agents/ (project-specific, highest priority)
+    2. Global: ~/.kollab/agents/ (user defaults; app start seeds the bundled agents here)
+    3. Bundled: bundles/agents/ (shipped with the app, so a process nothing has
+       seeded yet, such as the engine on a new machine, still finds them)
 
-    Local agents override global agents with the same name.
+    Local agents override global agents, and global ones bundled ones, with the same name.
     """
 
-    def __init__(self, config=None, event_bus=None):
+    def __init__(
+        self, config=None, event_bus=None, project_path: Optional[Path] = None
+    ):
         """
         Initialize agent manager with lazy loading.
 
         Args:
             config: Configuration object (optional)
             event_bus: Optional EventBus for hub trender tag rendering
+            project_path: Folder whose .kollab/ is the local tier (default: the
+                cwd's). A server that starts agents for chats in other folders
+                (the engine) passes the chat's folder.
         """
         self.config = config
         self.event_bus = event_bus
+        self.project_path = project_path
         self._agents: Dict[str, AgentRuntime] = {}
         self._active_agent_name: Optional[str] = None
         self._on_agent_changed = None  # Callback: fn(agent_or_none) called on activate/clear
 
-        # Agent directories (in discovery order, lowest to highest priority)
-        # 1. Global: ~/.kollab/agents/ (user defaults)
-        # 2. Local: .kollab/agents/ (project-specific, where agents are created)
+        # Agent directories (see agent_tiers for the priority order)
+        self.bundled_agents_dir = get_bundled_agents_dir()
         self.global_agents_dir = get_global_agents_dir()
-        self.local_agents_dir = get_local_agents_dir()
+        self.local_agents_dir = get_local_agents_dir(project_path)
 
         # Centralized skill library
-        self.skill_library = SkillLibrary()
+        self.skill_library = SkillLibrary(project_path)
 
         # Lazy loading: only discover agent names on init
         # Full agent data loaded on first access
         self._agent_names: List[str] = []  # Just names, not full agent objects
         self._agents_loaded = False
         self._discover_agent_names()
+
+    def agent_tiers(self) -> List[Tuple[str, Optional[Path]]]:
+        """Agent directories by tier, lowest priority first."""
+        return [
+            ("bundled", self.bundled_agents_dir),
+            ("global", self.global_agents_dir),
+            ("local", self.local_agents_dir),
+        ]
+
+    def find_agent_dir(self, name: str) -> Optional[Tuple[Path, str]]:
+        """Where ``name`` resolves, as ``(directory, tier)``: local, then global, then bundled.
+
+        A folder is the agent only with its ``system_prompt.md``: an ``agent.json``
+        left alone in a higher tier (a default-skill toggle writes one) must not
+        hide the whole agent the lower tiers still have.
+        """
+        for tier, agents_dir in reversed(self.agent_tiers()):
+            if agents_dir and (agents_dir / name / "system_prompt.md").is_file():
+                return agents_dir / name, tier
+        return None
 
     def _discover_agent_names(self) -> None:
         """Discover agent names only (lazy loading - full data loaded on first access).
@@ -981,29 +1007,18 @@ class AgentManager:
             "system",
         }
 
-        # Discover names from global first (lowest priority)
-        if self.global_agents_dir and self.global_agents_dir.exists():
-            for agent_dir in self.global_agents_dir.iterdir():
+        for tier, agents_dir in self.agent_tiers():
+            if not agents_dir or not agents_dir.exists():
+                continue
+            for agent_dir in agents_dir.iterdir():
                 if (
                     agent_dir.is_dir()
                     and agent_dir.name not in skip_dirs
                     and not agent_dir.name.startswith(".")
+                    and agent_dir.name not in self._agent_names
                 ):
-                    if agent_dir.name not in self._agent_names:
-                        self._agent_names.append(agent_dir.name)
-                        logger.debug(f"Discovered global agent name: {agent_dir.name}")
-
-        # Discover names from local (higher priority)
-        if self.local_agents_dir and self.local_agents_dir.exists():
-            for agent_dir in self.local_agents_dir.iterdir():
-                if (
-                    agent_dir.is_dir()
-                    and agent_dir.name not in skip_dirs
-                    and not agent_dir.name.startswith(".")
-                ):
-                    if agent_dir.name not in self._agent_names:
-                        self._agent_names.append(agent_dir.name)
-                        logger.debug(f"Discovered local agent name: {agent_dir.name}")
+                    self._agent_names.append(agent_dir.name)
+                    logger.debug(f"Discovered {tier} agent name: {agent_dir.name}")
 
         logger.info(
             f"Discovered {len(self._agent_names)} agent names (lazy load enabled)"
@@ -1035,28 +1050,15 @@ class AgentManager:
 
         # Check cache validity for each agent
         for agent_name in self._agent_names:
-            # Try local first, then global
-            agent_dir = None
-            source = "unknown"
-            overrides_global = False
-
-            if self.local_agents_dir and (self.local_agents_dir / agent_name).exists():
-                agent_dir = self.local_agents_dir / agent_name
-                source = "local"
-                if (
-                    self.global_agents_dir
-                    and (self.global_agents_dir / agent_name).exists()
-                ):
-                    overrides_global = True
-            elif (
-                self.global_agents_dir
-                and (self.global_agents_dir / agent_name).exists()
-            ):
-                agent_dir = self.global_agents_dir / agent_name
-                source = "global"
-
-            if not agent_dir:
+            found = self.find_agent_dir(agent_name)
+            if not found:
                 continue
+            agent_dir, source = found
+            overrides_global = bool(
+                source == "local"
+                and self.global_agents_dir
+                and (self.global_agents_dir / agent_name).exists()
+            )
 
             # Check cache
             if agent_name in cached_agents:
@@ -1362,7 +1364,7 @@ class AgentManager:
             target_dir = self.global_agents_dir / agent.name
         else:
             # Use get_local_agents_path() for creation (creates dir if needed)
-            target_dir = get_local_agents_path() / agent.name
+            target_dir = get_local_agents_path(self.project_path) / agent.name
 
         # Ensure directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1487,30 +1489,18 @@ class AgentManager:
         if agent_name in self._agents:
             active_skills = self._agents[agent_name].active_skills.copy()
 
-        # Reload from disk (local overrides global)
-        local_path = (
-            self.local_agents_dir / agent_name if self.local_agents_dir else None
-        )
-        global_path = (
-            self.global_agents_dir / agent_name if self.global_agents_dir else None
-        )
-
-        if local_path and local_path.exists():
-            # Check if this overrides a global agent
-            overrides = global_path and global_path.exists()
+        # Reload from disk, from the tier the agent resolves to
+        found = self.find_agent_dir(agent_name)
+        if found:
+            agent_dir, source = found
             agent = Agent.from_directory(
-                local_path,
-                source="local",
-                overrides_global=bool(overrides),
-                skill_library=self.skill_library,
-            )
-            if agent:
-                self._agents[agent_name] = AgentRuntime.from_agent(agent)
-        elif global_path and global_path.exists():
-            agent = Agent.from_directory(
-                global_path,
-                source="global",
-                overrides_global=False,
+                agent_dir,
+                source=source,
+                overrides_global=bool(
+                    source == "local"
+                    and self.global_agents_dir
+                    and (self.global_agents_dir / agent_name).exists()
+                ),
                 skill_library=self.skill_library,
             )
             if agent:
@@ -1656,7 +1646,7 @@ class AgentManager:
             return None
 
         # Create in .kollab/agents/ directory (creates local dir if needed)
-        local_path = get_local_agents_path()
+        local_path = get_local_agents_path(self.project_path)
         agent_dir = local_path / name
 
         if agent_dir.exists():
@@ -1704,7 +1694,7 @@ You are a specialized assistant.
                 )
 
             # Update local_agents_dir since we just created the local directory
-            self.local_agents_dir = get_local_agents_dir()
+            self.local_agents_dir = get_local_agents_dir(self.project_path)
 
             # Load the newly created agent
             # Check if it overrides a global agent
@@ -1884,7 +1874,7 @@ You are a specialized assistant.
         agent_dir = agent.directory
 
         # Only update local agents (not global)
-        local_path = get_local_agents_path()
+        local_path = get_local_agents_path(self.project_path)
         if not self.local_agents_dir or not agent_dir.is_relative_to(
             self.local_agents_dir
         ):

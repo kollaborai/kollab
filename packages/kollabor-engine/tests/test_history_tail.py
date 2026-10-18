@@ -34,6 +34,7 @@ def _session(daemon):
     session.history = []
     session._raw_history = []
     session._history_anchor = ""
+    session._history_seeded = False
     session._history_lock = asyncio.Lock()
     return session
 

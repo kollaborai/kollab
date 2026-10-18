@@ -1,0 +1,43 @@
+{
+  "name": "runner-home-isolation",
+  "description": "The runner gives the app command and every shell step a throwaway HOME (seeded, not the real one) and its own project root, and stops what a spec leaves running under it. A plain command, so the runner's defaults apply.",
+  "config": {
+    "command": "sh -c 'R=$(python3 -c \"import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)\"); H=$(if [ \"$HOME\" != \"$R\" ] && [ -f \"$HOME/.kollab/config.json\" ] && [ -f \"$HOME/.kollab/connect-guide-seen\" ]; then echo ok; else echo bad; fi); P=$(if [ \"$KOLLAB_PROJECT_ROOT\" = \"$HOME/project\" ]; then echo ok; else echo bad; fi); echo \"home-check=$H project-check=$P keyring-check=$KOLLAB_NO_KEYRING\"; sleep 120'",
+    "app_init_sleep": 1,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "description": "the previous run's stray process is gone",
+      "command": "P=\"${TMPDIR:-/tmp}/kollab-spec-runner-home.pid\"; if [ -s \"$P\" ] && /bin/ps -p \"$(cat \"$P\")\" -o command= 2>/dev/null | grep -q kollab-spec-runner-home; then echo \"stray left by the previous run\"; else echo \"no stray from the previous run\"; fi",
+      "assert_contains": "no stray from the previous run"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "keyring-check=1",
+      "timeout": 15,
+      "description": "app command ran"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "home-check=ok project-check=ok keyring-check=1",
+      "description": "app HOME is a seeded throwaway, not the real one, with its own project root"
+    },
+    {
+      "action": "shell",
+      "description": "shell steps share the throwaway HOME",
+      "command": "python3 -c \"import os,pwd; real=pwd.getpwuid(os.getuid()).pw_dir; h=os.environ['HOME']; print('shell home isolated' if h != real and os.path.isfile(h + '/.kollab/config.json') else 'shell home NOT isolated: ' + h)\"",
+      "assert_contains": "shell home isolated"
+    },
+    {
+      "action": "shell",
+      "description": "leave a detached process under the throwaway HOME for the runner to stop",
+      "command": "python3 -c \"import subprocess, sys; p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)  # kollab-spec-runner-home'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); open('${TMPDIR:-/tmp}/kollab-spec-runner-home.pid', 'w').write(str(p.pid)); print('stray started')\"",
+      "assert_contains": "stray started"
+    }
+  ]
+}

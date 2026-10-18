@@ -311,22 +311,21 @@ class SystemPromptBuilder:
         parts: List[Tuple[str, str]] = []
         base_path = None
         try:
-            from kollabor_config.config_utils import get_global_agents_dir
+            from kollabor_config.config_utils import get_agent_tier_dirs
 
-            sess = (
-                get_global_agents_dir()
-                / "_base"
-                / "sections"
-                / "01-session-context.md"
-            )
-            if sess.exists():
-                parts.append(
-                    (
-                        "session",
-                        '<trender type="include" path="01-session-context.md" />',
+            # Local, global, then bundled: a computer nothing has seeded
+            # (the engine on a new machine) still has the bundled template.
+            for agents_dir in get_agent_tier_dirs():
+                sess = agents_dir / "_base" / "sections" / "01-session-context.md"
+                if sess.exists():
+                    parts.append(
+                        (
+                            "session",
+                            '<trender type="include" path="01-session-context.md" />',
+                        )
                     )
-                )
-                base_path = sess.parent
+                    base_path = sess.parent
+                    break
         except Exception as e:
             logger.debug(f"Volatile session-context unavailable: {e}")
 
@@ -481,8 +480,12 @@ class SystemPromptBuilder:
             if conversation_history:
                 first_msg = conversation_history[0]
                 if first_msg.role == "system":
+                    # Keep the metadata: its system_initialization mark is what
+                    # hides the prompt from the web UI's chat.
                     conversation_history[0] = ConversationMessage(
-                        role="system", content=new_prompt
+                        role="system",
+                        content=new_prompt,
+                        metadata=dict(first_msg.metadata or {}),
                     )
                     logger.info(
                         f"System prompt rebuild #{self._rebuild_count} complete "

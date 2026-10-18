@@ -1,0 +1,89 @@
+{
+  "name": "hub-rosters-teams",
+  "description": "A persona from any roster launches with --as roster/name and runs its roster's agent bundle; /hub orgs lists the bundled teams plus a user team from ~/.kollab/teams; an unknown team is refused. Plain kollab (--no-daemon) in a throwaway HOME, no keyring, no model call.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-rosters.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon --as marketing-crew/maya'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME: a profile that is never called, and a user team",
+      "command": "P=\"${TMPDIR:-/tmp}/kollab-spec-rosters.path\"; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-rosters.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab/teams\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:9/v1\",\"api_key\":\"not-a-real-key\"}}}}}' > \"$H/.kollab/config.json\"; printf '{\"name\":\"duo\",\"description\":\"Two writers\",\"roster\":\"marketing-crew\",\"lead\":\"theo\",\"members\":[{\"persona\":\"theo\"},{\"persona\":\"jonas\",\"reports_to\":\"theo\"}]}' > \"$H/.kollab/teams/duo.json\"; echo \"throwaway home ready\"",
+      "assert_contains": "throwaway home ready"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "section",
+      "label": "--as roster/name takes the persona's name"
+    },
+    {
+      "action": "slash_command",
+      "command": "hub",
+      "subcommand": "whoami"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "identity: maya",
+      "timeout": 15,
+      "description": "the hub name is the part after the slash"
+    },
+    {
+      "action": "section",
+      "label": "teams: bundled and user"
+    },
+    {
+      "action": "slash_command",
+      "command": "hub",
+      "subcommand": "orgs"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "teams: 4 available",
+      "timeout": 15
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "marketing: A small marketing crew"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "duo \\(user\\): Two writers"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "engineering"
+    },
+    {
+      "action": "section",
+      "label": "an unknown team is refused"
+    },
+    {
+      "action": "slash_command",
+      "command": "hub",
+      "subcommand": "org nonesuch"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "team 'nonesuch' not found",
+      "timeout": 15
+    }
+  ]
+}

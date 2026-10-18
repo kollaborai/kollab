@@ -29,6 +29,7 @@ import os
 import subprocess
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from kollabor_config.config_utils import encode_project_path, get_project_data_dir
 
@@ -48,10 +49,12 @@ def is_project_scoped() -> bool:
     )
 
 
-@lru_cache(maxsize=1)
-def resolve_project_root() -> Path:
+@lru_cache(maxsize=128)
+def resolve_project_root(cwd: Optional[str] = None) -> Path:
     """Resolve project root using the precedence documented in the module.
 
+    ``cwd`` asks about another folder than this process's own: the root an
+    agent started there would join (the engine launches agents in any folder).
     Cached because the answer cannot change within a process and the git
     subprocess call isn't free.
     """
@@ -66,6 +69,7 @@ def resolve_project_root() -> Path:
             text=True,
             timeout=2.0,
             check=False,
+            cwd=cwd,
         )
         if result.returncode == 0:
             root = result.stdout.strip()
@@ -74,7 +78,7 @@ def resolve_project_root() -> Path:
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         pass
 
-    return Path.cwd().resolve()
+    return Path(cwd).resolve() if cwd else Path.cwd().resolve()
 
 
 def resolve_project_id() -> str:

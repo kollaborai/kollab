@@ -2,7 +2,6 @@
 
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from kollabor_ai import SystemPromptBuilder
@@ -94,6 +93,22 @@ class TestSystemPromptBuilder(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(conversation_history[0].content, "new prompt")
+
+    def test_rebuild_keeps_the_initialization_mark(self):
+        """The web UI keeps the prompt out of the chat by this mark."""
+        conversation_history = [
+            ConversationMessage(
+                role="system",
+                content="old prompt",
+                metadata={"system_initialization": True},
+            )
+        ]
+
+        with patch.object(self.builder, "build", return_value="new prompt"):
+            self.builder.rebuild(conversation_history)
+
+        self.assertEqual(conversation_history[0].content, "new prompt")
+        self.assertTrue(conversation_history[0].metadata["system_initialization"])
 
     def test_rebuild_no_system_message(self):
         """Test rebuild fails when no system message found."""
@@ -529,32 +544,3 @@ class TestMCPToolSummaries(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-class TestStartupAgentReconciliation(unittest.TestCase):
-    def test_pre_reconcile_prefers_pool_agent_type_before_first_build(self):
-        """Startup should select the hub-role bundle before first prompt build."""
-        agent_manager = MagicMock()
-        agent_manager.active_agent_name = "default"
-        agent_manager.set_active_agent = MagicMock(return_value=True)
-
-        startup_identity = "lapis"
-        desired_bundle = "coder"
-        pool_entry = SimpleNamespace(agent_type=desired_bundle)
-        pool = MagicMock()
-        pool.find = MagicMock(return_value=pool_entry)
-
-        active_name = getattr(agent_manager, "active_agent_name", "") or ""
-        if startup_identity:
-            entry = pool.find(startup_identity)
-            desired = (getattr(entry, "agent_type", "") or "").strip()
-            if desired and desired != active_name:
-                agent_manager.set_active_agent(desired)
-
-        agent_manager.set_active_agent.assert_called_once_with("coder")
-
-    def test_skip_startup_rebuild_when_pre_reconciled(self):
-        """Startup plugin-additions rebuild can be skipped after pre-reconcile."""
-        additions = ["plugin addition"]
-        startup_agent_reconciled = True
-        should_skip_startup_rebuild = bool(additions and startup_agent_reconciled)
-        self.assertTrue(should_skip_startup_rebuild)

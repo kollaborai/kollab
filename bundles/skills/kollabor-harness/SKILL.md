@@ -890,7 +890,8 @@ plus raw `<trender>cmd</trender>` shell execution.
 3. `KOLLAB_SYSTEM_PROMPT_FILE` env var
 4. local `.kollab/agents/default/system_prompt.md`
 5. global `~/.kollab/agents/default/system_prompt.md`
-6. built-in fallback
+6. bundled `bundles/agents/default/system_prompt.md`
+7. built-in fallback
 
 ## agents + skills
 

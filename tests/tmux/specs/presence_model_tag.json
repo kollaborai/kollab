@@ -1,0 +1,50 @@
+{
+  "name": "presence-model-tag",
+  "description": "An agent started in a terminal publishes the model it runs in its hub presence record (tags.model), the way an engine-started one does, so the web UI's sidebar row reads the same before the engine opens the agent as after. Plain kollab (daemon + this window) in a throwaway HOME with a fake model, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-presence-model.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-presence-model.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-presence-model.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\"",
+      "assert_contains": "fake model on port"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "label": "presence carries the model"
+    },
+    {
+      "action": "shell",
+      "description": "read the agent's presence record",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-presence-model.path\"); python3 -c \"import glob,json,sys; rows=[json.load(open(f)) for f in glob.glob(sys.argv[1]+'/.kollab/projects/*/hub/presence/*.json')]; print('presence model: ' + ','.join(r.get('tags',{}).get('model','') for r in rows))\" \"$H\"",
+      "assert_contains": "presence model: fake-echo"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-presence-model.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { optionLabel } from "./panel-model";
 
 /** Unsaved edits by field path. `null` on a secret field means "clear it". */
 export type Draft = Record<string, unknown>;
@@ -307,7 +308,7 @@ export function FieldRenderer({
           <SelectContent>
             {options.map((option) => (
               <SelectItem key={option} value={toItem(option)}>
-                {option === "" ? "(default)" : option}
+                {option === "" ? "(default)" : optionLabel(field, option)}
               </SelectItem>
             ))}
           </SelectContent>

@@ -38,6 +38,12 @@ Agents are resolved from:
 When the same agent name exists at multiple tiers, the higher-priority definition
 wins. The bundled copy remains the install-safe fallback.
 
+The local tier is the folder the agent runs in. A chat the engine starts for the web
+UI or a team launch uses that chat's own folder, not the engine's
+(`AgentManager(project_path=...)`). The hub protocol docs (`system/hub-*.md`) and the
+session-context template (`_base/sections/01-session-context.md`) resolve through the
+same three tiers (`kollabor_config.get_agent_tier_dirs`).
+
 ## Agent Configuration
 
 ### agent.json (Optional)
@@ -94,19 +100,19 @@ the `openai-oauth` provider profile. `lapis` is not an agent bundle, and
 `research` is not automatically a live hub identity just because a `research`
 bundle exists.
 
-## Hub Pool and Organization Bundles
+## Hub Rosters and Teams
 
-Hub gem identities and organization roles are separate configuration layers:
+Hub names and team charts are JSON libraries (see
+[rosters-and-teams.md](rosters-and-teams.md) and
+[the spec](../specs/rosters-and-teams.md)):
 
-- The bundled identity pool is `plugins/hub/organizations/pool.json`; each
-  `gems[]` entry has a `name` and may declare an `agent_type` bundle.
-- A project can override the pool at `.kollab/hub/pool.json`; user-global
-  overrides live under `~/.kollab/hub/`.
-- Bundled organization charts are `plugins/hub/organizations/*.json`.
-  User overrides live under `~/.kollab/hub/organizations/<name>.json`.
-- Organization roles use `agent_bundle` to select the bundle and `identity` to
-  select the hub name. Their `prompt` is an organization-specific instruction
-  layered into the launched process.
+- A roster is a set of personas. The bundled ones are `bundles/rosters/gems.json`
+  (each persona has a `name` and an `agent` bundle) and `marketing-crew.json`.
+- Teams are reporting chains of personas: `bundles/teams/*.json`.
+- Both resolve bundled, then `~/.kollab/{rosters,teams}`, then the project's
+  `.kollab/{rosters,teams}`; a later file of the same name replaces an earlier one.
+- A persona's `agent` selects the bundle and its `name` the hub name. Its `prompt`
+  and a team seat's instructions are added to the launched agent's hub context.
 
 Minimal role example:
 
@@ -248,7 +254,7 @@ kollab -a my-agent --skill debugging
 
 The `AgentManager` (`packages/kollabor-agent/src/kollabor_agent/agent_manager.py`) handles:
 
-- Agent discovery from local and global directories
+- Agent discovery from the local, global and bundled directories (`find_agent_dir` is the one resolver)
 - Skill loading and prompt assembly
 - Metadata caching (24-hour TTL)
 - Profile resolution

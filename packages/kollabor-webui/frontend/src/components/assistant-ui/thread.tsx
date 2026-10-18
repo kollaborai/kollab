@@ -26,6 +26,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useVoiceMode, type VoiceMode } from "@/voice-mode";
@@ -591,7 +592,7 @@ const Composer: FC<{
         description:
           agent.personality ||
           agent.role_aliases?.filter(Boolean).join(" · ") ||
-          agent.agent_type ||
+          (agent.agent_type && bundleName(agent.agent_type)) ||
           "Online Kollab agent",
         type: "agent" as const,
         searchText: [
@@ -603,7 +604,7 @@ const Composer: FC<{
         ]
           .filter(Boolean)
           .join(" "),
-        status: agent.state || "online",
+        status: agentStatus(agent.state),
         icon: "agent" as const,
       }));
     // agent@device is the address the hub routes across computers.
@@ -615,7 +616,7 @@ const Composer: FC<{
         description: `On ${agent.device}`,
         type: "agent" as const,
         searchText: [handle, agent.name, agent.device].join(" "),
-        status: agent.state || "online",
+        status: agentStatus(agent.state),
         icon: "agent" as const,
       };
     });

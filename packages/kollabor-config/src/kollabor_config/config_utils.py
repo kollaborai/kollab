@@ -31,14 +31,19 @@ def get_config_directory_candidates() -> list[Path]:
     return [get_config_directory()]
 
 
-def get_local_config_directory() -> Path:
-    """Get the project-local Kollab runtime/config directory."""
-    return Path.cwd() / APP_CONFIG_DIR_NAME
+def get_local_config_directory(project_path: Optional[Path] = None) -> Path:
+    """Get the project-local Kollab runtime/config directory.
+
+    Of ``project_path``, or of the current working directory when none is given.
+    """
+    return (project_path or Path.cwd()) / APP_CONFIG_DIR_NAME
 
 
-def get_local_config_directory_candidates() -> list[Path]:
+def get_local_config_directory_candidates(
+    project_path: Optional[Path] = None,
+) -> list[Path]:
     """Return project-local config roots in read precedence order."""
-    return [get_local_config_directory()]
+    return [get_local_config_directory(project_path)]
 
 
 def get_existing_config_directory() -> Path:
@@ -201,32 +206,35 @@ def get_logs_dir(project_path: Optional[Path] = None) -> Path:
     return get_project_data_dir(project_path) / "logs"
 
 
-def get_local_agents_dir() -> Path | None:
+def get_local_agents_dir(project_path: Optional[Path] = None) -> Path | None:
     """Get the local agents directory if it exists.
 
-    Checks for .kollab/agents/ in the current working directory.
+    Checks for .kollab/agents/ in ``project_path``, or in the current working
+    directory when none is given.
 
     Returns:
         Path to local agents directory if it exists, None otherwise
     """
     for local_agents_dir in (
-        directory / "agents" for directory in get_local_config_directory_candidates()
+        directory / "agents"
+        for directory in get_local_config_directory_candidates(project_path)
     ):
         if local_agents_dir.exists():
             return local_agents_dir
     return None
 
 
-def get_local_agents_path() -> Path:
+def get_local_agents_path(project_path: Optional[Path] = None) -> Path:
     """Get the local agents directory path (for creation purposes).
 
     Unlike get_local_agents_dir(), this returns the path even if it doesn't exist.
     Use this when you need to create the local agents directory.
 
     Returns:
-        Path to .kollab/agents/ in the current working directory
+        Path to .kollab/agents/ in ``project_path``, or in the current working
+        directory when none is given
     """
-    return get_local_config_directory() / "agents"
+    return get_local_config_directory(project_path) / "agents"
 
 
 def get_global_agents_dir() -> Path:
@@ -236,6 +244,26 @@ def get_global_agents_dir() -> Path:
         Path to the global agents directory.
     """
     return resolve_global_path("agents")
+
+
+def get_bundled_agents_dir() -> Path | None:
+    """Get the bundled agents (``bundles/agents/<name>/``), if present."""
+    return _get_bundled_dir("agents")
+
+
+def get_agent_tier_dirs(project_path: Optional[Path] = None) -> list[Path]:
+    """The agents directories that exist, highest priority first: local, global, bundled.
+
+    For a file that lives beside the agents (``system/hub-*.md``, ``_base/sections``):
+    the first tier that has it wins, and a computer nothing has seeded still
+    reaches the bundled copy.
+    """
+    tiers = (
+        get_local_agents_dir(project_path),
+        get_global_agents_dir(),
+        get_bundled_agents_dir(),
+    )
+    return [tier for tier in tiers if tier is not None and tier.is_dir()]
 
 
 # ── Skill library directories ──────────────────────────────────────
@@ -252,6 +280,16 @@ def get_bundled_skills_dir() -> Path | None:
     return _get_bundled_dir("skills")
 
 
+def get_bundled_rosters_dir() -> Path | None:
+    """Get the bundled persona rosters (``bundles/rosters/*.json``), if present."""
+    return _get_bundled_dir("rosters")
+
+
+def get_bundled_teams_dir() -> Path | None:
+    """Get the bundled teams (``bundles/teams/*.json``), if present."""
+    return _get_bundled_dir("teams")
+
+
 def get_global_skills_dir() -> Path:
     """Get the global skills directory.
 
@@ -261,16 +299,18 @@ def get_global_skills_dir() -> Path:
     return resolve_global_path("skills")
 
 
-def get_local_skills_dir() -> Path | None:
+def get_local_skills_dir(project_path: Optional[Path] = None) -> Path | None:
     """Get the local skills directory if it exists.
 
-    Checks for .kollab/skills/ in the current working directory.
+    Checks for .kollab/skills/ in ``project_path``, or in the current working
+    directory when none is given.
 
     Returns:
         Path to local skills directory if it exists, None otherwise
     """
     for local_skills_dir in (
-        directory / "skills" for directory in get_local_config_directory_candidates()
+        directory / "skills"
+        for directory in get_local_config_directory_candidates(project_path)
     ):
         if local_skills_dir.exists():
             return local_skills_dir
@@ -377,6 +417,8 @@ def get_system_prompt_path() -> Path:
     1. KOLLAB_SYSTEM_PROMPT_FILE environment variable (custom file path)
     2. Local .kollab/agents/default/system_prompt.md (project-specific)
     3. Global ~/.kollab/agents/default/system_prompt.md (global default)
+    4. Bundled bundles/agents/default/system_prompt.md, so a computer nothing
+       has seeded yet (the engine on a new machine) still has the real prompt
 
     Returns:
         Path to the system prompt file
@@ -395,27 +437,21 @@ def get_system_prompt_path() -> Path:
                 f"KOLLAB_SYSTEM_PROMPT_FILE points to non-existent file: {env_path}"
             )
 
-    local_config_dirs = get_local_config_directory_candidates()
-    global_config_dirs = get_config_directory_candidates()
+    # agents/default in every tier, highest priority first: local, global, bundled
+    default_dirs = [tier / "default" for tier in get_agent_tier_dirs()]
 
     # On Windows, prefer default_win.md if it exists (in agent directory)
     if IS_WINDOWS:
-        for config_dir in local_config_dirs + global_config_dirs:
-            win_prompt = config_dir / "agents" / "default" / "system_prompt_win.md"
+        for default_dir in default_dirs:
+            win_prompt = default_dir / "system_prompt_win.md"
             if win_prompt.exists():
                 logger.debug(f"Using Windows-specific system prompt: {win_prompt}")
                 return win_prompt
 
-    # If local exists, use it (override)
-    for config_dir in local_config_dirs:
-        local_agent_prompt = config_dir / "agents" / "default" / "system_prompt.md"
-        if local_agent_prompt.exists():
-            return local_agent_prompt
-
-    for config_dir in global_config_dirs:
-        global_agent_prompt = config_dir / "agents" / "default" / "system_prompt.md"
-        if global_agent_prompt.exists():
-            return global_agent_prompt
+    for default_dir in default_dirs:
+        agent_prompt = default_dir / "system_prompt.md"
+        if agent_prompt.exists():
+            return agent_prompt
 
     return get_config_directory() / "agents" / "default" / "system_prompt.md"
 
@@ -427,7 +463,9 @@ def get_system_prompt_content() -> str:
     1. CLI --system-prompt argument (highest priority)
     2. KOLLAB_SYSTEM_PROMPT environment variable (direct string)
     3. KOLLAB_SYSTEM_PROMPT_FILE environment variable (custom file path)
-    4. Fallback to minimal default
+    4. agents/default/system_prompt.md: local, global, then bundled
+       (get_system_prompt_path)
+    5. Fallback to minimal default
 
     Returns:
         System prompt content as string

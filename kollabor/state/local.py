@@ -1466,14 +1466,21 @@ class LocalStateService(StateService):
             return
 
         coro = LocalStateService._revoke_tools_async(self, revoke, removed)
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            task = loop.create_task(coro)
-            # Keep a reference so the task is not garbage-collected.
-            self._pending_revokes = getattr(self, "_pending_revokes", [])
-            self._pending_revokes.append(task)
-        else:
-            loop.run_until_complete(coro)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop is running (a sync caller): finish the revokes on a
+            # private loop, so the thread's current loop is left as it was.
+            private = asyncio.new_event_loop()
+            try:
+                private.run_until_complete(coro)
+            finally:
+                private.close()
+            return
+        task = loop.create_task(coro)
+        # Keep a reference so the task is not garbage-collected.
+        self._pending_revokes = getattr(self, "_pending_revokes", [])
+        self._pending_revokes.append(task)
 
     async def _revoke_tools_async(self, revoke, removed: List[str]) -> None:
         for tool_name in removed:

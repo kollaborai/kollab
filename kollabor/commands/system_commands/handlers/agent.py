@@ -183,11 +183,13 @@ class AgentCommandHandler(BaseCommandHandler):
             is_project_default = agent.name == project_default
             is_global_default = agent.name == global_default
 
-            # Build source indicator (L=local only, G=global only, *=both)
+            # Build source indicator (L=local only, G=global only, *=both, B=bundled)
             if agent.source == "local" and agent.overrides_global:
                 source_char = "*"
             elif agent.source == "local":
                 source_char = "L"
+            elif agent.source == "bundled":
+                source_char = "B"
             else:  # global
                 source_char = "G"
 
@@ -240,7 +242,7 @@ class AgentCommandHandler(BaseCommandHandler):
 
         return {
             "title": "Agents",
-            "footer": "L=local G=global *=both | D=proj g=global | ↑↓ Enter",
+            "footer": "L=local G=global B=bundled *=both | D=proj g=global | ↑↓ Enter",
             # Width and height are dynamic (terminal_width - 2, terminal_height - 4)
             "sections": [
                 {

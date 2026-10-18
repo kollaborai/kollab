@@ -666,7 +666,9 @@ class ACPRunner:
         if self._process_nonce is None or self._process_started_at is None:
             return
         for owner in psutil.process_iter(("pid", "create_time", "username")):
-            with contextlib.suppress(psutil.Error):
+            # psutil's macOS environ() raises SystemError, not psutil.Error,
+            # for a process that exits while its environment is read.
+            with contextlib.suppress(psutil.Error, SystemError):
                 birth = owner.info.get("create_time")
                 if (
                     owner.info.get("username") != self._process_username

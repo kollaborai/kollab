@@ -1,9 +1,18 @@
 #!/bin/bash
 # Integration test for kollabor-engine profiles API
+#
+# Runs its own engine in a throwaway HOME on a free port (tests/tmux/lib/isolated_home.sh):
+# the engine port 7433 and ~/.kollab belong to the developer's live app, whose profiles
+# this test creates, renames and deletes.
 
 set -e
 
-ENGINE_PORT=${ENGINE_PORT:-7433}
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../tmux/lib/isolated_home.sh
+source "$REPO_ROOT/tests/tmux/lib/isolated_home.sh"
+isolated_home_setup
+
+ENGINE_PORT=${ENGINE_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}
 ENGINE_HOST=${ENGINE_HOST:-127.0.0.1}
 BASE_URL="http://${ENGINE_HOST}:${ENGINE_PORT}"
 
@@ -23,7 +32,7 @@ TEST_PROFILE="api-test-$$"
 
 # Start server
 echo "Starting kollabor-engine server..."
-python -m kollabor_engine serve --port "$ENGINE_PORT" >/dev/null 2>&1 &
+(cd "$REPO_ROOT" && isolated_run "$ISOLATED_PYTHON" -m kollabor_engine serve --port "$ENGINE_PORT") >/dev/null 2>&1 &
 SERVER_PID=$!
 # Wait for server to be ready
 for i in $(seq 1 10); do
@@ -41,7 +50,7 @@ fi
 
 # Get token (server generates it on startup)
 sleep 1  # Give token time to be written
-TOKEN=$(cat ~/.kollab/engine.token 2>/dev/null || echo "")
+TOKEN=$(cat "$ISOLATED_HOME/.kollab/engine.token" 2>/dev/null || echo "")
 if [ -z "$TOKEN" ]; then
     echo -e "${RED}FAIL: No auth token found${NC}"
     kill $SERVER_PID 2>/dev/null || true
@@ -57,6 +66,7 @@ cleanup() {
     # Delete test profile if it exists
     curl -s -X DELETE "$BASE_URL/profiles/$TEST_PROFILE" -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1 || true
     curl -s -X DELETE "$BASE_URL/profiles/renamed-$TEST_PROFILE" -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1 || true
+    isolated_home_cleanup
 }
 trap cleanup EXIT
 
@@ -125,12 +135,12 @@ test_contains "Create returns profile name" "\"name\"" "$response"
 test_contains "Create returns created=true" '"created":true' "$response"
 
 echo ""
-echo "=== Test 5: POST /profiles - 400 for duplicate name ==="
+echo "=== Test 5: POST /profiles - 409 for duplicate name ==="
 http_code=$(curl -s -w "%{http_code}" -o /dev/null -X POST "$BASE_URL/profiles" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"name\": \"$TEST_PROFILE\", \"provider\": \"custom\", \"model\": \"test-model\"}")
-test "Returns 400 for duplicate" "400" "$http_code"
+test "Returns 409 for duplicate" "409" "$http_code"
 
 echo ""
 echo "=== Test 6: PUT /profiles/{name} - update profile ==="
