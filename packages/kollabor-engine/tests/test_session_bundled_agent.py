@@ -102,3 +102,75 @@ async def test_a_team_launches_with_every_members_bundle_on_an_empty_home(
         "creative-writer",
         "technical-writer",
     ]
+
+
+def write_agent(agents_dir, name, prompt):
+    (agents_dir / name).mkdir(parents=True)
+    (agents_dir / name / "system_prompt.md").write_text(prompt)
+
+
+@pytest.mark.asyncio
+async def test_a_session_finds_the_local_agent_of_its_own_folder_not_the_engines(
+    client, empty_home, tmp_path
+):
+    # the engine runs in empty_home.project; the chat is in another folder
+    chat = tmp_path / "chat"
+    write_agent(chat / ".kollab" / "agents", "only-here", "ONLY-IN-THE-CHAT-FOLDER")
+
+    response = await client.post(
+        "/sessions", json={"agent": "only-here", "workspace": str(chat)}
+    )
+
+    assert response.status_code == 200, response.text
+    assert "ONLY-IN-THE-CHAT-FOLDER" in FakeSession.made[0].kwargs["system_prompt"]
+
+    # the engine's own folder does not have it
+    response = await client.post(
+        "/sessions", json={"agent": "only-here", "workspace": empty_home.project}
+    )
+
+    assert response.status_code == 404 and len(FakeSession.made) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_beats_global_beats_bundled_for_the_chats_folder(
+    client, empty_home, tmp_path
+):
+    chat, bare = tmp_path / "chat", tmp_path / "bare"
+    bare.mkdir()
+    chat.mkdir()
+
+    async def prompt_in(folder):
+        response = await client.post(
+            "/sessions", json={"agent": "coder", "workspace": str(folder)}
+        )
+        assert response.status_code == 200, response.text
+        return FakeSession.made[-1].kwargs["system_prompt"]
+
+    bundled = await prompt_in(chat)
+    assert "GLOBAL-CODER" not in bundled and "LOCAL-CODER" not in bundled
+
+    write_agent(empty_home.global_agents, "coder", "GLOBAL-CODER")
+    assert "GLOBAL-CODER" in await prompt_in(chat)
+
+    write_agent(chat / ".kollab" / "agents", "coder", "LOCAL-CODER")
+    local = await prompt_in(chat)
+    assert "LOCAL-CODER" in local and "GLOBAL-CODER" not in local
+    assert "GLOBAL-CODER" in await prompt_in(bare)  # another folder: no local tier
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_finds_the_local_agent_of_the_teams_folder(
+    client, empty_home, tmp_path
+):
+    folder = tmp_path / "team-folder"
+    write_agent(folder / ".kollab" / "agents", "research", "LOCAL-RESEARCH")
+
+    response = await client.post(
+        "/teams/marketing/launch", json={"workspace": str(folder)}
+    )
+
+    body = response.json()
+    assert body["failed"] == [], body
+    researcher = next(s for s in FakeSession.made if s.kwargs["agent"] == "research")
+    assert "LOCAL-RESEARCH" in researcher.kwargs["system_prompt"]

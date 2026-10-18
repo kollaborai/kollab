@@ -301,10 +301,11 @@ class SkillLibrary:
       2. global:   ~/.kollab/skills/  (user-installed)
       3. local:    .kollab/skills/    (project-specific, highest priority)
 
-    Local overrides global overrides bundled when names collide.
+    Local overrides global overrides bundled when names collide. The local tier
+    is ``project_path``'s, or the current folder's when none is given.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, project_path: Optional[Path] = None) -> None:
         from kollabor_config.config_utils import (
             get_bundled_skills_dir,
             get_global_skills_dir,
@@ -313,7 +314,7 @@ class SkillLibrary:
 
         self.bundled_dir = get_bundled_skills_dir()
         self.global_dir = get_global_skills_dir()
-        self.local_dir = get_local_skills_dir()
+        self.local_dir = get_local_skills_dir(project_path)
         self._skills: Dict[str, Skill] = {}
         self._skill_dirs: Dict[str, tuple[Path, str]] = {}  # name -> (dir, source)
         self._loaded = False
@@ -728,7 +729,9 @@ class Agent:
         # Condensed hub protocol: appended, never prepended, and only when
         # this process is actually on the hub. A hub-disabled or solo
         # process gets none, so its prompt stays identical to a plain run.
-        hub_protocol = self._load_hub_protocol(renderer)
+        hub_protocol = self._load_hub_protocol(
+            renderer, getattr(agent_manager, "project_path", None)
+        )
         if hub_protocol:
             parts.append(hub_protocol)
 
@@ -776,7 +779,7 @@ class Agent:
 
         return "\n".join(parts)
 
-    def _load_hub_protocol(self, renderer) -> str:
+    def _load_hub_protocol(self, renderer, project_path: Optional[Path] = None) -> str:
         """Load the condensed hub protocol doc, when the hub is on.
 
         Replaces the legacy agents/system/*.md prepend: the hub docs are
@@ -786,15 +789,13 @@ class Agent:
 
         Args:
             renderer: PromptRenderer instance for processing trender tags.
+            project_path: Folder whose local tier applies (default: the cwd's).
 
         Returns:
             Rendered hub protocol markdown, or empty string when the hub
             is off or no hub doc is present.
         """
-        from kollabor_config.config_utils import (
-            get_global_agents_dir,
-            get_local_agents_dir,
-        )
+        from kollabor_config.config_utils import get_agent_tier_dirs
 
         # The hub docs teach the mesh. A solo or hub-disabled process is
         # not on it (env set by the engine / kollabor.hub_env), so it gets
@@ -810,16 +811,13 @@ class Agent:
         if hub_off or not hub_on:
             return ""
 
-        # Local overrides global by filename; the first hub-*.md wins.
-        candidates: List[Path] = []
-        local_agents = get_local_agents_dir()
-        if local_agents:
-            local_system = local_agents / "system"
-            if local_system.is_dir():
-                candidates.extend(sorted(local_system.glob("hub-*.md")))
-        global_system = get_global_agents_dir() / "system"
-        if global_system.is_dir():
-            candidates.extend(sorted(global_system.glob("hub-*.md")))
+        # Local overrides global overrides bundled by filename (the bundled
+        # tier is all a computer nothing has seeded has); the first hub-*.md wins.
+        candidates: List[Path] = [
+            path
+            for agents_dir in get_agent_tier_dirs(project_path)
+            for path in sorted((agents_dir / "system").glob("hub-*.md"))
+        ]
 
         seen: set = set()
         for path in candidates:
@@ -939,16 +937,22 @@ class AgentManager:
     Local agents override global agents, and global ones bundled ones, with the same name.
     """
 
-    def __init__(self, config=None, event_bus=None):
+    def __init__(
+        self, config=None, event_bus=None, project_path: Optional[Path] = None
+    ):
         """
         Initialize agent manager with lazy loading.
 
         Args:
             config: Configuration object (optional)
             event_bus: Optional EventBus for hub trender tag rendering
+            project_path: Folder whose .kollab/ is the local tier (default: the
+                cwd's). A server that starts agents for chats in other folders
+                (the engine) passes the chat's folder.
         """
         self.config = config
         self.event_bus = event_bus
+        self.project_path = project_path
         self._agents: Dict[str, AgentRuntime] = {}
         self._active_agent_name: Optional[str] = None
         self._on_agent_changed = None  # Callback: fn(agent_or_none) called on activate/clear
@@ -956,10 +960,10 @@ class AgentManager:
         # Agent directories (see agent_tiers for the priority order)
         self.bundled_agents_dir = get_bundled_agents_dir()
         self.global_agents_dir = get_global_agents_dir()
-        self.local_agents_dir = get_local_agents_dir()
+        self.local_agents_dir = get_local_agents_dir(project_path)
 
         # Centralized skill library
-        self.skill_library = SkillLibrary()
+        self.skill_library = SkillLibrary(project_path)
 
         # Lazy loading: only discover agent names on init
         # Full agent data loaded on first access
@@ -1360,7 +1364,7 @@ class AgentManager:
             target_dir = self.global_agents_dir / agent.name
         else:
             # Use get_local_agents_path() for creation (creates dir if needed)
-            target_dir = get_local_agents_path() / agent.name
+            target_dir = get_local_agents_path(self.project_path) / agent.name
 
         # Ensure directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1642,7 +1646,7 @@ class AgentManager:
             return None
 
         # Create in .kollab/agents/ directory (creates local dir if needed)
-        local_path = get_local_agents_path()
+        local_path = get_local_agents_path(self.project_path)
         agent_dir = local_path / name
 
         if agent_dir.exists():
@@ -1690,7 +1694,7 @@ You are a specialized assistant.
                 )
 
             # Update local_agents_dir since we just created the local directory
-            self.local_agents_dir = get_local_agents_dir()
+            self.local_agents_dir = get_local_agents_dir(self.project_path)
 
             # Load the newly created agent
             # Check if it overrides a global agent
@@ -1870,7 +1874,7 @@ You are a specialized assistant.
         agent_dir = agent.directory
 
         # Only update local agents (not global)
-        local_path = get_local_agents_path()
+        local_path = get_local_agents_path(self.project_path)
         if not self.local_agents_dir or not agent_dir.is_relative_to(
             self.local_agents_dir
         ):

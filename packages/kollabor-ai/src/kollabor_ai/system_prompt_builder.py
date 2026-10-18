@@ -311,22 +311,21 @@ class SystemPromptBuilder:
         parts: List[Tuple[str, str]] = []
         base_path = None
         try:
-            from kollabor_config.config_utils import get_global_agents_dir
+            from kollabor_config.config_utils import get_agent_tier_dirs
 
-            sess = (
-                get_global_agents_dir()
-                / "_base"
-                / "sections"
-                / "01-session-context.md"
-            )
-            if sess.exists():
-                parts.append(
-                    (
-                        "session",
-                        '<trender type="include" path="01-session-context.md" />',
+            # Local, global, then bundled: a computer nothing has seeded
+            # (the engine on a new machine) still has the bundled template.
+            for agents_dir in get_agent_tier_dirs():
+                sess = agents_dir / "_base" / "sections" / "01-session-context.md"
+                if sess.exists():
+                    parts.append(
+                        (
+                            "session",
+                            '<trender type="include" path="01-session-context.md" />',
+                        )
                     )
-                )
-                base_path = sess.parent
+                    base_path = sess.parent
+                    break
         except Exception as e:
             logger.debug(f"Volatile session-context unavailable: {e}")
 

@@ -131,8 +131,12 @@ def _sanitize_system_prompt(prompt: Optional[str]) -> Optional[str]:
     return prompt
 
 
-def _resolve_agent(name: str) -> Optional[dict]:
+def _resolve_agent(name: str, workspace: Optional[str] = None) -> Optional[dict]:
     """Load agent definition by name: local, then global, then bundled (AgentManager's order).
+
+    The local tier is ``workspace``'s own ``.kollab/agents``, the folder the
+    daemon will run in (the engine's folder when none is given), never the
+    engine's cwd when the chat is elsewhere.
 
     Returns a dict with resolved keys:
       system_prompt: str - fully rendered (trender includes resolved)
@@ -149,7 +153,8 @@ def _resolve_agent(name: str) -> Optional[dict]:
         return None
 
     try:
-        am = AgentManager()
+        project = Path(workspace).expanduser().resolve() if workspace else None
+        am = AgentManager(project_path=project)
         found = am.find_agent_dir(name)
         agent_obj = Agent.from_directory(found[0], source=found[1]) if found else None
         if not agent_obj:
@@ -198,7 +203,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # Resolve agent definition if requested
     agent_data = None
     if body.agent:
-        agent_data = _resolve_agent(body.agent)
+        agent_data = _resolve_agent(body.agent, body.workspace)
         if agent_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{body.agent}' not found"
