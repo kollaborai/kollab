@@ -53,7 +53,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { formatSessionName, sessionHeading } from "@/utils/session-display";
+import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useRosters } from "@/hooks/use-rosters";
@@ -1094,13 +1094,13 @@ export default function App() {
                     season="auto"
                     follow
                     size={112}
-                    label={nextGem.display_name || titleCase(nextGem.name)}
+                    label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
                   <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
-                  {nextGem ? nextGem.display_name || titleCase(nextGem.name) : "Start a Session"}
+                  {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}
                 </h1>
                 <p
                   className={
