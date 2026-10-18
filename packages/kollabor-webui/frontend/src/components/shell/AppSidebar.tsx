@@ -548,13 +548,9 @@ export function AppSidebar({
                               <CliBadge harness={harness} />
                             ) : task ? (
                               task
-                            ) : session.external ? (
-                              folder ? `In ${folder}` : "Running"
                             ) : (
-                              <>
-                                {pool?.active && pool.solo ? "Off Hub · " : ""}
-                                {session.model || session.profile || "default"}
-                              </>
+                              // One format for every agent, however it started: what it runs and where.
+                              [pool?.active && pool.solo ? "Off Hub" : "", session.model || session.profile, folder].filter(Boolean).join(" · ") || "Running"
                             )}
                           </span>
                           {task && harness ? (
@@ -563,9 +559,9 @@ export function AppSidebar({
                           {session.acp_waiting && (
                             <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
                           )}
-                          {harness && ((pool?.active && pool.solo) || (session.external && folder)) ? (
+                          {harness && ((pool?.active && pool.solo) || folder) ? (
                             <span className="text-muted-foreground truncate text-[0.6875rem]">
-                              {[pool?.active && pool.solo ? "Off Hub" : "", session.external && folder ? `In ${folder}` : ""].filter(Boolean).join(" · ")}
+                              {[pool?.active && pool.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
                             </span>
                           ) : null}
                           {note?.error ? <OpenError text={note.error} /> : null}

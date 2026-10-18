@@ -1060,6 +1060,8 @@ class HubPlugin(BasePlugin):
         except Exception:
             pass
 
+        model = self._active_model_details()[2]
+
         # Create identity (AgentRuntime is the unified superset)
         self._identity = AgentRuntime(
             name=(
@@ -1072,6 +1074,9 @@ class HubPlugin(BasePlugin):
             )
             or None,
             solo=hub_solo_by_env(),
+            # The model rides in presence, so a row reads the same before the
+            # engine opens this agent as after.
+            tags={"model": model} if model else {},
         )
 
         # Start presence + clean up orphan sockets from past crashes
@@ -7028,6 +7033,9 @@ class HubPlugin(BasePlugin):
         """
         if not self._identity or not self._presence:
             return
+
+        self._identity.tags["model"] = model
+        self._presence.publish()
 
         identity = self._identity.identity
         model_line = f"model: {model}"
