@@ -1,7 +1,6 @@
 # Rosters and Teams
 
-Status: implemented (backend and contract). The web UI for picking and launching
-personas and teams is the next piece (see "Not built yet").
+Status: implemented: backend, CLI and web UI.
 
 An agent's name is not tied to gems. A **persona** is one launchable identity; a
 **roster** is a themed set of personas (the 24 gems, a marketing crew, your own
@@ -185,14 +184,43 @@ start. 404 for an unknown team.
 `GET /agents` rows (the launch list) gain `roster`, `display_name`, `avatar` and `agent`
 (`agent_type` stays); with `?workspace=` the list is that folder's roster.
 
+`GET /sessions` `offline[]` rows (agents that ran in the engine's folder and are not
+running) carry `display_name`, `avatar`, `color` and `caste` of the persona their name
+resolves to in any roster (a bare name prefers the folder's roster), so a persona
+launched from another roster's folder keeps its look when it stops. A name that is no
+persona (the koordinator) carries none of them; the client falls back to its pool entry.
+
 ## CLI and TUI
 
 `kollab --as roster/name`; `/hub orgs` lists teams; `/hub org <team> [mission]` and
 `kollab --hub org <team>` / `--org <team>` launch one (detached processes, each with
 its brief). Help text says "team".
 
+## Web UI
+
+Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `AgentPicker`,
+`AgentLibrary`, `launch-choices.ts`, `team-model.ts`), `hooks/use-rosters.ts`.
+
+- **Names.** A persona is called by its `display_name` in rows (live, offline, remote),
+  the chat header, Session Controls, Who Is Online and the Session settings tab, and
+  falls back to its identity in Title Case (`agentName` in `utils/session-display.ts`).
+  The sidebar's gem dressing (Gem Studio) stays for gems.
+- **Avatar.** One component draws every agent picture: kind `gem` (or none) is the 3D
+  gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
+  files are fetched with the bearer token into blob URLs; a file that fails keeps the
+  initials.
+- **New Session.** *Agent* is one select grouped by roster: the chosen Workspace's roster
+  first (from `GET /agents?workspace=`, koordinator first), then each other roster's
+  personas from `GET /rosters`, which start as `roster/name`. Each row shows picture,
+  name and job title. "In Use" is per folder and by bare name: a name running in the
+  Workspace is disabled in every group, one running only in another folder is free.
+  Picking a persona preselects its *Type* (the agent bundle; `agent` in the request,
+  which the user can override). With no answer from the folder nobody is offered.
+- **Agents view.** Rosters tab (personas with Name, Type, Model Profile, Skills,
+  Personality, Prompt), Teams tab (outline by `reports_to`, lead marked, Launch Team
+  into the chosen folder: Started, Already Running, Failed), and the `problems` grouped
+  by file. The folder picker applies project rosters and teams.
+
 ## Not built yet
 
-- The web UI: persona picker with avatars, a Library view of rosters and teams,
-  Launch Team into a folder (plan: `HANDOFF.md` of the roster lane).
 - A `GET /rosters` entry for personas that exist only inside a team.

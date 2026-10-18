@@ -41,5 +41,11 @@ A file with the same `name` as a bundled one replaces it. A broken file never st
 Kollab: the bad persona or file is skipped and listed under `problems` in
 `GET /rosters` and `GET /teams`.
 
+In the web UI, New Session's **Agent** field lists the folder's roster first and every
+other roster's personas after it (each with its picture and job title); picking one
+fills in its **Type**. The sidebar's **Agents** button shows every roster and team and
+launches a team into a folder (**Launch Team**). Rows, the chat header and the settings
+call a persona by its display name.
+
 Web/engine: `GET /rosters`, `GET /teams`, `POST /teams/<name>/launch {"workspace": "..."}`.
 Contract and every field: [docs/specs/rosters-and-teams.md](../specs/rosters-and-teams.md).
