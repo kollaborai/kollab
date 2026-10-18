@@ -21,6 +21,8 @@ export type Session = {
   total_output_tokens?: number;
   identity?: string;
   daemon_pid?: number;
+  /** The running agent itself: its daemon's hub presence agent id, new for every process and the same whichever way this engine met it. A relaunched agent has another; what hiding a row keys on. */
+  instance?: string;
   /** Started outside this engine (a terminal, another engine): it opens on first use and Delete is not offered, since the engine only detaches from it. */
   external?: boolean;
   /** The computer an agent opened through the network runs on (its id is agent@device); empty for this one. */
@@ -248,6 +250,9 @@ export type WorkspaceEntry = { path: string; name: string; live: number };
 
 /** An agent that ran in the engine's folder and is not running: opening it starts it again. */
 export type OfflineAgent = { identity: string; workspace: string; last_ran: number };
+
+/** A sidebar row the user hid, for every client of this engine (engine: hidden_agents.py). `key` is hidden-agents.ts's; a running agent's entry names its `instance` and lasts as long as that process. */
+export type HiddenAgent = { key: string; label: string; detail: string; instance?: string };
 
 export type SlashParameter = {
   name: string;
@@ -704,7 +709,21 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork }>("/sessions");
+    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork; hidden?: HiddenAgent[] }>("/sessions");
+  }
+
+  /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
+  hideAgent(entry: HiddenAgent) {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
+  }
+
+  /** Show a hidden row again. */
+  showAgent(key: string) {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/unhide", { method: "POST", body: JSON.stringify({ key }) });
+  }
+
+  showAllAgents() {
+    return this.json<{ hidden: HiddenAgent[] }>("/sidebar/unhide", { method: "POST", body: JSON.stringify({ all: true }) });
   }
 
 

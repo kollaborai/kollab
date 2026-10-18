@@ -202,16 +202,22 @@ bottom borders meet at the divider. The mobile sheet uses its independent 3rem
 header. Unmount disconnects the observer and clears the measured height.
 
 Each local, offline or remote agent row offers **Hide Agent** in its action menu
-and right-click menu. Hiding changes browser-local visibility only: it does not
-select another chat, stop an agent, remove history or change Hub presence. The
-footer's **Hidden Agents** list can show one agent or **Show All**, including
-entries absent from the latest roster. Group counts reflect visible rows.
-Preferences use `kollab.sidebar.hidden-agents` in local storage; blocked or invalid
-storage still permits in-memory hiding. Open tabs synchronize storage changes.
-Local preferences follow identity plus workspace across running/offline transitions
-and session restarts; unnamed sessions use their session id. Remote preferences
-include network, device, workspace and identity, so hiding one agent does not hide
-an agent with the same name elsewhere.
+and right-click menu. Hiding changes visibility only: it does not select another
+chat, stop an agent, remove history or change Hub presence. The engine keeps the
+list (`~/.kollab/hub/hidden-agents.json`, `kollabor_engine/hidden_agents.py`) and
+sends it with every `GET /sessions` as `hidden`, so Kollab.app, every browser and
+the phone hide the same rows within one session refresh. `POST /sidebar/hide` and
+`POST /sidebar/unhide` (a `key`, or `all`) change it and answer with the list;
+`GET /sidebar/hidden` reads it. A running agent is hidden as the process it is:
+every session row carries an `instance` (the hub presence agent id of its daemon,
+new for every process), so an agent launched later under the same name in the same
+folder shows, and an entry is dropped from the list once its process is gone.
+Offline rows are hidden by folder and name, remote rows by network, device,
+workspace and name, so hiding one agent does not hide an agent with the same name
+elsewhere. The footer's **Hidden Agents** list can show one agent or **Show All**.
+Group counts reflect visible rows. The browser keeps no list of its own: the old
+`kollab.sidebar.hidden-agents` local storage key could not tell two agents of one
+name apart, so it is removed on load and never imported.
 
 ## Chat presentation
 

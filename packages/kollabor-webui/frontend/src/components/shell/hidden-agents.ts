@@ -1,35 +1,37 @@
-export const HIDDEN_AGENTS_KEY = "kollab.sidebar.hidden-agents";
+import type { HiddenAgent } from "@/api";
 
-export type HiddenAgent = { key: string; label: string; detail: string };
+export type { HiddenAgent };
 
-/** Agent visibility follows its location and identity, including after a restart. */
-export function sidebarAgentKey({ name, workspace, device, network, sessionId }: {
+/**
+ * What hides a sidebar row. A running agent is its process (`instance`, the
+ * daemon's hub presence agent id), so an agent launched later under the same
+ * name in the same folder is another row and shows. An offline row (nothing
+ * runs) and a row of another computer's agent have no process to name: they go
+ * by where they are and what they are called.
+ */
+export function sidebarAgentKey({ instance, name, workspace, device, network }: {
+  instance?: string | null;
   name?: string | null;
   workspace?: string | null;
   device?: string | null;
   network?: string | null;
-  sessionId?: string;
 }): string {
-  const identity = name?.trim().toLowerCase() || sessionId || "";
+  if (instance) return JSON.stringify(["agent", instance]);
+  const identity = name?.trim().toLowerCase() || "";
   return JSON.stringify(device
     ? ["remote", network || "", device, workspace || "", identity]
-    : ["local", workspace || "", identity]);
+    : ["offline", workspace || "", identity]);
 }
 
-/** Ignore malformed storage without losing other valid visibility preferences. */
-export function readHiddenAgents(stored: string | null): HiddenAgent[] {
-  try {
-    const values: unknown = JSON.parse(stored || "[]");
-    if (!Array.isArray(values)) return [];
-    const entries = new Map<string, HiddenAgent>();
-    for (const value of values) {
-      if (value && typeof value === "object" && typeof value.key === "string" && value.key
-        && typeof value.label === "string" && value.label && typeof value.detail === "string") {
-        entries.set(value.key, { key: value.key, label: value.label, detail: value.detail });
-      }
-    }
-    return [...entries.values()];
-  } catch {
-    return [];
-  }
+const LEGACY_KEY = "kollab.sidebar.hidden-agents";
+
+/**
+ * This browser used to keep its own list under LEGACY_KEY, keyed by folder and
+ * name, which could not tell two agents of one name apart (importing it would
+ * hide every sapphire in a folder). The engine keeps the list now, so the old
+ * one is dropped and never read.
+ */
+export function dropLegacyHiddenAgents(): void {
+  try { localStorage.removeItem(LEGACY_KEY); }
+  catch { /* Blocked storage holds nothing to drop. */ }
 }

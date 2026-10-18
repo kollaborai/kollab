@@ -56,6 +56,12 @@ if Node/npm is unavailable.
   computer's trust allows: under `open` (the default) every computer of your
   network, under `agents` only the agents it lets this one message, under
   `manual` none.
+- **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
+  every window that uses this engine (Kollab.app, browsers, the phone); the
+  footer's Hidden Agents list shows it again. The engine keeps the list
+  (`~/.kollab/hub/hidden-agents.json`) and sends it with `GET /sessions` as
+  `hidden`. A running agent is hidden as the process it is (its `instance`), so
+  one launched later under the same name shows.
 - **Multi-network (#158)**: when this device belongs to more than one network,
   the sidebar nests them — NETWORKS > DEVICES > WORKSPACES > AGENTS — with
   the devices and workspaces of every membership (`network.networks` on

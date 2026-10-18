@@ -51,6 +51,7 @@ import {
 } from "./runtime";
 import { formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
+import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -309,6 +310,7 @@ export default function App() {
   const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
   const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [offline, setOffline] = useState<OfflineAgent[]>([]);
+  const hiddenAgents = useHiddenAgents(api);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
@@ -389,12 +391,15 @@ export default function App() {
 
   useEffect(() => abortRecovery, [abortRecovery]);
 
+  const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const loadSessions = useCallback(async () => {
+    const hiddenStamp = stampHidden();
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
     setNetwork(result.network ?? { device: "", remote: [] });
     setOffline(result.offline ?? []);
+    syncHidden(hiddenStamp, result.hidden);
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -402,7 +407,7 @@ export default function App() {
       .then((p) => setProfiles(p.profiles || []))
       .catch(() => {});
     return next;
-  }, []);
+  }, [stampHidden, syncHidden]);
 
   // The folder's pool; an agent taken there cannot be the one New Session starts, so the
   // pick falls to the first free one (the next free gem in that folder).
@@ -903,6 +908,7 @@ export default function App() {
           launchAgents={launchPool}
           network={network}
           offline={offline}
+          hiddenAgents={hiddenAgents}
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}

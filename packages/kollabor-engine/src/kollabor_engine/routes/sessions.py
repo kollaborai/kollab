@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
+from .. import hidden_agents
 from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
@@ -612,11 +613,15 @@ async def list_sessions():
         and item.get("daemon_pid") not in local_pids
         and not pool.owns(item)
     ]
+    rows = sessions + discovered
+    hidden_agents.stamp_instances(rows, found)
     return {
-        "sessions": sessions + discovered,
+        "sessions": rows,
         "discovered": discovered,
         "active_count": len(sessions) + len(discovered),
         "offline": _offline_agents(found, registry),
+        # The rows the user hid, for every client of this engine (hidden_agents.py).
+        "hidden": hidden_agents.visible({row["instance"] for row in rows}),
         "network": merge_view_and_memberships(
             _network_view(await _network_snapshot(registry))
         ),

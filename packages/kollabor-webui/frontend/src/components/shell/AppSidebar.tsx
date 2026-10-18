@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, OfflineAgent, Profile, Session } from "@/api";
 import { GemAvatar } from "@/components/gems/GemAvatar";
@@ -8,7 +8,8 @@ import { groupNetworkTree } from "@/components/shell/agent-network";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
-import { HIDDEN_AGENTS_KEY, readHiddenAgents, sidebarAgentKey, type HiddenAgent } from "@/components/shell/hidden-agents";
+import { sidebarAgentKey } from "@/components/shell/hidden-agents";
+import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
@@ -112,6 +113,7 @@ export function AppSidebar({
   launchAgents,
   network,
   offline,
+  hiddenAgents,
   bundles,
   selectedProfile,
   selectedIdentity,
@@ -151,6 +153,8 @@ export function AppSidebar({
   network: AgentNetwork;
   /** Agents that ran in this folder and are not running; a click starts one. */
   offline: OfflineAgent[];
+  /** The rows hidden for every window of this engine, and how to change that. */
+  hiddenAgents: HiddenAgents;
   bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
@@ -184,32 +188,8 @@ export function AppSidebar({
   onProperties: (id: string, tab?: "chat") => void;
 }) {
   const { setOpenMobile } = useSidebar();
-  const [hiddenAgents, setHiddenAgents] = useState<HiddenAgent[]>(() => {
-    try { return readHiddenAgents(localStorage.getItem(HIDDEN_AGENTS_KEY)); }
-    catch { return []; }
-  });
-  useEffect(() => {
-    const sync = (event: StorageEvent) => {
-      if (event.key === HIDDEN_AGENTS_KEY || event.key === null) {
-        setHiddenAgents(readHiddenAgents(event.newValue));
-      }
-    };
-    window.addEventListener("storage", sync);
-    return () => window.removeEventListener("storage", sync);
-  }, []);
-  const changeHidden = (change: (previous: HiddenAgent[]) => HiddenAgent[]) => {
-    setHiddenAgents((previous) => {
-      const next = change(previous);
-      try { localStorage.setItem(HIDDEN_AGENTS_KEY, JSON.stringify(next)); }
-      catch { /* Hiding remains available when browser storage is blocked. */ }
-      return next;
-    });
-  };
-  const hide = (entry: HiddenAgent) => changeHidden((previous) => [
-    ...previous.filter((agent) => agent.key !== entry.key), entry,
-  ]);
-  const show = (key: string) => changeHidden((previous) => previous.filter((agent) => agent.key !== key));
-  const hiddenKeys = useMemo(() => new Set(hiddenAgents.map((agent) => agent.key)), [hiddenAgents]);
+  const { hidden: hiddenList, error: hiddenError, hide, show, showAll } = hiddenAgents;
+  const hiddenKeys = useMemo(() => new Set(hiddenList.map((agent) => agent.key)), [hiddenList]);
   // Deleting a session stops its daemon and is irreversible, so it goes behind
   // an AlertDialog rather than the bare "x" the previous shell shipped.
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
@@ -279,10 +259,9 @@ export function AppSidebar({
     });
   // An agent opened on another computer is a session too; it stays in its computer's group.
   const localSessions = useMemo(() => sessions.filter((session) => !session.device), [sessions]);
-  const sessionKey = (session: Session) => sidebarAgentKey({
-    name: session.identity || session.agent, workspace: session.workspace || workspacePath,
-    sessionId: session.session_id,
-  });
+  // A running agent is hidden as the process it is, not as its name in a folder.
+  const instanceOf = (session: Session) => session.instance || session.session_id;
+  const sessionKey = (session: Session) => sidebarAgentKey({ instance: instanceOf(session) });
   const offlineKey = (agent: OfflineAgent) => sidebarAgentKey({ name: agent.identity, workspace: agent.workspace });
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
@@ -508,7 +487,7 @@ export function AppSidebar({
                 <AgentSidebarRow
                   key={session.session_id}
                   name={sessionHeading(session)}
-                  onHide={() => hide({ key: sessionKey(session), label: sessionHeading(session), detail: session.workspace || workspacePath })}
+                  onHide={() => hide({ key: sessionKey(session), label: sessionHeading(session), detail: session.workspace || workspacePath, instance: instanceOf(session) })}
                   onProperties={session.identity ? () => openProperties("chat") : undefined}
                   onDelete={session.external ? undefined : () => setPendingDelete(session)}
                   busy={busy}
@@ -765,17 +744,22 @@ export function AppSidebar({
 
       <SidebarFooter className="p-2">
         <SidebarMenu>
-          {hiddenAgents.length ? (
+          {hiddenError ? (
+            <SidebarMenuItem>
+              <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
+            </SidebarMenuItem>
+          ) : null}
+          {hiddenList.length ? (
             <SidebarMenuItem>
               <Popover>
                 <PopoverTrigger asChild>
-                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenAgents.length})</span></SidebarMenuButton>
+                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenList.length})</span></SidebarMenuButton>
                 </PopoverTrigger>
                 <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
                   <p className="text-sm font-semibold">Hidden Agents</p>
-                  <p className="text-muted-foreground mt-1 text-xs">Hidden in this browser.</p>
+                  <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
                   <ul className="my-2 max-h-64 overflow-y-auto">
-                    {hiddenAgents.map((agent) => (
+                    {hiddenList.map((agent) => (
                       <li key={agent.key} className="flex items-center gap-2 py-1.5">
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm">{agent.label}</p>
@@ -785,7 +769,7 @@ export function AppSidebar({
                       </li>
                     ))}
                   </ul>
-                  <Button size="sm" variant="outline" className="w-full" onClick={() => changeHidden(() => [])}>Show All</Button>
+                  <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
                 </PopoverContent>
               </Popover>
             </SidebarMenuItem>

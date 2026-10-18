@@ -66,3 +66,14 @@ def no_real_recent_workspaces(tmp_path, monkeypatch):
     path = tmp_path / "engine-workspaces.json"
     monkeypatch.setattr(workspaces, "_recent_path", lambda: path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_real_hidden_agents(tmp_path, monkeypatch):
+    """The sidebar rows the user hid go to a temp file."""
+    import kollabor_engine.hidden_agents as hidden_agents  # type: ignore[import-not-found]
+
+    path = tmp_path / "hub" / "hidden-agents.json"
+    monkeypatch.setattr(hidden_agents, "hidden_path", lambda: path)
+    monkeypatch.setattr(hidden_agents, "_learned", {})
+    return path
