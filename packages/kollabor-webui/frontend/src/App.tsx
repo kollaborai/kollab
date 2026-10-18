@@ -374,6 +374,8 @@ export default function App() {
     controller: AbortController;
   } | null>(null);
   const refreshSignalRef = useRef(0);
+  // Sessions whose thread was built from the engine's disk seed (stale).
+  const staleHistoryRef = useRef(new Set<string>());
 
   const abortRecovery = useCallback(() => {
     recoveryRef.current?.controller.abort();
@@ -462,6 +464,10 @@ export default function App() {
         api.getHistory(sessionId),
         api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
       ]);
+      // The daemon's answer comes as history_updated, which can fire before
+      // the stream below is open; see followEvents.
+      if (history.stale) staleHistoryRef.current.add(sessionId);
+      else staleHistoryRef.current.delete(sessionId);
       return buildInitialState(
         sessionId,
         nextSessions,
@@ -478,11 +484,17 @@ export default function App() {
     const retryTimerRef = { current: null as number | null };
     const refreshActiveState = async (sessionId: string) => {
       try {
+        // A thread built from the engine's disk seed is no prefix of the
+        // daemon's history, so the daemon's answer replaces it whole.
+        const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
         const nextState = await loadState(sessionId, nextSessions);
         if (controller.signal.aborted || activeId !== sessionId) return;
+        // Still the seed: the daemon's answer comes as history_updated.
+        if (seeded && staleHistoryRef.current.has(sessionId)) return;
         setInitialState(nextState);
+        if (seeded) setRuntimeEpoch((epoch) => epoch + 1);
         refreshSignalRef.current += 1;
         setRefreshSignal(refreshSignalRef.current);
       } catch {
@@ -510,6 +522,11 @@ export default function App() {
               void refreshActiveState(activeId);
             }
             if (type === "turn_complete") midTurn = false;
+          }, () => {
+            // Open, so nothing slips past from here. The history_updated that
+            // replaces a seed can have fired before this stream existed: ask
+            // again now.
+            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;

@@ -939,17 +939,22 @@ export class EngineApi {
    * Follow the daemon's existing turn after a browser reload. The endpoint is
    * SSE and terminates at turn_complete; callers provide an AbortSignal so a
    * session switch can stop the reconnect without leaking a subscription.
+   * onOpen runs once the engine holds the subscription (it subscribes before
+   * it answers): an event that fired earlier is gone, so a caller that may
+   * have missed one reloads then.
    */
   async streamEvents(
     sessionId: string,
     signal?: AbortSignal,
     onEvent?: (event: SessionEvent) => void,
+    onOpen?: () => void,
   ): Promise<void> {
     const response = await this.request(
       `/sessions/${encodeURIComponent(sessionId)}/events`,
       { method: "GET", signal },
     );
     if (!response.body) throw new Error("event stream response has no body");
+    onOpen?.();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
