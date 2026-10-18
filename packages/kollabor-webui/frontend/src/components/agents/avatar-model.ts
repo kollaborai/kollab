@@ -63,6 +63,11 @@ export function imageSource(
   return { fetch: `${avatar.url}${avatar.url.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(folder)}` };
 }
 
+/** A gem, or no avatar at all, is drawn as the 3D gem; any other avatar is a flat tile with no gem look to dress. */
+export function isGemAvatar(avatar: AvatarSpec | null | undefined): avatar is { kind: "gem" } | null | undefined {
+  return !avatar || avatar.kind === "gem";
+}
+
 /** The identity a New Session or a launch sends: a plain name, or `roster/name` for a roster the folder does not draw from. */
 export function launchRef(persona: { name: string; roster?: string }, folderRoster: string): string {
   return persona.roster && persona.roster !== folderRoster ? `${persona.roster}/${persona.name}` : persona.name;

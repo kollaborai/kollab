@@ -11,7 +11,7 @@ import {
 import type { AvatarSpec, EngineApi } from "@/api";
 import { GemAvatar, type GemAvatarProps } from "@/components/gems/GemAvatar";
 import { cn } from "@/lib/utils";
-import { imageSource, initialsOf, inkFor, tileColor } from "./avatar-model";
+import { imageSource, initialsOf, inkFor, isGemAvatar, tileColor } from "./avatar-model";
 
 export type AvatarProps = GemAvatarProps & {
   /** What the engine says the agent looks like; absent or a gem draws the 3D gem. */
@@ -86,7 +86,7 @@ function useAvatarPicture(avatar: AvatarSpec | null | undefined, folder: string)
  * color in the same layout box: a picture, an emoji, or initials.
  */
 export function Avatar({ avatar, displayName, folder, ...gem }: AvatarProps) {
-  if (!avatar || avatar.kind === "gem") return <GemAvatar {...gem} />;
+  if (isGemAvatar(avatar)) return <GemAvatar {...gem} />;
   return <FlatAvatar avatar={avatar} displayName={displayName} folder={folder ?? ""} {...gem} />;
 }
 

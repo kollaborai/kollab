@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { imageSource, initialsOf, inkFor, launchRef, tileColor } from "../src/components/agents/avatar-model.ts";
+import { imageSource, initialsOf, inkFor, isGemAvatar, launchRef, tileColor } from "../src/components/agents/avatar-model.ts";
 
 test("initials are the first letters of the first and last word", () => {
   assert.equal(initialsOf("Maya Lindqvist", "maya"), "ML");
@@ -44,4 +44,13 @@ test("only a roster the folder does not draw from needs its name in the launch i
   assert.equal(launchRef({ name: "maya", roster: "marketing-crew" }, "gems"), "marketing-crew/maya");
   assert.equal(launchRef({ name: "koordinator", roster: "" }, "marketing-crew"), "koordinator");
   assert.equal(launchRef({ name: "maya" }, "gems"), "maya");
+});
+
+test("only a gem, or no avatar, is drawn as a gem; the rest are flat tiles with no look to dress", () => {
+  assert.equal(isGemAvatar(undefined), true);
+  assert.equal(isGemAvatar(null), true);
+  assert.equal(isGemAvatar({ kind: "gem" }), true);
+  assert.equal(isGemAvatar({ kind: "initials" }), false);
+  assert.equal(isGemAvatar({ kind: "emoji", value: "\u{1f3af}" }), false);
+  assert.equal(isGemAvatar({ kind: "image", url: "/rosters/field-crew/avatars/rae.svg" }), false);
 });
