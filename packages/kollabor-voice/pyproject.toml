@@ -25,3 +25,8 @@ full = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kollabor_voice"]
+
+[tool.black]
+# Used when black runs on this package's files; the root config skips them.
+line-length = 88
+target-version = ["py312"]

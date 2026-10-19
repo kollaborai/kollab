@@ -154,6 +154,9 @@ members = ["packages/kollabor-*"]
 line-length = 88
 target-version = ["py314"]
 include = '\.pyi?$'
+# Black has no per-file target, and py314 output (`except A, B:`) does not parse
+# on the voice service's 3.12/3.13 runtime. That package has its own [tool.black].
+force-exclude = '^/packages/kollabor-voice/'
 
 [tool.ruff]
 line-length = 120
