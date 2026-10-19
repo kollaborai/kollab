@@ -122,8 +122,12 @@ def verify_manifest(directory: Path, version: str) -> None:
 
 
 def scie_env() -> dict[str, str]:
-    """This environment minus any scie identity, which would make a scie act as another."""
-    env = {key: val for key, val in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
+    """This environment minus any scie/pex identity, which would make one act as another."""
+    env = {
+        key: val
+        for key, val in os.environ.items()
+        if key not in ("SCIE", "SCIE_ARGV0", "PEX", "__PEX_EXE__", "__PEX_ENTRY_POINT__")
+    }
     env["KOLLAB_NO_KEYRING"] = "1"
     return env
 
