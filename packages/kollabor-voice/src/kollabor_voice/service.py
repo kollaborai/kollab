@@ -506,11 +506,23 @@ class VoiceService:
                 else Recorder(RecorderConfig(queue_maxsize=100))
             )
             self.last_seq = None
-            await asyncio.to_thread(self.recorder.start)
+            try:
+                # PortAudio device open can stall indefinitely (CoreAudio
+                # mutex, TCC prompts for a detached daemon). Bounded like
+                # stop_capture so a stalled start releases the lifecycle
+                # lock instead of wedging claim/watch.
+                await asyncio.wait_for(asyncio.to_thread(self.recorder.start), timeout=5)
+            except asyncio.TimeoutError:
+                raise VoiceError(
+                    "capture_start_timeout",
+                    "Microphone did not open within 5s; run /voice retry",
+                ) from None
         except Exception as exc:
+            log.exception("Voice capture failed to start")
             self.error = str(exc)
             if self.recorder:
-                await asyncio.to_thread(self.recorder.stop)
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self.recorder.stop)
             self.recorder = None
             self.segmenter = None
 
@@ -534,9 +546,20 @@ class VoiceService:
     async def stop_capture(self):
         if self.recorder:
             recorder, self.recorder = self.recorder, None
-            await asyncio.to_thread(recorder.stop)
-            while not recorder.frames.empty():
-                self.consume_frame(recorder.frames.get_nowait(), final=False)
+            try:
+                # CoreAudio can deadlock inside AudioOutputUnitStop (observed
+                # live: HALB_Mutex::Lock held forever). Bounded so the
+                # lifecycle lock is released and voice stays recoverable
+                # instead of wedging every future claim.
+                await asyncio.wait_for(asyncio.to_thread(recorder.stop), timeout=5)
+            except asyncio.TimeoutError:
+                log.error(
+                    "recorder.stop did not finish within 5s; abandoning the "
+                    "capture thread and continuing teardown"
+                )
+            finally:
+                while not recorder.frames.empty():
+                    self.consume_frame(recorder.frames.get_nowait(), final=False)
         if self.segmenter:
             segment = self.segmenter.flush()
             if segment:

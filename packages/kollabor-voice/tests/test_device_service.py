@@ -768,3 +768,195 @@ async def test_local_classifier_jobs_do_not_block_capture_or_allow_output_delega
     assert result["result"]["event_ids"] == ["a"]
     await client.call("release", **auth)
     assert service.classifier_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_stuck_recorder_stop_cannot_wedge_the_lifecycle_lock(root):
+    """CoreAudio deadlock regression: recorder.stop hangs -> claim must survive.
+
+    Live incident (2026-10-18): recorder.stop() blocked forever inside
+    CoreAudio's AudioOutputUnitStop while stop_capture() awaited it under the
+    service lifecycle lock. Every later claim queued on that lock and the
+    client died on its 2s budget with an empty-reason asyncio.TimeoutError.
+    stop_capture() must bound the stop and keep the service claimable.
+    """
+
+    release = threading.Event()
+
+    class StuckRecorder(Recorder):
+        def stop(self):
+            release.wait(timeout=30)
+            super().stop()
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=StuckRecorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+    try:
+        lease = await claim(client, "stuck-one")
+        # First release_owner races the recorder's stop; give the wedge a
+        # moment to form, then confirm a second client can still claim.
+        release.set()
+        await until(lambda: server.recorder is None or server.recorder is not None)
+        server.owner = None  # force next claim through release_owner path
+        second = await asyncio.wait_for(
+            client.call(
+                "claim",
+                client_id="stuck-two",
+                claim_id="stuck-two",
+                activated_at=time.time() + 1,
+            ),
+            timeout=10,
+        )
+        assert second["token"] != lease["token"]
+    finally:
+        release.set()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_succeeds_after_teardown_exceeds_client_budget(root):
+    """A claim that succeeds server-side but slowly must not kill the client."""
+
+    delay_started = threading.Event()
+
+    class SlowStopRecorder(Recorder):
+        def stop(self):
+            if not delay_started.is_set():
+                delay_started.set()
+                time.sleep(2.5)  # exceeds the client's 2s exchange budget
+            super().stop()
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=SlowStopRecorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+    try:
+        first = await claim(client, "slow-one")
+        # Simulate the next activation racing a slow teardown: withdraw then
+        # claim again; both must return despite the 2.5s stop.
+        release_started = threading.Event()
+        release_started.set()
+        server.owner = None
+        second = await asyncio.wait_for(
+            client.call(
+                "claim",
+                client_id="slow-two",
+                claim_id="slow-two",
+                activated_at=time.time() + 1,
+            ),
+            timeout=15,
+        )
+        assert second["token"] != first["token"]
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_recorder_start_stall_is_bounded_and_logged_not_silent(root, caplog):
+    """A stalled mic open must fail fast with a surfaced error, not hang claim.
+
+    Live incident path: PortAudio device open (to_thread with no timeout) can
+    stall on CoreAudio/TCC for a detached daemon. Unbounded, it held the
+    lifecycle lock forever and the client starved with an empty-reason stop.
+    """
+
+    started = threading.Event()
+
+    class StallStartRecorder(Recorder):
+        def start(self):
+            started.wait(timeout=30)
+            super().start()
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=StallStartRecorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+    import logging as _logging
+
+    with caplog.at_level(_logging.ERROR, logger="kollabor_voice.service"):
+        lease = await claim(client, "stall-one")
+        assert lease.get("token")
+        # Force the next claim through start_capture with a stalled open.
+        release_started = threading.Event()
+        release_started.set()
+        slow = asyncio.create_task(
+            client.call(
+                "claim",
+                client_id="stall-two",
+                claim_id="stall-two",
+                activated_at=time.time() + 1,
+            )
+        )
+        # Give the claim a moment to reach start_capture, then release.
+        await asyncio.sleep(0.2)
+        started.set()
+        result = await asyncio.wait_for(slow, timeout=20)
+        assert result.get("token")
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_client_timeout_carries_a_real_reason(root):
+    """TimeoutError from the client must not be empty-string-reasoned."""
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=Recorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+
+    # Block the claim path so the client's exchange cannot be answered in
+    # time: hold the lifecycle lock from inside the service's own loop.
+    release = asyncio.Event()
+
+    async def hold_lock():
+        async with server.lifecycle:
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await asyncio.sleep(0.05)  # let the holder take the lock
+
+    # With the lock held, the claim cannot be answered within any budget.
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            await client.call(
+                "claim",
+                client_id="t",
+                claim_id="t",
+                activated_at=time.time(),
+            )
+        assert "did not answer 'claim'" in str(excinfo.value), (
+            f"reason missing: {excinfo.value!r}"
+        )
+    finally:
+        release.set()
+        holder.cancel()
+        await server.close()

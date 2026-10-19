@@ -704,3 +704,182 @@ async def test_own_voice_echo_never_reaches_the_classifier_or_the_agent():
     assert seen == [["request"]]
     assert [d["message"] for d in delivered] == ["Please check the README."]
     assert plugin.status()["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_first_bind_timeout_retries_and_never_kills_the_voice_client(
+    tmp_path_factory,
+):
+    """Cold-start regression: a daemon still busy with startup must not kill voice.
+
+    Before the fix, the very first voice.bind (timeout=2s) firing during daemon
+    startup congestion flipped requested=False and tore the client down. Now the
+    bind retries, the mic stays up, and heartbeat routing starts only once bound.
+    """
+    from kollabor_rpc import RpcTimeoutError
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.requested = True
+    plugin._lease = {"epoch": "cold", "token": "t", "cursor": 0, "stream_id": "s"}
+    plugin._state = {"state": "ready"}
+
+    plugin.classifier_name = "provider"  # skip laya classifier_prepare in setup
+
+    async def local_status(op, progress=None, **params):
+        if op == "claim":
+            return plugin._lease
+        if op == "heartbeat":
+            return {"state": "ready"}
+        if op == "read":
+            return {"cursor": 0, "records": []}
+        return {"ready": True, "state": "ready", "cursor": 0}
+
+    async def ensure(progress):
+        return {"ready": True, "state": "ready", "cursor": 0}
+
+    tmp_consumers = tmp_path_factory.mktemp("voice-consumers")
+    fake_client = SimpleNamespace(
+        root=tmp_consumers,
+        call=AsyncMock(side_effect=local_status),
+        ensure=ensure,
+        shutdown=AsyncMock(),
+    )
+    plugin._client = fake_client
+
+    # _run() constructs its own VoiceClient; hand back the stub instead.
+    import kollabor_voice.client as client_module
+
+    try:
+        real_cls = client_module.VoiceClient
+        client_module.VoiceClient = lambda *a, **k: fake_client
+
+        timeouts = {"n": 0}
+
+        async def flaky_bind(method, params=None, timeout=None, **kwargs):
+            if method == "voice.bind":
+                timeouts["n"] += 1
+                if timeouts["n"] == 1:
+                    raise RpcTimeoutError("rpc call 'voice.bind' timed out after 5s")
+                assert timeout == 2, "retry must use the steady-state budget"
+                return {"bound": True}
+            if method == "heartbeat":
+                return {"state": "ready"}
+            return {}
+
+        rpc = SimpleNamespace(call=AsyncMock(side_effect=flaky_bind))
+        plugin._event_bus.register_service("rpc_client", rpc)
+
+        stopped = []
+
+        async def run_client():
+            try:
+                await plugin._run()
+            except Exception as exc:  # pragma: no cover - failure detail on assert
+                stopped.append(exc)
+
+        task = asyncio.create_task(run_client())
+
+        async def wait_for(predicate, budget=3.0):
+            deadline = time.monotonic() + budget
+            while not predicate():
+                if time.monotonic() > deadline:
+                    return False
+                await asyncio.sleep(0.01)
+            return True
+
+        assert await wait_for(lambda: timeouts["n"] == 2), (
+            f"bind must retry exactly once (saw {timeouts['n']})"
+        )
+
+        assert not stopped, f"voice client died: {stopped}"
+        assert plugin.requested is True, "a bind timeout must never flip requested off"
+        assert plugin._bound_epoch == "cold"
+        assert plugin._routing_error is None
+        assert plugin._remote_heartbeat_task is not None
+        assert plugin._remote_heartbeat_task.get_name() == "voice-routing-heartbeat"
+
+        plugin.requested = False
+        await asyncio.gather(
+            asyncio.wait_for(task, 1),
+            return_exceptions=True,
+        )
+    finally:
+        client_module.VoiceClient = real_cls
+
+
+@pytest.mark.asyncio
+async def test_bind_outage_after_retries_keeps_voice_local_only(tmp_path_factory):
+    """Every bind attempt timing out must degrade to local-only, not shutdown."""
+    from kollabor_rpc import RpcTimeoutError
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.classifier_name = "provider"
+    plugin.requested = True
+    plugin._lease = {"epoch": "e", "token": "t", "cursor": 0, "stream_id": "s"}
+    plugin._state = {"state": "ready"}
+
+    calls = {"bind": 0}
+
+    async def always_timeout(method, params=None, timeout=None, **kwargs):
+        if method == "voice.bind":
+            calls["bind"] += 1
+            raise RpcTimeoutError("rpc call 'voice.bind' timed out after 5s")
+        return {}
+
+    plugin._event_bus.register_service(
+        "rpc_client", SimpleNamespace(call=AsyncMock(side_effect=always_timeout))
+    )
+
+    async def local_status(op, progress=None, **params):
+        if op == "claim":
+            return plugin._lease
+        if op == "heartbeat":
+            return {"state": "ready"}
+        if op == "read":
+            return {"cursor": 0, "records": []}
+        return {"ready": True, "state": "ready", "cursor": 0}
+
+    async def ensure(progress):
+        return {"ready": True, "state": "ready", "cursor": 0}
+
+    fake_client = SimpleNamespace(
+        root=tmp_path_factory.mktemp("voice-consumers"),
+        call=AsyncMock(side_effect=local_status),
+        ensure=ensure,
+        shutdown=AsyncMock(),
+    )
+    plugin._client = fake_client
+
+    import kollabor_voice.client as client_module
+
+    real_cls = client_module.VoiceClient
+    client_module.VoiceClient = lambda *a, **k: fake_client
+    try:
+        task = asyncio.create_task(plugin._run())
+
+        async def wait_until(predicate, budget=5.0):
+            deadline = time.monotonic() + budget
+            while not predicate():
+                if time.monotonic() > deadline:
+                    return False
+                await asyncio.sleep(0.01)
+            return True
+
+        assert await wait_until(lambda: calls["bind"] >= 3), (
+            f"bind attempts seen: {calls['bind']}"
+        )
+        # The ladder ends with a final backoff sleep before surfacing the error.
+        assert await wait_until(lambda: plugin._routing_error is not None), (
+            "terminal routing error must surface after the last retry"
+        )
+    finally:
+        client_module.VoiceClient = real_cls
+
+    assert calls["bind"] == 3, "bind retries 3 times before giving up routing"
+    assert plugin.requested is True, "client survives total bind outage"
+    assert plugin._bound_epoch is None
+    assert plugin._routing_error, "routing error is surfaced for the status line"
+    assert plugin._remote_heartbeat_task is None, "no heartbeat without a bind"
+
+    plugin.requested = False
+    await asyncio.gather(asyncio.wait_for(task, 1), return_exceptions=True)

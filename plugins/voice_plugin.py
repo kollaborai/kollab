@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 class VoicePlugin(BasePlugin):
+
+    # First voice.bind after activation rides the hub socket while the daemon
+    # may still be busy with session startup; give it more than the 2s
+    # steady-state budget before the retry ladder kicks in.
+    BIND_FIRST_TIMEOUT_S = 5.0
+
     def __init__(
         self, name="voice", event_bus=None, renderer=None, config=None, **kwargs
     ):
@@ -53,6 +59,7 @@ class VoicePlugin(BasePlugin):
         self._remote_jobs = {}
         self._remote_heartbeat_task = None
         self._routing_error = None
+        self._bound_epoch = None
         from kollabor_voice.classifiers import load_preferences
 
         self._preferences_revision = self._preference_revision()
@@ -287,6 +294,7 @@ class VoicePlugin(BasePlugin):
         self._observer_error = None
         self._speech_error = None
         self._routing_error = None
+        self._bound_epoch = None
         self._refresh()
         return "Voice Off"
 
@@ -367,25 +375,35 @@ class VoicePlugin(BasePlugin):
             if not self.requested:
                 return
             self._claim_id = uuid.uuid4().hex
-            self._lease = await self._client.call(
-                "claim",
-                client_id=self.client_id,
-                activated_at=activated,
-                claim_id=self._claim_id,
-            )
+            # The service may be finishing a prior capture (teardown, VAD
+            # load); its claim can exceed the client's 2s exchange budget
+            # while still succeeding server-side. Retry instead of dying.
+            for attempt in range(3):
+                try:
+                    self._lease = await self._client.call(
+                        "claim",
+                        client_id=self.client_id,
+                        activated_at=activated,
+                        claim_id=self._claim_id,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if attempt == 2 or not self.requested:
+                        raise
+                    logger.warning(
+                        "voice claim timed out (attempt %d/3); retrying", attempt + 1
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
             if self.classifier_name == "laya":
                 await self._client.call("classifier_prepare")
             cursor = self._lease["cursor"]
             rpc = self._event_bus.get_service("rpc_client")
             if rpc:
-                await rpc.call(
-                    "voice.bind",
-                    {"epoch": self._lease["epoch"], "client_id": self.client_id},
-                    timeout=2,
-                )
-                self._remote_heartbeat_task = asyncio.create_task(
-                    self._keep_remote_alive(rpc), name="voice-routing-heartbeat"
-                )
+                await self._bind_remote(rpc)
+                if self._bound_epoch == self._lease["epoch"]:
+                    self._remote_heartbeat_task = asyncio.create_task(
+                        self._keep_remote_alive(rpc), name="voice-routing-heartbeat"
+                    )
             self._observer = asyncio.create_task(
                 self._observe_loop(), name="voice-observer"
             )
@@ -429,7 +447,50 @@ class VoicePlugin(BasePlugin):
             if self._observer:
                 self._observer.cancel()
             self._refresh()
-            logger.warning("Voice client stopped: %s", exc)
+            logger.warning("Voice client stopped: %r", exc)
+
+    async def _bind_remote(self, rpc):
+        """Bind the lease to remote routing, surviving daemon cold-start congestion.
+
+        The first bind rides the hub socket seconds after session start, when the
+        daemon's event loop is still chewing startup work; a 2s timeout can fire
+        with the path perfectly healthy (it replies in milliseconds once warm).
+        Retry with backoff, and never treat a bind failure as fatal: local
+        microphone and durable transcription work without remote routing, same
+        policy as _keep_remote_alive.
+        """
+        from kollabor_rpc import RpcTimeoutError
+
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                await rpc.call(
+                    "voice.bind",
+                    {"epoch": self._lease["epoch"], "client_id": self.client_id},
+                    timeout=self.BIND_FIRST_TIMEOUT_S if attempt == 0 else 2,
+                )
+                self._bound_epoch = self._lease["epoch"]
+                self._routing_error = None
+                return
+            except RpcTimeoutError as exc:
+                last_exc = exc
+                logger.warning(
+                    "voice.bind timed out (attempt %d/3): %s", attempt + 1, exc
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Method missing / handler error means routing is genuinely
+                # unavailable; stop retrying, stay non-fatal.
+                logger.warning("voice.bind unavailable, continuing local-only: %s", exc)
+                self._routing_error = str(exc)
+                return
+        self._routing_error = str(last_exc)
+        logger.warning(
+            "voice.bind timed out after retries; voice stays local-only: %s",
+            last_exc,
+        )
 
     async def _keep_remote_alive(self, rpc):
         try:
