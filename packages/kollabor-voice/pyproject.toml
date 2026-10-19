@@ -9,7 +9,7 @@ description = "Shared local voice service with automatic setup, durable transcri
 # Lower than the rest: the voice service runs this code in its own runtime,
 # prepared on Python 3.12 or 3.13 for its ML wheels (bootstrap.py).
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0"
 dependencies = []
 
 [project.optional-dependencies]

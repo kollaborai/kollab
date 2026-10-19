@@ -2,9 +2,9 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/kollab)](https://pypi.org/project/kollab/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/kollaborai/kollab/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/kollaborai/kollab/blob/main/LICENSE)
 
-AI agents across your computers. Each one has a name and keeps its memory, they message each other, and you pick the model. MIT licensed.
+AI agents across your computers. Each one has a name and keeps its memory, they message each other, and you pick the model. Apache 2.0 licensed.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/hero-dark.webp" alt="A Kollab chat where the koordinator agent has Claude Code fix a failing test and Lapis review the diff." width="100%">
@@ -712,4 +712,4 @@ or local runtime data in public issues.
 
 ## License
 
-Kollab is licensed under the [MIT License](https://github.com/kollaborai/kollab/blob/main/LICENSE).
+Kollab is licensed under the [Apache License 2.0](https://github.com/kollaborai/kollab/blob/main/LICENSE).

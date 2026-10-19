@@ -22,7 +22,7 @@ See [providers.md](providers.md) for the complete list.
 
 ### Is it free?
 
-Yes, MIT-licensed. You pay only for the LLM API usage to your provider.
+Yes, Apache 2.0 licensed. You pay only for the LLM API usage to your provider.
 
 ### What Python version?
 

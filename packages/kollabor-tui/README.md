@@ -98,4 +98,4 @@ python -m pytest tests/unit/mcp/test_mcp_status_plugin.py -q
 
 ## License
 
-MIT
+Apache-2.0

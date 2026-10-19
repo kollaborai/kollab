@@ -90,4 +90,4 @@ python -m pytest tests/unit/commands/test_all_command_handlers.py -q
 
 ## License
 
-MIT
+Apache-2.0

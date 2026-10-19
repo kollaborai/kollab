@@ -28,7 +28,7 @@ version = "0.17.0"
 description = "AI agents across your computers: named agents that keep their memory, message each other, and use any model."
 readme = "README.md"
 requires-python = ">=3.14"
-license = "MIT"
+license = "Apache-2.0"
 authors = [
     {name = "kollabor.ai Contributors"}
 ]

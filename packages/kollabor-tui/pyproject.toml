@@ -8,6 +8,7 @@ version = "0.17.0"
 description = "Terminal UI primitives for Kollabor: design system, key parsing, terminal state, visual effects"
 readme = "README.md"
 requires-python = ">=3.14"
+license = "Apache-2.0"
 dependencies = [
     "kollabor-events>=0.17.0",
 ]

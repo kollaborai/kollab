@@ -8,7 +8,7 @@ version = "0.17.0"
 description = "Kollab AI engine - HTTP/SSE server wrapping kollabor-ai and kollabor-agent"
 readme = "README.md"
 requires-python = ">=3.14"
-license = "MIT"
+license = "Apache-2.0"
 dependencies = [
     "kollabor-ai>=0.17.0",
     "kollabor-agent>=0.17.0",

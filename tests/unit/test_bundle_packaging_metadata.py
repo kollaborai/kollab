@@ -57,8 +57,8 @@ def test_pyproject_license_metadata_uses_spdx_strings() -> None:
         license_value = pyproject["project"].get("license")
         classifiers = pyproject["project"].get("classifiers", [])
 
-        assert license_value in (None, "MIT"), pyproject_path
-        assert "License :: OSI Approved :: MIT License" not in classifiers
+        assert license_value == "Apache-2.0", pyproject_path
+        assert not any(c.startswith("License ::") for c in classifiers), pyproject_path
 
 
 def test_kollabor_ai_declares_keyring_dependency_for_secret_sentinels() -> None:

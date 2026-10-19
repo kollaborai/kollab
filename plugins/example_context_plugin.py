@@ -96,7 +96,7 @@ class ExampleContextPlugin(BasePlugin):
 - Primary repo: kollaborai/kollab
 - Branch: main
 - Stars: [varies - check actual count]
-- License: MIT
+- License: Apache-2.0
 
 ## Common Commands
 

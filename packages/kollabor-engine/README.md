@@ -218,4 +218,4 @@ Without the `PYTHONPATH` override, this checkout may import an installed
 
 ## License
 
-MIT
+Apache-2.0

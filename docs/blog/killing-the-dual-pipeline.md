@@ -196,4 +196,4 @@ Sometimes the right refactor isn't extracting a helper method. It's deleting the
 
 ---
 
-*Kollab is open source under the MIT license. The unified tool pipeline is documented in `docs/plugins/development.md` through the `register_plugin_tag` and `register_plugin_handler` APIs.*
+*Kollab is open source under the Apache 2.0 license. The unified tool pipeline is documented in `docs/plugins/development.md` through the `register_plugin_tag` and `register_plugin_handler` APIs.*

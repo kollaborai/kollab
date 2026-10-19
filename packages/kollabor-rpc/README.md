@@ -89,4 +89,4 @@ None. This package is intentionally stdlib-only.
 
 ## License
 
-MIT
+Apache-2.0

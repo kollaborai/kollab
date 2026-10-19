@@ -8,7 +8,7 @@ version = "0.17.0"
 description = "Agent execution toolkit - tool execution, MCP integration, file operations, and shell commands"
 readme = "README.md"
 requires-python = ">=3.14"
-license = "MIT"
+license = "Apache-2.0"
 dependencies = [
     "kollabor-events>=0.17.0",
     "kollabor-config>=0.17.0",

@@ -299,4 +299,4 @@ python -m pytest tests/unit/mcp tests/unit/test_auto_grant_mcp_tools.py -q
 
 ## License
 
-MIT
+Apache-2.0
