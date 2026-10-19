@@ -62,10 +62,11 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
     return () => gemEngine.unmount(canvas);
   }, []);
 
-  const colorKey = gem.color?.join(",") ?? "";
+  // Every prop the engine reads, so none can be left out of the update (a picked shape once was).
+  const signature = JSON.stringify(props);
   useEffect(() => {
     if (canvasRef.current) gemEngine.update(canvasRef.current, propsRef.current);
-  }, [gem.gem, gem.caste, colorKey, gem.state, gem.live, gem.activity, gem.face, gem.hat, gem.follow, gem.season, gem.motion, key, size]);
+  }, [signature]);
 
   // Sized in rem, so gems scale with the UI around them (styles.css shrinks the
   // root font on mouse-driven screens); the engine still draws at `size` pixels.
