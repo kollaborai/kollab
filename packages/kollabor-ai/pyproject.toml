@@ -7,7 +7,7 @@ name = "kollabor-ai"
 version = "0.16.8"
 description = "LLM provider API for Kollabor"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 dependencies = [
     "pydantic>=2.0.0",

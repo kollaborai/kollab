@@ -1070,7 +1070,7 @@ Monorepo with 8 extracted packages. Recent development:
 - MCP integration
 - Tool permission system with risk assessment
 
-**The codebase uses Python 3.12+ with async/await throughout.**
+**The codebase uses Python 3.14+ with async/await throughout.**
 
 ## Completion Checklist
 

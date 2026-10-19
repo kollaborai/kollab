@@ -7,7 +7,7 @@ name = "kollabor-events"
 version = "0.16.8"
 description = "Event bus and hook system for Kollabor"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 dependencies = []
 

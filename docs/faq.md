@@ -27,7 +27,7 @@ Yes, MIT-licensed. You pay only for the LLM API usage to your provider.
 ### What Python version?
 
 None for the binary the install script installs (macOS 11+, or Linux with glibc
-2.28+, on x86_64 or arm64). The Python package needs 3.12 or later.
+2.28+, on x86_64 or arm64). The Python package needs 3.14 or later.
 
 ## Setup
 

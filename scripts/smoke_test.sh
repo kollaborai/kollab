@@ -22,7 +22,7 @@ echo "Installing: $INSTALL_CMD"
 echo ""
 
 # Run everything in a clean container
-docker run --rm python:3.12-slim bash -c "
+docker run --rm python:3.14-slim bash -c "
     set -e
 
     PASS=0

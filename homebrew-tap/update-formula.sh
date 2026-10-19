@@ -65,10 +65,10 @@ class Kollab < Formula
   sha256 "$SHA256"
   license "MIT"
 
-  depends_on "python@3.12"
+  depends_on "python@3.14"
 
   def install
-    system "pip3", "--python", Formula["python@3.12"].opt_bin/"python3",
+    system "pip3", "--python", Formula["python@3.14"].opt_bin/"python3",
            "install", *std_pip_args(build_isolation: true), "--prefix=#{prefix}", "./"
     bin.install_symlink libexec/"bin/kollab" => "kollab"
   end

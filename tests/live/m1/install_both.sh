@@ -16,7 +16,7 @@ NAMES=()
 for w in "${WHEELS[@]}"; do NAMES+=("$(basename "$w")"); done
 
 # ---- Mac -------------------------------------------------------------------
-PY=$(m1_pick_python) || die "no Python >= 3.12 on the Mac (set M1_PY_MAC)"
+PY=$(m1_pick_python) || die "no Python >= 3.14 on the Mac (set M1_PY_MAC)"
 say "mac: $($PY --version) at $PY"
 mkdir -p "$M1_MAC_ROOT" "$M1_MAC_WS"
 [ -x "$M1_MAC_VENV/bin/python" ] || "$PY" -m venv "$M1_MAC_VENV"
@@ -26,7 +26,7 @@ say "mac: pip install of ${#WHEELS[@]} local wheels into $M1_MAC_VENV"
 # ---- server --------------------------------------------------------------
 m1_srv_paths
 say "srv: $M1_HOST home is $M1_SRV_HOME"
-m1_ssh "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'" || die "python3 on $M1_HOST is older than 3.12"
+m1_ssh "python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)'" || die "python3 on $M1_HOST is older than 3.14"
 m1_ssh "mkdir -p '$M1_SRV_ROOT/wheels' '$M1_SRV_ROOT/bin' '$M1_SRV_WS'"
 say "srv: copying wheels to $M1_SRV_ROOT/wheels"
 scp -q "${M1_SSH_OPTS[@]}" "${WHEELS[@]}" "$M1_HOST:$M1_SRV_ROOT/wheels/"

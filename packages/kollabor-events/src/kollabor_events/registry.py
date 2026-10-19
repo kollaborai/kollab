@@ -18,8 +18,6 @@ class HookRegistry:
 
     def __init__(self):
         """Initialize the hook registry."""
-        from typing import Union
-
         # Support both EventType enum and string event types
         self.hooks: Dict[Union[EventType, str], List[Hook]] = defaultdict(list)
         self.hook_status: Dict[str, HookStatus] = {}

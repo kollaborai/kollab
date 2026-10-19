@@ -1406,7 +1406,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
     import json
     import os
     from pathlib import Path
-    from typing import List, Optional
+    from typing import List
 
     _apply_hub_project_scope_from_config()
 

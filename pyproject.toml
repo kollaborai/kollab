@@ -27,7 +27,7 @@ name = "kollab"
 version = "0.16.8"
 description = "AI agents across your computers: named agents that keep their memory, message each other, and use any model."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 authors = [
     {name = "kollabor.ai Contributors"}
@@ -49,7 +49,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Terminals",
@@ -152,12 +152,16 @@ members = ["packages/kollabor-*"]
 
 [tool.black]
 line-length = 88
-target-version = ["py312"]
+target-version = ["py314"]
 include = '\.pyi?$'
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py314"
+
+[tool.ruff.per-file-target-version]
+# The voice service runs this code on its own Python 3.12 or 3.13 runtime.
+"packages/kollabor-voice/**" = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
@@ -178,7 +182,7 @@ ignore = ["E203"]
 known-first-party = ["kollabor", "kollabor_ai", "kollabor_tui", "kollabor_events", "kollabor_config", "kollabor_plugins", "kollabor_agent", "kollabor_rpc", "kollabor_cli_main"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

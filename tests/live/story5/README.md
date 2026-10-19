@@ -21,7 +21,7 @@ the tooling.
 
 - The commit you mean to ship is what `m1/build_wheels.sh` built and `m1/install_both.sh` installed on both hosts (fresh venvs at `~/kollab-m1/venv`). Or install a published release instead: a fresh venv at `~/kollab-m1/venv` on both hosts with `pip install kollab==X.Y.Z`, and `M1_VERSION=X.Y.Z` when you run `proof.sh`. The relay on kollabor.ai is a build of the same commit; `proof.sh` stops unless it negotiates `kollab-relay/1` on the WebSocket and answers 404 on `POST /relay/v1/contact/lookup` (the 0.13 build, where a knock is a call; the `deploy_relay*.sh` scripts print the same 404 probe).
 - ChatGPT login on both hosts (`~/.kollab/oauth/openai.json`); every agent runs `--llm openai-oauth`.
-- `uv`, `tmux`, `python3` >= 3.12 on the Mac; `ssh server` works with no password.
+- `uv`, `tmux`, `python3` >= 3.14 on the Mac; `ssh server` works with no password.
 - Nobody is attached to the `s5-*` tmux sessions while it runs (keys vanish). Do not run with `bash -x`.
 
 ## Order

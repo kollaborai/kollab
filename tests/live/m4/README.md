@@ -20,7 +20,7 @@ rule. Nothing here has been run yet.
 ## Preconditions
 
 - The commit you build contains `kollab relay serve --domain`. Build exactly what you mean to ship.
-- The m1 preconditions: `uv`, `tmux`, Python >= 3.12, `ssh server` with no password, ChatGPT logins on both hosts
+- The m1 preconditions: `uv`, `tmux`, Python >= 3.14, `ssh server` with no password, ChatGPT logins on both hosts
   (`~/.kollab/oauth/openai.json`), nobody attached to the `m4-*` tmux sessions while it runs, no `bash -x` (it would print the join code).
 - `ssh edge` works with no password and `sudo -n` works there.
 - DNS `selfhost.kollabor.ai`, its `_agent` TXT record, the certificate and the edge vhost exist (they do today) and the

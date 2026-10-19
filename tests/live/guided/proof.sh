@@ -226,7 +226,7 @@ pypi_phase() {
   say "pypi-upgrade: kollab==$GS_PYPI_FROM from PyPI into $M1_MAC_VENV and $M1_SRV_VENV"
   # kollab pins kollabor-* with >=, so pin every one or pip mixes in newer ones: a true old install
   OLD_SET="kollab==$GS_PYPI_FROM"; for p in agent ai config engine events plugins rpc tui webui; do OLD_SET="$OLD_SET kollabor-$p==$GS_PYPI_FROM"; done
-  PY=$(m1_pick_python) || abort p0-install "no Python >= 3.12 on the Mac (set M1_PY_MAC)"
+  PY=$(m1_pick_python) || abort p0-install "no Python >= 3.14 on the Mac (set M1_PY_MAC)"
   mkdir -p "$M1_MAC_ROOT" "$M1_MAC_WS/.kollab"
   "$PY" -m venv --clear "$M1_MAC_VENV"   # fresh each run: no packages left from an earlier upgrade
   "$M1_MAC_VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir $OLD_SET >"$EVID/p0-pip-mac.txt" 2>&1 \

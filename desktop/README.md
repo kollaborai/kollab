@@ -161,13 +161,13 @@ Windows. Producing a Tauri `.exe` alone would leave these failures:
   `kollabor/cli.py:cli_main()` calls `os.fork()` and `os.setsid()` without a
   Windows path. Removing `os.fork` in a controlled local probe produced
   `AttributeError` at that call, before an agent could start. Python documents
-  [`os.fork` as POSIX-only](https://docs.python.org/3.12/library/os.html#os.fork).
+  [`os.fork` as POSIX-only](https://docs.python.org/3.14/library/os.html#os.fork).
 - **Agent IPC:** `DaemonHandle.connect()` uses
   `kollabor_rpc.open_unix_connection_with_large_buffer()`, whose transport
   calls `loop.create_unix_connection()`. The other end is
   `plugins/hub/messenger.py:AgentSocketServer.start()` using
   `asyncio.start_unix_server()`. Python's Windows event loops
-  [do not implement these Unix connection/server methods](https://docs.python.org/3.12/library/asyncio-platforms.html#windows).
+  [do not implement these Unix connection/server methods](https://docs.python.org/3.14/library/asyncio-platforms.html#windows).
   Switching event-loop policy does not supply them. Both ends need a native
   transport with the current attach/RPC access controls and framing preserved.
 - **Hub locking:** importing `plugins.hub.plugin` imports
@@ -175,7 +175,7 @@ Windows. Producing a Tauri `.exe` alone would leave these failures:
   `messaging_bridge.py` and `task_ledger.py` also require it. Denying only
   `fcntl` in a fresh local import probe reproduced `ModuleNotFoundError` in
   `coordinator.py`. Python documents
-  [`fcntl` as Unix-only](https://docs.python.org/3.12/library/fcntl.html).
+  [`fcntl` as Unix-only](https://docs.python.org/3.14/library/fcntl.html).
   Native file locking must preserve election, poll ownership, and ledger
   serialization; skipping the Hub plugin would not produce a working app.
 

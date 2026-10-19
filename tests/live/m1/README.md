@@ -9,7 +9,7 @@ installed packages, driven through tmux like a user, on this Mac and `server`.
 - The relay on kollabor.ai already serves `POST /relay/v1/enrollment/lookup`. `proof.sh` probes it first and stops on 404/405/5xx.
 - ChatGPT login exists on both hosts: `~/.kollab/oauth/openai.json` (both agents run `--llm openai-oauth`).
 - Your real hosts and addresses go in `tests/live/local.env` (untracked; copy `local.env.example`).
-- `uv`, `tmux`, `python3` >= 3.12 on the Mac. `ssh server` works with no password. tmux and python3 >= 3.12 on the server.
+- `uv`, `tmux`, `python3` >= 3.14 on the Mac. `ssh server` works with no password. tmux and python3 >= 3.14 on the server.
 - Nobody is attached to the `m1-*` tmux sessions while it runs (keys vanish).
 - Do not run with `bash -x`: it would print the join code.
 
