@@ -914,7 +914,7 @@ invocable from Claude Code — read + follow by hand): `bundles/skills/release-m
 Every release also ships `kollab` as one executable per platform
 (`kollab-macos-aarch64`, `kollab-macos-x86_64`, `kollab-linux-x86_64`,
 `kollab-linux-aarch64`, each with a `.sha256`): a pex scie holding a portable
-CPython 3.12 and every wheel, so it runs with no Python installed.
+CPython 3.14 and every wheel, so it runs with no Python installed.
 `scripts/build_binary.py` builds and smoke-tests it for the machine it runs on,
 with wheels picked for macOS 11 and glibc 2.28, never for the build host;
 `.github/workflows/binaries.yml` runs it on each platform for every tag and for
