@@ -765,7 +765,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
     }
 
     async def _acp_submit(params):
-        return await state_service.submit_client_turn(str(params.get("message") or ""), str(params.get("request_id") or ""))
+        return await state_service.submit_client_turn(
+            str(params.get("message") or ""), str(params.get("request_id") or "")
+        )
 
     async def _acp_cancel(params):
         return await state_service.cancel_client_turn(str(params.get("request_id") or ""))
