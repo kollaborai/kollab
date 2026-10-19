@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from kollabor_voice.classifiers import CLASSIFIERS, MAX_CONTEXT_LINES, load_preferences
+from kollabor_voice.classifiers import (
+    CLASSIFIERS,
+    LOCAL_CLASSIFIERS,
+    MAX_CONTEXT_LINES,
+    available_classifiers,
+    load_preferences,
+)
 from kollabor_voice.control import service_root
-from kollabor_voice.speech_settings import KOKORO_VOICES, speech_errors
+from kollabor_voice.speech_settings import (
+    KOKORO_VOICES,
+    STT_ENGINES,
+    TTS_ENGINES,
+    available_stt_engines,
+    speech_errors,
+)
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 from .config import validate_config_changes
@@ -31,6 +43,9 @@ def voice_sections(plugin, live=None) -> list[dict]:
     from kollabor_voice.control import manifest
 
     speech = state.get("speech", {})
+    transcription = state.get("transcription", {})
+    classifiers = available_classifiers()
+    engines = available_stt_engines()
     return [
         {
             "id": "preferences",
@@ -41,10 +56,18 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "dropdown",
                     "Classifier",
                     value=preferences["classifier"],
-                    options=list(CLASSIFIERS),
+                    options=list(classifiers),
+                    option_labels=classifiers,
                     help=(
-                        "Laya runs locally. Provider uses the active AI profile, "
-                        "sends transcript context to it and can incur charges."
+                        "Laya runs locally. "
+                        + (
+                            "Fine-Tuned Qwen3 0.6B also runs locally (645 MB of "
+                            'weights) and answers "was that for me?" itself. '
+                            if "qwen" in classifiers
+                            else ""
+                        )
+                        + "Provider uses the active AI profile, sends transcript "
+                        "context to it and can incur charges."
                     ),
                 ),
                 make_field(
@@ -57,6 +80,15 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     step=1,
                     help="Previous microphone transcript lines used to interpret the next utterance (1–50).",
                 ),
+                make_field(
+                    "classifier_status",
+                    "label",
+                    "Classifier Readiness",
+                    value=classifier_text(preferences["classifier"], state),
+                    help=classifier_worker(preferences["classifier"], state).get(
+                        "detail", ""
+                    ),
+                ),
             ],
         },
         {
@@ -65,17 +97,26 @@ def voice_sections(plugin, live=None) -> list[dict]:
             "fields": [
                 make_field(
                     "stt_engine",
-                    "label",
+                    "dropdown",
                     "Transcription Engine",
-                    value="Whisper base",
-                    help="Local speech recognition; currently fixed.",
+                    value=preferences["stt_engine"],
+                    options=list(engines),
+                    option_labels=engines,
+                    help=(
+                        "Local speech recognition. Parakeet v3 needs an Apple silicon "
+                        "Mac and downloads 2.5 GB once; Whisper Base transcribes "
+                        "until it is ready."
+                        if "parakeet" in engines
+                        else "Local speech recognition with Whisper Base."
+                    ),
                 ),
                 make_field(
                     "tts_engine",
                     "dropdown",
                     "Speech Engine",
                     value=preferences["tts_engine"],
-                    options=["kokoro", "vibevoice"],
+                    options=list(TTS_ENGINES),
+                    option_labels=TTS_ENGINES,
                     help=("Local synthesis. Selecting VibeVoice prepares its isolated runtime "
                           "and warms the model in the background."),
                 ),
@@ -145,11 +186,22 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     step=0.1,
                 ),
                 make_field(
+                    "transcription_status",
+                    "label",
+                    "Transcription Readiness",
+                    value=(
+                        f"{STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
+                        f" · {transcription.get('state', 'off')}"
+                    ),
+                    help=transcription.get("detail", ""),
+                ),
+                make_field(
                     "speech_status",
                     "label",
                     "Speech Readiness",
                     value=(
-                        f"{speech.get('engine') or 'not loaded'} · {speech.get('state', 'off')}"
+                        f"{TTS_ENGINES.get(speech.get('engine'), speech.get('engine')) or 'not loaded'}"
+                        f" · {speech.get('state', 'off')}"
                     ),
                     help=speech.get("detail", ""),
                 ),
@@ -179,7 +231,81 @@ def voice_sections(plugin, live=None) -> list[dict]:
                 ),
             ],
         },
+        {
+            "id": "filters",
+            "title": "Echo and Speaker",
+            "fields": [
+                make_field(
+                    "echo_cancellation",
+                    "checkbox",
+                    "Echo Cancellation",
+                    value=preferences["echo_cancellation"],
+                    help=(
+                        "Removes voice's own speech from the microphone before "
+                        "transcription. A TV, other people and other apps are kept."
+                    ),
+                ),
+                make_field(
+                    "speaker_gate",
+                    "checkbox",
+                    "Speaker Gate",
+                    value=preferences["speaker_gate"],
+                    help=(
+                        "Only your voice reaches the classifier. Other voices stay in "
+                        "the transcript as context. Needs a voiceprint: /voice enroll."
+                    ),
+                ),
+                make_field(
+                    "speaker_threshold",
+                    "spinbox",
+                    "Speaker Threshold",
+                    value=preferences["speaker_threshold"],
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    help=(
+                        "How close to your voiceprint a line must sound (0–1). Higher "
+                        "keeps out more of the TV and more of you."
+                    ),
+                ),
+                make_field(
+                    "voiceprint",
+                    "label",
+                    "Voiceprint",
+                    value=voiceprint_text(state.get("speaker") or {}),
+                    help=(
+                        "Made by /voice enroll from 30 seconds of your speech; no audio "
+                        "is kept. /voice enroll forget deletes it."
+                    ),
+                ),
+            ],
+        },
     ]
+
+
+def classifier_worker(selected: str, state: dict) -> dict:
+    """The service's worker status when it runs the selected classifier, else {}."""
+    worker = state.get("classifier") or {}
+    # An older service has no name: it runs Laya only.
+    return worker if worker.get("name", "laya") == selected else {}
+
+
+def classifier_text(selected: str, state: dict) -> str:
+    """The selected classifier and its worker's state, e.g. "Laya · ready"."""
+    if selected not in LOCAL_CLASSIFIERS:
+        return f"{CLASSIFIERS[selected]} · runs in the chat"
+    return f"{CLASSIFIERS[selected]} · {classifier_worker(selected, state).get('state', 'off')}"
+
+
+def voiceprint_text(speaker: dict) -> str:
+    enrollment, saved = speaker.get("enrollment"), speaker.get("voiceprint")
+    if enrollment:
+        return f"Enrolling: {enrollment['seconds']:.0f} of {enrollment['target']:.0f} seconds"
+    if saved:
+        return f"Saved from {saved['seconds']:.0f} seconds of speech"
+    if "voiceprint" not in speaker and (service_root() / "voiceprint.json").exists():
+        return "Saved"  # the voice service is not running to say more
+    return "None yet"
 
 
 class VoicePanel:

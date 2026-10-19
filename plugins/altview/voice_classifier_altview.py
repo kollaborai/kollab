@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from kollabor_voice.classifiers import CLASSIFIERS, available_classifiers
+
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
 from kollabor_tui.key_parser import KeyPress
@@ -20,10 +22,33 @@ logger = logging.getLogger(__name__)
 def _word(entry: Dict[str, Any]) -> str:
     if entry.get("echo"):
         return "echo"
+    if entry.get("other_speaker"):
+        return "not you"  # the list's word column is 7 wide
+    if entry.get("enrolling"):
+        return "enroll"
     if entry.get("error"):
         return "error"
     decision = (entry.get("decision") or {}).get("decision")
     return VOICE_DECISION_WORDS.get(decision, "pending")
+
+
+SPEAKER_WORDS = {
+    "user": ("good", "voice: yours"),
+    "other_speaker": ("warn", "voice: another speaker"),
+    "unverified": ("dim", "voice: too short to check"),
+}
+
+
+def _speaker_line(record: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Who the speaker gate says spoke, and whether echo was cancelled first."""
+    style, parts = "dim", []
+    speaker, score = record.get("speaker"), record.get("speaker_score")
+    if speaker in SPEAKER_WORDS:
+        style, word = SPEAKER_WORDS[speaker]
+        parts.append(word + (f" ({score:.2f})" if score is not None else ""))
+    if record.get("echo_cancellation"):
+        parts.append("echo cancelled")
+    return (style, "  " + " · ".join(parts)) if parts else None
 
 
 def _clock(at: Optional[float]) -> str:
@@ -35,17 +60,37 @@ def detail_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
     lines: List[Tuple[str, str]] = []
     decision = entry.get("decision") or {}
     records = entry.get("records") or []
-    name = "Laya" if entry.get("classifier") == "laya" else "AI provider"
+    name = (
+        "AI provider"
+        if entry.get("classifier") == "provider"
+        else CLASSIFIERS.get(entry.get("classifier"), "Classifier")
+    )
 
     lines.append(("heading", "Heard"))
     for record in records:
         lines.append(("text", f'  "{record.get("text", "")}"'))
         for overlap in record.get("playback_overlap") or []:
             lines.append(("warn", f'  while the agent said: "{overlap.get("text", "")}"'))
+        heard = _speaker_line(record)
+        if heard:
+            lines.append(heard)
 
-    if entry.get("echo"):
+    reason = (
+        "The microphone heard the agent's own voice."
+        if entry.get("echo")
+        else (
+            "The speaker gate heard another voice: kept as context."
+            if entry.get("other_speaker")
+            else (
+                "Voice enrollment: your words make the voiceprint."
+                if entry.get("enrolling")
+                else None
+            )
+        )
+    )
+    if reason:
         lines.append(("heading", "Not classified"))
-        lines.append(("dim", "  The microphone heard the agent's own voice."))
+        lines.append(("dim", f"  {reason}"))
         lines.append(("heading", "Sent to the agent"))
         lines.append(("dim", "  nothing"))
         return lines
@@ -85,18 +130,19 @@ def detail_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
         if decision.get("detail"):
             lines.append(("dim", f"  {decision['detail']}"))
 
+    if entry.get("said"):
+        lines.append(("heading", "Said"))
+        lines.append(("text", f'  "{entry['said']}"'))
+
     lines.append(("heading", "Sent to the agent"))
     sent = set(entry.get("delivered") or [])
-    unsure = set(decision.get("deferred_event_ids") or [])
     if not sent:
         lines.append(("dim", "  nothing"))
     if entry.get("note"):
         lines.append(("warn", f"  {entry['note']}"))
     for record in records:
         if record.get("event_id") in sent:
-            how = "as unsure speech" if record["event_id"] in unsure else "as speech"
-            style = "warn" if record["event_id"] in unsure else "good"
-            lines.append((style, f'  {how}: "{record.get("text", "")}"'))
+            lines.append(("good", f'  "{record.get("text", "")}"'))
     return lines
 
 
@@ -259,9 +305,10 @@ class VoiceClassifierAltView(AltView):
 
     def _render_footer(self, width: int, height: int, theme: Any) -> None:
         assert self.renderer is not None
-        name = getattr(self.plugin, "classifier_name", "") or "none"
+        name = getattr(self.plugin, "classifier_name", "")
         hints = (
-            f" Classifier: {name} (/voice classifier laya|provider)"
+            f" Classifier: {CLASSIFIERS.get(name, 'none')}"
+            f" (/voice classifier {'|'.join(available_classifiers())})"
             " · Tab: switch · Up/Down: move · q/Esc: close"
         )
         self.renderer.write_at(0, height - 2, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), "")

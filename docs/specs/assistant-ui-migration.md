@@ -221,11 +221,15 @@ name apart, so it is removed on load and never imported.
 
 ## Chat presentation
 
-The chat header stays on one row. Its labels adapt to the chat pane's container
-width, including sidebar resizing. **Session Controls** holds model/profile,
-approval mode, context usage, full status/errors, MCP servers, the online roster,
-settings and clear-history actions. Dialogs remain mounted when the popover closes;
-closing one returns focus to its control. Chat/Trajectory stay directly available.
+A chat has no header bar on a computer. **Session Controls** is a panel docked at
+the chat's right edge, open by default (`SessionPanel.tsx`): the session's name,
+its CLI harness, context usage and full status/errors, the **Chat** and
+**Trajectory** views, model/profile, approval mode, MCP servers, the online
+roster, settings and clear-history actions. Hiding it leaves a slim rail with
+Show, Chat and Trajectory; the browser remembers which (`kollab.session-panel`).
+Closing a dialog returns focus to the row that opened it. The sidebar has no
+hide button on a computer. On a phone a one-row header keeps the sidebar button,
+the session's name and a **Session** button that opens the panel as a sheet.
 
 Once a chat has messages, its agent's live gem docks immediately beside the input
 bar and stays visible while the conversation scrolls. It shares the selected

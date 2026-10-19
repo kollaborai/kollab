@@ -12,8 +12,9 @@ See [spoken-response-review.md](spoken-response-review.md) for the format bounda
 single rewrite nudge, silent rejection, and attached routing contract.
 
 Contract:
-- `/voice classifier` shows the choices. `laya` and `provider` save a device
-  preference without enabling the microphone. New installations default to Laya.
+- `/voice classifier` shows the choices. `laya`, `qwen` (Apple silicon only) and
+  `provider` save a device preference without enabling the microphone. New
+  installations default to Laya.
 - Switching while listening preserves pending transcript records and the current
   capture lease. A result from the previous selection cannot admit a user turn.
 - `DecisionProvider.decide(DecisionRequest)` returns a versioned `VoiceDecision`:
@@ -91,3 +92,46 @@ oversize deferral; ignored context retained within one polling batch. Probe the
 real Laya worker with TV/background context, ambiguous
 greetings and explicit assistant requests, without treating a fixture as a promise
 that acoustic transcription or classification is perfect.
+
+## Fine-tuned Qwen3-0.6B (October 19 extension)
+
+Objective: a second local classifier, selectable beside Laya, whose one model
+makes all three voice decisions: intent, the reply to "Sorry, was that for me?"
+and spoken style. Off by default; nothing about when or how voice takes speech
+changes unless `qwen` is selected.
+
+Contract:
+- `qwen` ("Fine-Tuned Qwen3 0.6B") is offered by `available_classifiers()` and
+  accepted by `save_preferences` only on an Apple silicon Mac (`apple_silicon()`,
+  which also gates Parakeet). Elsewhere it is not listed, saving it is refused
+  and a stored `qwen` loads as the default.
+- The device service owns one classifier worker at a time. `classifier_prepare`
+  names the model (default `laya`) and closes the other worker on a switch.
+  `classifier_submit` for a model other than the prepared one is refused as
+  `classifier_not_ready`, so speech stays pending through a switch. The `answer`
+  task is refused by Laya as `unsupported`.
+- `QwenWorker` runs `kollabor_voice.qwen_worker` in its own persistent process
+  and pinned runtime (`manifest.json` `classifiers.qwen.runtime`). Weights are
+  MLX 8-bit, verified by size and SHA-256 (`classifiers.qwen.bundle`). The worker
+  refuses prompts whose SHA-256 differs from `prompt_sha256`: the weights were
+  trained on them. Warmup runs one intent and one style pass before ready.
+- Intent returns the same `VoiceDecision` (provider `qwen`): one pass per
+  connected utterance with the transcript window, recent conversation and
+  overlapping playback; automatic at probability 0.8 or more
+  (`minimum_probability`), deferred below it. Non-English speech is deferred.
+- With `qwen` selected, the reply to the question is read by the model from the
+  held words, the question voice actually said and the reply: `yes` admits the
+  held words, `no` mutes questions as before, `other` is not an answer. Laya and
+  provider keep the word rules. The route log records the model and confidence.
+- Spoken style returns the same `SpeechDecision`: the format check first, then
+  the model; unsure goes to the provider check as with Laya (`qwen+provider`).
+- No download source is published yet (`base_url` is empty): preparing reports
+  the folder the verified files belong in. A voice service older than this
+  change reports a worker without a name; with `qwen` selected the plugin says to
+  restart the voice service instead of waiting on Laya.
+
+Acceptance: `bench/qwen_voice.py score runtime` drives the shipped worker code
+and matches the measured MLX 8-bit run on every split (see
+[the benchmark evidence](../../packages/kollabor-voice/bench/README.md#fine-tuned-qwen3-06b)).
+Unit tests cover the gating, routing, answer path and worker protocol;
+`tests/tmux/specs/voice-classifier-qwen.json` picks the model in `/voice config`.

@@ -4,9 +4,30 @@ from __future__ import annotations
 
 import math
 import os
+import platform
+import sys
 from pathlib import Path
 
 from .control import manifest
+
+# Cosine score at or above which a segment is the enrolled user (speaker.py).
+# Measured false accepts and rejects: bench/README.md.
+SPEAKER_THRESHOLD = 0.45
+
+# Engines by preference id; the labels are what people read.
+STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
+TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
+
+
+def apple_silicon():
+    """MLX, which Parakeet v3 and the Qwen classifier run on, needs an Apple silicon Mac."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def available_stt_engines():
+    """The transcription engines this machine can run: Parakeet only on Apple silicon."""
+    return {k: v for k, v in STT_ENGINES.items() if k != "parakeet" or apple_silicon()}
+
 
 KOKORO_VOICES = (
     "af_alloy",
@@ -46,6 +67,7 @@ def speech_defaults():
     if (installed / "config.json").is_file():
         model = str(installed)
     return {
+        "stt_engine": "whisper",
         "tts_engine": "kokoro",
         "kokoro_voice": "af_heart",
         "kokoro_speed": 1.0,
@@ -55,13 +77,19 @@ def speech_defaults():
         "vibevoice_device": "auto",
         "vibevoice_steps": 5,
         "vibevoice_cfg": 1.5,
+        # Filters in front of transcription (echo.py, speaker.py); off until
+        # turned on.
+        "echo_cancellation": False,
+        "speaker_gate": False,
+        "speaker_threshold": SPEAKER_THRESHOLD,
     }
 
 
 def speech_errors(preferences, *, check_files=False):
     errors = {}
     choices = {
-        "tts_engine": ("kokoro", "vibevoice"),
+        "stt_engine": tuple(STT_ENGINES),
+        "tts_engine": tuple(TTS_ENGINES),
         "kokoro_voice": KOKORO_VOICES,
         "vibevoice_voice": tuple(manifest()["tts"]["vibevoice"]["voices"]),
         "vibevoice_device": ("auto", "mps", "cuda", "cpu"),
@@ -69,10 +97,16 @@ def speech_errors(preferences, *, check_files=False):
     for key, options in choices.items():
         if preferences.get(key) not in options:
             errors[key] = "Choose one of the available options"
+    if preferences.get("stt_engine") == "parakeet" and not apple_silicon():
+        errors["stt_engine"] = "Parakeet v3 needs an Apple silicon Mac"
+    for key in ("echo_cancellation", "speaker_gate"):
+        if not isinstance(preferences.get(key), bool):
+            errors[key] = "Must be on or off"
     for key, low, high, step in (
         ("kokoro_speed", 0.5, 2.0, 0.1),
         ("vibevoice_steps", 1, 20, 1),
         ("vibevoice_cfg", 1.0, 3.0, 0.1),
+        ("speaker_threshold", 0.0, 1.0, 0.01),
     ):
         value = preferences.get(key)
         if (

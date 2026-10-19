@@ -14,8 +14,10 @@ mkdir -p "$home/work" "$home/.kollab"
 # this spec checks; mark setup done (specs/first_run_setup_wizard.json covers it).
 printf '%s' '{"application":{"setup_completed":true}}' > "$home/.kollab/config.json"
 cd "$home/work"
-HOME=$home "$py" - <<'EOF'
+# RESUME_FIXTURE_ID picks the saved chat's session id (specs/session_name_hides_token.json).
+HOME=$home RESUME_FIXTURE_ID=${RESUME_FIXTURE_ID:-2601010000-resume-fixture} "$py" - <<'EOF'
 import asyncio
+import os
 
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_config.config_utils import get_conversations_dir
@@ -23,7 +25,7 @@ from kollabor_config.config_utils import get_conversations_dir
 
 async def seed():
     log = KollaborConversationLogger(get_conversations_dir())
-    log.reset_session("2601010000-resume-fixture")
+    log.reset_session(os.environ["RESUME_FIXTURE_ID"])
     parent = await log.log_user_message("what is two plus two?")
     parent = await log.log_assistant_message("four", parent_uuid=parent)
     parent = await log.log_user_message("and three plus three?", parent_uuid=parent)

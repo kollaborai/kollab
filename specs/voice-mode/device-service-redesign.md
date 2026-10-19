@@ -332,8 +332,8 @@ Voice Listening · MacBook Pro Microphone · mic [|||..]
 Voice Listening · transcribing · 1 segment waiting
 Heard 14:03:22 · "Can you check the failing test?"
 Voice Listening · speaking · 2 sentences queued
-Voice Error · microphone unavailable · /voice retry
-Voice Disconnected · service heartbeat lost · /voice retry
+Voice Starting · microphone unavailable · restarting in 5s
+Voice Starting · service heartbeat lost · restarting in 10s
 Voice Off
 ```
 
@@ -494,6 +494,11 @@ transcripts during overlap; let Laya classify self-echo using playback context,
 not by deleting the microphone log. Do not ship speaker mode until the echo-loop
 and talk-over tests pass. A sophisticated AEC stack is justified only if those
 tests demonstrate a need; the existing placeholder is not evidence of protection.
+Amended 2026-10-19: the 2026-10-18 live test showed the need (the microphone
+transcribed voice's own playback, and another person's words reached the agent).
+`echo.py` feeds WebRTC AEC3 the speaker queue's playback reference and `speaker.py`
+gates lines on an enrolled voiceprint before classification; both are off by
+default and measured in `packages/kollabor-voice/bench/README.md`.
 
 ## 5. Keep, rewrite, retire
 
@@ -630,7 +635,7 @@ to open Settings → Voice; `/voice`, `/voice on` and `/voice off` reach the dae
 The composer microphone sends `/voice on|off` and checks the live command catalog.
 
 One daemon-owned `voice` form defines both interfaces. It exposes every current
-user preference: classifier (`laya` or `provider`) and transcript context (integer
+user preference: classifier (`laya`, `qwen` on Apple silicon, or `provider`) and transcript context (integer
 1–50). Fixed Whisper base, Kokoro, af_heart and speed 1.0 are read-only rows,
 with microphone, state and preferences location. Unsupported engines cannot be
 saved. The panel is available before audio setup and does not acquire a microphone

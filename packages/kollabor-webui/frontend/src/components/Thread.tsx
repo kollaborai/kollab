@@ -170,7 +170,7 @@ const HubNoteView: FC<{
         <div className="text-muted-foreground mb-1 flex flex-wrap items-center gap-1 text-xs font-medium">
           <span>{label}</span>
         </div>
-        <div className="text-foreground wrap-break-word">{children}</div>
+        <div className="text-foreground leading-relaxed wrap-break-word pointer-fine:text-sm">{children}</div>
         {footer}
       </div>
     </div>

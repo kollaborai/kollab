@@ -45,7 +45,7 @@ surfaces are split:
 - `packages/kollabor-webui/src/kollabor_webui/static/app.js` contains a legacy
   add-server modal, but the current assistant-ui WebUI only exposes
   `listMcpServers()` plus per-session connect/disconnect controls in
-  `frontend/src/components/shell/SessionToolbar.tsx`.
+  `frontend/src/components/shell/SessionPanel.tsx`.
 - `kollabor/state/local.py` and `kollabor/state/remote.py` expose enable,
   disable, test, and reload operations. They do not yet expose CRUD operations
   needed by an attached CLI manager.
@@ -72,7 +72,7 @@ Authoritative implementation surfaces for this spec:
 - `packages/kollabor-engine/src/kollabor_engine/routes/sessions.py`
 - `packages/kollabor-engine/src/kollabor_engine/routes/messages.py`
 - `packages/kollabor-webui/frontend/src/api.ts`
-- `packages/kollabor-webui/frontend/src/components/shell/SessionToolbar.tsx`
+- `packages/kollabor-webui/frontend/src/components/shell/SessionPanel.tsx`
 - `packages/kollabor-webui/frontend/src/components/trajectory/trajectory-records.ts`
 
 ## invariant
@@ -455,7 +455,7 @@ or fails, the UI must show `saved` plus the structured apply result rather than
 claiming that the server connected. The client refreshes from the server after
 `409 ConfigConflict` rather than merging masked or stale fields.
 
-### SessionToolbar
+### SessionPanel
 
 The MCP dialog must provide:
 
@@ -607,7 +607,7 @@ The existing trajectory refresh boundary remains `turn_complete`/`error`.
 
 - Make REST CRUD use the shared store and full config shape.
 - Add session reload endpoint and typed WebUI API methods.
-- Add current assistant-ui Add/Edit/Delete flow to `SessionToolbar`.
+- Add current assistant-ui Add/Edit/Delete flow to `SessionPanel`.
 - Remove or align legacy static behavior so it cannot drift from the current
   contract.
 

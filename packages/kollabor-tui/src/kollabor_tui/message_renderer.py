@@ -257,7 +257,7 @@ class ModernMessageRenderer:
             lines,
             width=width,
             text_color=_assistant_text_color(),
-            first_prefix=" ֎ ",
+            first_prefix=" ◆ ",
             prefix_color=T().text,
         )
 
@@ -541,7 +541,7 @@ class ModernMessageRenderer:
         # Temporarily keep timing/reasoning rows plain if they reach this renderer.
         # MessageDisplayService currently converts them into blank spacer rows.
 
-        return self._compact_lines(
+        return "\n" + self._compact_lines(
             message.split("\n"),
             width=width,
             text_color=T().text_dim,

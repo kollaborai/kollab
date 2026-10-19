@@ -1,6 +1,6 @@
 # kollab one-pager
 
-terminal-based LLM chat where **everything has hooks**. monorepo, python 3.12+,
+terminal-based LLM chat where **everything has hooks**. monorepo, python 3.14+,
 async/await throughout. the tagline isn't marketing — every user action, every
 LLM request, every tool call, every render frame fires an event that plugins can
 intercept, transform, or block.

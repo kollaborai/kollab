@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
-import { Loader2, MessageSquare, Plus, Waypoints } from "lucide-react";
+import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
@@ -24,8 +24,7 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
-import { SessionToolbar } from "@/components/shell/SessionToolbar";
-import { CliBadge } from "@/components/shell/CliBadge";
+import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,8 +52,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
-import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
-import { cliHarness } from "@/utils/cli-harness";
+import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
@@ -84,7 +82,6 @@ const noGuideYet = () => {
     return false;
   }
 };
-type SessionView = "chat" | "trajectory";
 const RESTART_COMMAND = /^\/(restart|new|clear)(\s|$)/i;
 
 /** Keep context counts compact without rounding up the amount used. */
@@ -153,6 +150,7 @@ function RuntimeShell({
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
+  const [panelSheetOpen, setPanelSheetOpen] = useState(false);
   // An agent on another computer reads @names in that computer's mesh.
   // The #158 signature also narrows by network/workspace once rows carry them;
   // rows without those fields (pre-aggregate engines) ignore the filters.
@@ -165,7 +163,6 @@ function RuntimeShell({
     [session.device, agents, liveAgents, remoteAgents, session.network, session.workspace, session.identity, session.instance],
   );
   const profile = profiles.find((item) => item.name === session.profile);
-  const model = session.model || profile?.model;
   const sessionLabel = sessionHeading(
     session,
     targets.agents.find((agent) => agent.name === session.identity)?.display_name,
@@ -224,46 +221,62 @@ function RuntimeShell({
 
   return (
     <>
-      {/* Respond to the chat pane's width, including when its sidebar is resized. */}
-      <ShellHeader className="bg-background @container/shell-header sticky top-0 z-10 flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5">
+      {/* Phones only: the sidebar and the session panel are sheets there. */}
+      <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 md:hidden">
         <SidebarTrigger className="-ml-1 shrink-0" />
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span
-            className="min-w-0 truncate text-sm font-semibold tracking-tight"
-            title={`${sessionLabel} · ${formatSessionName(session.name, session.session_id)} · ${session.harness || model || "model unavailable"} · ${session.profile || "default"}`}
-          >
-            {sessionLabel}
-          </span>
-          <CliBadge harness={cliHarness(session)} className="text-muted-foreground max-w-40 shrink-0 text-xs @max-[38rem]/shell-header:[&>span]:hidden" />
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight" title={sessionLabel}>
+          {sessionLabel}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label="Session Controls"
+          className="h-8 shrink-0 gap-1.5 px-2"
+          onClick={() => setPanelSheetOpen(true)}
+        >
+          <SlidersHorizontal className="size-4" />
+          Session
+        </Button>
+      </ShellHeader>
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {session.harness && Boolean(session.acp_plan?.entries?.length) && (
+            <details className="bg-muted/30 px-3 py-2 text-xs">
+              <summary className="cursor-pointer font-medium">Harness Plan</summary>
+              <ol className="mt-2 space-y-1">
+                {session.acp_plan?.entries?.map((entry, index) => (
+                  <li key={index} className="flex gap-2">
+                    <span className="text-muted-foreground shrink-0">{entry.status}</span>
+                    <span className="min-w-0 break-words">{entry.content}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
+          <div className="flex min-h-0 flex-1 flex-col">
+            {view === "chat" ? (
+              <Thread
+                agents={targets.agents}
+                commands={commands}
+                onOpenPanel={onOpenSettings}
+                attachmentsEnabled={
+                  session.supports_vision ?? profile?.supports_vision ?? true
+                }
+                identity={session.identity}
+                activity={activity}
+                onOpenGem={onOpenProperties}
+                remoteAgents={targets.remote}
+                workspace={session.workspace ?? ""}
+                device={session.device ?? ""}
+                locked={locked}
+              />
+            ) : (
+              <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
+            )}
+          </div>
         </div>
-        {usageLabel && (
-          <span className="text-muted-foreground hidden shrink-0 whitespace-nowrap text-xs @min-[56rem]/shell-header:block" title="Current harness context usage">
-            {usageLabel}
-          </span>
-        )}
-        <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Session view">
-          {([
-            ["chat", "Chat", MessageSquare],
-            ["trajectory", "Trajectory", Waypoints],
-          ] as const).map(([id, label, Icon]) => (
-            <button
-              key={id}
-              type="button"
-              aria-label={label}
-              title={label}
-              aria-pressed={view === id}
-              data-testid={`${id}-tab`}
-              onClick={() => setView(id)}
-              className={`flex items-center gap-1.5 border-b-2 px-1.5 pt-1 pb-0.5 text-xs font-medium transition-colors ${
-                view === id ? "border-foreground text-foreground" : "text-muted-foreground hover:text-foreground border-transparent"
-              }`}
-            >
-              <Icon className="size-3.5" aria-hidden="true" />
-              <span className="hidden @min-[26rem]/shell-header:inline">{label}</span>
-            </button>
-          ))}
-        </div>
-        <SessionToolbar
+        <SessionPanel
           api={api}
           session={session}
           profiles={profiles}
@@ -275,41 +288,11 @@ function RuntimeShell({
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
           onHistoryCleared={onHistoryCleared}
+          view={view}
+          onViewChange={setView}
+          sheetOpen={panelSheetOpen}
+          onSheetOpenChange={setPanelSheetOpen}
         />
-      </ShellHeader>
-      {session.harness && Boolean(session.acp_plan?.entries?.length) && (
-        <details className="bg-muted/30 px-3 py-2 text-xs">
-          <summary className="cursor-pointer font-medium">Harness Plan</summary>
-          <ol className="mt-2 space-y-1">
-            {session.acp_plan?.entries?.map((entry, index) => (
-              <li key={index} className="flex gap-2">
-                <span className="text-muted-foreground shrink-0">{entry.status}</span>
-                <span className="min-w-0 break-words">{entry.content}</span>
-              </li>
-            ))}
-          </ol>
-        </details>
-      )}
-      <div className="flex min-h-0 flex-1 flex-col">
-        {view === "chat" ? (
-          <Thread
-            agents={targets.agents}
-            commands={commands}
-            onOpenPanel={onOpenSettings}
-            attachmentsEnabled={
-              session.supports_vision ?? profile?.supports_vision ?? true
-            }
-            identity={session.identity}
-            activity={activity}
-            onOpenGem={onOpenProperties}
-            remoteAgents={targets.remote}
-            workspace={session.workspace ?? ""}
-            device={session.device ?? ""}
-            locked={locked}
-          />
-        ) : (
-          <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
-        )}
       </div>
     </>
   );
@@ -1103,7 +1086,7 @@ export default function App() {
             </EngineRuntimeProvider>
           ) : (
             <>
-              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3">
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">
                 <SidebarTrigger className="-ml-1" />
                 <span className="text-muted-foreground text-sm">No session</span>
               </ShellHeader>

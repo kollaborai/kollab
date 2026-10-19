@@ -5,7 +5,9 @@
     "kokoro-onnx==0.6.1",
     "sounddevice==0.5.6",
     "numpy==2.5.3",
-    "onnxruntime==1.30.0"
+    "onnxruntime==1.30.0",
+    "pywebrtc-audio==0.2.0",
+    "kaldi-native-fbank==1.22.3"
   ],
   "voice": "af_heart",
   "bundles": {
@@ -118,7 +120,111 @@
         "question_sha256": "f31899d4f7a832780f554bdb462360ef91ddd4ec7a27872c84c4d86cad82e5dd",
         "kernel_gamma": 0.5
       }
+    },
+    "qwen": {
+      "runtime": [
+        "mlx==0.32.4",
+        "mlx-metal==0.32.4",
+        "mlx-lm==0.32.2",
+        "transformers==5.20.1",
+        "tokenizers==0.23.3",
+        "numpy==2.5.4"
+      ],
+      "model": "qwen3-0.6b-voice-v1",
+      "minimum_probability": 0.8,
+      "prompt_sha256": "46409ae1f412b7061231181a344d7c43cc22b2c7237f7dc2752c555fdcc6b762",
+      "bundle": {
+        "license": "Apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/LICENSE",
+        "attribution": "Qwen3-0.6B by the Qwen team, LoRA fine-tuned on Kollab's synthetic voice fixtures, fused, MLX 8-bit",
+        "base_model": "Qwen/Qwen3-0.6B",
+        "base_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+        "revision": "voice-qwen-v1",
+        "base_url": "",
+        "files": [
+          {
+            "name": "chat_template.jinja",
+            "size": 4168,
+            "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+          },
+          {
+            "name": "config.json",
+            "size": 1021,
+            "sha256": "ba4be8b0002d2c05a4c7a50e8d4a69711caf55f46503ba0eef7762f811d4587d"
+          },
+          {
+            "name": "generation_config.json",
+            "size": 239,
+            "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+          },
+          {
+            "name": "model.safetensors",
+            "size": 633443038,
+            "sha256": "d6132601f54ab7723365c605403990aa2ce649ff9ba9d2302e43cf69afe13c0f"
+          },
+          {
+            "name": "model.safetensors.index.json",
+            "size": 49770,
+            "sha256": "9e9d09d5f0eb73a33663314f68b24dd91d33e245ca3af15daed8e69b5adff982"
+          },
+          {
+            "name": "tokenizer.json",
+            "size": 11422650,
+            "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"
+          },
+          {
+            "name": "tokenizer_config.json",
+            "size": 729,
+            "sha256": "ee8f6d44bf2353e6d3686c3adaf70e1ccfe9e6ed6822d0ab2f28cafdd7754792"
+          }
+        ]
+      }
     }
+  },
+  "stt": {
+    "parakeet": {
+      "model": "nvidia/parakeet-tdt-0.6b-v3",
+      "runtime": [
+        "parakeet-mlx==0.5.3",
+        "mlx==0.32.4",
+        "librosa==1.0.0",
+        "numpy==2.5.3"
+      ],
+      "bundle": {
+        "license": "CC-BY-4.0",
+        "license_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+        "attribution": "Parakeet TDT 0.6B v3 by NVIDIA, MLX conversion by mlx-community",
+        "revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+        "base_url": "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/resolve/ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15/",
+        "files": [
+          {
+            "name": "config.json",
+            "size": 244093,
+            "sha256": "f320f1292511f34ec47f513755fe20fd01dbfc09a925d42730e66059a6e1ef4c"
+          },
+          {
+            "name": "model.safetensors",
+            "size": 2508288736,
+            "sha256": "05e01c7f396c298cf7d23f61da7b504adeab698f0aaeafd9c82d198625464592"
+          }
+        ]
+      }
+    }
+  },
+  "speaker": {
+    "model": "3dspeaker-eres2net-voxceleb",
+    "license": "Apache-2.0",
+    "license_url": "https://www.modelscope.cn/models/iic/speech_eres2net_sv_en_voxceleb_16k/summary",
+    "attribution": "3D-Speaker ERes2Net trained on VoxCeleb by Alibaba Tongyi, ONNX export by k2-fsa sherpa-onnx",
+    "revision": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+    "base_url": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/",
+    "files": [
+      {
+        "name": "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        "size": 26485263,
+        "sha256": "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5"
+      }
+    ]
   },
   "tts": {
     "vibevoice": {

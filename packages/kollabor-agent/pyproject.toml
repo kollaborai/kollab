@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-agent"
-version = "0.16.8"
+version = "0.17.0"
 description = "Agent execution toolkit - tool execution, MCP integration, file operations, and shell commands"
 readme = "README.md"
-requires-python = ">=3.12"
-license = "MIT"
+requires-python = ">=3.14"
+license = "Apache-2.0"
 dependencies = [
-    "kollabor-events>=0.16.8",
-    "kollabor-config>=0.16.8",
-    "kollabor-ai>=0.16.8",
+    "kollabor-events>=0.17.0",
+    "kollabor-config>=0.17.0",
+    "kollabor-ai>=0.17.0",
     "pyyaml>=6.0",
 ]
 

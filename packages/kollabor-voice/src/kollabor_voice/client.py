@@ -56,7 +56,18 @@ class VoiceClient:
                 writer.close()
                 await writer.wait_closed()
 
-        return await asyncio.wait_for(exchange(), 2.0)
+        # claim rides the lifecycle lock; a slow capture teardown (CoreAudio
+        # stop, VAD model load) can legitimately exceed a 2s budget while the
+        # server still completes the claim. Callers retry on TimeoutError.
+        budget = 2.0 if op != "claim" else 8.0
+        try:
+            return await asyncio.wait_for(exchange(), budget)
+        except TimeoutError:
+            # str(asyncio.TimeoutError()) is empty; give the stop log and the
+            # status line a real reason.
+            raise TimeoutError(
+                f"voice service did not answer '{op}' within {budget:g}s"
+            ) from None
 
     def launch(self) -> None:
         if os.name != "posix":
@@ -114,12 +125,12 @@ class VoiceClient:
                 return {
                     **data,
                     "state": "error",
-                    "detail": "Voice setup stopped; run /voice retry",
+                    "detail": "Voice setup stopped",
                 }
             if time.time() - data["updated_at"] > 960:
                 return {
                     "state": "error",
-                    "detail": "Voice setup stopped; run /voice retry",
+                    "detail": "Voice setup stopped",
                 }
             return data
         except (OSError, ValueError, KeyError):
@@ -148,7 +159,7 @@ class VoiceClient:
                         "setup_failed", state.get("detail", "Voice setup failed")
                     )
                 await asyncio.sleep(0.3)
-        raise VoiceError("setup_timeout", "Voice setup timed out; run /voice retry")
+        raise VoiceError("setup_timeout", "Voice setup timed out")
 
     async def voice_out(
         self,

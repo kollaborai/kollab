@@ -1,5 +1,51 @@
 # Voice service implementation evidence
 
+## October 19: Fine-Tuned Qwen3 0.6B classifier
+
+Local source changes: `qwen` is a third classifier choice, offered and saved
+only on Apple silicon; Laya stays the default. The device service runs one local
+classifier worker at a time: `classifier_prepare` names it, and a submit for the
+other model is refused while speech stays pending. `QwenWorker` runs
+`kollabor_voice.qwen_worker` in its own pinned MLX runtime, with weights and
+prompts pinned by SHA-256 in `manifest.json` (`classifiers.qwen`). With `qwen`
+selected the model also reads the reply to "was that for me?". See the
+[October 19 contract](classifier-providers.md#fine-tuned-qwen3-06b-october-19-extension).
+
+Runtime evidence in an isolated root (`/tmp/kvq`, removed afterwards; the user's
+own voice service and its workers were left running untouched):
+- `VoiceClient.ensure` started a fresh service through the bootstrap. The qwen
+  runtime installed from the uv cache, and `classifier_prepare(model="qwen")`
+  reached ready in 2.8 s (load and warmup 1.44 s): one worker process, 934 MB
+  resident after the run. Weights were placed by hand; no download source exists.
+- Claiming the lease hung in CoreAudio from the agent shell, which has no
+  microphone permission, and the service exited as designed. The proof then ran
+  the same `VoiceService` with only its recorder and player stubbed.
+- The bench's 230 synthetic evaluation cases (intent development, heldout,
+  acceptance and playback; answers heldout; style heldout) went through
+  `LocalClassifier.decide`/`answer` and `VoiceClient.review_speech` on the socket
+  under a live lease: 230 of 230 verdicts identical to `score runtime`, so
+  acceptance 40/40, playback 8/8, answers 59/60, style 24 right and 2 deferred.
+  Each call took a median 52 ms, including the client's 50 ms result poll.
+- A Spanish line was deferred as not English. The plugin's status check passed
+  on the new service and, against the user's running older service, reported
+  that it predates Fine-Tuned Qwen3 0.6B and must be restarted.
+- Real microphone, from a Ghostty-owned tmux session (it has microphone
+  permission) running this checkout's TUI in a throwaway HOME with a fake
+  model, lines played with `say`: "Can you check whether the build passed?"
+  was sent (respond 1.00); a TV line was ignored; a Spanish line was held and
+  voice asked "Sorry, was that for me?"; "Yes, it was.", said over the
+  question, was read by the model as yes (0.99) and the held line reached the
+  agent. A reply given after the 12-second window was judged on its own, as
+  designed.
+- Not exercised live: switching back to Laya inside one service (unit-tested),
+  Linux.
+- Seen in the same run, not caused by this change: after a voice turn the TUI
+  leaves the previous input box and status rows on screen; typed turns clear.
+
+Voice-package and unit voice tests, the full unit suite (7196 passed) and the
+tmux specs `voice-classifier-qwen.json`, `voice-transcription-engine.json`,
+`voice-speaker-gate.json` and `voice-classifier-screen.json` passed.
+
 ## October 12: shared Voice Configuration
 
 Local source changes: `/voice` is canonical; `/voice config` opens a shared form
@@ -280,7 +326,10 @@ active-process evidence. Changes remain local and uncommitted; no release is cla
   cancellation and producer scope tested. Real simultaneous multi-agent speech and
   physical stop latency remain unmeasured.
 - V17: echo context, classifier decisions and main-agent silence are covered by
-  controlled tests. No acoustic echo cancellation or general talk-over claim.
+  controlled tests. Echo cancellation (AEC3 fed the playback reference) and the
+  speaker gate exist behind off-by-default settings, measured in a simulated room
+  and on recorded speech (bench/README.md). Neither is proven on real speakers and
+  a microphone; no general talk-over claim.
 - V18: installed wheel/client/assets/offline singleton verified on macOS arm64 and
   Python 3.12. Linux is not live-accepted; Windows remains unsupported.
 

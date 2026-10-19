@@ -5,11 +5,15 @@ Imported only by the device service after isolated support is ready.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 RATE = 16000
 BLOCK = 512
@@ -144,14 +148,20 @@ class LocalModels:
         for _ in segments:
             pass
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, names=()):
+        # Whisper spells names it was primed with: "Aquamarine", not "Awkwamari".
+        others = [n for n in names if n.lower() != "kollab"]
         segments, info = self.whisper.transcribe(
             audio,
             beam_size=1,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             condition_on_previous_text=False,
-            initial_prompt="Kollab is the assistant's name.",
+            initial_prompt=(
+                f"The assistant is called {', '.join(others)}, or Kollab."
+                if others
+                else "Kollab is the assistant's name."
+            ),
             temperature=0,
         )
         # Whisper can hallucinate repetitions on a tiny trailing fragment at the
@@ -175,27 +185,98 @@ class LocalModels:
         )
 
 
-def play_audio(samples, rate, cancelled: threading.Event):
-    """Blocking chunked playback. stop() drains; abort() never reports played."""
-    import sounddevice as sd
+class StreamPlayer:
+    """Plays chunks back to back on one open output stream.
 
-    if cancelled.is_set():
-        return False
-    audio = np.asarray(samples, dtype=np.float32)
-    if audio.ndim != 1 or not len(audio) or not np.isfinite(audio).all():
-        raise ValueError("Speech engine returned invalid waveform samples")
-    stream = sd.OutputStream(samplerate=rate, channels=1, dtype="float32")
-    try:
-        stream.start()
+    Nothing reaches the device until PREBUFFER_S, or the larger lead the
+    speech queue sets for a run, is queued, so a synthesizer running near real
+    time cannot stutter; finish() plays the rest and releases the device.
+    """
+
+    PREBUFFER_S = 0.4
+
+    def __init__(self):
+        self.stream = None
+        self.rate = None
+        self.pending = []
+        self.lead = 0.0  # seconds to hold before starting (SpeechQueue, per run)
+        self.played = self.underruns = 0  # per open stream, logged on finish
+        # echo.PlaybackReference: what plays and when, for echo cancellation.
+        self.reference = None
+        self.sounds_until = 0.0  # monotonic time the audio handed over ends
+
+    def _send(self, audio):
+        """Write to the device, telling the reference when this audio sounds."""
+        if self.reference is not None:
+            start = max(self.sounds_until, time.monotonic() + self.stream.latency)
+            self.sounds_until = self.reference.play(audio, self.rate, start)
+        return self.stream.write(audio[:, None])
+
+    def write(self, samples, rate, cancelled: threading.Event) -> bool:
+        """Blocking like the device. False (and nothing more plays) once cancelled."""
+        import sounddevice as sd
+
+        audio = np.asarray(samples, dtype=np.float32)
+        if audio.ndim != 1 or not len(audio) or not np.isfinite(audio).all():
+            raise ValueError("Speech engine returned invalid waveform samples")
+        if cancelled.is_set():
+            self.abort()
+            return False
+        if self.stream is not None and rate != self.rate:
+            self.finish()
+        if self.stream is None:
+            self.stream = sd.OutputStream(samplerate=rate, channels=1, dtype="float32")
+            self.rate = rate
+        if not self.stream.active:
+            self.pending.append(audio)
+            if sum(map(len, self.pending)) < max(self.PREBUFFER_S, self.lead) * rate:
+                return True
+            audio, self.pending = np.concatenate(self.pending), []
+            self.stream.start()
         for offset in range(0, len(audio), 512):
             if cancelled.is_set():
-                stream.abort()
+                self.abort()
                 return False
-            stream.write(audio[offset : offset + 512, None])
-        if cancelled.is_set():
-            stream.abort()
-            return False
-        stream.stop()  # Wait for actual device completion before the receipt.
-        return not cancelled.is_set()
-    finally:
-        stream.close()
+            # write() reports an underrun: the device ran dry before this chunk.
+            self.underruns += bool(self._send(audio[offset : offset + 512]))
+        self.played += len(audio)
+        return True
+
+    def finish(self):
+        """Play what is still buffered, wait for the device, then release it."""
+        if self.stream is None:
+            return
+        try:
+            if self.pending:
+                audio, self.pending = np.concatenate(self.pending), []
+                self.stream.start()
+                self._send(audio)
+                self.played += len(audio)
+            if self.stream.active:
+                self.stream.stop()
+            log.info(
+                "Speech playback: %.1fs of audio, %d underruns, %.1fs lead",
+                self.played / self.rate,
+                self.underruns,
+                max(self.PREBUFFER_S, self.lead),
+            )
+        finally:
+            self.stream.close()
+            self.stream, self.pending = None, []
+            self.played = self.underruns = 0
+            self.sounds_until = 0.0
+
+    def abort(self):
+        """Drop everything buffered and release the device at once."""
+        if self.stream is None:
+            return
+        try:
+            if self.stream.active:
+                self.stream.abort()
+        finally:
+            if self.reference is not None:
+                self.reference.cut()  # what was still buffered never sounds
+            self.stream.close()
+            self.stream, self.pending = None, []
+            self.played = self.underruns = 0
+            self.sounds_until = 0.0

@@ -1948,11 +1948,21 @@ class LLMService:
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
             origin = dict(data.get("origin_context") or {})
             origin.setdefault("operator", source != "agent")
-            if await acp.steer(str(data["message"]), origin=origin, thread_id=data.get("thread_id")):
+            message = str(data["message"])
+            voice = data.get("voice")
+            if voice:
+                # A mic turn carries the voice rules, as on the native path, and
+                # its reply is spoken when the turn ends (acp.voice_turns).
+                from kollabor_voice.observer import voice_preamble
+
+                epoch = voice.get("epoch")
+                message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
+                acp.voice_rules_epochs.add(epoch)
+            elif await acp.steer(message, origin=origin, thread_id=data.get("thread_id")):
                 return {"status": "injected", "request_id": request_id}
             try:
                 admission = acp.admit(
-                    str(data["message"]), request_id=request_id, source=source,
+                    message, request_id=request_id, source=source,
                     thread_id=data.get("thread_id"),
                     origin=origin,
                 )
@@ -1964,6 +1974,8 @@ class LLMService:
                 if "full" in str(exc).lower():
                     return {"status": "rejected", "reason": "acp_queue_full"}
                 return {"status": "rejected", "reason": "acp_admission_failed"}
+            if voice:
+                acp.voice_turns[admission.request_id] = voice
             return {
                 "status": "queued",
                 "request_id": admission.request_id,

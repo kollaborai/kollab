@@ -242,7 +242,10 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
-          className="w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
+          className={cn(
+            "w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden",
+            variant === "floating" && cn("inset-y-2 h-auto overflow-hidden rounded-xl shadow-lg", side === "left" ? "left-2" : "right-2")
+          )}
           style={
             {
               "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
@@ -305,7 +308,7 @@ function Sidebar({
         <div
           data-sidebar="sidebar"
           data-slot="sidebar-inner"
-          className="flex h-full w-full flex-col bg-sidebar group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm"
+          className="flex h-full w-full flex-col bg-sidebar group-data-[variant=floating]:overflow-hidden group-data-[variant=floating]:rounded-xl group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-lg"
         >
           {children}
         </div>
@@ -475,7 +478,9 @@ function SidebarRail({ className, ref: forwardedRef, onPointerDown, onPointerMov
       }}
       title={open ? "Drag or use arrow keys to resize Sidebar" : "Expand Sidebar"}
       className={cn(
-        "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 touch-none transition-colors ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-border focus-visible:outline-none focus-visible:after:bg-ring md:flex",
+        "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 touch-none transition-colors ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] hover:after:bg-sidebar-ring [[data-resizing]_&]:after:bg-sidebar-ring focus-visible:outline-none focus-visible:after:bg-ring md:flex",
+        // A floating sidebar's edge is the gap beside its card: the line sits in it.
+        "[[data-side=left][data-variant=floating][data-state=expanded]_&]:-right-3 [[data-side=right][data-variant=floating][data-state=expanded]_&]:left-1",
         open && "cursor-col-resize",
         "[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize",
         "group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:after:left-full hover:group-data-[collapsible=offcanvas]:bg-sidebar",

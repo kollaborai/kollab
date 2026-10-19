@@ -215,4 +215,4 @@ node --test tests/*.test.ts
 
 ## License
 
-MIT
+Apache-2.0

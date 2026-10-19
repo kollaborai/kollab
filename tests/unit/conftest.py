@@ -38,3 +38,21 @@ def unthrottled_relay(monkeypatch):
     """
     monkeypatch.setattr(relay_client, "SEND_BURST", 1e9)
     monkeypatch.setattr(relay_client, "SEND_RATE_PER_SECOND", 1e9)
+
+
+@pytest.fixture(autouse=True)
+def _private_hub_socket_folder(monkeypatch):
+    """Hub sockets a unit test makes or sweeps live in its own /tmp folder.
+
+    Tests keep the repo as their project, so they shared the live agents'
+    /tmp/kollabor-hub/<hash> folder: a full run on 2026-10-19 deleted every live
+    agent's socket and cut the web UI off from them.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    folder = tempfile.mkdtemp(dir="/tmp", prefix="kh-")  # short: unix socket limit
+    monkeypatch.setattr(presence, "SOCKET_DIR_ROOT", Path(folder))
+    yield
+    shutil.rmtree(folder, ignore_errors=True)

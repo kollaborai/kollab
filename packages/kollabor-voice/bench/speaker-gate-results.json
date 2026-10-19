@@ -1,0 +1,107 @@
+{
+ "model": "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+ "equal_error_rate": 0.0121,
+ "equal_error_threshold": 0.407,
+ "trials": {
+  "genuine": 3410,
+  "person": 142662,
+  "tv": 16840,
+  "playback": 2000,
+  "say": 2000
+ },
+ "sweep": [
+  {
+   "threshold": 0.3,
+   "false_reject": 0.0085,
+   "false_accept_person": 0.0715,
+   "false_accept_tv": 0.0109,
+   "false_accept_playback": 0.0325,
+   "false_accept_say": 0.016
+  },
+  {
+   "threshold": 0.35,
+   "false_reject": 0.0097,
+   "false_accept_person": 0.036,
+   "false_accept_tv": 0.0033,
+   "false_accept_playback": 0.017,
+   "false_accept_say": 0.0065
+  },
+  {
+   "threshold": 0.4,
+   "false_reject": 0.0106,
+   "false_accept_person": 0.0155,
+   "false_accept_tv": 0.0008,
+   "false_accept_playback": 0.0035,
+   "false_accept_say": 0.002
+  },
+  {
+   "threshold": 0.41,
+   "false_reject": 0.012,
+   "false_accept_person": 0.0129,
+   "false_accept_tv": 0.0007,
+   "false_accept_playback": 0.003,
+   "false_accept_say": 0.001
+  },
+  {
+   "threshold": 0.45,
+   "false_reject": 0.0158,
+   "false_accept_person": 0.0049,
+   "false_accept_tv": 0.0001,
+   "false_accept_playback": 0.0005,
+   "false_accept_say": 0.0005
+  },
+  {
+   "threshold": 0.5,
+   "false_reject": 0.0282,
+   "false_accept_person": 0.0012,
+   "false_accept_tv": 0.0,
+   "false_accept_playback": 0.0,
+   "false_accept_say": 0.0
+  },
+  {
+   "threshold": 0.55,
+   "false_reject": 0.0437,
+   "false_accept_person": 0.0002,
+   "false_accept_tv": 0.0,
+   "false_accept_playback": 0.0,
+   "false_accept_say": 0.0
+  },
+  {
+   "threshold": 0.6,
+   "false_reject": 0.0666,
+   "false_accept_person": 0.0,
+   "false_accept_tv": 0.0,
+   "false_accept_playback": 0.0,
+   "false_accept_say": 0.0
+  }
+ ],
+ "by_duration": {
+  "1-2s": {
+   "false_reject": 0.0618,
+   "false_accept_person": 0.0025,
+   "false_accept_tv": 0.0,
+   "false_accept_playback": 0.0,
+   "false_accept_say": null
+  },
+  "2-4s": {
+   "false_reject": 0.0117,
+   "false_accept_person": 0.0031,
+   "false_accept_tv": 0.0,
+   "false_accept_playback": 0.0,
+   "false_accept_say": 0.0017
+  },
+  "4-99s": {
+   "false_reject": 0.0118,
+   "false_accept_person": 0.006,
+   "false_accept_tv": 0.0002,
+   "false_accept_playback": 0.0009,
+   "false_accept_say": 0.0
+  }
+ },
+ "under_one_second": {
+  "person": 0.034,
+  "tv": 0.023,
+  "playback": 0.0,
+  "say": 0.0
+ }
+}

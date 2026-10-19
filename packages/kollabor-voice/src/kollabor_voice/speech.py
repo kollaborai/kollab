@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import select
@@ -90,40 +91,58 @@ class VibeVoiceWorker:
             raise
 
     def exchange(self, request, timeout=120):
+        response = self._receive(self._send(request), timeout)
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "VibeVoice inference failed"))
+        return response
+
+    def stream(self, text, timeout=120):
+        """Yield float32 chunks while VibeVoice is still generating the rest."""
+        import numpy as np
+
+        identity = self._send({"op": "stream", "text": text})
+        finished = False
+        try:
+            while True:
+                response = self._receive(identity, timeout)
+                if "chunk" not in response:
+                    finished = True
+                    if not response.get("ok"):
+                        raise RuntimeError(
+                            response.get("error", "VibeVoice inference failed")
+                        )
+                    return
+                audio = np.frombuffer(
+                    base64.b64decode(response["chunk"], validate=True), dtype="<f4"
+                ).copy()
+                if not len(audio) or not np.isfinite(audio).all():
+                    raise RuntimeError("VibeVoice returned invalid waveform samples")
+                yield audio
+        finally:
+            # Stopped early (a cancelled sentence): read the rest of this answer
+            # so the next request never receives its chunks.
+            while not finished:
+                finished = "chunk" not in self._receive(identity, timeout)
+
+    def _send(self, request):
         identity = uuid.uuid4().hex
         request = {**request, "id": identity}
         self.process.stdin.write((json.dumps(request) + "\n").encode())
         self.process.stdin.flush()
+        return identity
+
+    def _receive(self, identity, timeout):
         if not select.select([self.process.stdout], [], [], timeout)[0]:
             self.close()
-            raise TimeoutError("VibeVoice inference timed out; use /voice retry")
+            raise TimeoutError("VibeVoice inference timed out")
         line = self.process.stdout.readline(16 * 1024 * 1024)
         if not line.endswith(b"\n"):
             raise RuntimeError("VibeVoice worker stopped or returned excessive audio")
         response = json.loads(line)
         if response.get("id") != identity:
             self.close()
-            raise RuntimeError("VibeVoice response identity differs; use /voice retry")
-        if not response.get("ok"):
-            raise RuntimeError(response.get("error", "VibeVoice inference failed"))
+            raise RuntimeError("VibeVoice response identity differs")
         return response
-
-    def synthesize(self, text):
-        import numpy as np
-
-        value = self.exchange({"op": "synthesize", "text": text})
-        audio = np.frombuffer(
-            base64.b64decode(value["audio"], validate=True), dtype="<f4"
-        ).copy()
-        rate = value["rate"]
-        if (
-            type(rate) is not int
-            or not 8000 <= rate <= 96000
-            or not len(audio)
-            or not np.isfinite(audio).all()
-        ):
-            raise RuntimeError("VibeVoice returned invalid waveform samples")
-        return audio, rate
 
     def close(self):
         if self.process.poll() is None:
@@ -146,7 +165,7 @@ class SpeechEngine:
         state = dict(self.state)
         if self.worker and self.worker.process.poll() is not None:
             state.update(
-                state="error", detail="VibeVoice worker stopped; use /voice retry"
+                state="error", detail="VibeVoice worker stopped"
             )
         return state
 
@@ -194,28 +213,38 @@ class SpeechEngine:
                 self.state.update(state="error", detail=str(exc))
                 raise
 
-    def synthesize(self, text):
+    def stream(self, text):
+        """Yield (samples, rate) chunks; VibeVoice yields while it generates."""
         with self.lock:
-            self.configure()
+            # A failed engine (timed out, worker died) starts again here, on the
+            # next sentence, instead of failing every sentence after it.
+            # ponytail: a crash-looping engine pays its load per sentence; add a
+            # backoff if that shows up.
+            self.configure(force=self.status()["state"] == "error")
             if self.status()["state"] != "ready":
                 raise RuntimeError(self.status()["detail"])
             preferences = self.preferences
             if preferences["tts_engine"] == "vibevoice":
+                rate = self.worker.ready["rate"]
                 try:
-                    return self.worker.synthesize(text)
+                    with contextlib.closing(self.worker.stream(text)) as chunks:
+                        for samples in chunks:
+                            yield samples, rate
                 except Exception as exc:
                     self.state.update(state="error", detail=str(exc))
                     raise
+                return
             if (
                 preferences["kokoro_voice"] == "af_heart"
                 and preferences["kokoro_speed"] == 1
             ):
-                return self.kokoro(text)
-            return self.kokoro(
-                text,
-                voice=preferences["kokoro_voice"],
-                speed=preferences["kokoro_speed"],
-            )
+                yield self.kokoro(text)
+            else:
+                yield self.kokoro(
+                    text,
+                    voice=preferences["kokoro_voice"],
+                    speed=preferences["kokoro_speed"],
+                )
 
     def close(self):
         with self.lock:

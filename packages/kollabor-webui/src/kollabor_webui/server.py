@@ -145,6 +145,10 @@ def create_app(
             server_version = pkg_version("kollabor-webui")
         except Exception:
             server_version = ""
+        try:
+            kollab_version = pkg_version("kollab")
+        except Exception:
+            kollab_version = ""
         return {
             "engine_url": url,
             "token": read_token_from_disk(),
@@ -152,6 +156,7 @@ def create_app(
             # warns in the UI instead of failing on renamed API fields.
             "server_version": server_version,
             "engine_version": engine_version,
+            "kollab_version": kollab_version,
         }
 
     # One route answers five methods, so it has one operation id; the engine's own

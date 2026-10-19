@@ -1082,6 +1082,7 @@ class HubPlugin(BasePlugin):
 
         if not self._is_enabled():
             logger.info("Hub plugin disabled")
+            self.enabled = False
             return
 
         # Pipe mode: don't register presence or start socket server.

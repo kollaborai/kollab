@@ -185,4 +185,4 @@ feature, not a shell workaround.
 
 ---
 
-*Kollab is open source under the MIT license. The hub plugin ships with the `kollab` command. Try `kollab --designation architect` and `kollab --designation navigator` in two terminals.*
+*Kollab is open source under the Apache 2.0 license. The hub plugin ships with the `kollab` command. Try `kollab --designation architect` and `kollab --designation navigator` in two terminals.*

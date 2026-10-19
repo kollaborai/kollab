@@ -1,0 +1,2373 @@
+{
+ "date": "2026-10-19",
+ "machine": "Apple M2 Max, macOS 27.2",
+ "audio": "macOS say voices Samantha, Daniel, Karen, Rishi, 16 kHz mono, 20 sentences each; babble = another voice and sentence 10 dB below the speaker",
+ "method": "Each engine runs the service's own code path on every clip once: Whisper through LocalModels.transcribe (CPU int8, Silero VAD, primed with the agent names), Parakeet through ParakeetWorker (MLX on the GPU, its own process), one engine after the other. Latency is wall time per utterance after warm-up; the load average and swap in use are recorded with it.",
+ "engines": {
+  "whisper": {
+   "model": "faster-whisper base (Systran)",
+   "revision": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+   "runtime": [
+    "faster-whisper==1.2.1",
+    "kokoro-onnx==0.6.1",
+    "sounddevice==0.5.6",
+    "numpy==2.5.3",
+    "onnxruntime==1.30.0",
+    "pywebrtc-audio==0.2.0",
+    "kaldi-native-fbank==1.22.3"
+   ]
+  },
+  "parakeet": {
+   "model": "nvidia/parakeet-tdt-0.6b-v3",
+   "revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+   "runtime": [
+    "parakeet-mlx==0.5.3",
+    "mlx==0.32.4",
+    "librosa==1.0.0",
+    "numpy==2.5.3"
+   ],
+   "cold_start_seconds": 2.9
+  }
+ },
+ "load_average_at_start": {
+  "whisper": 3.9,
+  "parakeet": 6.5
+ },
+ "first_utterance_after_idle_ms": {
+  "whisper": {
+   "30": 586.8,
+   "120": 569.5,
+   "300": 568.5
+  },
+  "parakeet": {
+   "30": 128.6,
+   "120": 127.6,
+   "300": 109.8
+  }
+ },
+ "swap_used_at_end": "2782.62M",
+ "summary": {
+  "whisper": {
+   "clean": {
+    "utterances": 80,
+    "latency_ms": {
+     "p50": 562,
+     "p95": 611,
+     "mean": 567,
+     "max": 633
+    },
+    "real_time_factor_p50": 0.197,
+    "wer": 0.0283,
+    "names_correct": "54/60",
+    "per_name": {
+     "aquamarine": "16/16",
+     "lapis": "16/16",
+     "zircon": "12/12",
+     "sapphire": "8/8",
+     "kollab": "2/8"
+    }
+   },
+   "babble": {
+    "utterances": 80,
+    "latency_ms": {
+     "p50": 558,
+     "p95": 592,
+     "mean": 559,
+     "max": 665
+    },
+    "real_time_factor_p50": 0.196,
+    "wer": 0.0613,
+    "names_correct": "56/60",
+    "per_name": {
+     "aquamarine": "16/16",
+     "lapis": "16/16",
+     "zircon": "12/12",
+     "sapphire": "8/8",
+     "kollab": "4/8"
+    }
+   }
+  },
+  "parakeet": {
+   "clean": {
+    "utterances": 80,
+    "latency_ms": {
+     "p50": 69,
+     "p95": 92,
+     "mean": 71,
+     "max": 167
+    },
+    "real_time_factor_p50": 0.024,
+    "wer": 0.0142,
+    "names_correct": "51/60",
+    "per_name": {
+     "aquamarine": "16/16",
+     "lapis": "16/16",
+     "zircon": "12/12",
+     "sapphire": "7/8",
+     "kollab": "0/8"
+    }
+   },
+   "babble": {
+    "utterances": 80,
+    "latency_ms": {
+     "p50": 73,
+     "p95": 84,
+     "mean": 74,
+     "max": 101
+    },
+    "real_time_factor_p50": 0.025,
+    "wer": 0.0629,
+    "names_correct": "49/60",
+    "per_name": {
+     "aquamarine": "15/16",
+     "lapis": "16/16",
+     "zircon": "11/12",
+     "sapphire": "7/8",
+     "kollab": "0/8"
+    }
+   }
+  }
+ },
+ "clips": [
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.36,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 610.7
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 138.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.56,
+   "whisper": {
+    "text": "Hey lapis, what is the status of the build?",
+    "ms": 583.1
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 67.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.2,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 576.6
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 69.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.43,
+   "whisper": {
+    "text": "Stop talking for a second.",
+    "ms": 548.2
+   },
+   "parakeet": {
+    "text": "Coleb, stop talking for a second.",
+    "ms": 64.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.04,
+   "whisper": {
+    "text": "Sapphire, summarized the latest commits for me.",
+    "ms": 555.6
+   },
+   "parakeet": {
+    "text": "Sapphire, summarize the latest commits for me.",
+    "ms": 70.6
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.79,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 539.0
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 72.5
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.43,
+   "whisper": {
+    "text": "Aquamarine, how much disc space is left on the server?",
+    "ms": 578.2
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 73.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.39,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 623.2
+   },
+   "parakeet": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 62.6
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.06,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 555.4
+   },
+   "parakeet": {
+    "text": "Thanks Lapis. That looks good.",
+    "ms": 62.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.83,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 533.7
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 56.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Can you hear me?",
+   "seconds": 1.08,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 601.5
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 94.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.59,
+   "whisper": {
+    "text": "Switch the transcription engine to Paraguette.",
+    "ms": 555.0
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 68.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.69,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 561.1
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 67.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.08,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 562.1
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 70.0
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 3.82,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 572.2
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis, compare your answers and pick the better one.",
+    "ms": 166.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.0,
+   "whisper": {
+    "text": "Callab, read me the last message from sapphire.",
+    "ms": 555.0
+   },
+   "parakeet": {
+    "text": "Coleb, read me the last message from Sapphire.",
+    "ms": 71.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.54,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 552.8
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 66.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.09,
+   "whisper": {
+    "text": "Open the full request and approve it if the checks are green.",
+    "ms": 566.1
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 77.0
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.66,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 563.4
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 67.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Samantha",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.64,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 540.8
+   },
+   "parakeet": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 65.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.75,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 563.5
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 77.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.83,
+   "whisper": {
+    "text": "Hey lapis, what is the status of the build?",
+    "ms": 546.8
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 68.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.33,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 596.2
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 72.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.55,
+   "whisper": {
+    "text": "Stop talking for a second.",
+    "ms": 533.8
+   },
+   "parakeet": {
+    "text": "Colab, stop talking for a second.",
+    "ms": 91.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.21,
+   "whisper": {
+    "text": "Sapphire, summarise the latest commits for me.",
+    "ms": 535.8
+   },
+   "parakeet": {
+    "text": "Sapphire summarize the latest commits for me.",
+    "ms": 73.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 3.32,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 542.7
+   },
+   "parakeet": {
+    "text": "Lapis. Push the branch when the checks pass.",
+    "ms": 71.5
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.6,
+   "whisper": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 577.2
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 74.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 553.0
+   },
+   "parakeet": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 64.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.27,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 536.1
+   },
+   "parakeet": {
+    "text": "Thanks Lapis. That looks good.",
+    "ms": 62.5
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.85,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 551.2
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 58.6
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Can you hear me?",
+   "seconds": 1.13,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 544.5
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 51.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.67,
+   "whisper": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 546.1
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 66.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.77,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 547.6
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 65.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.29,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 547.7
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 70.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 4.04,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 566.8
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis. Compare your answers and pick the better one.",
+    "ms": 79.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 2.98,
+   "whisper": {
+    "text": "Read me the last message from sapphire.",
+    "ms": 529.7
+   },
+   "parakeet": {
+    "text": "Colab, read me the last message from Sapphire.",
+    "ms": 70.5
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 558.1
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 68.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.27,
+   "whisper": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 611.0
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 72.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.86,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 561.3
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 68.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Daniel",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 545.1
+   },
+   "parakeet": {
+    "text": "Never mind. I was talking to my wife.",
+    "ms": 62.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.46,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests until me what failed?",
+    "ms": 578.8
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 72.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.72,
+   "whisper": {
+    "text": "Hey lapis, what is the status of the build?",
+    "ms": 551.5
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 67.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.08,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 550.6
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 69.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.56,
+   "whisper": {
+    "text": "Kollab, stop talking for a second.",
+    "ms": 542.7
+   },
+   "parakeet": {
+    "text": "Colib, stop talking for a second.",
+    "ms": 64.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.23,
+   "whisper": {
+    "text": "Sapphire, summarise the latest commits for me.",
+    "ms": 590.2
+   },
+   "parakeet": {
+    "text": "Sapphire, summarize the latest commits for me.",
+    "ms": 72.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 632.6
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 69.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.53,
+   "whisper": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 579.7
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 70.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.46,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 587.2
+   },
+   "parakeet": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 64.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.13,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 547.5
+   },
+   "parakeet": {
+    "text": "Thanks Lapis, that looks good.",
+    "ms": 61.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.78,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 562.0
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 58.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Can you hear me?",
+   "seconds": 1.11,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 520.3
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 47.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.59,
+   "whisper": {
+    "text": "Switch the transcription engine to Parachute.",
+    "ms": 551.4
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to Parakeet.",
+    "ms": 69.2
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.71,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 562.3
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 66.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.19,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 550.5
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 108.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 3.73,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 562.3
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis, compare your answers and pick the better one.",
+    "ms": 78.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.14,
+   "whisper": {
+    "text": "Kollab, read me the last message from sapphire.",
+    "ms": 569.6
+   },
+   "parakeet": {
+    "text": "Colib, read me the last message from Sapphire.",
+    "ms": 71.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 582.6
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 70.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.03,
+   "whisper": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 558.0
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 74.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.8,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 590.4
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 64.9
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Karen",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.71,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 594.1
+   },
+   "parakeet": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 64.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.84,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 566.8
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 74.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.97,
+   "whisper": {
+    "text": "Hey lapis, what is the status of the build?",
+    "ms": 623.1
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 67.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.23,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 560.9
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 71.8
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.5,
+   "whisper": {
+    "text": "Stop talking for a second.",
+    "ms": 534.9
+   },
+   "parakeet": {
+    "text": "Colub, stop talking for a second.",
+    "ms": 64.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.35,
+   "whisper": {
+    "text": "Sapphire Up, summarise the latest commits for me.",
+    "ms": 574.0
+   },
+   "parakeet": {
+    "text": "Safaya, summarize the latest commits for me.",
+    "ms": 73.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 596.8
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 68.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 4.0,
+   "whisper": {
+    "text": "Aquamarine, how much disc space is left on the server?",
+    "ms": 611.0
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 74.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.73,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 554.3
+   },
+   "parakeet": {
+    "text": "Zircon restart the voice service.",
+    "ms": 66.5
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.28,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 549.0
+   },
+   "parakeet": {
+    "text": "Thanks Lapis. That looks good.",
+    "ms": 63.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Aquamarine, are you there?",
+   "seconds": 2.11,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 555.3
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 59.1
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Can you hear me?",
+   "seconds": 1.08,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 532.5
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 51.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 554.6
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to Parakeet.",
+    "ms": 66.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 3.11,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 601.1
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 65.7
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.51,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 593.4
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 69.0
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 4.26,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 607.8
+   },
+   "parakeet": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 80.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.32,
+   "whisper": {
+    "text": "Callab, read me the last message from Sapphire.",
+    "ms": 589.5
+   },
+   "parakeet": {
+    "text": "Colub, read me the last message from Sapphire.",
+    "ms": 73.3
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.96,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 567.3
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 69.0
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.59,
+   "whisper": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 580.7
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 76.6
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.93,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 574.0
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 68.4
+   }
+  },
+  {
+   "condition": "clean",
+   "voice": "Rishi",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.9,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 602.0
+   },
+   "parakeet": {
+    "text": "Never mind. I was talking to my wife.",
+    "ms": 65.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.36,
+   "whisper": {
+    "text": "Aquamarine, can you run the test and tell me what fail?",
+    "ms": 591.3
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 101.1
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.56,
+   "whisper": {
+    "text": "Hey, lapis. What is the status of the build?",
+    "ms": 559.1
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 70.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.2,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 549.6
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 76.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.43,
+   "whisper": {
+    "text": "Call him, stop talking for a second.",
+    "ms": 540.2
+   },
+   "parakeet": {
+    "text": "Column, stop talking for a second.",
+    "ms": 68.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.04,
+   "whisper": {
+    "text": "Sapphire, summer ice the latest commits for me.",
+    "ms": 571.5
+   },
+   "parakeet": {
+    "text": "Sapphire summarize the latest commits for me.",
+    "ms": 79.3
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.79,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 560.6
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 66.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.43,
+   "whisper": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 584.8
+   },
+   "parakeet": {
+    "text": "Aquamarine. How much disk space is left on the server?",
+    "ms": 80.3
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.39,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 569.2
+   },
+   "parakeet": {
+    "text": "Zircon restart the voice service.",
+    "ms": 71.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.06,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 528.5
+   },
+   "parakeet": {
+    "text": "Thanks Lapis. That looks good.",
+    "ms": 67.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.83,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 524.8
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 64.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Can you hear me?",
+   "seconds": 1.08,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 528.7
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 56.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.59,
+   "whisper": {
+    "text": "Switch the transcription engine to Parathy.",
+    "ms": 528.9
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 74.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.69,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 646.7
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 65.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.08,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 589.6
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 74.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 3.82,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 571.3
+   },
+   "parakeet": {
+    "text": "Zirkon and Lapis, compare your answers and pick the better one.",
+    "ms": 79.3
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.0,
+   "whisper": {
+    "text": "Call him, read me the last message from sapphire.",
+    "ms": 567.0
+   },
+   "parakeet": {
+    "text": "Column, read me the last message from Sapphire.",
+    "ms": 74.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.54,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 540.5
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 63.1
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.09,
+   "whisper": {
+    "text": "Open the pool request and approve it if the checks are green.",
+    "ms": 551.2
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 74.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.66,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 545.0
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 70.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Samantha",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.64,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 545.2
+   },
+   "parakeet": {
+    "text": "Never mind. I was talking to my wife.",
+    "ms": 69.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.75,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 561.8
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 82.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.83,
+   "whisper": {
+    "text": "Hey, lapis, what is the status of the bill?",
+    "ms": 571.5
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 72.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.33,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 572.3
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 72.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.55,
+   "whisper": {
+    "text": "Kollab, stop talking for a second.",
+    "ms": 537.3
+   },
+   "parakeet": {
+    "text": "Stop talking for a second.",
+    "ms": 70.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.21,
+   "whisper": {
+    "text": "Sapphire summarizes the latest commits for me.",
+    "ms": 549.4
+   },
+   "parakeet": {
+    "text": "Sapphire, summarize the latest commits for me.",
+    "ms": 80.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 3.32,
+   "whisper": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 545.1
+   },
+   "parakeet": {
+    "text": "Lapis the branch when the checks pass.",
+    "ms": 78.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.6,
+   "whisper": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 555.7
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 77.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 527.6
+   },
+   "parakeet": {
+    "text": "Zircon restart the voice service.",
+    "ms": 70.7
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.27,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 578.6
+   },
+   "parakeet": {
+    "text": "Thanks Lapis.",
+    "ms": 69.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.85,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 534.8
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 68.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Can you hear me?",
+   "seconds": 1.13,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 535.9
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 57.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.67,
+   "whisper": {
+    "text": "Switch the transcription engine to parapet.",
+    "ms": 541.7
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to parapete.",
+    "ms": 69.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.77,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 554.7
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 67.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.29,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this week?",
+    "ms": 550.6
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 73.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 4.04,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 588.0
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis. What is this compare your answers and pick the better one?",
+    "ms": 90.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 2.98,
+   "whisper": {
+    "text": "Kollab, read me the last message from sapphire.",
+    "ms": 557.2
+   },
+   "parakeet": {
+    "text": "Colin, read me the last message from Sapphire.",
+    "ms": 71.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Add a unit test for the speech cash and run it.",
+    "ms": 562.5
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 68.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.27,
+   "whisper": {
+    "text": "Open the full request and approve it if the checks are green.",
+    "ms": 576.6
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 76.3
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.86,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 561.4
+   },
+   "parakeet": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 65.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Daniel",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 538.6
+   },
+   "parakeet": {
+    "text": "Never mind. I was talking to my wife.",
+    "ms": 70.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.46,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests until me what failed?",
+    "ms": 557.3
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 81.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.72,
+   "whisper": {
+    "text": "Her lapis, what is the status of the build?",
+    "ms": 560.1
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 73.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.08,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 603.5
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 71.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.56,
+   "whisper": {
+    "text": "Stop talking for a second.",
+    "ms": 529.1
+   },
+   "parakeet": {
+    "text": "Column, stop talking for a second.",
+    "ms": 71.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.23,
+   "whisper": {
+    "text": "Sapphire summarizes the latest commits for me.",
+    "ms": 548.4
+   },
+   "parakeet": {
+    "text": "Sapphire, summarize the latest commits for me.",
+    "ms": 79.7
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Lapis, push the branch when the chick's pass.",
+    "ms": 542.9
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 76.7
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 3.53,
+   "whisper": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 560.1
+   },
+   "parakeet": {
+    "text": "Aquamarine, how much disk space is left on the server?",
+    "ms": 77.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.46,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 537.9
+   },
+   "parakeet": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 69.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.13,
+   "whisper": {
+    "text": "Thanks lapis, that looks good.",
+    "ms": 524.6
+   },
+   "parakeet": {
+    "text": "Thanks Lapis.",
+    "ms": 63.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Aquamarine, are you there?",
+   "seconds": 1.78,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 549.1
+   },
+   "parakeet": {
+    "text": "Aquamarine, are you there?",
+    "ms": 65.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Can you hear me?",
+   "seconds": 1.11,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 519.9
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 57.7
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.59,
+   "whisper": {
+    "text": "Switch the transcription engine to Parachute.",
+    "ms": 538.3
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to Parakeet.",
+    "ms": 73.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 2.71,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 539.1
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 74.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.19,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 564.1
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 73.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 3.73,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better ones.",
+    "ms": 560.8
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis, compare your answers and pick the better one.",
+    "ms": 80.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.14,
+   "whisper": {
+    "text": "Call him, read me the last message from sapphire.",
+    "ms": 571.4
+   },
+   "parakeet": {
+    "text": "Colib, read me the last message from Sapphire.",
+    "ms": 75.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "At a unit test for the speech cash and run it.",
+    "ms": 561.3
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 73.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.03,
+   "whisper": {
+    "text": "Open the full request and approve it if the checks are green.",
+    "ms": 591.2
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks agree.",
+    "ms": 78.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.8,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 558.0
+   },
+   "parakeet": {
+    "text": "Aquamarine.",
+    "ms": 70.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Karen",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.71,
+   "whisper": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 565.7
+   },
+   "parakeet": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 69.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Aquamarine, can you run the tests and tell me what failed?",
+   "seconds": 3.84,
+   "whisper": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 577.4
+   },
+   "parakeet": {
+    "text": "Aquamarine, can you run the tests and tell me what failed?",
+    "ms": 83.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Hey lapis, what is the status of the build?",
+   "seconds": 2.97,
+   "whisper": {
+    "text": "Hey lapis, what is the status of the build?",
+    "ms": 571.6
+   },
+   "parakeet": {
+    "text": "Hey Lapis, what is the status of the build?",
+    "ms": 70.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Zircon, open the config file and check the port.",
+   "seconds": 3.23,
+   "whisper": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 584.4
+   },
+   "parakeet": {
+    "text": "Zircon, open the config file and check the port.",
+    "ms": 76.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Kollab, stop talking for a second.",
+   "seconds": 2.5,
+   "whisper": {
+    "text": "Kollab, stop talking for a second.",
+    "ms": 558.8
+   },
+   "parakeet": {
+    "text": "Column, stop talking for a second.",
+    "ms": 70.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Sapphire, summarize the latest commits for me.",
+   "seconds": 3.35,
+   "whisper": {
+    "text": "Sapphire, summarize the latest commits for me.",
+    "ms": 556.1
+   },
+   "parakeet": {
+    "text": "Safi up summarize the latest commits for me.",
+    "ms": 83.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Lapis, push the branch when the checks pass.",
+   "seconds": 2.89,
+   "whisper": {
+    "text": "Lapis, push the brand to end the check sparse.",
+    "ms": 556.0
+   },
+   "parakeet": {
+    "text": "Lapis, push the branch when the checks pass.",
+    "ms": 70.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Aquamarine, how much disk space is left on the server?",
+   "seconds": 4.0,
+   "whisper": {
+    "text": "Aquamarine, how much disc space is left on the server?",
+    "ms": 605.8
+   },
+   "parakeet": {
+    "text": "Aquamarine how much disk space is left on the server like",
+    "ms": 84.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Zircon, restart the voice service.",
+   "seconds": 2.73,
+   "whisper": {
+    "text": "Zircon, restart the voice service.",
+    "ms": 561.5
+   },
+   "parakeet": {
+    "text": "Zircon restart the voice service.",
+    "ms": 78.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Thanks lapis, that looks good.",
+   "seconds": 2.28,
+   "whisper": {
+    "text": "Kank's lapis, that looks good.",
+    "ms": 557.4
+   },
+   "parakeet": {
+    "text": "Thanks Lapis, that looks good.",
+    "ms": 84.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Aquamarine, are you there?",
+   "seconds": 2.11,
+   "whisper": {
+    "text": "Aquamarine, are you there?",
+    "ms": 538.5
+   },
+   "parakeet": {
+    "text": "Aquamarines for the are you there?",
+    "ms": 82.8
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Can you hear me?",
+   "seconds": 1.08,
+   "whisper": {
+    "text": "Can you hear me?",
+    "ms": 526.4
+   },
+   "parakeet": {
+    "text": "Can you hear me?",
+    "ms": 55.9
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Switch the transcription engine to Parakeet.",
+   "seconds": 2.75,
+   "whisper": {
+    "text": "Switch the transcription engine to Paradeet.",
+    "ms": 665.3
+   },
+   "parakeet": {
+    "text": "Switch the transcription engine to parakeet.",
+    "ms": 72.3
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Remind me to call the dentist tomorrow morning.",
+   "seconds": 3.11,
+   "whisper": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 562.4
+   },
+   "parakeet": {
+    "text": "Remind me to call the dentist tomorrow morning.",
+    "ms": 73.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "What is the weather like in San Francisco this weekend?",
+   "seconds": 3.51,
+   "whisper": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 575.7
+   },
+   "parakeet": {
+    "text": "What is the weather like in San Francisco this weekend?",
+    "ms": 74.5
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Zircon and lapis, compare your answers and pick the better one.",
+   "seconds": 4.26,
+   "whisper": {
+    "text": "Zircon and lapis, compare your answers and pick the better one.",
+    "ms": 589.3
+   },
+   "parakeet": {
+    "text": "Zircon and Lapis Compare your answers and pick the better one.",
+    "ms": 90.0
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Kollab, read me the last message from sapphire.",
+   "seconds": 3.32,
+   "whisper": {
+    "text": "Kollab, read me the last message from sapphire.",
+    "ms": 545.5
+   },
+   "parakeet": {
+    "text": "Column read me the last message from Sapphire.",
+    "ms": 78.6
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Add a unit test for the speech cache and run it.",
+   "seconds": 2.96,
+   "whisper": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 549.8
+   },
+   "parakeet": {
+    "text": "Add a unit test for the speech cache and run it.",
+    "ms": 69.2
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Open the pull request and approve it if the checks are green.",
+   "seconds": 3.59,
+   "whisper": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 573.7
+   },
+   "parakeet": {
+    "text": "Open the pull request and approve it if the checks are green.",
+    "ms": 81.4
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Aquamarine, what time is it in Tokyo?",
+   "seconds": 2.93,
+   "whisper": {
+    "text": "Aquamarine, what time is it in Tokyo?",
+    "ms": 575.1
+   },
+   "parakeet": {
+    "text": "Aquamarine.",
+    "ms": 72.1
+   }
+  },
+  {
+   "condition": "babble",
+   "voice": "Rishi",
+   "text": "Never mind, I was talking to my wife.",
+   "seconds": 2.9,
+   "whisper": {
+    "text": "Nevermind, I was talking to my wife.",
+    "ms": 548.3
+   },
+   "parakeet": {
+    "text": "Never mind, I was talking to my wife.",
+    "ms": 71.2
+   }
+  }
+ ]
+}

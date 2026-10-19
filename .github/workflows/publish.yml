@@ -26,10 +26,12 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
 
       - name: Install build tools
         run: uv pip install --system build twine
@@ -164,7 +166,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Download the binaries
         uses: actions/download-artifact@v8

@@ -36,14 +36,13 @@ m1_srv_paths() {
 # kollab keeps per-workspace state under ~/.kollab/projects/<path, '/' -> '_'>.
 m1_project_dir() { local p=${1#/}; printf '%s/.kollab/projects/%s' "$2" "${p//\//_}"; }
 
-# Interpreter for the Mac venv: kollab needs >= 3.12; the uv-managed 3.12 is
-# what earlier acceptance runs used.
+# Interpreter for the Mac venv: kollab needs >= 3.14.
 m1_pick_python() {
   local c
-  for c in "${M1_PY_MAC:-}" "$HOME"/.local/share/uv/python/cpython-3.12*/bin/python3 python3.12 python3.13 python3; do
+  for c in "${M1_PY_MAC:-}" "$HOME"/.local/share/uv/python/cpython-3.14*/bin/python3 python3.14 python3; do
     [ -n "$c" ] || continue
     command -v "$c" >/dev/null 2>&1 || continue
-    "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null && { command -v "$c"; return 0; }
+    "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)' 2>/dev/null && { command -v "$c"; return 0; }
   done
   return 1
 }

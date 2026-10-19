@@ -12,7 +12,7 @@ Protocol reuse: [Grok Bot, Buzz and A2A comparison](agent-network-protocol-lands
 
 ## 2. Open-source constraints, invariant, and result states
 
-The repository uses the MIT license. The network feature must remain usable with free, open-source software and self-hosted infrastructure: no paid directory API, hosted identity provider, account with Kollabor, subscription, or proprietary relay SDK may be required. Existing Ed25519/TLS capabilities should be reused. Select minimal, license-compatible dependencies for DNS parsing and protocol support; use maintained implementations rather than inventing cryptographic primitives.
+The repository uses the Apache-2.0 license. The network feature must remain usable with free, open-source software and self-hosted infrastructure: no paid directory API, hosted identity provider, account with Kollabor, subscription, or proprietary relay SDK may be required. Existing Ed25519/TLS capabilities should be reused. Select minimal, license-compatible dependencies for DNS parsing and protocol support; use maintained implementations rather than inventing cryptographic primitives.
 
 `kollabor.ai` is a worked example and optional bootstrap. Every domain, pinned peer, local discovery source, and service URL is configurable. A fresh install must not silently publish a workspace or depend on contacting the project's domain; an explicitly configured bootstrap opts into that contact. `/connect <domain>` selects public discovery directly; bare `/connect` opens the Connect screen, or private code entry when there is no network. Runtime discovery and forwarding require no LLM calls. Self-hosting still uses the operator's machines, bandwidth, and any domain/hosting services they choose; no zero-infrastructure-cost claim is made.
 

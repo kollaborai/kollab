@@ -45,8 +45,9 @@ def _reserve_session_id(
 ) -> str:
     """Reserve an ID before any daemon work can begin.
 
-    A generated name is one of about 800 a minute, so two members of one team
-    launch can draw the same: redraw it. A requested ID is the caller's to fix.
+    A generated name ends in a random token, so two members of one team launch
+    should never draw the same; if they do, redraw. A requested ID is the
+    caller's to fix.
     """
     with _session_reservation_lock:
         for _ in range(1 if requested_id else 20):

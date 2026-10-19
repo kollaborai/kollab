@@ -5,6 +5,48 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-19
+
+### Added
+- Web: Settings has a Versions section: the kollab, engine, web UI server and agent bundle versions this computer runs.
+- Web: Random Look in the Gem Studio rolls hair or fur too, at the odds a gem is born with them.
+- Voice: Fine-Tuned Qwen3 0.6B is a second local classifier on Apple silicon Macs. Pick it under Classifier in `/voice config` or with `/voice classifier qwen`; Laya stays the default and nothing changes until you do. One model decides whether speech is for the agent, what your reply to "Sorry, was that for me?" means and whether a reply reads as natural speech. On a day of real household speech it decided 70 lines right, 18 wrong and asked about 13, against Laya's 45, 20 and 36, read 59 of 60 synthetic replies to the question right (word rules: 44) and 11 of 12 real ones, and peaked at 1.75 GB of memory against Laya's 3.87 GB. Its mistakes are mostly the TV or the room waking it, where Laya's are mostly misses. It runs in its own process from 645 MB of weights checked against a pinned SHA-256; they have no download source yet, so selecting it names the folder they belong in.
+- Voice: Parakeet v3 is a second transcription engine on Apple silicon Macs. Pick it under Transcription Engine in `/voice config`; Whisper Base stays the default. It downloads 2.5 GB once, checked against a pinned SHA-256, and runs on the GPU in its own process: on an M2 Max it transcribed an utterance in a median 69 ms against Whisper Base's 562 ms. Whisper transcribes while Parakeet prepares and whenever it stops, and `/voice status` names the engine that is live. Parakeet cannot be told the agent names, so "Kollab" comes out as "Colab".
+- Voice: the lines voice says itself (acknowledgements, "Sorry, was that for me?", still-working lines) are kept on disk in `~/.kollab/voice/cache/speech/`, so a line it has said before plays at once instead of being synthesized again. A file is deleted three days after it last played; agent replies are never kept.
+- Voice: two filters in front of transcription, both off until you turn them on under Echo and Speaker in `/voice config`. Echo Cancellation removes voice's own speech from the microphone with WebRTC's echo canceller, fed what the speaker plays: in a simulated room voice's words vanished from the transcript, but talking over voice is heard less reliably. Speaker Gate passes only your voice to the classifier: `/voice enroll` saves a voiceprint from 30 seconds of your speech (`/voice enroll forget` deletes it), and other voices stay in the transcript as context and never reach the agent. On recorded speech it rejected 1.6% of a speaker's own lines and let through 0.5% of other people's and 0.01% of a TV film's. The speaker model (3D-Speaker ERes2Net, 26.5 MB) downloads once, checked against a pinned SHA-256. The voice runtime gains two small packages, so the first `/voice on` after updating prepares it again.
+
+### Changed
+- Kollab is licensed under Apache 2.0 (was MIT).
+- Claude Code and other ACP agents speak their replies to mic turns, like a native agent.
+- ACP: the model or effort you pick for a harness is kept for its profile and set again whenever the harness starts. The status bar shows the harness's own model.
+- Gems born before hair existed get one hair or fur roll; a gem born bare stays bare for good.
+- Terminal: assistant replies start with ◆.
+- Kollab needs Python 3.14 or later. CI no longer tests 3.12. The voice service keeps its own Python 3.12 or 3.13 runtime for its speech models.
+- Web: Session Controls is a panel at the chat's right edge, open by default, instead of a popover. It holds the session's name, the Chat and Trajectory views and every control that sat in the chat header, so on a computer the chat has no header bar and the sidebar no hide button. Hide the panel to a slim rail; the browser remembers. On a phone the Session button opens it as a sheet.
+- Web: the sidebar's footer (Hidden Agents, Apps, Agents, Gem Studio, Settings) is one row of icons.
+- Web: the sidebar and Session Controls float as rounded cards with a margin around them, and Session Controls ends at its last control instead of running to the bottom of the window. The sidebar's edge shows a line on hover: drag it, or focus it and use the arrow keys, to resize the sidebar.
+- Voice: a mic check ("can you hear me?"), thanks or a bare name is answered by voice at once and still reaches the agent with that answer, so the agent can add more or hold off with a lone period. No still-working lines follow a turn voice already answered.
+- Voice: after "Sorry, was that for me?", a no stops these questions for two minutes (was ten) and no answer stops them for 30 seconds (was two minutes).
+- Voice: a spoken reply is no longer rewritten for its length. One or two sentences are preferred, but a longer reply is still spoken, and a reply still unsuitable after its one rewrite is spoken with code, links and paths taken out instead of skipped.
+- Voice: the classifier reads the chat's last three exchanges (was the last two messages) and drops the oldest text first when that runs over Laya's context. Whisper is told the agent's names, so it writes "Aquamarine" instead of a near miss.
+- Voice: speech more than 30 seconds old by the time voice can decide is kept as context and never sent; `/voice retry` no longer sends it.
+
+### Fixed
+- Web: a chat reconnects on its own when its agent's socket restarts, instead of failing every save with a 502.
+- Hub: the startup socket sweep no longer deletes a socket a live agent still answers on, so a test or tmux spec with its own HOME cannot cut off running agents.
+- ACP: tool calls show as tool rows, not "completed" info lines, and the voice rules sent with a mic turn no longer show as your message.
+- ACP: a chat with the hub off (pipe mode, `KOLLAB_NO_HUB`) starts its harness instead of failing with "Hub startup was not scheduled".
+- Web: messages between agents were drawn in larger type than the chat's own messages on a computer.
+- Voice: every voice turn left the previous input box and status rows on the terminal screen, and the next message printed under them.
+- Voice recovers on its own instead of waiting for `/voice retry`. When the voice service dies, its lease expires, setup fails or capture stops, the chat starts voice again after 5 seconds, waiting longer each time up to two minutes; the status row reads `starting` until the microphone is live. A late answer from a busy voice service no longer turns voice off, and no message tells you to run `/voice retry`.
+- Voice: a VibeVoice worker that timed out or exited left every later reply silent. The speech engine is prepared again on the next sentence.
+- Voice: talking over voice's own speech merged both into one line. The words voice was saying are cut, and only yours are judged and sent.
+- Voice: replies no longer go quiet between sentences. VibeVoice streams audio as it generates, and the next sentence is synthesized while one plays.
+- Voice: packaged builds (wheel, release binary, Kollab.app) shipped without Laya's classifier heads, so `/voice` stopped with "Laya setup failed".
+- Voice: stopping the microphone no longer deadlocks CoreAudio, a recorder start or stop that hangs restarts the voice service instead of freezing every later `/voice`, and a slow first bind right after the daemon starts no longer turns voice off.
+- Voice: `/voice on` right after a session starts no longer stops with "voice.bind timed out after 2s". The first bind gets more time and retries, and a failed bind keeps voice running on this computer. A stuck microphone start or stop no longer wedges the voice service, and a stop now says why.
+- Two sessions started in the same minute could draw the same id, and resuming or branching one then overwrote the other's saved transcript. Session ids now end in a short random token (2610180756-quantum-spark-7k2x); the status bar, /resume, the conversation browsers and the web UI still show only the two words.
+
 ## [0.16.8] - 2026-10-18
 
 ### Added

@@ -192,7 +192,7 @@ def test_response_text_uses_assistant_text_color_not_success_green():
     rendered = CleanRenderer().response_block(["on it"], width=80)
 
     assert solid_fg("on it", T().assistant_text) in rendered
-    assert solid_fg(" ֎ ", T().text) in rendered
+    assert solid_fg(" ◆ ", T().text) in rendered
     assert solid_fg("on it", T().success[0]) not in rendered
 
 

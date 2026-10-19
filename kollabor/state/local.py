@@ -559,7 +559,26 @@ class LocalStateService(StateService):
             return ProfileSnapshot(name="", is_active=False)
         if active is None:
             return ProfileSnapshot(name="", is_active=False)
-        return self._profile_to_snapshot(active, is_active=True)
+        snapshot = self._profile_to_snapshot(active, is_active=True)
+        harness_model = self._acp_harness_model()
+        if harness_model:
+            # A harness picks its own model (/model sets it there): report that
+            # one, not the profile's, which the harness does not read.
+            snapshot.model = harness_model
+        return snapshot
+
+    def _acp_harness_model(self) -> str:
+        """The active ACP harness's current model option, or "" when there is none."""
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            if acp is None or getattr(acp, "active", False) is not True:
+                return ""
+            for option in acp.advertised_config_options():
+                if str(option.get("category") or option.get("id") or "").lower() == "model":
+                    return str(option.get("currentValue") or "")
+        except Exception:
+            logger.debug("ACP harness model unavailable", exc_info=True)
+        return ""
 
     async def list_profiles(self) -> ProfileListSnapshot:
         """Return the full profile registry with the active one marked."""
@@ -1016,12 +1035,17 @@ class LocalStateService(StateService):
                     logger.debug(f"plugin_registry count error: {e}")
 
         voice_requested = voice_running = False
+        voice_activity = {}
         if self._event_bus is not None:
             try:
                 voice_plugin = self._event_bus.get_service("voice_plugin")
                 voice = voice_plugin.status() if voice_plugin is not None else {}
                 voice_requested = bool(voice.get("requested"))
                 voice_running = bool(voice.get("running"))
+                voice_activity = dict(voice.get("activity") or {})
+                transcript = voice.get("last_transcript") or {}
+                if voice_requested and transcript.get("text"):
+                    voice_activity["heard"] = transcript["text"]
             except Exception as e:
                 logger.debug(f"voice status error: {e}")
 
@@ -1043,6 +1067,7 @@ class LocalStateService(StateService):
             plugin_count=plugin_count,
             voice_requested=voice_requested,
             voice_running=voice_running,
+            voice_activity=voice_activity,
             startup_state=startup_state,
             startup_error=startup_error,
         )

@@ -7,6 +7,7 @@ Two-pane layout: sessions list on left, message preview on right.
 import logging
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.session_naming import strip_session_decorations
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
 from kollabor_tui.fullscreen import FullScreenPlugin
 from kollabor_tui.fullscreen.plugin import PluginMetadata
@@ -396,12 +397,9 @@ class ConversationsPlugin(FullScreenPlugin):
     def _get_display_name(self, session_id: str) -> str:
         """Extract display name from session ID."""
         # Session IDs are like "2501231234-wolf-blade" or "session_abc123"
-        if "-" in session_id:
-            # New format: YYMMDDHHMM-name-name
-            parts = session_id.split("-", 1)
-            if len(parts) > 1:
-                return parts[1]
-            return session_id
+        stripped = strip_session_decorations(session_id)
+        if stripped != session_id:
+            return stripped
         elif session_id.startswith("session_"):
             return session_id[8:]  # Remove "session_" prefix
         return session_id

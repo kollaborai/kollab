@@ -1,0 +1,150 @@
+{
+  "name": "voice classifier qwen",
+  "description": "On an Apple silicon Mac, /voice config offers Fine-Tuned Qwen3 0.6B beside Laya (the default); selecting it saves it for this device without starting the microphone or the voice service, and /voice status names it; the /voice classifier log names it in its footer",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
+    },
+    {
+      "action": "section",
+      "title": "Laya is the default"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Laya",
+      "timeout": 5
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Laya · off"
+    },
+    {
+      "action": "section",
+      "title": "Select Fine-Tuned Qwen3 0.6B and save it for this device"
+    },
+    {
+      "action": "arrow",
+      "direction": "Right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Fine-Tuned Qwen3 0.6B",
+      "timeout": 5
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice settings saved for this device",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Fine-Tuned Qwen3 0.6B · off"
+    },
+    {
+      "action": "section",
+      "title": "A fresh /voice config reads the saved choice"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 8
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Fine-Tuned Qwen3 0.6B",
+      "timeout": 5
+    },
+    {
+      "action": "shell",
+      "description": "the choice is saved for the device and the voice service never started",
+      "command": "cat \"$HOME/.kollab/voice/preferences.json\"; test ! -e \"$HOME/.kollab/voice/service.sock\" && echo no-voice-service",
+      "assert_contains": "\"classifier\": \"qwen\""
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no-voice-service"
+    },
+    {
+      "action": "section",
+      "title": "/voice status names the saved classifier"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 8
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "status"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Fine-Tuned Qwen3 0.6B · off · worker not running",
+      "timeout": 8
+    },
+    {
+      "action": "section",
+      "title": "The decision log names the saved classifier"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "classifier"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Fine-Tuned Qwen3 0.6B \\(/voice classifier laya\\|qwen\\|provider\\)",
+      "timeout": 8
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

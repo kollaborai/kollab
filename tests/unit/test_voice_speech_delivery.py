@@ -109,11 +109,7 @@ async def test_attached_speech_does_not_block_its_own_rpc_reply(operation):
                 await value.handle_remote_reply(event)
 
     reader = asyncio.create_task(read_events())
-    text = (
-        "One sentence. Two sentences. Three sentences."
-        if operation == "rewrite"
-        else "The tests passed."
-    )
+    text = "Run `pytest` now." if operation == "rewrite" else "The tests passed."
     incoming.put_nowait(
         {"spoken_text": text, "reply_id": "reply", "owner_epoch": "owner"}
     )
@@ -353,7 +349,7 @@ async def test_uncertain_rewrite_is_reviewed_without_spending_another_rewrite():
     value._speech_request = AsyncMock(
         return_value='{"decision":"speak","reason":"Brief conversational reply"}'
     )
-    await value._spoken_reply(reply("One sentence. Two sentences. Three sentences."))
+    await value._spoken_reply(reply("Run `pytest` now."))
     value._rewrite_speech.assert_awaited_once()
     value._speech_request.assert_awaited_once()
     value._client.call.assert_awaited_once()
@@ -409,9 +405,9 @@ async def test_rejected_rewrite_does_not_block_the_next_queued_reply(decision):
     ]
     value._speech_request = AsyncMock(
         return_value='{"decision":"rewrite","reason":"Still too technical"}',
-        side_effect=RuntimeError("Provider unavailable")
-        if decision == "unavailable"
-        else None,
+        side_effect=(
+            RuntimeError("Provider unavailable") if decision == "unavailable" else None
+        ),
     )
     await value.handle_remote_reply(
         {
@@ -423,8 +419,13 @@ async def test_rejected_rewrite_does_not_block_the_next_queued_reply(decision):
     )
     await value._remote_reply_queue.join()
     value._speech_request.assert_awaited_once()
-    assert "skipped" in value.status()["output"]["error"]
-    value._client.call.assert_not_awaited()
+    if decision == "unavailable":
+        assert "skipped" in value.status()["output"]["error"]
+        value._client.call.assert_not_awaited()
+    else:
+        # Still rejected after its one rewrite: spoken anyway, never dropped.
+        text = value._client.call.call_args.kwargs["text"]
+        assert text == "The short answer is ready."
     assert value._observer_error is None
     await value.handle_remote_reply(
         {
@@ -499,32 +500,43 @@ async def test_admitted_reply_outlives_input_deadline_but_still_requires_live_ow
 
 
 @pytest.mark.asyncio
-async def test_long_spoken_reply_gets_one_nudge_then_only_approved_rewrite_plays():
+async def test_formatted_spoken_reply_gets_one_nudge_then_only_approved_rewrite_plays():
     value = plugin()
-    await value._spoken_reply(reply("One sentence. Two sentences. Three sentences."))
+    await value._spoken_reply(reply("Run `pytest` now."))
     value._rewrite_speech.assert_awaited_once()
     value._client.call.assert_awaited_once()
     assert value._client.call.call_args.kwargs["text"] == "The short answer is ready."
 
 
 @pytest.mark.asyncio
-async def test_rejected_rewrite_stays_silent_and_does_not_loop():
+async def test_a_long_spoken_reply_plays_as_written():
+    # One or two sentences is what the agent is asked for, not a rule.
     value = plugin()
-    value._rewrite_speech.return_value = "Still long. Still formatted. Still wrong."
+    long = "The build passed on every platform. " * 4 + "Next I check voice."
+    await value._spoken_reply(reply(long))
+    value._rewrite_speech.assert_not_awaited()
+    assert value._client.call.call_args.kwargs["text"] == long
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_still_formatted_is_spoken_with_code_removed():
+    value = plugin()
+    value._rewrite_speech.return_value = "Still formatted: run `pytest`."
     value._speech_request = AsyncMock()
-    await value._spoken_reply(reply("One. Two. Three."))
+    await value._spoken_reply(reply("Run `pytest`."))
     value._rewrite_speech.assert_awaited_once()
-    value._client.call.assert_not_awaited()
+    value._client.call.assert_awaited_once()
+    assert value._client.call.call_args.kwargs["text"] == "Still formatted: run."
     value._speech_request.assert_not_awaited()
-    assert "after one rewrite" in value.status()["output"]["error"]
+    assert value._speech_error is None
 
 
 @pytest.mark.asyncio
 async def test_attached_rewrite_budget_cannot_restart_on_the_device():
     value = plugin()
-    await value._spoken_reply(reply("One. Two. Three.", rewrite_count=1))
+    await value._spoken_reply(reply("Run `pytest`.", rewrite_count=1))
     value._rewrite_speech.assert_not_awaited()
-    value._client.call.assert_not_awaited()
+    assert value._client.call.call_args.kwargs["text"] == "Run."  # code removed
 
 
 @pytest.mark.asyncio
@@ -597,7 +609,8 @@ async def test_provider_classifier_keeps_single_rewrite_budget():
     value._client.review_speech.assert_not_awaited()
     value._rewrite_speech.assert_awaited_once()
     assert value._speech_request.await_count == 2
-    value._client.call.assert_not_awaited()
+    # The one rewrite is spent and the reply is spoken, not dropped.
+    assert value._client.call.call_args.kwargs["text"] == "The short answer is ready."
 
 
 @pytest.mark.asyncio
@@ -637,3 +650,20 @@ async def test_rewrite_provider_request_has_no_tools_and_reuses_one_client(monke
     assert len(created) == 1
     assert all(kwargs == {"tools": []} for _, kwargs in calls)
     assert "Do not perform actions" in calls[0][0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_unsure_qwen_style_gets_the_provider_check_with_its_name():
+    value = plugin()
+    value.classifier_name = "qwen"
+    value._client.review_speech = AsyncMock(
+        return_value=SpeechDecision(
+            "defer", "unsure", "qwen", "qwen3-0.6b-voice-v1", 0.6
+        )
+    )
+    value._provider_speech_review = AsyncMock(
+        return_value=SpeechDecision("speak", "reads naturally", "provider")
+    )
+    result = await value._review_speech("The build passed and the deploy is next.")
+    assert result.decision == "speak" and result.provider == "qwen+provider"
+    assert result.reason == "Fine-Tuned Qwen3 0.6B unsure; reads naturally"

@@ -5,6 +5,7 @@ Combines Tech/Code and Mythical/Epic themes for unique, memorable names.
 
 import hashlib
 import random
+import string
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -112,9 +113,9 @@ def session_display_name(session_id: str) -> str:
     """
     value = str(session_id or "")
     candidate = value.removeprefix("sess_")
-    prefix, separator, suffix = candidate.partition("-")
-    if separator and len(prefix) == 10 and prefix.isdigit():
-        return suffix or "session"
+    slug = strip_session_decorations(candidate)
+    if slug != candidate:
+        return slug or "session"
 
     try:
         canonical_id = UUID(candidate).hex
@@ -127,6 +128,39 @@ def session_display_name(session_id: str) -> str:
     return f"{TECH_PREFIXES[prefix_index]}-{TECH_SUFFIXES[suffix_index]}"
 
 
+def _uniqueness_token() -> str:
+    """Random 4-char token that always starts with a digit.
+
+    Two names generated in the same minute collide without it (800 word
+    combos), and a colliding resume/branch save_session() truncates the
+    existing transcript. A leading digit keeps the token distinguishable
+    from the word parts for display stripping.
+    """
+    chars = string.ascii_lowercase + string.digits
+    return random.choice(string.digits) + "".join(random.choices(chars, k=3))
+
+
+def strip_session_decorations(session_id: str) -> str:
+    """Drop the timestamp prefix and uniqueness token from a session id.
+
+    '2512111430-quantum-spark-7k2x' -> 'quantum-spark'. Ids without the
+    generated shape are returned unchanged.
+    """
+    candidate = str(session_id or "")
+    prefix, separator, rest = candidate.partition("-")
+    if not (separator and len(prefix) == 10 and prefix.isdigit()):
+        return candidate
+    words = rest.rsplit("-", 1)
+    if (
+        len(words) == 2
+        and len(words[1]) == 4
+        and words[1][0].isdigit()
+        and words[1].isalnum()
+    ):
+        return words[0]
+    return rest
+
+
 def generate_session_name(
     theme: Optional[str] = None, include_timestamp: bool = True
 ) -> str:
@@ -137,7 +171,11 @@ def generate_session_name(
         include_timestamp: Whether to prepend timestamp
 
     Returns:
-        Generated session name like '2512111430-quantum-spark'
+        Generated session name like '2512111430-quantum-spark-7k2x'
+
+    The trailing token makes the name unique among names generated in the
+    same minute; session files are keyed by it and a collision would
+    truncate another conversation's transcript.
     """
     if theme == "tech":
         prefix = random.choice(TECH_PREFIXES)
@@ -154,10 +192,10 @@ def generate_session_name(
             prefix = random.choice(MYTHIC_PREFIXES)
             suffix = random.choice(MYTHIC_SUFFIXES)
 
-    name = f"{prefix}-{suffix}"
+    name = f"{prefix}-{suffix}-{_uniqueness_token()}"
 
     if include_timestamp:
-        # Prepend timestamp (YYMMDDHHMM) for sorting and uniqueness
+        # Prepend timestamp (YYMMDDHHMM) for sorting
         timestamp = datetime.now().strftime("%y%m%d%H%M")
         name = f"{timestamp}-{name}"
 
@@ -168,7 +206,7 @@ def generate_branch_name() -> str:
     """Generate a name for a branched session.
 
     Returns:
-        Fresh session name like '2512111430-quantum-spark'
+        Fresh session name like '2512111430-quantum-spark-7k2x'
     """
     return generate_session_name()
 

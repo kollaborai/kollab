@@ -47,9 +47,7 @@ def download(url: str, destination: Path, item: dict, progress) -> None:
                 progress(offset, item["size"])
     if not verified(partial, item):
         # Keep the previous published model intact. A corrupt partial can restart.
-        raise RuntimeError(
-            f"Checksum mismatch for {item['name']}; run /voice retry"
-        )
+        raise RuntimeError(f"Checksum mismatch for {item['name']}")
     partial.replace(destination)
 
 
@@ -87,6 +85,12 @@ def ensure_models(root: Path, progress, bundles=None) -> dict[str, Path]:
                     shutil.copyfile(cached, partial)
                     partial.replace(path)
                     continue
+            if not bundle["base_url"]:
+                # Not published yet: files placed by hand are the only source.
+                raise RuntimeError(
+                    f"{key} has no download source yet; place its verified "
+                    f"{item['name']} in {target}"
+                )
             download(
                 bundle["base_url"] + item["name"],
                 path,

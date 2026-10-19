@@ -120,4 +120,4 @@ python -m pytest tests/unit/llm tests/unit/test_context_service_hub_bridge.py -q
 
 ## License
 
-MIT
+Apache-2.0

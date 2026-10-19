@@ -28,9 +28,13 @@ from .control import (
     service_root,
     socket_path,
 )
+from .observer import is_playback_echo, strip_playback
 from .store import TranscriptLog, utc
 
 log = logging.getLogger(__name__)
+
+# A recorder start or stop that takes longer than this is stuck in CoreAudio.
+RECORDER_TIMEOUT_S = 5
 
 
 class VoiceService:
@@ -55,6 +59,9 @@ class VoiceService:
         self.speech = None
         self.speech_prepare_task = None
         self._speech_preferences_revision = None
+        self.stt = None
+        self.stt_prepare_task = None
+        self._stt_preferences_revision = None
         self.owner = None
         self.delegates = {}
         self.withdrawn_claims = {}
@@ -71,17 +78,33 @@ class VoiceService:
         self.setup_task = None
         self.server = None
         self.lifecycle = asyncio.Lock()
+        self.shutdown = asyncio.Event()
+        self.stuck = False
         self.load_assets = load_assets
         self.load_models = load_models
         self.recorder_factory = recorder_factory
         self.segmenter_factory = segmenter_factory
         self.player = player
         from .laya import LayaWorker
+        from .qwen import QwenWorker
 
-        self.classifier = LayaWorker(root)
+        # One local classifier is loaded at a time: the one last prepared.
+        self.classifiers = {w.name: w for w in (LayaWorker(root), QwenWorker(root))}
+        self.classifier = self.classifiers["laya"]
         self.classifier_jobs = {}
         self.speech_review_jobs = {}
         self.speech_review_started = {}
+        from .echo import PlaybackReference
+        from .speaker import SpeakerGate
+
+        # Filters in front of transcription; both off until preferences say so.
+        self.gate = SpeakerGate(root)
+        self.gate_task = None
+        self.reference = PlaybackReference()
+        self.echo_cancellation = False
+        self.echo = None  # EchoCanceller while capturing with it on
+        self.echo_error = None
+        self._capture_preferences_revision = "unread"
 
     def progress(self, **state):
         self.setup = state
@@ -108,9 +131,10 @@ class VoiceService:
     async def prepare(self):
         try:
             from .assets import ensure_models
-            from .audio import LocalModels, play_audio
+            from .audio import LocalModels, StreamPlayer
             from .output import SpeechQueue
             from .speech import SpeechEngine
+            from .transcription import TranscriptionEngine
 
             loop = asyncio.get_running_loop()
 
@@ -135,6 +159,16 @@ class VoiceService:
             await asyncio.to_thread(
                 self.speech.configure, self.speech.status()["state"] == "error"
             )
+            if self.stt is None:
+                self.stt = TranscriptionEngine(
+                    self.root, lambda audio, names: self.models.transcribe(audio, names)
+                )
+            if self.stt_prepare_task is None or self.stt_prepare_task.done():
+                # Whisper transcribes while a slower engine prepares.
+                self.stt_prepare_task = asyncio.create_task(
+                    self.prepare_transcription(self.stt.status()["state"] == "error"),
+                    name="stt-prepare",
+                )
             if self.transcript is None:
                 self.transcript = TranscriptLog(self.root, self.instance_id)
             for task in list(self.tasks):
@@ -155,13 +189,13 @@ class VoiceService:
                         )
             self.worker_failures.clear()
             if self.output is None:
-                self.output = SpeechQueue(
-                    self.root, self.speech.synthesize, self.player or play_audio
-                )
+                player = self.player or StreamPlayer()
+                player.reference = self.reference  # what echo cancellation removes
+                self.output = SpeechQueue(self.root, self.speech.stream, player)
                 self.tasks.append(
                     asyncio.create_task(self.output.run(), name="voice-output")
                 )
-            self.progress(state="ready", detail="Whisper base and speech ready")
+            self.progress(state="ready", detail="Transcription and speech ready")
             async with self.lifecycle:
                 if (
                     self.owner
@@ -173,7 +207,7 @@ class VoiceService:
         except Exception as exc:
             log.exception("Voice setup failed")
             self.error = str(exc)
-            self.progress(state="error", detail=f"{exc}. Run /voice retry")
+            self.progress(state="error", detail=str(exc))
 
     def authorize(self, token, epoch):
         if (
@@ -181,7 +215,7 @@ class VoiceService:
             or time.monotonic() - self.owner["heartbeat"] >= LEASE_SECONDS
         ):
             raise VoiceError(
-                "lease_expired", "Voice connection expired; run /voice retry"
+                "lease_expired", "Voice connection expired"
             )
         if token != self.owner["token"] or epoch != self.owner["epoch"]:
             raise VoiceError(
@@ -233,6 +267,15 @@ class VoiceService:
                 if self.speech
                 else {"state": "off", "engine": None}
             ),
+            "transcription": (
+                self.stt.status() if self.stt else {"state": "off", "engine": None}
+            ),
+            "speaker": self.gate.status(),
+            "echo_cancellation": {
+                "enabled": self.echo_cancellation,
+                "active": self.echo is not None,
+                "detail": self.echo_error or "",
+            },
             "audio_warmup_seconds": self.audio_warmup_seconds,
         }
 
@@ -241,6 +284,7 @@ class VoiceService:
         if op in {"hello", "status"}:
             return self.status()
         if op == "classifier_prepare":
+            await self.select_classifier(request.get("model", "laya"))
             self.classifier.prepare()
             return self.classifier.status()
         if op == "withdraw":
@@ -300,6 +344,9 @@ class VoiceService:
                     self.prepare(), name="voice-setup"
                 )
             return self.status()
+        if op == "speaker_forget":
+            # Deleting a voiceprint needs no microphone lease.
+            return {"forgotten": self.gate.forget(), "speaker": self.gate.status()}
         delegated = self.delegates.get(request.get("token"))
         if delegated:
             if op not in {
@@ -319,6 +366,10 @@ class VoiceService:
             request["producer_id"] = delegated["producer_id"]
         else:
             self.authorize(request.get("token"), request.get("epoch"))
+        if op == "hint":
+            # The owner's agent names prime transcription for its lease.
+            self.owner["names"] = [str(n)[:40] for n in request.get("names", [])][:8]
+            return {"names": self.owner["names"]}
         if op == "delegate":
             if len(self.delegates) >= 128:
                 raise VoiceError("queue_full", "Voice delegation limit reached")
@@ -331,6 +382,11 @@ class VoiceService:
         if op == "heartbeat":
             self.owner["heartbeat"] = time.monotonic()
             return self.status()
+        if op == "speaker_enroll":
+            # The owner's next 30 seconds of speech; never sent while enrolling.
+            self.gate.enroll()
+            self.prepare_gate()
+            return self.gate.status()
         if op == "classifier_submit":
             for key, task in list(self.classifier_jobs.items()):
                 if task.done():
@@ -339,15 +395,30 @@ class VoiceService:
                 raise VoiceError(
                     "classifier_busy", "A classifier decision is already pending"
                 )
+            if request.get("model", self.classifier.name) != self.classifier.name:
+                raise VoiceError(
+                    "classifier_not_ready",
+                    "Voice classifier changed; speech remains pending",
+                )
             identity = uuid.uuid4().hex
-            task = asyncio.create_task(
-                self.classifier.decide(
+            if request.get("task") == "answer":
+                # The reply to "was that for me?"; only the Qwen model reads it.
+                if not hasattr(self.classifier, "answer"):
+                    raise VoiceError(
+                        "unsupported",
+                        f"{self.classifier.label} does not answer questions",
+                    )
+                job = self.classifier.answer(
+                    str(request["held"]), str(request["question"]), str(request["text"])
+                )
+            else:
+                job = self.classifier.decide(
                     request["records"],
                     str(request.get("context", "")),
                     request.get("transcript_context", []),
                     request.get("context_lines", 10),
                 )
-            )
+            task = asyncio.create_task(job)
             task.add_done_callback(
                 lambda task: task.exception() if not task.cancelled() else None
             )
@@ -456,6 +527,14 @@ class VoiceService:
             }
         raise VoiceError("unknown_operation", "Unknown voice operation")
 
+    async def select_classifier(self, name):
+        """Load only the selected local classifier; switching closes the other."""
+        if name not in self.classifiers:
+            raise VoiceError("unknown_classifier", "Choose laya or qwen")
+        previous, self.classifier = self.classifier, self.classifiers[name]
+        if previous is not self.classifier:
+            await previous.close()
+
     def claim_result(self):
         return {
             "token": self.owner["token"],
@@ -500,17 +579,29 @@ class VoiceService:
 
             self.transcript.probe()
             self.segmenter = (self.segmenter_factory or SpeechSegmenter)()
+            self.echo = self.new_echo() if self.echo_cancellation else None
             self.recorder = (
                 self.recorder_factory()
                 if self.recorder_factory
                 else Recorder(RecorderConfig(queue_maxsize=100))
             )
             self.last_seq = None
-            await asyncio.to_thread(self.recorder.start)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.recorder.start), timeout=RECORDER_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                self.capture_stuck("recorder.start")
+                raise VoiceError(
+                    "capture_start_timeout",
+                    "Microphone did not open; run /voice again to restart voice",
+                ) from None
         except Exception as exc:
+            log.exception("Voice capture failed to start")
             self.error = str(exc)
-            if self.recorder:
-                await asyncio.to_thread(self.recorder.stop)
+            if self.recorder and not self.stuck:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self.recorder.stop)
             self.recorder = None
             self.segmenter = None
 
@@ -528,20 +619,76 @@ class VoiceService:
         self.classifier_jobs.clear()
         if previous and self.output:
             self.output.cancel(previous["epoch"], forget=True)
+        self.gate.cancel()  # an unfinished enrollment belongs to that owner
         self.owner = None
         self.delegates.clear()
 
     async def stop_capture(self):
         if self.recorder:
             recorder, self.recorder = self.recorder, None
-            await asyncio.to_thread(recorder.stop)
-            while not recorder.frames.empty():
-                self.consume_frame(recorder.frames.get_nowait(), final=False)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(recorder.stop), timeout=RECORDER_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                self.capture_stuck("recorder.stop")
+            finally:
+                while not recorder.frames.empty():
+                    self.consume_frame(recorder.frames.get_nowait(), final=False)
         if self.segmenter:
             segment = self.segmenter.flush()
             if segment:
                 self.submit(segment, final=False)
         self.segmenter = None
+        self.echo = None
+
+    def new_echo(self):
+        """An echo canceller for this capture, or None when it cannot load."""
+        try:
+            from .echo import EchoCanceller
+
+            echo, self.echo_error = EchoCanceller(self.reference), None
+            return echo
+        except Exception as exc:  # e.g. a runtime prepared before pywebrtc-audio
+            self.echo_error = f"Echo cancellation unavailable: {exc}"
+            log.warning(self.echo_error)
+            return None
+
+    def apply_capture_preferences(self):
+        from .classifiers import load_preferences
+
+        preferences = load_preferences(self.root)
+        self.gate.configure(preferences)
+        self.prepare_gate()
+        self.echo_cancellation = preferences["echo_cancellation"]
+        if self.segmenter and self.echo_cancellation != (self.echo is not None):
+            self.echo = self.new_echo() if self.echo_cancellation else None
+
+    def prepare_gate(self):
+        """Load the speaker model in the background once the gate needs it."""
+        if not self.gate.needed or self.gate.model is not None:
+            return
+        if self.gate_task is None or self.gate_task.done():
+            self.gate_task = asyncio.create_task(
+                asyncio.to_thread(self.gate.prepare), name="speaker-prepare"
+            )
+            self.gate_task.add_done_callback(
+                lambda task: task.cancelled()
+                or not task.exception()
+                or log.warning("Speaker gate not ready: %s", task.exception())
+            )
+
+    def capture_stuck(self, call):
+        # The stuck thread holds CoreAudio's device mutex, so no stream in this
+        # process opens again. Restart: serve() exits and the next /voice
+        # launches a fresh service.
+        log.error(
+            "%s did not return within %ss; restarting the voice service",
+            call,
+            RECORDER_TIMEOUT_S,
+        )
+        self.stuck = True
+        self.shutdown.set()
 
     def submit(self, segment, final=True):
         if not self.owner:
@@ -581,8 +728,11 @@ class VoiceService:
 
             self.segmenter = (self.segmenter_factory or SpeechSegmenter)()
         self.last_seq = frame.seq
-        start = time.time() - time.monotonic() + frame.ts - len(frame.audio) / 16000
-        for segment in self.segmenter.feed(frame.audio, start):
+        audio, captured = frame.audio, frame.ts - len(frame.audio) / 16000
+        if self.echo is not None:
+            audio = self.echo.process(audio, captured)  # voice's own speech removed
+        start = time.time() - time.monotonic() + captured
+        for segment in self.segmenter.feed(audio, start):
             self.submit(segment, final=final)
 
     async def watch(self):
@@ -594,11 +744,7 @@ class VoiceService:
                     from .classifiers import load_preferences
                     from .speech_settings import speech_key
 
-                    try:
-                        st = (self.root / "preferences.json").stat()
-                        revision = st.st_mtime_ns, st.st_ino
-                    except OSError:
-                        revision = None
+                    revision = self._preferences_revision()
                     changed = revision != self._speech_preferences_revision
                     self._speech_preferences_revision = revision
                     if (
@@ -608,6 +754,20 @@ class VoiceService:
                         self.speech_prepare_task = asyncio.create_task(
                             self.prepare_speech(), name="speech-prepare"
                         )
+                if self.stt and (
+                    self.stt_prepare_task is None or self.stt_prepare_task.done()
+                ):
+                    revision = self._preferences_revision()
+                    retry = self.stt.retry_due()
+                    if revision != self._stt_preferences_revision or retry:
+                        self._stt_preferences_revision = revision
+                        self.stt_prepare_task = asyncio.create_task(
+                            self.prepare_transcription(retry), name="stt-prepare"
+                        )
+                revision = self._preferences_revision()
+                if revision != self._capture_preferences_revision:
+                    self._capture_preferences_revision = revision
+                    self.apply_capture_preferences()
                 async with self.lifecycle:
                     for task in self.tasks:
                         if (
@@ -618,7 +778,7 @@ class VoiceService:
                         ):
                             self.worker_failures.add(task.get_name())
                             raise RuntimeError(
-                                f"{task.get_name()} stopped: {task.exception()}. Run /voice retry"
+                                f"{task.get_name()} stopped: {task.exception()}"
                             )
                     if (
                         self.owner
@@ -652,6 +812,30 @@ class VoiceService:
                     await self.stop_capture()
             await asyncio.sleep(0.02)
 
+    def _preferences_revision(self):
+        try:
+            st = (self.root / "preferences.json").stat()
+            return st.st_mtime_ns, st.st_ino
+        except OSError:
+            return None
+
+    async def judge_speaker(self, audio, overlap):
+        """Speaker fields for a transcript record. A failing gate passes speech."""
+        if not self.gate.needed:
+            return {}
+        try:
+            return await asyncio.to_thread(self.gate.judge, audio, overlap)
+        except Exception as exc:
+            log.exception("Speaker gate failed")
+            self.gate.state, self.gate.detail = "error", f"Speaker gate failed: {exc}"
+            return {}
+
+    async def prepare_transcription(self, force=False):
+        try:
+            await asyncio.to_thread(self.stt.configure, force)
+        except Exception:
+            log.exception("Transcription engine preparation failed")
+
     async def prepare_speech(self):
         try:
             await asyncio.to_thread(self.speech.configure)
@@ -670,7 +854,9 @@ class VoiceService:
             try:
                 self.transcribing = True
                 text, language = await asyncio.to_thread(
-                    self.models.transcribe, segment.audio
+                    self.stt.transcribe,
+                    segment.audio,
+                    (self.owner or {}).get("names", ()),
                 )
                 if text:
                     overlap = (
@@ -681,6 +867,10 @@ class VoiceService:
                     final = segment.final and bool(
                         self.owner and self.owner["epoch"] == epoch and self.recorder
                     )
+                    # Who spoke: the enrolled user, another speaker, unjudged.
+                    fields = await self.judge_speaker(segment.audio, bool(overlap))
+                    if self.echo is not None:
+                        fields["echo_cancellation"] = True
                     record = self.transcript.append(
                         {
                             "type": "transcript",
@@ -691,10 +881,17 @@ class VoiceService:
                             "final": final,
                             "owner_epoch": epoch,
                             "playback_overlap": overlap,
+                            **fields,
                         }
                     )
-                    if self.owner and self.owner["epoch"] == epoch:
-                        self.last_transcript = record
+                    # Heard is what the user said: the mic picking up voice's
+                    # own playback or another speaker is not shown, and talking
+                    # over voice shows only the person's words.
+                    own = "" if is_playback_echo(record) else strip_playback(record)
+                    if fields.get("speaker") == "other_speaker":
+                        own = ""
+                    if own and self.owner and self.owner["epoch"] == epoch:
+                        self.last_transcript = {**record, "text": own}
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -716,16 +913,23 @@ class VoiceService:
         # Persist admitted trailing speech before ending workers.
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.segments.join(), 15)
-        for task in [self.setup_task, self.speech_prepare_task, *self.tasks]:
+        tasks = [
+            self.setup_task,
+            self.speech_prepare_task,
+            self.stt_prepare_task,
+            self.gate_task,
+            *self.tasks,
+        ]
+        for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(
-            *(t for t in [self.setup_task, self.speech_prepare_task, *self.tasks] if t),
-            return_exceptions=True,
-        )
+        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
         if self.speech:
             await asyncio.to_thread(self.speech.close)
-        await self.classifier.close()
+        if self.stt:
+            await asyncio.to_thread(self.stt.close)
+        for worker in self.classifiers.values():
+            await worker.close()
         path = socket_path(self.root)
         if path.exists():
             path.unlink()
@@ -733,15 +937,17 @@ class VoiceService:
 
 async def serve(root):
     service = VoiceService(root)
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(signum, stop.set)
+        loop.add_signal_handler(signum, service.shutdown.set)
     await service.start()
     try:
-        await stop.wait()
+        await service.shutdown.wait()
     finally:
         await service.close()
+    if service.stuck:
+        # Interpreter exit joins every executor thread, the stuck one too.
+        os._exit(1)
 
 
 def main():

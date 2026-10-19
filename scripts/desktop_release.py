@@ -34,6 +34,11 @@ CLI_PLATFORMS = ("macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64
 APP_MARKER = "KOLLAB-APP"
 # The scie's CPython minor version: scripts/build_binary.py PYTHON (a test keeps them equal).
 RUNTIME_PYTHON = "python3.14"
+# Keep in lockstep with scripts/build_binary.py PEX: pex-tools must resolve the
+# same pex generation that built the scie.
+PEX_PIN = "pex==2.103.4"
+# Standalone pex-tools entry point (tests substitute the tuple with a fake script).
+PEX_TOOLS_CMD = ("uvx", "--python", RUNTIME_PYTHON, "--from", PEX_PIN, "pex-tools")
 LAUNCHER = f"""#!/bin/sh
 # Kollab.app's kollab: the app's own Python, isolated (-I) from the caller's
 # Python settings, never writing bytecode (-B) into the sealed bundle.
@@ -122,8 +127,12 @@ def verify_manifest(directory: Path, version: str) -> None:
 
 
 def scie_env() -> dict[str, str]:
-    """This environment minus any scie identity, which would make a scie act as another."""
-    env = {key: val for key, val in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
+    """This environment minus any scie/pex identity, which would make one act as another."""
+    env = {
+        key: val
+        for key, val in os.environ.items()
+        if key not in ("SCIE", "SCIE_ARGV0", "PEX", "__PEX_EXE__", "__PEX_ENTRY_POINT__")
+    }
     env["KOLLAB_NO_KEYRING"] = "1"
     return env
 
@@ -156,10 +165,19 @@ def unpack_runtime(scie: Path, destination: Path) -> Path:
     if not interpreter.is_file():
         raise ValueError(f"the scie's CPython has no bin/{RUNTIME_PYTHON}; match RUNTIME_PYTHON to build_binary.PYTHON")
     # The pex's own tools lay out exactly the distributions the scie resolved.
-    subprocess.run(
-        [str(interpreter), str(work / "split/pex"), "venv", "--site-packages-copies", str(work / "venv")],
-        env={**scie_env(), "PEX_TOOLS": "1"}, check=True,
+    # Standalone pex-tools, not PEX_TOOLS=1 on the pex itself: venv-built pexes
+    # (PEX_VENV, our build) re-exec through a shim that ignores PEX_TOOLS, and
+    # an inherited __PEX_EXE__ then runs the kollab app, which exits 0 on the
+    # unknown flag and hides the failure until copytree finds no venv.
+    venv_dir = work / "venv"
+    result = subprocess.run(
+        [*PEX_TOOLS_CMD, str(work / "split/pex"), "venv", "--site-packages-copies", str(venv_dir)],
+        env=scie_env(),
     )
+    if result.returncode != 0:
+        raise ValueError(f"pex-tools venv failed with exit code {result.returncode}")
+    if not (venv_dir / "lib" / RUNTIME_PYTHON / "site-packages").is_dir():
+        raise ValueError("pex-tools venv produced no site-packages; refusing to stage a broken runtime")
     for pattern in PRUNE:
         for path in runtime.glob(pattern):
             shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()

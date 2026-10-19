@@ -1,0 +1,159 @@
+{
+  "name": "voice speaker gate",
+  "description": "/voice config shows Echo and Speaker (both off, threshold 0.45); turning on Speaker Gate saves it for this device without starting the microphone, and /voice status reports both filters",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
+    },
+    {
+      "action": "section",
+      "title": "Both filters start off"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "type",
+      "text": "/speaker",
+      "delay": 0.2
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Speaker Threshold",
+      "timeout": 5
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Echo and Speaker"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "0\\.45"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "None yet"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Echo Cancellation"
+    },
+    {
+      "action": "section",
+      "title": "Turn on Speaker Gate and save it for this device"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 8
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "type",
+      "text": "/speaker gate",
+      "delay": 0.2
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Speaker Gate",
+      "timeout": 5
+    },
+    {
+      "action": "send_keys",
+      "keys": " "
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice settings saved for this device",
+      "timeout": 8
+    },
+    {
+      "action": "shell",
+      "description": "the gate is saved for the device and the microphone never started",
+      "command": "cat \"$HOME/.kollab/voice/preferences.json\"; echo; test ! -e \"$HOME/.kollab/voice/service.sock\" && echo no-voice-service",
+      "assert_contains": "\"speaker_gate\": true"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no-voice-service"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "section",
+      "title": "/voice status reports both filters"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 8
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "status"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Speaker gate: on",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Speaker gate: on · threshold 0\\.45 · voiceprint: none yet"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Echo cancellation: off"
+    }
+  ]
+}

@@ -530,6 +530,7 @@ export type EngineConfig = {
   token?: string;
   server_version?: string;
   engine_version?: string;
+  kollab_version?: string;
 };
 
 export type SessionEvent = {

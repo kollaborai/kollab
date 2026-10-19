@@ -46,7 +46,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      placeholder: "macOS 14, zsh, iTerm2, Python 3.12"
+      placeholder: "macOS 14, zsh, iTerm2, Python 3.14"
   - type: textarea
     id: logs
     attributes:

@@ -101,12 +101,13 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
         budget = agent.cfg["max_len"] - agent.cfg["head_max_len"] - 32
         # Conversation context is optional. It must never displace the user's
         # current words or turn a short request into an oversized utterance.
+        # Trimming drops the oldest half: the latest exchange matters most.
         while (
             state["recent_conversation"]
             and len(agent.tok.encode(json.dumps(state, ensure_ascii=False))) > budget
         ):
             state["recent_conversation"] = state["recent_conversation"][
-                : len(state["recent_conversation"]) // 2
+                len(state["recent_conversation"]) // 2 :
             ]
         if len(agent.tok.encode(json.dumps(state, ensure_ascii=False))) > budget:
             deferred.extend(r["event_id"] for r in group)
@@ -127,17 +128,29 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
                 "state": state,
                 "passes": [
                     {"label": label, "choice": choice, "probability": round(p, 3)}
-                    for label, (choice, p) in zip(("with context", "words alone"), passes)
+                    for label, (choice, p) in zip(
+                        ("with context", "words alone"), passes
+                    )
                 ],
             }
         )
         sure = [p for p in passes if p[1] >= minimum]
-        if not sure or len({c for c, _ in sure}) > 1:
+        # A sure "ignore" with history must not drop words that lean "respond"
+        # on their own ("Tell me what you're working on" is 0.91 ignore with
+        # history, 0.72 respond alone): unsure, so the human is asked. Words
+        # surely ignorable alone stay ignored whatever history leans.
+        split = (
+            len(passes) == 2
+            and passes[0][0] == "ignore"
+            and passes[0][1] >= minimum
+            and passes[1][0] == "respond"
+        )
+        if not sure or len({c for c, _ in sure}) > 1 or split:
             probabilities.extend(p for _, p in passes)
             deferred.extend(r["event_id"] for r in group)
             context_conflict |= bool(sure)
             reasons.append(
-                "Laya needs the agent to resolve transcript context"
+                "Laya's history and words-alone passes disagree"
                 if sure
                 else "Laya is uncertain"
             )
@@ -153,7 +166,7 @@ def predict(agent, records, context, transcript_context=None, context_lines=10):
         min(probabilities) if probabilities and not context_conflict else None,
         (
             "; ".join(dict.fromkeys(reasons))
-            + ". Asking the agent to decide whether a response is needed."
+            + ". Asking the human whether it was for the agent."
             if deferred
             else ""
         ),

@@ -26,22 +26,28 @@ class FakeVibe:
         self.preferences = preferences
         self.closed = False
         self.process = SimpleNamespace(pid=42, poll=lambda: None)
-        self.ready = {"device": "mps"}
+        self.ready = {"device": "mps", "rate": 24000}
 
-    def synthesize(self, text):
-        return np.full(2400, .1, dtype=np.float32), 24000
+    def stream(self, text):
+        yield np.full(2400, .1, dtype=np.float32)
 
     def close(self):
         self.closed = True
 
 
+def say(engine, text):
+    """One sentence's audio, as the speech queue plays it."""
+    chunks = list(engine.stream(text))
+    return np.concatenate([samples for samples, _ in chunks]), chunks[0][1]
+
+
 def test_kokoro_preferences_reach_synthesis(root):
     synth = Mock(return_value=(np.ones(10), 24000))
     engine = SpeechEngine(root, synth)
-    engine.synthesize("Hello there.")
+    say(engine, "Hello there.")
     synth.assert_called_once_with("Hello there.")
     save_preferences({"kokoro_voice": "bf_emma", "kokoro_speed": 1.2}, root)
-    engine.synthesize("Hello again.")
+    say(engine, "Hello again.")
     synth.assert_called_with("Hello again.", voice="bf_emma", speed=1.2)
 
 
@@ -49,13 +55,13 @@ def test_switching_engines_closes_only_owned_worker_and_preserves_other_preferen
     monkeypatch.setattr("kollabor_voice.speech.VibeVoiceWorker", FakeVibe)
     save_preferences({"tts_engine": "vibevoice", "vibevoice_voice": "Emma", "context_lines": 23}, root)
     engine = SpeechEngine(root, Mock(return_value=(np.ones(10), 24000)))
-    audio, rate = engine.synthesize("Use the selected voice.")
+    audio, rate = say(engine, "Use the selected voice.")
     assert rate == 24000 and len(audio) == 2400
     worker = engine.worker
     assert worker.preferences["vibevoice_voice"] == "Emma"
     assert engine.status()["engine"] == "vibevoice"
     save_preferences({"tts_engine": "kokoro"}, root)
-    engine.synthesize("Switch back to Kokoro.")
+    say(engine, "Switch back to Kokoro.")
     assert worker.closed and engine.worker is None
     assert load_preferences(root)["context_lines"] == 23
 
@@ -83,12 +89,27 @@ def test_backend_failure_stays_visible_without_silent_fallback(root, monkeypatch
     kokoro = Mock()
     engine = SpeechEngine(root, kokoro)
     with pytest.raises(RuntimeError, match="model cannot load"):
-        engine.synthesize("A spoken response.")
+        say(engine, "A spoken response.")
     assert engine.status()["state"] == "error"
     kokoro.assert_not_called()
+    # Once the engine can load, the next sentence brings it back on its own.
     monkeypatch.setattr("kollabor_voice.speech.VibeVoiceWorker", FakeVibe)
-    engine.configure(force=True)
+    say(engine, "The next response.")
     assert engine.status()["state"] == "ready"
+    kokoro.assert_not_called()
+
+
+def test_a_dead_worker_starts_again_on_the_next_sentence(root, monkeypatch):
+    monkeypatch.setattr("kollabor_voice.speech.VibeVoiceWorker", FakeVibe)
+    save_preferences({"tts_engine": "vibevoice"}, root)
+    engine = SpeechEngine(root, Mock())
+    say(engine, "First.")
+    dead = engine.worker
+    dead.process.poll = lambda: 1  # the worker process exited
+    assert engine.status()["state"] == "error"
+    audio, _ = say(engine, "Second.")
+    assert dead.closed and engine.worker is not dead
+    assert engine.status()["state"] == "ready" and len(audio) == 2400
 
 
 def test_inactive_engine_changes_do_not_reload_the_active_worker(root, monkeypatch):
@@ -109,16 +130,16 @@ async def test_cancelled_vibevoice_generation_never_reaches_playback(root, monke
     started, finish = threading.Event(), threading.Event()
 
     class SlowVibe(FakeVibe):
-        def synthesize(self, text):
+        def stream(self, text):
             started.set()
             finish.wait(3)
-            return super().synthesize(text)
+            yield from super().stream(text)
 
     monkeypatch.setattr("kollabor_voice.speech.VibeVoiceWorker", SlowVibe)
     save_preferences({"tts_engine": "vibevoice"}, root)
     engine = SpeechEngine(root, Mock())
     play = Mock(return_value=True)
-    queue = SpeechQueue(root, engine.synthesize, play)
+    queue = SpeechQueue(root, engine.stream, play)
     ids = queue.admit("This is a short response.", "reply", "epoch", "producer")["ids"]
     task = asyncio.create_task(queue.run())
     try:

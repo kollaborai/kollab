@@ -29,7 +29,11 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useVoiceMode, type VoiceMode } from "@/voice-mode";
+import {
+  useVoiceMode,
+  type VoiceActivity,
+  type VoiceMode,
+} from "@/voice-mode";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -681,6 +685,9 @@ const Composer: FC<{
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
+            {voiceAvailable && voice.on ? (
+              <VoiceStatus activity={voice.activity} />
+            ) : null}
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
@@ -755,6 +762,42 @@ const SLOT_SHOWS_SEND =
   "group-data-[mode=send]/composer:scale-100 group-data-[mode=send]/composer:opacity-100 group-data-[mode=send]/composer:visible";
 const SLOT_SHOWS_LISTENING =
   "group-data-[mode=listening]/composer:scale-100 group-data-[mode=listening]/composer:opacity-100 group-data-[mode=listening]/composer:visible";
+
+// Mic loudness (0..1) at which each meter bar lights.
+const VOICE_METER = [0.1, 0.3, 0.55, 0.8];
+
+/** Voice mode at a glance: the mic level, what voice is doing, the last line. */
+const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
+  const level = activity?.level ?? 0;
+  const line = activity?.said
+    ? `Said “${activity.said}”`
+    : activity?.heard
+      ? `Heard “${activity.heard}”`
+      : "";
+  return (
+    <div
+      data-slot="aui_voice-status"
+      className="flex min-w-0 items-center gap-2 px-1 text-xs text-muted-foreground"
+    >
+      <span className="flex h-3 shrink-0 items-end gap-0.5" aria-hidden>
+        {VOICE_METER.map((at, index) => (
+          <span
+            key={at}
+            className={cn(
+              "w-0.5 rounded-sm bg-current transition-opacity duration-150",
+              level >= at ? "opacity-100" : "opacity-25",
+            )}
+            style={{ height: `${(index + 1) * 25}%` }}
+          />
+        ))}
+      </span>
+      <span className="shrink-0 font-medium text-foreground capitalize">
+        {activity?.stage ?? "starting"}
+      </span>
+      {line ? <span className="min-w-0 truncate">{line}</span> : null}
+    </div>
+  );
+};
 
 const ComposerSlot: FC<{
   voice: VoiceMode | null;

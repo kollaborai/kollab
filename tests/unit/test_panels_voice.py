@@ -1,11 +1,13 @@
 """Voice preferences persist across the TUI, web/RPC and active chat boundaries."""
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from kollabor_voice import speech_settings
 from kollabor_voice.classifiers import load_preferences, save_preferences
 from kollabor_voice.speech_settings import speech_defaults
 
@@ -126,6 +128,7 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
         {"context_lines": True},
         {"classifier": "vibevoice"},
         {"tts_voice": "other"},
+        {"stt_engine": "nemo"},
         {"unknown": "x"},
         {"classifier": "provider", "context_lines": 0},
     ],
@@ -171,3 +174,106 @@ def test_concurrent_updates_preserve_sibling_and_unknown_keys(voice):
         "classifier": "provider",
         "context_lines": 23,
     }
+
+
+@pytest.mark.asyncio
+async def test_transcription_engine_is_selectable_with_readable_labels(
+    voice, monkeypatch
+):
+    from kollabor_voice import speech_settings
+
+    state, plugin, root = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    engine = fields["stt_engine"]
+    assert (engine["type"], engine["value"]) == ("dropdown", "whisper")
+    assert engine["option_labels"] == {
+        "whisper": "Whisper Base",
+        "parakeet": "Parakeet v3",
+    }
+    assert fields["transcription_status"]["value"] == "not loaded · off"
+    view = VoiceConfigAltView(plugin)
+    view._load_widgets()
+    widgets = {w.config_path: w for ws in view._section_widgets for w in ws}
+    shown = "".join(view._render_widget_modern(widgets["stt_engine"], 80, "last"))
+    assert "Transcription Engine: Whisper Base" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
+
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
+    # Elsewhere Parakeet is not offered, and saving it anyway is refused.
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["stt_engine"]["options"] == ["whisper"]
+    assert fields["stt_engine"]["help"] == "Local speech recognition with Whisper Base."
+    refused = await VoicePanel().act(
+        state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
+    )
+    assert not refused["ok"] and "stt_engine" in refused["errors"]
+    assert not (root / "preferences.json").exists()
+
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    saved = await VoicePanel().act(
+        state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
+    )
+    assert saved["ok"]
+    assert load_preferences()["stt_engine"] == "parakeet"
+    fresh = {f["path"]: f for s in saved["panel"]["sections"] for f in s["fields"]}
+    assert fresh["stt_engine"]["value"] == "parakeet"
+
+
+@pytest.mark.asyncio
+async def test_settings_offer_qwen_only_on_apple_silicon(voice, monkeypatch):
+    state, plugin, root = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    live = {"classifier": {"state": "warming", "name": "qwen", "detail": "Loading"}}
+    monkeypatch.setattr(
+        "kollabor_voice.client.VoiceClient.call", AsyncMock(return_value=live)
+    )
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["classifier"]["options"] == ["laya", "qwen", "provider"]
+    assert fields["classifier"]["option_labels"]["qwen"] == "Fine-Tuned Qwen3 0.6B"
+    assert fields["classifier"]["value"] == "laya"  # the default is unchanged
+    assert fields["classifier_status"]["value"] == "Laya · off"
+    saved = await VoicePanel().act(
+        state, "save", {"changes": {"classifier": "qwen"}, "target": "device"}
+    )
+    assert saved["ok"] and load_preferences()["classifier"] == "qwen"
+    fresh = {f["path"]: f for s in saved["panel"]["sections"] for f in s["fields"]}
+    assert fresh["classifier_status"]["value"] == "Fine-Tuned Qwen3 0.6B · warming"
+    assert fresh["classifier_status"]["help"] == "Loading"
+    assert plugin.classifier_name == "qwen"
+
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["classifier"]["options"] == ["laya", "provider"]
+    assert fields["classifier"]["value"] == "laya"  # a saved qwen reads as the default
+    refused = await VoicePanel().act(
+        state, "save", {"changes": {"classifier": "qwen"}, "target": "device"}
+    )
+    assert not refused["ok"] and "classifier" in refused["errors"]
+
+
+@pytest.mark.asyncio
+async def test_voice_classifier_command_switches_and_status_names_the_worker(
+    voice, monkeypatch
+):
+    state, plugin, _ = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    handler = VoiceModeCommandHandler(
+        SimpleNamespace(register_command=lambda _: None), state._event_bus
+    )
+    result = await handler.handle_voicemode(
+        SimpleNamespace(args=["classifier", "qwen"])
+    )
+    assert result.success and "Fine-Tuned Qwen3 0.6B" in result.message
+    assert load_preferences()["classifier"] == "qwen"
+    live = {"classifier": {"state": "ready", "name": "qwen", "pid": 4242}}
+    monkeypatch.setattr(
+        "kollabor_voice.client.VoiceClient.call", AsyncMock(return_value=live)
+    )
+    status = await handler.handle_voicemode(SimpleNamespace(args=["status"]))
+    assert "Classifier: Fine-Tuned Qwen3 0.6B · ready · worker 4242" in status.message
+    usage = await handler.handle_voicemode(SimpleNamespace(args=["nonsense"]))
+    assert "classifier [laya|qwen|provider]" in usage.message

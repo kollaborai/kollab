@@ -176,7 +176,18 @@ class TestBirths:
         assert tuple(born["lapis"]["hairColor"]) in gem_appearance.BIRTH_HAIR_COLORS
         assert born["ruby"]["fur"] in gem_appearance.BIRTH_FURS
         assert "furColor" not in born["ruby"]
-        assert {"hair", "fur"}.isdisjoint(born["opal"])
+        assert born["opal"]["hair"] == "none" and "fur" not in born["opal"]
+
+    def test_a_gem_born_before_hair_gets_its_coat_roll_once(self, appearance_store, monkeypatch):
+        appearance_store.parent.mkdir(parents=True)
+        appearance_store.write_text(json.dumps({"born": {"lapis": {"face": "pill", "hat": "cap"}}}))
+        monkeypatch.setattr(gem_appearance.random, "random", lambda: 0.1)
+        gem_appearance.record_births([])
+        lapis = gem_appearance.load_appearance()["born"]["lapis"]
+        assert lapis["face"] == "pill" and lapis["hair"] in gem_appearance.BIRTH_HAIRS
+        monkeypatch.setattr(gem_appearance.random, "random", lambda: 0.9)
+        gem_appearance.record_births([])
+        assert gem_appearance.load_appearance()["born"]["lapis"] == lapis
 
     def test_unreadable_file_is_left_alone(self, appearance_store):
         appearance_store.parent.mkdir(parents=True)

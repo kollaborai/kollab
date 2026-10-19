@@ -1,0 +1,68 @@
+{
+  "name": "session-name-hides-token",
+  "description": "Session ids end in a 4-character token (2610180756-quantum-spark-7k2x) so two drawn in one minute never share a transcript file. The status bar and /resume still show only the two words.",
+  "config": {
+    "command": "env RESUME_FIXTURE_ID=2601010000-resume-fixture-7k2x sh tests/tmux/lib/resume_app.sh",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Esc for later",
+      "timeout": 40,
+      "description": "first-run Connect prompt on the fresh HOME"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 15,
+      "description": "status bar up"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "[a-z]+-[a-z]+-[0-9][a-z0-9]{3}",
+      "description": "this session's id token stays out of the status bar"
+    },
+    {
+      "action": "section",
+      "label": "open /resume"
+    },
+    {
+      "action": "slash_command",
+      "command": "resume",
+      "delay": 0.5
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Resume Conversation",
+      "timeout": 15,
+      "description": "resume modal open"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "resume-fixture",
+      "description": "the saved chat is listed by its words"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "resume-fixture-7k2x",
+      "description": "its token is not shown"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 10,
+      "description": "back at the input box"
+    }
+  ]
+}

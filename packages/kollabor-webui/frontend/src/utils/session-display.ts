@@ -1,5 +1,5 @@
-import type { Session } from "@/api";
-import { titleCase } from "@/components/panels/panel-model";
+import type { Session } from "../api";
+import { titleCase } from "../components/panels/panel-model";
 
 /** Return the compact label shown to users without changing the session key. */
 export function formatSessionName(
@@ -7,6 +7,11 @@ export function formatSessionName(
   sessionId?: string | null,
 ): string {
   const value = (name || sessionId || "").replace(/^sess_/, "");
+  // Generated ids are YYMMDDHHMM-words-token (token = 4 chars, digit-led).
+  // The full shape must match before the token is dropped, so a user-titled
+  // name like "fix-2day" is never mangled.
+  const generated = value.match(/^\d{10}-([a-z]+-[a-z]+)-\d[a-z0-9]{3}$/);
+  if (generated) return generated[1];
   return value.replace(/^\d{10}-/, "") || "session";
 }
 

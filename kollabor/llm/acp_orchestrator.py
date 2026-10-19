@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import sys
 import uuid
@@ -73,9 +74,16 @@ class ACPOrchestrator:
         self._user_history_tasks: dict[str, asyncio.Task] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
+        # Voice data of a mic turn, by request id, until its reply is spoken.
+        self.voice_turns: dict[str, dict[str, Any]] = {}
+        # Voice epochs whose rules already went to the harness.
+        self.voice_rules_epochs: set[Any] = set()
         from pathlib import Path
+
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
+        # The model/effort picked for each harness profile, re-applied at start.
+        self._options_path = Path(get_project_data_dir()) / "acp" / "options.json"
         self._binding_conversation_id: str | None = None
         self._observations: deque[AgentHudEntry] = deque(maxlen=20)
         self._observation_count = 0
@@ -109,7 +117,41 @@ class ACPOrchestrator:
         runner = self._runner
         if runner is None or self._closed:
             raise ACPError("ACP session is not active")
-        return await runner.set_config_option(config_id, value)
+        options = await runner.set_config_option(config_id, value)
+        if self._profile_name:
+            saved = self._saved_options()
+            saved.setdefault(self._profile_name, {})[config_id] = value
+            try:
+                self._options_path.parent.mkdir(parents=True, exist_ok=True)
+                self._options_path.write_text(json.dumps(saved, indent=2))
+            except OSError as exc:
+                logger.warning("ACP option save failed: %s", exc)
+        return options
+
+    def _saved_options(self) -> dict[str, dict[str, Any]]:
+        try:
+            saved = json.loads(self._options_path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return saved if isinstance(saved, dict) else {}
+
+    async def _restore_options(self, profile: LLMProfile) -> None:
+        """Re-apply the profile's model and the options last picked for it."""
+        wanted: dict[str, Any] = {}
+        if profile.model:
+            model = next((o for o in self.advertised_config_options()
+                          if o.get("category") == "model" or o.get("id") == "model"), None)
+            if model is not None:
+                wanted[str(model["id"])] = profile.model
+        wanted.update(self._saved_options().get(profile.name) or {})
+        for config_id, value in wanted.items():
+            option = next((o for o in self.advertised_config_options() if o.get("id") == config_id), None)
+            if option is None or option.get("currentValue") == value:
+                continue
+            try:
+                await self._runner.set_config_option(config_id, value)
+            except Exception as exc:  # an option the harness no longer offers
+                logger.info("ACP option %s=%s not restored: %s", config_id, value, exc)
 
     async def start(self, profile: LLMProfile, *, resume_conversation: str | None = None) -> None:
         if profile.provider != "acp":
@@ -128,6 +170,8 @@ class ACPOrchestrator:
         self._observation_count = 0
         self._selected_profile = profile
         self.hub_plugin = self.event_bus.get_service("hub_plugin") or self.hub_plugin
+        if not getattr(self.hub_plugin, "enabled", True):
+            self.hub_plugin = None  # hub off (pipe mode, KOLLAB_NO_HUB): a harness with no mesh tools
 
         try:
             command = tuple(profile.command)
@@ -166,6 +210,7 @@ class ACPOrchestrator:
             )
             self._binding_conversation_id = self._conversation_id()
             await self._runner.start(binding=binding)
+            await self._restore_options(profile)
             self.event_bus.register_service("acp_orchestrator", self)
             self._save_binding()
         except BaseException as exc:
@@ -297,7 +342,10 @@ class ACPOrchestrator:
         # Hub already drew incoming messages. The batched model context is
         # persisted as a HUD for web/history replay, never echoed as user input.
         if display is not None and source not in {"agent", "observation"}:
-            display.display_user_message(text)
+            from kollabor_voice.observer import strip_voice_preamble
+
+            # A mic turn shows what was said, never the voice rules sent with it.
+            display.display_user_message(strip_voice_preamble(text))
 
     async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
         if not self._runner or not await self._runner.steer(text, origin=origin, thread_id=thread_id):
@@ -482,7 +530,8 @@ class ACPOrchestrator:
                     for update in result.updates if update.get("kind") == "agent_thought_chunk"]
         metadata = {"provider": "acp", "profile": self._profile_name, "request_id": result.request_id,
                     "acp_session_id": result.session_id,
-                    "acp_updates": [update for update in result.updates if update.get("kind") not in {"plan", "usage_update"}],
+                    "acp_updates": [update for update in result.updates
+                                    if update.get("kind") not in {"plan", "usage_update"}],
                     "stop_reason": result.stop_reason, "thinking": thoughts}
         tools: dict[str, dict[str, Any]] = {}
         for update in result.updates:
@@ -493,7 +542,8 @@ class ACPOrchestrator:
             previous = tools.get(tool_id, {}).get("metadata", {}).get("acp", {})
             payload = {**previous, **{key: value for key, value in payload.items() if value is not None}}
             tools[tool_id] = {"id": tool_id, "name": payload.get("title") or payload.get("kind") or "Harness Tool",
-                "input": payload.get("rawInput") if payload.get("rawInput") is not None else {}, "status": payload.get("status"),
+                "input": payload.get("rawInput") if payload.get("rawInput") is not None else {},
+                "status": payload.get("status"),
                 "result": payload.get("rawOutput") if payload.get("rawOutput") is not None else payload.get("content"),
                 "is_error": payload.get("status") == "failed",
                 "metadata": {"acp": dict(payload)}}
@@ -536,6 +586,21 @@ class ACPOrchestrator:
         sys.stderr.buffer.write(b"[acp] " + chunk)
         sys.stderr.buffer.flush()
 
+    def _speak_reply(self, voice: dict[str, Any], text: str) -> None:
+        """Hand a mic turn's reply to voice, as the native pipeline does."""
+        from kollabor_ai.response_channels import split_response_channels
+
+        display_text, spoken_text = split_response_channels(text)
+        if not display_text.strip() and not spoken_text:
+            return
+        task = asyncio.create_task(self.event_bus.emit_with_hooks(
+            "voice_response_ready",
+            {"voice": voice, "display_text": display_text, "spoken_text": spoken_text},
+            "llm_service",
+        ), name="acp-voice-reply")
+        self._delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_tasks.discard)
+
     def _on_runner_update(self, update: dict[str, Any]) -> None:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
         key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
@@ -569,7 +634,15 @@ class ACPOrchestrator:
                 display.hide_loading()
                 display.end_streaming_response()
                 if observed is not None:
-                    display.display_complete_response(thinking_duration=0, response=observed.text)
+                    from kollabor_ai.response_channels import display_response_text
+
+                    display.display_complete_response(
+                        thinking_duration=0, response=display_response_text(observed.text)
+                    )
+        if kind == "turn_finished" and observed is not None:
+            voice = self.voice_turns.pop(key[0], None)
+            if voice is not None:
+                self._speak_reply(voice, observed.text)
             elif kind == "agent_thought_chunk" and key == self._display_turn:
                 display.show_loading(str((payload.get("content") or {}).get("text") or "Harness is thinking")[:120])
         if kind in {"tool_call", "tool_call_update"}:
@@ -580,16 +653,19 @@ class ACPOrchestrator:
                     tool_type=payload.get("kind") or "acp", input=payload.get("rawInput") or {},
                     request_id=update.get("request_id"), turn_id=update.get("turn_id"), acp_passthrough=True)
             if payload.get("status") in {"completed", "failed"}:
-                import json
                 output = payload.get("rawOutput") or payload.get("content") or ""
                 if not isinstance(output, str):
                     output = json.dumps(output, ensure_ascii=False)
                 publish_semantic(self.event_bus, "tool_result", tool_id=tool_id,
                     tool_name=payload.get("title") or "Harness Tool", success=payload.get("status") == "completed",
                     output=output,
-                    metadata={"acp": payload}, request_id=update.get("request_id"), turn_id=update.get("turn_id"), acp_passthrough=True)
+                    metadata={"acp": payload}, request_id=update.get("request_id"),
+                    turn_id=update.get("turn_id"), acp_passthrough=True)
                 if display is not None:
-                    display.display_system_message(str(payload.get("title") or "Harness Tool") + ": " + str(payload.get("status")))
+                    display.display_tool_row(
+                        str(payload.get("title") or "Harness Tool"),
+                        success=payload.get("status") == "completed",
+                    )
         if kind == "usage_update":
             stats = getattr(llm, "session_stats", None)
             if isinstance(stats, dict):
