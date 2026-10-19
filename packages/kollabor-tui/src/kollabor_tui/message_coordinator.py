@@ -841,7 +841,7 @@ class MessageDisplayCoordinator:
         self._saved_main_buffer_state = None
 
     def force_ready(self) -> None:
-        """Ensure render state is clean so the input box draws.
+        """Unblock the render loop so the input box draws.
 
         Call this after a processing loop completes (e.g. the queue
         processor's finally block) to guarantee that writing_messages
@@ -849,18 +849,20 @@ class MessageDisplayCoordinator:
         a multi-tool sequence can leave the render in a stale state
         where the input box never reappears.
 
-        Safe to call at any time -- just resets to the same clean
-        defaults that display_queued_messages() sets in its finally.
+        Leaves input_line_written and last_line_count alone: they say
+        what is on screen right now. The render loop may have drawn the
+        active area since the last message display (a voice turn awaits
+        its spoken reply after the reply shows), and forgetting that
+        block makes the next render clear one line and draw a second
+        active area under the first.
         """
         if self._in_alternate_buffer:
             # Don't touch state while a modal/altview is active
             return
 
         self.terminal_renderer.writing_messages = False
-        self.terminal_renderer.input_line_written = False
-        self.terminal_renderer.last_line_count = 0
         self.terminal_renderer.invalidate_render_cache()
-        logger.debug("force_ready: reset render state for input box")
+        logger.debug("force_ready: unblocked render loop for input box")
 
     def get_saved_state(self) -> Optional[Dict[str, Any]]:
         """Get the saved render state (for debugging).

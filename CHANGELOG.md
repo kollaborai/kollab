@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Web: messages between agents were drawn in larger type than the chat's own messages on a computer.
+- Voice: every voice turn left the previous input box and status rows on the terminal screen, and the next message printed under them.
 - Voice recovers on its own instead of waiting for `/voice retry`. When the voice service dies, its lease expires, setup fails or capture stops, the chat starts voice again after 5 seconds, waiting longer each time up to two minutes; the status row reads `starting` until the microphone is live. A late answer from a busy voice service no longer turns voice off, and no message tells you to run `/voice retry`.
 - Voice: a VibeVoice worker that timed out or exited left every later reply silent. The speech engine is prepared again on the next sentence.
 - Voice: talking over voice's own speech merged both into one line. The words voice was saying are cut, and only yours are judged and sent.
