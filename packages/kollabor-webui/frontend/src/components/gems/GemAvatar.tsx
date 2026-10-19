@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { cn } from "@/lib/utils";
 import { useGemLook, useLookKey } from "./gem-appearance";
 import { GEM_PAD, gemEngine, type GemProps } from "./gem-engine";
-import { seasonFor, type EyeStyle, type HatStyle, type Season } from "./gem-face";
+import { seasonFor, type Aura, type EyeStyle, type FurStyle, type HairStyle, type HatStyle, type Season, type Sparkle } from "./gem-face";
 import { gemSpec, isPoolGem, type GemCut } from "./gem-specs";
 
 export type GemAvatarProps = Omit<GemProps, "size" | "lookKey"> & {
@@ -43,6 +43,15 @@ export function GemAvatar({ size = 32, className, label, where, ...own }: GemAva
     hat: own.hat ?? ((look.hat ?? (inSeason ? undefined : look.bornHat)) as HatStyle | "auto" | undefined),
     season,
     cut: own.cut ?? (look.cut as GemCut | undefined),
+    hair: own.hair ?? (look.hair as HairStyle | "none" | undefined),
+    hairColor: own.hairColor ?? look.hairColor,
+    fur: own.fur ?? (look.fur as FurStyle | "none" | undefined),
+    furColor: own.furColor ?? look.furColor,
+    hairKnobs: own.hairKnobs ?? look.hairKnobs,
+    furKnobs: own.furKnobs ?? look.furKnobs,
+    auras: own.auras ?? (look.auras as Aura[] | undefined),
+    sparkles: own.sparkles ?? (look.sparkles as Sparkle | undefined),
+    auraColor: own.auraColor ?? look.auraColor,
     color: look.color ?? own.color ?? (isPoolGem(own.gem) ? undefined : look.bornColor),
     lookKey: key,
   };

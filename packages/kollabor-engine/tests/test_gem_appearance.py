@@ -81,6 +81,55 @@ class TestNormalize:
             "theo": {"avatar": {"kind": "gem"}},
         }
 
+    def test_keeps_hair_fur_and_auras_and_drops_bad_ones(self):
+        doc = {
+            "born": {"lapis": {"hair": "long", "hairColor": [95, 60, 35], "auras": ["glow"], "sparkles": "lots"}},
+            "gems": {
+                "lapis": {"hair": "mohawk", "hairColor": "gem", "fur": "shaggy", "furColor": [225, 190, 120]},
+                "ruby": {"auras": ["glow", "orbit", "glow", "Bad", 3], "sparkles": "few", "auraColor": [200, 30, 50]},
+                "opal": {
+                    "hair": "Not A Slug",
+                    "hairColor": "blue",
+                    "furColor": [1, 2],
+                    "auras": "glow",
+                    "auraColor": "pink",
+                },
+            },
+        }
+        clean = gem_appearance.normalize(doc)
+        # A born look keeps its coat, never an aura.
+        assert clean["born"] == {"lapis": {"hair": "long", "hairColor": [95, 60, 35]}}
+        assert clean["gems"] == {
+            "lapis": {"hair": "mohawk", "hairColor": "gem", "fur": "shaggy", "furColor": [225, 190, 120]},
+            "ruby": {"auras": ["glow", "orbit"], "sparkles": "few", "auraColor": [200, 30, 50]},
+        }
+
+    def test_keeps_coat_knobs_and_drops_bad_ones(self):
+        doc = {
+            "born": {"lapis": {"hair": "long", "hairKnobs": {"length": 0.7}}},
+            "gems": {
+                "lapis": {
+                    "hair": "long",
+                    "hairKnobs": {
+                        "length": 0.7,
+                        "lie": 2,
+                        "fall": True,
+                        "sway": "far",
+                        "Bad Name": 1,
+                        "clump": float("nan"),
+                    },
+                    "furKnobs": {"length": 99},
+                },
+                "ruby": {"hairKnobs": [0.3], "furKnobs": {"gloss": "high"}},
+            },
+        }
+        clean = gem_appearance.normalize(doc)
+        # Nothing is born with knob settings.
+        assert clean["born"] == {"lapis": {"hair": "long"}}
+        assert clean["gems"] == {
+            "lapis": {"hair": "long", "hairKnobs": {"length": 0.7, "lie": 2.0}, "furKnobs": {"length": 10.0}},
+        }
+
     def test_non_object_is_empty(self):
         assert gem_appearance.normalize(["nope"]) == EMPTY
 
@@ -118,6 +167,17 @@ class TestBirths:
         assert born["lapis"] == look
         assert set(born) == {"lapis", "ruby"}
 
+    def test_some_gems_are_born_with_hair_or_fur(self, appearance_store, monkeypatch):
+        rolls = iter([0.1, 0.3, 0.9])
+        monkeypatch.setattr(gem_appearance.random, "random", lambda: next(rolls))
+        gem_appearance.record_births(["lapis", "ruby", "opal"])
+        born = gem_appearance.load_appearance()["born"]
+        assert born["lapis"]["hair"] in gem_appearance.BIRTH_HAIRS
+        assert tuple(born["lapis"]["hairColor"]) in gem_appearance.BIRTH_HAIR_COLORS
+        assert born["ruby"]["fur"] in gem_appearance.BIRTH_FURS
+        assert "furColor" not in born["ruby"]
+        assert {"hair", "fur"}.isdisjoint(born["opal"])
+
     def test_unreadable_file_is_left_alone(self, appearance_store):
         appearance_store.parent.mkdir(parents=True)
         appearance_store.write_text("{not json")
@@ -131,12 +191,18 @@ class TestBirths:
         text = GEM_FACE_TS.read_text(encoding="utf-8")
         entry = re.compile(r'\{ id: "([a-z0-9_-]+)", label: "[^"]*", group: "(\w*)" \}')
 
+        def block(const):
+            return text.split(f"export const {const}", 1)[1].split("export const", 1)[0]
+
         def everyday(const):
-            block = text.split(f"export const {const}", 1)[1].split("export const", 1)[0]
-            return {id_ for id_, group in entry.findall(block) if group not in ("Halloween", "Christmas", "Hair")}
+            return {id_ for id_, group in entry.findall(block(const)) if group not in ("Halloween", "Christmas")}
 
         assert everyday("EYE_STYLES") == set(gem_appearance.BIRTH_FACES)
         assert everyday("HAT_STYLES") == set(gem_appearance.BIRTH_HATS)
+        assert re.findall(r'id: "([a-z]+)"', block("HAIR_STYLES")) == list(gem_appearance.BIRTH_HAIRS)
+        assert re.findall(r'id: "([a-z]+)"', block("FUR_STYLES")) == list(gem_appearance.BIRTH_FURS)
+        shades = re.findall(r"rgb: \[(\d+), (\d+), (\d+)\]", block("HAIR_COLORS"))
+        assert [tuple(map(int, shade)) for shade in shades] == list(gem_appearance.BIRTH_HAIR_COLORS)
 
 
 @pytest.mark.asyncio

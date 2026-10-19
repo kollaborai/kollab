@@ -10,26 +10,32 @@ import {
   setShapeWeights,
   type Shape,
 } from "./gem-blob";
+import { SPARKS_PER_SECOND, drawAuraBehind, drawAuraFront, drawSparks, type AuraPaint, type Spark } from "./gem-aura";
 import { HAT_SIZES, drawActivityEffects, drawEffects, drawHat, drawSeasonBody, type HatFit } from "./gem-dress";
 import {
-  isHair,
   autoHat,
   drawFace,
   eyeGap,
   eyeShape,
   gazeFor,
+  mix,
   mouthShape,
   seasonFor,
   workPhase,
   type Activity,
+  type Aura,
+  type CoatKnobs,
   type EyeStyle,
   type FaceAnchor,
   type FaceFrame,
+  type FurStyle,
   type HairStyle,
   type HatStyle,
+  type Rgb,
   type Season,
+  type Sparkle,
 } from "./gem-face";
-import { coatMesh, dressCoat } from "./gem-fur";
+import { FUR_COATS, HAIR_COATS, coatCrown, coatMesh, coatPress, dressCoat, type CoatStyle } from "./gem-fur";
 import { drawn } from "./gem-look";
 import { HOLDS, drawHeld, drawProps } from "./gem-props";
 import { gemMood, gemSpec, type GemCut, type GemMood, type GemSpec } from "./gem-specs";
@@ -115,6 +121,19 @@ export type GemProps = {
   cut?: GemCut | null;
   /** How the body moves; absent, the agent's born motion. */
   motion?: GemMotion | null;
+  /** Hair on its head and fur all over (gem-fur.ts), under any hat; "none" or absent, bare. */
+  hair?: HairStyle | "none";
+  fur?: FurStyle | "none";
+  /** Their colors: sRGB 0-255, or "gem" / absent for the body's own. */
+  hairColor?: readonly number[] | "gem" | null;
+  furColor?: readonly number[] | "gem" | null;
+  /** The user's settings of their styles' knobs (gem-face.ts COAT_KNOBS), over each style's own. */
+  hairKnobs?: CoatKnobs;
+  furKnobs?: CoatKnobs;
+  /** Auras around it (gem-aura.ts), how much it sparkles (absent: as it always has), and their color. */
+  auras?: readonly Aura[];
+  sparkles?: Sparkle;
+  auraColor?: readonly number[] | "gem" | null;
 };
 
 type Glint = { x: number; y: number; age: number; ttl: number; size: number; hue: number | null };
@@ -210,6 +229,9 @@ type Avatar = {
   talk: number;
   glints: Glint[];
   glintCarry: number;
+  /** Sparkles around the gem (its aura), apart from the glints on it. */
+  sparks: Spark[];
+  sparkCarry: number;
 };
 
 /** An affine from face pixels to canvas pixels, and 0..1 for how squarely the patch faces the camera. */
@@ -449,13 +471,37 @@ function headFor(w: ArrayLike<number>, build: readonly [number, number], fit: nu
   return head;
 }
 
+/** The hair and fur a gem wears: each style's look with the user's knob settings over it. */
+function coats(props: GemProps): { hair?: CoatStyle; fur?: CoatStyle } {
+  const hair = props.hair && props.hair !== "none" ? HAIR_COATS[props.hair] : undefined;
+  const fur = props.fur && props.fur !== "none" ? FUR_COATS[props.fur] : undefined;
+  return {
+    hair: hair && props.hairKnobs ? { ...hair, ...props.hairKnobs } : hair,
+    fur: fur && props.furKnobs ? { ...fur, ...props.furKnobs } : fur,
+  };
+}
+
+/**
+ * Where a hat's band sits over a gem's coat (body-local). A hat sits on the
+ * head over a thin layer of the coat: one that covers the crown presses the
+ * coat under it flat (`pressed`), one open on top (a crown, horns) lets it
+ * stand around it. Headphones arc over the coat.
+ */
+function hatBand(props: GemProps, hat: Exclude<HatStyle, "none">, head: Head) {
+  const { hair, fur } = coats(props);
+  const over = hat === "headphones";
+  const lift = over ? Math.max(coatCrown(hair), coatCrown(fur)) : Math.max(coatPress(hair), coatPress(fur));
+  return { by: head.by + lift, bx: head.bx + (over ? 0.6 : 1) * lift, lift, pressed: COVERS.has(hat) && !!(hair || fur) };
+}
+
 class GemEngine {
   private renderer: WebGLRenderer | null = null;
   private scene = new Scene();
   private camera = new PerspectiveCamera(CANVAS_FOV, 1, 0.1, 20);
   private body: Mesh | null = null;
   /** Hair or fur grown from the body (gem-fur.ts), a child of it. */
-  private coat: Mesh | null = null;
+  private hairCoat: Mesh | null = null;
+  private furCoat: Mesh | null = null;
   private material: ShaderMaterial | null = null;
   /** Where the face is painted before it is trimmed to the body's silhouette. */
   private paint: CanvasRenderingContext2D | null = null;
@@ -516,8 +562,9 @@ class GemEngine {
       this.body = new Mesh(bodyGeometry(), this.material);
       this.body.frustumCulled = false;
       this.scene.add(this.body);
-      this.coat = coatMesh();
-      this.body.add(this.coat);
+      this.hairCoat = coatMesh("hair");
+      this.furCoat = coatMesh("fur");
+      this.body.add(this.hairCoat, this.furCoat);
       this.renderer = renderer;
     } catch {
       this.failed = true;
@@ -671,6 +718,8 @@ class GemEngine {
       talk: 0,
       glints: [],
       glintCarry: 0,
+      sparks: [],
+      sparkCarry: 0,
     };
     this.identify(avatar, props);
     this.resize(avatar);
@@ -1004,8 +1053,12 @@ class GemEngine {
     if (still) {
       avatar.glints.length = 0;
       avatar.glintCarry = 0;
+      avatar.sparks.length = 0;
+      avatar.sparkCarry = 0;
     }
-    const rate = still || offline || activity === "error" ? 0 : BUSY.has(activity) ? 0.5 : (GLINTS[activity] ?? 0.12);
+    const sparkles = avatar.props.sparkles;
+    const rate =
+      still || offline || activity === "error" || sparkles === "none" ? 0 : BUSY.has(activity) ? 0.5 : (GLINTS[activity] ?? 0.12);
     avatar.glintCarry += rate * dt;
     while (avatar.glintCarry >= 1) {
       avatar.glintCarry -= 1;
@@ -1023,6 +1076,23 @@ class GemEngine {
     }
     for (const glint of avatar.glints) glint.age += dt;
     avatar.glints = avatar.glints.filter((glint) => glint.age < glint.ttl);
+    // A picked amount of sparkle also twinkles around the gem, more while it works.
+    const around = sparkles === "few" || sparkles === "lots" ? SPARKS_PER_SECOND[sparkles] : null;
+    avatar.sparkCarry += around && !still && !offline ? around[BUSY.has(activity) || activity === "dance" ? 1 : 0] * dt : 0;
+    while (avatar.sparkCarry >= 1) {
+      avatar.sparkCarry -= 1;
+      const angle = Math.random() * Math.PI * 2;
+      const reach = 0.36 + Math.random() * 0.26;
+      avatar.sparks.push({
+        x: Math.cos(angle) * reach,
+        y: Math.sin(angle) * reach * 0.95,
+        age: 0,
+        ttl: 0.6 + Math.random() * 0.6,
+        size: 0.04 + Math.random() * 0.045,
+      });
+    }
+    for (const spark of avatar.sparks) spark.age += dt;
+    avatar.sparks = avatar.sparks.filter((spark) => spark.age < spark.ttl);
   }
 
   /** The shape mix the body is heading for: its cut, leaning into its activity's mood shape and its motion. */
@@ -1129,11 +1199,13 @@ class GemEngine {
    * a little toward the face while it shows so a turn carries it, tilted with
    * the head, and pressed down or shrunk to stay inside the layout box.
    */
-  private hatFit(avatar: Avatar, hat: Exclude<HatStyle, "none" | HairStyle>, vis: number, px: number, g: number): HatFit {
+  private hatFit(avatar: Avatar, hat: Exclude<HatStyle, "none">, vis: number, px: number, g: number): HatFit {
     const body = this.body as Mesh;
     const size = HAT_SIZES[hat];
     const head = headFor(weights, avatar.spec.build, size.fit);
-    P.set(0, head.by, 0.5 * head.bx * vis);
+    // Over hair or fur the hat rides up and opens out by the coat's depth under it.
+    const { by, bx, lift: coat } = hatBand(avatar.props, hat, head);
+    P.set(0, by, 0.5 * bx * vis);
     this.project(P, px, c0);
     U.copy(P).applyMatrix4(body.matrixWorld);
     const near = CAMERA_DISTANCE / (CAMERA_DISTANCE - U.z);
@@ -1141,7 +1213,7 @@ class GemEngine {
     this.project(P, px, c1);
     const angle = Math.atan2(c1.x - c0.x, -(c1.y - c0.y)) + (hat === "headphones" ? 0 : avatar.tilt + avatar.jig);
     const unit = g / FRAME;
-    let k = (head.bx * body.scale.x * unit * near) / size.band;
+    let k = (bx * body.scale.x * unit * near) / size.band;
     // The room above the band at rest (without a bounce) up to the box's top.
     const room = c0.y + avatar.bob * unit - ((px - avatar.gemPx) / 2 - 0.04 * avatar.gemPx);
     let squash = 1;
@@ -1151,13 +1223,13 @@ class GemEngine {
     }
     const ears = { lx: 0, ly: 0, rx: 0, ry: 0, tx: 0, ty: 0 };
     if (hat === "headphones") {
-      P.set(-head.ex, head.ey, 0);
+      P.set(-head.ex - 0.5 * coat, head.ey, 0);
       this.project(P, px, c2);
       [ears.lx, ears.ly] = [c2.x, c2.y];
-      P.set(head.ex, head.ey, 0);
+      P.set(head.ex + 0.5 * coat, head.ey, 0);
       this.project(P, px, c2);
       [ears.rx, ears.ry] = [c2.x, c2.y];
-      P.set(0, head.top, 0);
+      P.set(0, head.top + coat, 0);
       this.project(P, px, c2);
       [ears.tx, ears.ty] = [c2.x, c2.y];
     }
@@ -1174,7 +1246,13 @@ class GemEngine {
     const body = this.body;
     if (!renderer || !body) return null;
     const glow = Math.min(1.1, avatar.glow + avatar.burst * 0.6);
-    this.pose(avatar, activity, t, glow);
+    const face = avatar.props.face ?? "pill";
+    const season = avatar.props.season === "auto" ? seasonFor() : (avatar.props.season ?? "none");
+    const hatProp = avatar.props.hat ?? "auto";
+    // A bubbled (offline) gem rests bare-headed.
+    const hat = activity === "offline" ? "none" : hatProp === "auto" ? autoHat(avatar.props.caste, season, avatar.seed) : hatProp;
+    // Without a face nothing is seated, the hat included.
+    this.pose(avatar, activity, t, glow, face === "none" ? "none" : hat);
     const px = avatar.px;
     // WebGL counts rows from the bottom.
     renderer.setViewport(sx, this.atlas - sy - px, px, px);
@@ -1186,9 +1264,6 @@ class GemEngine {
     const g = avatar.gemPx * FIT;
     const o = Math.floor((px - g) / 2);
     const oy = Math.floor((px - g) / 2 + SINK * avatar.gemPx);
-    const face = avatar.props.face ?? "pill";
-    const season = avatar.props.season === "auto" ? seasonFor() : (avatar.props.season ?? "none");
-    const hatProp = avatar.props.hat ?? "auto";
     const frame: FaceFrame = {
       ctx: avatar.ctx,
       t,
@@ -1201,15 +1276,7 @@ class GemEngine {
       blink: avatar.blink,
       activity,
       style: face === "none" ? "pill" : face,
-      // A bubbled (offline) gem rests bare-headed; hair and fur stay on.
-      hat:
-        activity === "offline"
-          ? hatProp !== "auto" && isHair(hatProp)
-            ? hatProp
-            : "none"
-          : hatProp === "auto"
-            ? autoHat(avatar.props.caste, season, avatar.seed)
-            : hatProp,
+      hat,
       season,
       rgb: avatar.rgb,
       dark: avatar.dark,
@@ -1241,7 +1308,7 @@ class GemEngine {
     const vx = Math.abs(avatar.gaze[0].v);
     const vy = Math.abs(avatar.gaze[1].v);
     pending.stretch = [1 + Math.min(vx * 0.01, 0.04) - Math.min(vy * 0.005, 0.02), 1 + Math.min(vy * 0.01, 0.04) - Math.min(vx * 0.005, 0.02)];
-    if (frame.hat !== "none" && !isHair(frame.hat)) pending.hat = this.hatFit(avatar, frame.hat, pending.seat.vis, px, g);
+    if (frame.hat !== "none") pending.hat = this.hatFit(avatar, frame.hat, pending.seat.vis, px, g);
     return pending;
   }
 
@@ -1278,7 +1345,7 @@ class GemEngine {
   private crownClip(p: Pending, px: number): Path2D | null {
     const fit = p.hat;
     const hat = p.frame.hat;
-    if (!fit || hat === "none" || isHair(hat) || !COVERS.has(hat)) return null;
+    if (!fit || hat === "none" || !COVERS.has(hat)) return null;
     const half = 0.55 * HAT_SIZES[hat].band * fit.k;
     const cos = Math.cos(fit.angle);
     const sin = Math.sin(fit.angle);
@@ -1323,6 +1390,9 @@ class GemEngine {
       ctx.fillStyle = halo;
       ctx.fillRect(0, 0, px, px);
     }
+    // Auras: what goes behind the body now, the rest once it is drawn.
+    const aura = this.auraPaint(avatar, ctx, t, o + g / 2 + slideX, oy + g / 2 - lift, g, glow, frame.activity);
+    if (aura) drawAuraBehind(aura);
     // A pointed head (a pear's tip, an octahedron's point) rises inside its
     // hat rather than poking through it.
     const crown = this.crownClip(p, px);
@@ -1332,6 +1402,7 @@ class GemEngine {
     ctx.restore();
     if (!seat) {
       this.drawGlints(ctx, avatar, o + slideX, oy - lift, g);
+      if (aura) this.auraFront(aura, avatar);
       return;
     }
 
@@ -1384,10 +1455,28 @@ class GemEngine {
     drawEffects(frame);
     // What the last activity put around the gem fades out instead of vanishing.
     if (leaving && away < 0.4) drawActivityEffects({ ...frame, activity: avatar.prev, since: 10 }, 1 - away / 0.4);
+    if (aura) this.auraFront(aura, avatar);
+  }
+
+  /**
+   * This frame's auras, in the picked aura color or the gem's own lightened:
+   * a third strength at rest, full while it works, fading out offline.
+   */
+  private auraPaint(avatar: Avatar, ctx: CanvasRenderingContext2D, t: number, cx: number, cy: number, g: number, glow: number, activity: Activity): AuraPaint | null {
+    const { auras = [], auraColor } = avatar.props;
+    if (!auras.length && !avatar.sparks.length) return null;
+    const strength = activity === "offline" ? 0 : (0.35 + 0.65 * clamp(glow, 0, 1)) * (1 - avatar.rest);
+    const rgb: Rgb = Array.isArray(auraColor) && auraColor.length === 3 ? [auraColor[0], auraColor[1], auraColor[2]] : mix(avatar.rgb, [255, 255, 255], 0.25);
+    return { ctx, t, cx, cy, g, rgb, strength, auras, seed: avatar.seed };
+  }
+
+  private auraFront(aura: AuraPaint, avatar: Avatar) {
+    drawAuraFront(aura);
+    drawSparks(aura.ctx, avatar.sparks, aura.cx, aura.cy, aura.g, aura.rgb);
   }
 
   /** The body's pose, shape and colors for this frame. */
-  private pose(avatar: Avatar, activity: Activity, t: number, glow: number) {
+  private pose(avatar: Avatar, activity: Activity, t: number, glow: number, hat: HatStyle) {
     const body = this.body;
     const material = this.material;
     if (!body || !material) return;
@@ -1463,13 +1552,15 @@ class GemEngine {
     paintBody(material, tint, avatar.rest, avatar.spec.material, clamp((avatar.props.size - 24) / 40, 0, 1));
     if (avatar.anger > 0) (u.uGlowColor.value as Color).lerp(ANGRY, avatar.anger);
     u.uGlow.value = Math.min(0.8, glow * 0.85) * (1 - avatar.rest);
-    if (this.coat) {
-      dressCoat(this.coat, material, avatar.props.hat, {
-        weights,
-        rest: avatar.rest,
-        hairline: faceHeight(weights) + 0.42,
-        unitPx: (avatar.gemPx * FIT) / FRAME,
-      });
+    if (this.hairCoat && this.furCoat) {
+      const { hairColor, furColor } = avatar.props;
+      const { hair, fur } = coats(avatar.props);
+      const gem = { weights, rest: avatar.rest, face: faceHeight(weights), unitPx: (avatar.gemPx * FIT) / FRAME };
+      // A hat over the crown presses the coat flat under its band.
+      const pulled = hat === "none" ? null : hatBand(avatar.props, hat, headFor(weights, avatar.spec.build, HAT_SIZES[hat].fit));
+      const band = pulled?.pressed ? { y: pulled.by, r: pulled.bx } : null;
+      dressCoat(this.hairCoat, material, hair, hairColor, gem, band);
+      dressCoat(this.furCoat, material, fur, furColor, gem, band);
     }
   }
 

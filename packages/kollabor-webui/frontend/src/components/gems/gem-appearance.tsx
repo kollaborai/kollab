@@ -8,12 +8,12 @@ import {
   type ReactNode,
 } from "react";
 import type { EngineApi, GemAppearance } from "@/api";
-import { EYE_STYLES, HAT_STYLES, SEASONS } from "./gem-face";
+import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES } from "./gem-face";
 import { GEM_CUTS } from "./gem-specs";
 import { lookKey, resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
 
-const everyday = (style: { group: string }) => !["Halloween", "Christmas", "Hair"].includes(style.group);
-/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same); hair is only ever picked. */
+const everyday = (style: { group: string }) => style.group !== "Halloween" && style.group !== "Christmas";
+/** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
 export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
 export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
 
@@ -29,6 +29,11 @@ export const GEM_LOOK_VOCABULARY: GemLookVocabulary = {
   hats: new Set(["auto", ...HAT_STYLES.map((style) => style.id)]),
   seasons: new Set(["auto", ...SEASONS.map((season) => season.id)]),
   cuts: new Set(GEM_CUTS),
+  hairs: new Set(["none", ...HAIR_STYLES.map((style) => style.id)]),
+  furs: new Set(["none", ...FUR_STYLES.map((style) => style.id)]),
+  knobs: Object.fromEntries(COAT_KNOBS.map((knob) => [knob.key, [knob.min, knob.max] as const])),
+  auras: new Set(AURAS.map((aura) => aura.id)),
+  sparkles: new Set(SPARKLES.map((amount) => amount.id)),
   birthFaces: EVERYDAY_FACES,
   birthHats: EVERYDAY_HATS,
   birthColors: GEM_SWATCHES,

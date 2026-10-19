@@ -7,7 +7,7 @@
  * column of light.
  */
 
-import { TAU, WHITE, hue, mix, rgba, star, workPhase, type FaceFrame, type HairStyle, type HatStyle } from "./gem-face";
+import { TAU, WHITE, hue, mix, rgba, star, workPhase, type FaceFrame, type HatStyle } from "./gem-face";
 
 /**
  * Where a hat goes, in canvas pixels (the engine reads it off the head's
@@ -32,7 +32,7 @@ export type HatFit = {
  * half-width the band opens to (a beanie pulls down over the crown, a top hat
  * perches), and how far the hat rises above its band.
  */
-export const HAT_SIZES: Record<Exclude<HatStyle, "none" | HairStyle>, { band: number; fit: number; rise: number }> = {
+export const HAT_SIZES: Record<Exclude<HatStyle, "none">, { band: number; fit: number; rise: number }> = {
   party: { band: 0.15, fit: 0.36, rise: 0.41 },
   top: { band: 0.125, fit: 0.42, rise: 0.27 },
   beanie: { band: 0.21, fit: 0.84, rise: 0.25 },

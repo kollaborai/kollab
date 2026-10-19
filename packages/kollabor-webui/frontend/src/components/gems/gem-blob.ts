@@ -431,6 +431,26 @@ void main() {
   gl_Position = projectionMatrix * mv;
 }`;
 
+/**
+ * Where a coat grows: nowhere (uCoat 0), the head (1) above a hairline over
+ * the brow that drops uBack toward the back, kept to a strip uStrip wide when
+ * that is set, or all over (2).
+ */
+export const COAT_GLSL = /* glsl */ `
+uniform float uCoat;
+uniform float uHairline;
+uniform float uBack;
+uniform float uStrip;
+float coat(vec3 d) {
+  if (uCoat < 0.5) return 0.0;
+  if (uCoat > 1.5) return 1.0;
+  float front = d.z / max(length(d.xz), 1e-3);
+  float line = uHairline - uBack * (1.0 - front);
+  float m = smoothstep(line, line + 0.12, d.y);
+  if (uStrip > 0.0) m *= smoothstep(uStrip, 0.55 * uStrip, abs(d.x));
+  return m;
+}`;
+
 const BODY_FRAG = /* glsl */ `
 uniform vec3 uTop;
 uniform vec3 uBottom;
@@ -444,10 +464,16 @@ uniform float uIris;
 uniform float uFleck;
 uniform vec3 uFleckColor;
 uniform vec3 uSheen;
+// Under hair or fur of a color of their own: their root color (gem-fur.ts dressCoat).
+uniform vec3 uScalp;
+uniform float uScalpMix;
+uniform vec3 uUnderFur;
+uniform float uUnderFurMix;
 varying vec3 vN;
 varying vec3 vV;
 varying vec3 vD;
 varying float vY;
+${COAT_GLSL}
 float hash(vec3 p) {
   return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
 }
@@ -468,6 +494,9 @@ void main() {
     float speck = step(0.78, hash(id)) * smoothstep(0.3, 0.1, length(fract(cell) - 0.5 - 0.3 * jitter));
     base = mix(base, uFleckColor, speck * uFleck);
   }
+  // The body under a coat takes its root color, so no gem shows between the strands.
+  base = mix(base, uUnderFur, uUnderFurMix);
+  base = mix(base, uScalp, uScalpMix * coat(vD));
   vec3 col = base * (0.62 + 0.42 * wrap) * (1.0 - 0.3 * uMetal);
   // Light carried through the body, brightest through the thick middle and on the shadow side.
   col += base * uClear * (0.16 * facing * facing + 0.12 * (1.0 - wrap));
@@ -511,6 +540,14 @@ export function bodyMaterial(): ShaderMaterial {
       uFleck: { value: 0 },
       uFleckColor: { value: new Color() },
       uSheen: { value: new Color(0, 0, 0) },
+      uCoat: { value: 0 },
+      uHairline: { value: 0.4 },
+      uBack: { value: 0 },
+      uStrip: { value: 0 },
+      uScalp: { value: new Color() },
+      uScalpMix: { value: 0 },
+      uUnderFur: { value: new Color() },
+      uUnderFurMix: { value: 0 },
     },
   });
 }

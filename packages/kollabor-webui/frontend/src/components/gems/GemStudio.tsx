@@ -1,6 +1,6 @@
-import { useState, type ChangeEvent, type ReactNode } from "react";
+import { Fragment, useState, type ChangeEvent, type ReactNode } from "react";
 import { Dices, Loader2, RotateCcw } from "lucide-react";
-import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, Session } from "@/api";
+import type { AgentPoolEntry, AvatarSpec, GemAppearance, GemLook, LookColor, Session } from "@/api";
 import { Avatar } from "@/components/agents/Avatar";
 import { isGemAvatar } from "@/components/agents/avatar-model";
 import { titleCase } from "@/components/panels/panel-model";
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -28,7 +29,21 @@ import {
   useGemAppearance,
   useLookKey,
 } from "./gem-appearance";
-import { EYE_STYLES, HAT_STYLES, SEASONS, type Activity, type EyeStyle } from "./gem-face";
+import {
+  AURAS,
+  COAT_KNOBS,
+  EYE_STYLES,
+  FUR_STYLES,
+  HAIR_COLORS,
+  HAIR_STYLES,
+  HAT_STYLES,
+  SEASONS,
+  SPARKLES,
+  type Activity,
+  type CoatKnobs,
+  type EyeStyle,
+} from "./gem-face";
+import { FUR_COATS, HAIR_COATS, type CoatStyle } from "./gem-fur";
 import { resolveGemLook, withLook } from "./gem-look";
 import { GEM_CUTS, gemSpec, isPoolGem, type GemCut } from "./gem-specs";
 
@@ -102,7 +117,7 @@ export function GemStudio({
       <DialogContent
         className={cn(
           "flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0",
-          focus ? "sm:max-w-[min(46rem,calc(100%-2rem))]" : "sm:max-w-[min(64rem,calc(100%-2rem))]",
+          focus ? "sm:max-w-[min(54rem,calc(100%-2rem))]" : "sm:max-w-[min(66rem,calc(100%-2rem))]",
         )}
       >
         {/* Mounted per open, so each visit starts from what is saved. */}
@@ -193,7 +208,7 @@ function StudioBody({
         <div
           className={cn(
             "flex min-h-0 flex-1 flex-col overflow-y-auto lg:grid lg:overflow-hidden",
-            focus ? "lg:grid-cols-[minmax(0,1fr)_20rem]" : "lg:grid-cols-[13rem_minmax(0,1fr)_20rem]",
+            focus ? "lg:grid-cols-[minmax(0,1fr)_27rem]" : "lg:grid-cols-[13rem_minmax(0,1fr)_22rem]",
           )}
         >
           {focus ? null : (
@@ -277,18 +292,15 @@ function StudioBody({
                 defaultValue={focus?.tab ?? (focus && !dressGem ? "avatar" : "eyes")}
                 className="flex flex-col gap-0 lg:min-h-0 lg:flex-1"
               >
-                <TabsList
-                  className="mx-3 mt-3 grid shrink-0"
-                  style={{
-                    gridTemplateColumns: `repeat(${1 + (focus ? 1 : 0) + (dressGem ? 3 : 0) + (chat ? 1 : 0)}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {focus ? <TabsTrigger value="avatar">Avatar</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger value="shape">Shape</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger value="eyes">Eyes</TabsTrigger> : null}
-                  {dressGem ? <TabsTrigger value="hat">Hat</TabsTrigger> : null}
-                  <TabsTrigger value="color">Color</TabsTrigger>
-                  {chat ? <TabsTrigger value="chat">Chat</TabsTrigger> : null}
+                <TabsList aria-label="Look" className="mx-3 mt-3 w-auto shrink-0 justify-start overflow-x-auto">
+                  {focus ? <TabsTrigger className="flex-none px-1.5" value="avatar">Avatar</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="shape">Shape</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="eyes">Eyes</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hair">Hair</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="hat">Hat</TabsTrigger> : null}
+                  {dressGem ? <TabsTrigger className="flex-none px-1.5" value="aura">Aura</TabsTrigger> : null}
+                  <TabsTrigger className="flex-none px-1.5" value="color">Color</TabsTrigger>
+                  {chat ? <TabsTrigger className="flex-none px-1.5" value="chat">Chat</TabsTrigger> : null}
                 </TabsList>
 
                 {focus && current ? (
@@ -392,6 +404,81 @@ function StudioBody({
                   </div>
                 </TabsContent>
 
+                <TabsContent value="hair" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <div className="flex flex-col gap-4">
+                    <CoatPicker
+                      title="Hair"
+                      styles={HAIR_STYLES}
+                      coats={HAIR_COATS}
+                      picked={target.hair}
+                      born={born.hair}
+                      onPick={(hair) => set({ hair, hairKnobs: undefined })}
+                      knobs={target.hairKnobs}
+                      onKnobs={(hairKnobs) => set({ hairKnobs })}
+                      color={target.hairColor ?? born.hairColor}
+                      onColor={(hairColor) => set({ hairColor })}
+                      gem={target.color ?? baseColor ?? [128, 128, 128]}
+                    />
+                    <CoatPicker
+                      title="Fur"
+                      styles={FUR_STYLES}
+                      coats={FUR_COATS}
+                      picked={target.fur}
+                      born={born.fur}
+                      onPick={(fur) => set({ fur, furKnobs: undefined })}
+                      knobs={target.furKnobs}
+                      onKnobs={(furKnobs) => set({ furKnobs })}
+                      color={target.furColor ?? born.furColor}
+                      onColor={(furColor) => set({ furColor })}
+                      gem={target.color ?? baseColor ?? [128, 128, 128]}
+                    />
+                    <p className="text-muted-foreground text-[0.6875rem]">
+                      A hat sits snug on the head over the hair. Gem keeps the coat in the body's color. Picking a style starts its details over.
+                    </p>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="aura" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+                  <div className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <p className="text-muted-foreground text-[0.6875rem] font-medium">Auras</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {AURAS.map((aura) => {
+                          const on = target.auras?.includes(aura.id) ?? false;
+                          const others = (target.auras ?? []).filter((id) => id !== aura.id);
+                          return (
+                            <Chip key={aura.id} active={on} onClick={() => set({ auras: on ? (others.length ? others : undefined) : [...others, aura.id] })}>
+                              {aura.label}
+                            </Chip>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <p className="text-muted-foreground text-[0.6875rem] font-medium">Sparkles</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Chip active={!target.sparkles} onClick={() => set({ sparkles: undefined })}>
+                          Auto
+                        </Chip>
+                        {SPARKLES.map((amount) => (
+                          <Chip key={amount.id} active={target.sparkles === amount.id} onClick={() => set({ sparkles: amount.id })}>
+                            {amount.label}
+                          </Chip>
+                        ))}
+                      </div>
+                    </div>
+                    <ColorRow
+                      label="Aura Color"
+                      value={target.auraColor ?? "gem"}
+                      gem={target.color ?? baseColor ?? [128, 128, 128]}
+                      onPick={(auraColor) => set({ auraColor })}
+                    />
+                    <p className="text-muted-foreground text-[0.6875rem]">
+                      Quiet while idle, stronger while it works, gone while offline. Auto sparkles as gems always have.
+                    </p>
+                  </div>
+                </TabsContent>
+
                 <TabsContent value="color" className="p-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
                   {current ? (
                     <div className="flex flex-col gap-3">
@@ -467,7 +554,13 @@ function StudioBody({
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => set({ face: undefined, hat: undefined, cut: undefined, color: undefined, avatar: undefined })}
+              onClick={() =>
+                setDraft((prev) => {
+                  const gems = { ...prev.gems };
+                  delete gems[key];
+                  return { ...prev, gems };
+                })
+              }
               disabled={!draft.gems?.[key]}
             >
               <RotateCcw className="size-4" />
@@ -636,6 +729,133 @@ function Swatch({
         active && "outline-primary outline-2 outline-offset-2",
       )}
     />
+  );
+}
+
+/** A coat's style row (Born, None and its styles) and its color row. */
+function CoatPicker({
+  title,
+  styles,
+  coats,
+  picked,
+  born,
+  onPick,
+  knobs,
+  onKnobs,
+  color,
+  onColor,
+  gem,
+}: {
+  title: "Hair" | "Fur";
+  styles: readonly { id: string; label: string }[];
+  coats: Readonly<Record<string, CoatStyle>>;
+  picked?: string;
+  born?: string;
+  onPick: (style: string | undefined) => void;
+  knobs?: CoatKnobs;
+  onKnobs: (knobs: CoatKnobs | undefined) => void;
+  color?: LookColor;
+  onColor: (color: LookColor) => void;
+  gem: readonly number[];
+}) {
+  const bornLabel = styles.find((style) => style.id === born)?.label ?? "None";
+  // The style it wears now, picked or born; its details start at that style's own.
+  const worn = picked ?? born;
+  const style = worn && worn !== "none" ? coats[worn] : undefined;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <p className="text-muted-foreground text-[0.6875rem] font-medium">{title}</p>
+        <div className="flex flex-wrap gap-1.5">
+          <Chip active={!picked} onClick={() => onPick(undefined)}>
+            Born
+          </Chip>
+          <Chip active={picked === "none"} onClick={() => onPick("none")}>
+            None
+          </Chip>
+          {styles.map((style) => (
+            <Chip key={style.id} active={picked === style.id} onClick={() => onPick(style.id)}>
+              {style.label}
+            </Chip>
+          ))}
+        </div>
+        <p className="text-muted-foreground text-[0.6875rem]">Born {title.toLowerCase()}: {bornLabel}.</p>
+      </div>
+      <ColorRow label={`${title} Color`} value={color ?? "gem"} gem={gem} natural onPick={onColor} />
+      {style ? (
+        <div className="flex flex-col gap-2">
+          <div className="flex h-6 items-center justify-between">
+            <p className="text-muted-foreground text-[0.6875rem] font-medium">{title} Details</p>
+            {knobs ? (
+              <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-[0.6875rem]" onClick={() => onKnobs(undefined)}>
+                <RotateCcw className="size-3" />
+                Reset
+              </Button>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-[6.5rem_minmax(0,1fr)_2.25rem] items-center gap-x-2 gap-y-2.5">
+            {COAT_KNOBS.filter((knob) => title === "Hair" || !knob.hair).map((knob) => {
+              const value = knobs?.[knob.key] ?? style[knob.key];
+              return (
+                <Fragment key={knob.key}>
+                  <span className="text-muted-foreground truncate text-xs">{knob.label}</span>
+                  <Slider
+                    aria-label={`${title} ${knob.label}`}
+                    min={knob.min}
+                    max={knob.max}
+                    step={knob.step}
+                    value={[value]}
+                    onValueChange={([next]) => onKnobs({ ...knobs, [knob.key]: Number(next.toFixed(2)) })}
+                  />
+                  <span className="text-right text-xs tabular-nums">{value.toFixed(2)}</span>
+                </Fragment>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Gem (the body's own color), natural shades when asked, the gem swatches, and a custom color. */
+function ColorRow({
+  label,
+  value,
+  gem,
+  natural = false,
+  onPick,
+}: {
+  label: string;
+  value: LookColor;
+  gem: readonly number[];
+  natural?: boolean;
+  onPick: (color: LookColor) => void;
+}) {
+  const rgb = value === "gem" ? undefined : value;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-muted-foreground text-[0.6875rem] font-medium">{label}</p>
+      <div className="grid max-w-[22rem] grid-cols-10 gap-1.5">
+        <Swatch active={value === "gem"} rgb={gem} label="Gem Color" onClick={() => onPick("gem")} ring />
+        {(natural ? HAIR_COLORS : []).map((shade) => (
+          <Swatch key={shade.label} active={sameColor(rgb, shade.rgb)} rgb={shade.rgb} label={shade.label} onClick={() => onPick(shade.rgb)} />
+        ))}
+        {GEM_SWATCHES.map((swatch) => (
+          <Swatch key={swatch.join(",")} active={sameColor(rgb, swatch)} rgb={swatch} label={toHex(swatch)} onClick={() => onPick(swatch)} />
+        ))}
+      </div>
+      <label className="text-muted-foreground flex items-center gap-2 text-xs">
+        <input
+          type="color"
+          aria-label={`Custom ${label}`}
+          value={toHex(rgb ?? gem)}
+          onChange={(event) => onPick(fromHex(event.target.value))}
+          className="size-8 cursor-pointer rounded-md bg-muted/60 p-0.5"
+        />
+        Custom
+      </label>
+    </div>
   );
 }
 

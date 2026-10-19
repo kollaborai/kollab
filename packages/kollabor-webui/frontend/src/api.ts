@@ -33,7 +33,27 @@ export type Session = {
 
 /** One gem's Gem Studio picks; ids are gem-face.ts eye/hat styles. */
 /** `avatar` replaces the roster's picture for that agent everywhere (a picture is an inline data URL). */
-export type GemLook = { face?: string; hat?: string; cut?: string; color?: number[]; avatar?: AvatarSpec };
+/** A coat or aura color: sRGB 0-255, or "gem" for the body's own. */
+export type LookColor = number[] | "gem";
+export type GemLook = {
+  face?: string;
+  hat?: string;
+  cut?: string;
+  color?: number[];
+  avatar?: AvatarSpec;
+  /** Hair and fur styles (gem-face.ts HAIR_STYLES, FUR_STYLES) or "none", and their colors. */
+  hair?: string;
+  hairColor?: LookColor;
+  fur?: string;
+  furColor?: LookColor;
+  /** The user's settings of the hair's and fur's knobs (gem-face.ts COAT_KNOBS), over their styles' own. */
+  hairKnobs?: Record<string, number>;
+  furKnobs?: Record<string, number>;
+  /** Auras worn (gem-face.ts AURAS), how much it sparkles, and their one color. */
+  auras?: string[];
+  sparkles?: string;
+  auraColor?: LookColor;
+};
 
 /** The Gem Studio's saved looks (engine: ~/.kollab/hub/appearance.json). */
 export type GemAppearance = {
