@@ -33,3 +33,18 @@ async def test_finished_mic_turn_is_handed_to_voice():
     assert emitted == [
         ("voice_response_ready", {"voice": voice, "display_text": "Done.", "spoken_text": "All done."})
     ]
+
+
+@pytest.mark.asyncio
+async def test_active_profile_reports_the_harness_model():
+    from kollabor.state.local import LocalStateService
+
+    acp = SimpleNamespace(
+        active=True,
+        advertised_config_options=lambda: [{"id": "model", "category": "model", "currentValue": "sonnet"}],
+    )
+    state = LocalStateService.__new__(LocalStateService)
+    state._event_bus = SimpleNamespace(get_service=lambda name: acp if name == "acp_orchestrator" else None)
+    assert state._acp_harness_model() == "sonnet"
+    acp.active = False
+    assert state._acp_harness_model() == ""

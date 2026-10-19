@@ -301,7 +301,10 @@ class ACPOrchestrator:
         # Hub already drew incoming messages. The batched model context is
         # persisted as a HUD for web/history replay, never echoed as user input.
         if display is not None and source not in {"agent", "observation"}:
-            display.display_user_message(text)
+            from kollabor_voice.observer import strip_voice_preamble
+
+            # A mic turn shows what was said, never the voice rules sent with it.
+            display.display_user_message(strip_voice_preamble(text))
 
     async def steer(self, text: str, *, origin: dict[str, Any], thread_id: str | None = None) -> bool:
         if not self._runner or not await self._runner.steer(text, origin=origin, thread_id=thread_id):

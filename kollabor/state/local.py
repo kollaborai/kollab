@@ -559,7 +559,26 @@ class LocalStateService(StateService):
             return ProfileSnapshot(name="", is_active=False)
         if active is None:
             return ProfileSnapshot(name="", is_active=False)
-        return self._profile_to_snapshot(active, is_active=True)
+        snapshot = self._profile_to_snapshot(active, is_active=True)
+        harness_model = self._acp_harness_model()
+        if harness_model:
+            # A harness picks its own model (/model sets it there): report that
+            # one, not the profile's, which the harness does not read.
+            snapshot.model = harness_model
+        return snapshot
+
+    def _acp_harness_model(self) -> str:
+        """The active ACP harness's current model option, or "" when there is none."""
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            if acp is None or getattr(acp, "active", False) is not True:
+                return ""
+            for option in acp.advertised_config_options():
+                if str(option.get("category") or option.get("id") or "").lower() == "model":
+                    return str(option.get("currentValue") or "")
+        except Exception:
+            logger.debug("ACP harness model unavailable", exc_info=True)
+        return ""
 
     async def list_profiles(self) -> ProfileListSnapshot:
         """Return the full profile registry with the active one marked."""
