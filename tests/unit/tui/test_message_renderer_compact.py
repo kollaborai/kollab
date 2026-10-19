@@ -180,9 +180,9 @@ def test_response_block_renders_as_compact_plain_lines():
     plain = visible(rendered)
     lines = plain.splitlines()
 
-    assert lines == ["", " ֎ Plan updated", "", "   Read app/api/orders/route.ts"]
+    assert lines == ["", " ◆ Plan updated", "", "   Read app/api/orders/route.ts"]
     assert "\033[0;48;" not in rendered
-    assert solid_fg(" ֎ ", T().text) in rendered
+    assert solid_fg(" ◆ ", T().text) in rendered
     assert solid_fg("Plan updated", T().assistant_text) in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 

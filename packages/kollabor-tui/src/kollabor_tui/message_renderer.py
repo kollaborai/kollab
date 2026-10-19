@@ -257,7 +257,7 @@ class ModernMessageRenderer:
             lines,
             width=width,
             text_color=_assistant_text_color(),
-            first_prefix=" ֎ ",
+            first_prefix=" ◆ ",
             prefix_color=T().text,
         )
 

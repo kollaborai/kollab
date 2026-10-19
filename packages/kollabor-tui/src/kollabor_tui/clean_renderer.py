@@ -156,7 +156,7 @@ class CleanRenderer:
     def response_block(self, lines: List[str], width: Optional[int] = None) -> str:
         return "\n" + _plain_rows(
             lines,
-            " ֎ ",
+            " ◆ ",
             T().text,
             _assistant_text_color(),
             width,

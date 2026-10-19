@@ -122,7 +122,7 @@ async def test_force_ready_keeps_the_active_area_drawn_before_it():
     """
     renderer = TerminalRenderer()
     renderer.terminal_state = MagicMock()
-    screen = _Screen(["▌ hello", "֎ pong: hello", ""])
+    screen = _Screen(["▌ hello", "◆ pong: hello", ""])
     renderer.terminal_state.write_raw = screen.write
     working = [
         "",
@@ -140,4 +140,4 @@ async def test_force_ready_keeps_the_active_area_drawn_before_it():
     renderer.message_coordinator.force_ready()  # the queue processor's finally
     await renderer._render_lines(ready)
 
-    assert screen.rows == ["▌ hello", "֎ pong: hello", *ready]
+    assert screen.rows == ["▌ hello", "◆ pong: hello", *ready]
