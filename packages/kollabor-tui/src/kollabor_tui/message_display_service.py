@@ -161,6 +161,16 @@ class MessageDisplayService:
 
         logger.debug(f"Displayed {len(tool_results)} tool results")
 
+    def display_tool_row(self, name: str, args: str = "", success: bool = True) -> None:
+        """Display one finished tool as the standard tool row.
+
+        For tools run by a harness (ACP) that have no ToolExecutionResult.
+        """
+        status = "success" if success else "error"
+        self.message_coordinator.display_message_sequence(
+            [("tool", "", {"tool_name": name, "tool_args": args, "tool_status": status})]
+        )
+
     def display_user_message(self, message: str) -> None:
         """Display user message through coordinator.
 

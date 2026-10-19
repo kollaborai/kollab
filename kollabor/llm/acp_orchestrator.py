@@ -616,7 +616,10 @@ class ACPOrchestrator:
                     output=output,
                     metadata={"acp": payload}, request_id=update.get("request_id"), turn_id=update.get("turn_id"), acp_passthrough=True)
                 if display is not None:
-                    display.display_system_message(str(payload.get("title") or "Harness Tool") + ": " + str(payload.get("status")))
+                    display.display_tool_row(
+                        str(payload.get("title") or "Harness Tool"),
+                        success=payload.get("status") == "completed",
+                    )
         if kind == "usage_update":
             stats = getattr(llm, "session_stats", None)
             if isinstance(stats, dict):

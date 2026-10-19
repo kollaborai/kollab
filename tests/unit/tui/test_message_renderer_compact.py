@@ -193,7 +193,7 @@ def test_info_block_renders_as_compact_status_row():
 
     plain = visible(rendered)
 
-    assert plain == "ℹ Ready"
+    assert plain == "\nℹ Ready"
     assert "\033[48;" not in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 
@@ -220,7 +220,7 @@ def test_turn_timing_info_row_has_no_background_if_rendered_directly():
     rendered = ModernMessageRenderer().info_block("turn took 8.9s", width=80)
     plain = visible(rendered)
 
-    assert plain == "ℹ turn took 8.9s"
+    assert plain == "\nℹ turn took 8.9s"
     assert "\033[48;" not in rendered
     assert not {"▄", "▀", "█"} & set(plain)
 
