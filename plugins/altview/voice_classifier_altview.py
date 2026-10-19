@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from kollabor_voice.classifiers import CLASSIFIERS
+
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
 from kollabor_tui.key_parser import KeyPress
@@ -58,7 +60,11 @@ def detail_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
     lines: List[Tuple[str, str]] = []
     decision = entry.get("decision") or {}
     records = entry.get("records") or []
-    name = "Laya" if entry.get("classifier") == "laya" else "AI provider"
+    name = (
+        "AI provider"
+        if entry.get("classifier") == "provider"
+        else CLASSIFIERS.get(entry.get("classifier"), "Classifier")
+    )
 
     lines.append(("heading", "Heard"))
     for record in records:

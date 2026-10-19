@@ -86,8 +86,11 @@ class VoiceService:
         self.segmenter_factory = segmenter_factory
         self.player = player
         from .laya import LayaWorker
+        from .qwen import QwenWorker
 
-        self.classifier = LayaWorker(root)
+        # One local classifier is loaded at a time: the one last prepared.
+        self.classifiers = {w.name: w for w in (LayaWorker(root), QwenWorker(root))}
+        self.classifier = self.classifiers["laya"]
         self.classifier_jobs = {}
         self.speech_review_jobs = {}
         self.speech_review_started = {}
@@ -281,6 +284,7 @@ class VoiceService:
         if op in {"hello", "status"}:
             return self.status()
         if op == "classifier_prepare":
+            await self.select_classifier(request.get("model", "laya"))
             self.classifier.prepare()
             return self.classifier.status()
         if op == "withdraw":
@@ -391,15 +395,30 @@ class VoiceService:
                 raise VoiceError(
                     "classifier_busy", "A classifier decision is already pending"
                 )
+            if request.get("model", self.classifier.name) != self.classifier.name:
+                raise VoiceError(
+                    "classifier_not_ready",
+                    "Voice classifier changed; speech remains pending",
+                )
             identity = uuid.uuid4().hex
-            task = asyncio.create_task(
-                self.classifier.decide(
+            if request.get("task") == "answer":
+                # The reply to "was that for me?"; only the Qwen model reads it.
+                if not hasattr(self.classifier, "answer"):
+                    raise VoiceError(
+                        "unsupported",
+                        f"{self.classifier.label} does not answer questions",
+                    )
+                job = self.classifier.answer(
+                    str(request["held"]), str(request["question"]), str(request["text"])
+                )
+            else:
+                job = self.classifier.decide(
                     request["records"],
                     str(request.get("context", "")),
                     request.get("transcript_context", []),
                     request.get("context_lines", 10),
                 )
-            )
+            task = asyncio.create_task(job)
             task.add_done_callback(
                 lambda task: task.exception() if not task.cancelled() else None
             )
@@ -507,6 +526,14 @@ class VoiceService:
                 )
             }
         raise VoiceError("unknown_operation", "Unknown voice operation")
+
+    async def select_classifier(self, name):
+        """Load only the selected local classifier; switching closes the other."""
+        if name not in self.classifiers:
+            raise VoiceError("unknown_classifier", "Choose laya or qwen")
+        previous, self.classifier = self.classifier, self.classifiers[name]
+        if previous is not self.classifier:
+            await previous.close()
 
     def claim_result(self):
         return {
@@ -901,7 +928,8 @@ class VoiceService:
             await asyncio.to_thread(self.speech.close)
         if self.stt:
             await asyncio.to_thread(self.stt.close)
-        await self.classifier.close()
+        for worker in self.classifiers.values():
+            await worker.close()
         path = socket_path(self.root)
         if path.exists():
             path.unlink()

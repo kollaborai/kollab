@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from kollabor_voice.classifiers import (
     DecisionRequest,
-    LayaClassifier,
+    LocalClassifier,
     VoiceDecision,
     load_context_lines,
     save_classifier,
@@ -206,7 +206,7 @@ async def test_laya_transport_carries_history_and_rejects_old_worker(
     plugin._client.call = AsyncMock(
         side_effect=[{"job_id": "job"}, {"done": True, "result": decision.to_wire()}]
     )
-    call = LayaClassifier(plugin._client, plugin._auth).decide(
+    call = LocalClassifier(plugin._client, plugin._auth).decide(
         DecisionRequest(current, "", history, 3)
     )
     if updated_worker:
@@ -216,7 +216,7 @@ async def test_laya_transport_carries_history_and_rejects_old_worker(
             await call
     params = plugin._client.call.call_args_list[0].kwargs
     assert params["records"] == current and params["transcript_context"] == history
-    assert params["context_lines"] == 3
+    assert params["context_lines"] == 3 and params["model"] == "laya"
 
 
 @pytest.mark.parametrize("oversized", [True, False])

@@ -635,7 +635,7 @@ to open Settings → Voice; `/voice`, `/voice on` and `/voice off` reach the dae
 The composer microphone sends `/voice on|off` and checks the live command catalog.
 
 One daemon-owned `voice` form defines both interfaces. It exposes every current
-user preference: classifier (`laya` or `provider`) and transcript context (integer
+user preference: classifier (`laya`, `qwen` on Apple silicon, or `provider`) and transcript context (integer
 1–50). Fixed Whisper base, Kokoro, af_heart and speed 1.0 are read-only rows,
 with microphone, state and preferences location. Unsupported engines cannot be
 saved. The panel is available before audio setup and does not acquire a microphone

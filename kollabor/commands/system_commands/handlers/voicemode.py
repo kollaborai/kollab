@@ -40,7 +40,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
                             "classifier",
-                            "See each decision; add laya or provider to switch",
+                            "See each decision; add laya, qwen or provider to switch",
                         ),
                         (
                             "enroll",
@@ -106,7 +106,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 success=False,
                 message=(
                     "Usage: /voice [on|off|status|retry|config"
-                    "|classifier [laya|provider]|context [1–50]|enroll [forget]]"
+                    "|classifier [laya|qwen|provider]|context [1–50]|enroll [forget]]"
                 ),
                 display_type="error",
             )
@@ -133,7 +133,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
 
     async def _open_classifier_log(self, plugin):
         """Fullscreen: each classifier decision, what it saw and what it said."""
-        from kollabor_voice.classifiers import CLASSIFIERS
+        from kollabor_voice.classifiers import CLASSIFIERS, available_classifiers
 
         from kollabor_tui.altview.stack_manager import (
             AltViewStackManager,
@@ -158,7 +158,13 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 message=(
                     f"Voice classifier: {CLASSIFIERS[plugin.classifier_name]}\n"
                     "/voice classifier laya — local, shared persistent worker (default)\n"
-                    "/voice classifier provider — active AI provider"
+                    + (
+                        "/voice classifier qwen — local fine-tuned Qwen3 0.6B, "
+                        'also answers "was that for me?"\n'
+                        if "qwen" in available_classifiers()
+                        else ""
+                    )
+                    + "/voice classifier provider — active AI provider"
                 ),
             )
         return CommandResult(success=True, message="")
@@ -180,13 +186,18 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             pass  # not running, an older service, or a socket path too long
         last = state.get("last_transcript") or {}
         output = state.get("output") or {}
-        classifier = state.get("classifier") or {}
-        from kollabor_voice.classifiers import CLASSIFIERS, load_preferences
+        from kollabor_voice.classifiers import (
+            CLASSIFIERS,
+            LOCAL_CLASSIFIERS,
+            load_preferences,
+        )
         from kollabor_voice.speech_settings import STT_ENGINES, TTS_ENGINES
 
-        from kollabor.panels.voice import voiceprint_text
+        from kollabor.panels.voice import classifier_worker, voiceprint_text
 
         name = state.get("classifier_name", "laya")
+        # The service reports the local classifier it has loaded, maybe the other one.
+        classifier = classifier_worker(name, state)
         transcription = state.get("transcription") or {}
         speech_engine = state.get("speech", {}).get("engine")
         # No service running: the saved settings are what will apply.
@@ -208,7 +219,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             f"Classifier: {CLASSIFIERS.get(name, name)}"
             + (
                 f" · {classifier.get('state', 'off')} · worker {classifier.get('pid') or 'not running'}"
-                if name == "laya"
+                if name in LOCAL_CLASSIFIERS
                 else ""
             ),
             "Echo cancellation: "
@@ -245,7 +256,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             transcription.get("detail"),
             echo.get("detail"),
             speaker.get("detail"),
-            classifier.get("detail") if name == "laya" else None,
+            classifier.get("detail") if name in LOCAL_CLASSIFIERS else None,
         ):
             if value:
                 lines.append(str(value))

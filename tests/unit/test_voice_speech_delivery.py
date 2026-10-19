@@ -650,3 +650,20 @@ async def test_rewrite_provider_request_has_no_tools_and_reuses_one_client(monke
     assert len(created) == 1
     assert all(kwargs == {"tools": []} for _, kwargs in calls)
     assert "Do not perform actions" in calls[0][0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_unsure_qwen_style_gets_the_provider_check_with_its_name():
+    value = plugin()
+    value.classifier_name = "qwen"
+    value._client.review_speech = AsyncMock(
+        return_value=SpeechDecision(
+            "defer", "unsure", "qwen", "qwen3-0.6b-voice-v1", 0.6
+        )
+    )
+    value._provider_speech_review = AsyncMock(
+        return_value=SpeechDecision("speak", "reads naturally", "provider")
+    )
+    result = await value._review_speech("The build passed and the deploy is next.")
+    assert result.decision == "speak" and result.provider == "qwen+provider"
+    assert result.reason == "Fine-Tuned Qwen3 0.6B unsure; reads naturally"

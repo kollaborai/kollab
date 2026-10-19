@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from kollabor_voice.classifiers import CLASSIFIERS, MAX_CONTEXT_LINES, load_preferences
+from kollabor_voice.classifiers import (
+    CLASSIFIERS,
+    LOCAL_CLASSIFIERS,
+    MAX_CONTEXT_LINES,
+    available_classifiers,
+    load_preferences,
+)
 from kollabor_voice.control import service_root
 from kollabor_voice.speech_settings import (
     KOKORO_VOICES,
@@ -37,6 +43,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
 
     speech = state.get("speech", {})
     transcription = state.get("transcription", {})
+    classifiers = available_classifiers()
     return [
         {
             "id": "preferences",
@@ -47,11 +54,18 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "dropdown",
                     "Classifier",
                     value=preferences["classifier"],
-                    options=list(CLASSIFIERS),
-                    option_labels=CLASSIFIERS,
+                    options=list(classifiers),
+                    option_labels=classifiers,
                     help=(
-                        "Laya runs locally. Provider uses the active AI profile, "
-                        "sends transcript context to it and can incur charges."
+                        "Laya runs locally. "
+                        + (
+                            "Fine-Tuned Qwen3 0.6B also runs locally (645 MB of "
+                            'weights) and answers "was that for me?" itself. '
+                            if "qwen" in classifiers
+                            else ""
+                        )
+                        + "Provider uses the active AI profile, sends transcript "
+                        "context to it and can incur charges."
                     ),
                 ),
                 make_field(
@@ -63,6 +77,15 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     max_value=MAX_CONTEXT_LINES,
                     step=1,
                     help="Previous microphone transcript lines used to interpret the next utterance (1–50).",
+                ),
+                make_field(
+                    "classifier_status",
+                    "label",
+                    "Classifier Readiness",
+                    value=classifier_text(preferences["classifier"], state),
+                    help=classifier_worker(preferences["classifier"], state).get(
+                        "detail", ""
+                    ),
                 ),
             ],
         },
@@ -254,6 +277,20 @@ def voice_sections(plugin, live=None) -> list[dict]:
             ],
         },
     ]
+
+
+def classifier_worker(selected: str, state: dict) -> dict:
+    """The service's worker status when it runs the selected classifier, else {}."""
+    worker = state.get("classifier") or {}
+    # An older service has no name: it runs Laya only.
+    return worker if worker.get("name", "laya") == selected else {}
+
+
+def classifier_text(selected: str, state: dict) -> str:
+    """The selected classifier and its worker's state, e.g. "Laya · ready"."""
+    if selected not in LOCAL_CLASSIFIERS:
+        return f"{CLASSIFIERS[selected]} · runs in the chat"
+    return f"{CLASSIFIERS[selected]} · {classifier_worker(selected, state).get('state', 'off')}"
 
 
 def voiceprint_text(speaker: dict) -> str:

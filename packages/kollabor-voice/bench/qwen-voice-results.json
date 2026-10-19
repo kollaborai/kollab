@@ -1339,6 +1339,19 @@
       }
     }
   },
+  "runtime_check": {
+    "what": "score runtime: the qwen-syn-pb2-mlx-8bit weights through the shipped worker code (kollabor_voice.qwen_worker predict, predict_answer and predict_speech: utterance grouping, the 0.8 policy, English-only intent and the format check before style)",
+    "prompts": "1490 of 1490 prompts byte-identical to the bench's before the prompts moved into qwen_worker.py; manifest.json pins their sha256 and the worker refuses other prompts",
+    "result": "every split identical to qwen-syn-pb2-mlx-8bit (count, argmax, automatic right/wrong, deferred, error kinds): real intent 79/101 argmax and 70/18/13, answers 59/60 heldout and 11/12 real, style 71/22/26 real, acceptance 40/40, playback 8/8",
+    "max_probability_difference": {
+      "intent": 0.0005,
+      "answer": 0.0,
+      "style": 0.0
+    },
+    "intent_real_p50_ms": 79.9,
+    "intent_real_p95_ms": 103.0,
+    "load_seconds": 2.52
+  },
   "findings": [
     "Real intent (101 cases, one day): Qwen MLX 8-bit 79 argmax correct vs Laya 47. Under the 0.8 policy: 70 right / 18 wrong / 13 deferred vs Laya 45 / 20 / 36.",
     "Qwen's 18 real errors: 12 false wakes (10 room or TV fragments with nothing playing, 2 while the agent was talking) and 6 misses (3 'can you hear me?' checks, 3 questions mixed into echo of its own reply). Laya's 20: 15 misses, 5 false wakes. A confident ignore is not rescued by the mic-check rule, which only answers unsure decisions.",
@@ -1381,13 +1394,14 @@
     "One test day and 101 real intent cases; 92 of those labels are the author's annotations, 9 are the user's own answers.",
     "Recent-chat context for real cases is reconstructed from earlier groups labelled 'respond' and the agent's spoken replies (teacher forcing), close to but not identical to the runtime's 6-message window.",
     "Latency is from a shared machine with live services; numbers are per case in one process, warm, after model load.",
-    "No runtime wiring was done: the worker, manifest pins and the downloader mirror are untouched."
+    "Wired after these runs as the opt-in qwen classifier (Laya stays the default). Nothing is uploaded: manifest.json pins every file with an empty base_url, so the weights are placed by hand, and the downloader mirror is not built."
   ],
   "reproduce": [
     "python bench/qwen_voice.py train --playback --out ADAPTER",
     "python -m mlx_lm fuse --model Qwen/Qwen3-0.6B --adapter-path ADAPTER --save-path FUSED",
     "python -m mlx_lm convert --hf-path FUSED --mlx-path FUSED-8bit -q --q-bits 8 --q-group-size 64",
     "python bench/qwen_voice.py score mlx --model FUSED-8bit --out SCORES.json",
+    "python bench/qwen_voice.py score runtime --model FUSED-8bit --out RUNTIME.json",
     "python bench/qwen_voice.py score laya --model ~/.kollab/voice/models/laya/1c5edc17a7acd8701df6fc341c0d179f1c62c982 --out LAYA.json",
     "python bench/qwen_voice.py report SCORES.json LAYA.json"
   ]

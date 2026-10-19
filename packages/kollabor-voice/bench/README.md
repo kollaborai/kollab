@@ -277,7 +277,17 @@ model card with the exact prompts; `manifest.json` pins its revision and every
 file's size and SHA-256 like the Laya bundle. A GitHub Release on the kollab
 repo carries the same files as a mirror; the downloader tries Hugging Face first
 and accepts mirror bytes only when size and SHA-256 match. Nothing is uploaded
-or wired into the runtime yet.
+yet: `manifest.json` pins every file with an empty `base_url`, so the weights
+are placed by hand.
+
+Wired as the opt-in `qwen` classifier (`kollabor_voice/qwen_worker.py`; Laya
+stays the default). `score runtime` runs these weights through that worker's
+own `predict`, `predict_answer` and `predict_speech`, so utterance grouping, the
+0.8 policy and the prompts are the shipped ones. Every split matches the MLX
+8-bit run above exactly (largest probability difference 0.0005, trace
+rounding); real intent ran at p50 80 ms, p95 103 ms. The worker refuses
+prompts whose SHA-256 differs from the manifest's `prompt_sha256`, since the
+weights were trained on them.
 
 Not proven: one test day, and 92 of the 101 real intent labels are the author's
 annotations (9 are the user's own answers to "was that for me?"); recent chat
@@ -289,6 +299,7 @@ python bench/qwen_voice.py train --playback --out ADAPTER
 python -m mlx_lm fuse --model ~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca --adapter-path ADAPTER --save-path FUSED
 python -m mlx_lm convert --hf-path FUSED --mlx-path FUSED-8bit -q --q-bits 8 --q-group-size 64
 python bench/qwen_voice.py score mlx --model FUSED-8bit --out /tmp/qwen.json
+python bench/qwen_voice.py score runtime --model FUSED-8bit --out /tmp/qwen-runtime.json
 python bench/qwen_voice.py score laya --model ~/.kollab/voice/models/laya/1c5edc17a7acd8701df6fc341c0d179f1c62c982 --out /tmp/laya.json
 python bench/qwen_voice.py report /tmp/qwen.json /tmp/laya.json
 ```

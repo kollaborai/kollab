@@ -1,5 +1,41 @@
 # Voice service implementation evidence
 
+## October 19: Fine-Tuned Qwen3 0.6B classifier
+
+Local source changes: `qwen` is a third classifier choice, offered and saved
+only on Apple silicon; Laya stays the default. The device service runs one local
+classifier worker at a time: `classifier_prepare` names it, and a submit for the
+other model is refused while speech stays pending. `QwenWorker` runs
+`kollabor_voice.qwen_worker` in its own pinned MLX runtime, with weights and
+prompts pinned by SHA-256 in `manifest.json` (`classifiers.qwen`). With `qwen`
+selected the model also reads the reply to "was that for me?". See the
+[October 19 contract](classifier-providers.md#fine-tuned-qwen3-06b-october-19-extension).
+
+Runtime evidence in an isolated root (`/tmp/kvq`, removed afterwards; the user's
+own voice service and its workers were left running untouched):
+- `VoiceClient.ensure` started a fresh service through the bootstrap. The qwen
+  runtime installed from the uv cache, and `classifier_prepare(model="qwen")`
+  reached ready in 2.8 s (load and warmup 1.44 s): one worker process, 934 MB
+  resident after the run. Weights were placed by hand; no download source exists.
+- Claiming the lease hung in CoreAudio from the agent shell, which has no
+  microphone permission, and the service exited as designed. The proof then ran
+  the same `VoiceService` with only its recorder and player stubbed.
+- The bench's 230 synthetic evaluation cases (intent development, heldout,
+  acceptance and playback; answers heldout; style heldout) went through
+  `LocalClassifier.decide`/`answer` and `VoiceClient.review_speech` on the socket
+  under a live lease: 230 of 230 verdicts identical to `score runtime`, so
+  acceptance 40/40, playback 8/8, answers 59/60, style 24 right and 2 deferred.
+  Each call took a median 52 ms, including the client's 50 ms result poll.
+- A Spanish line was deferred as not English. The plugin's status check passed
+  on the new service and, against the user's running older service, reported
+  that it predates Fine-Tuned Qwen3 0.6B and must be restarted.
+- Not exercised live: microphone speech into the qwen path, switching back to
+  Laya inside one service (unit-tested), Linux.
+
+Voice-package and unit voice tests, the full unit suite (7196 passed) and the
+tmux specs `voice-classifier-qwen.json`, `voice-transcription-engine.json`,
+`voice-speaker-gate.json` and `voice-classifier-screen.json` passed.
+
 ## October 12: shared Voice Configuration
 
 Local source changes: `/voice` is canonical; `/voice config` opens a shared form

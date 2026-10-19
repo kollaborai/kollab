@@ -14,7 +14,13 @@ from typing import Protocol
 
 from .control import VoiceError, atomic_json, service_root
 
-CLASSIFIERS = {"laya": "Laya", "provider": "Active AI Provider"}
+CLASSIFIERS = {
+    "laya": "Laya",
+    "qwen": "Fine-Tuned Qwen3 0.6B",
+    "provider": "Active AI Provider",
+}
+# Run by the device service's worker; "provider" runs in the chat.
+LOCAL_CLASSIFIERS = ("laya", "qwen")
 DEFAULT_CLASSIFIER = "laya"
 DEFAULT_CONTEXT_LINES = 10
 MAX_CONTEXT_LINES = 50
@@ -39,13 +45,18 @@ LAYA_QUESTION = {
 }
 
 
+def available_classifiers():
+    """The classifiers this device can run: the Qwen model needs MLX's Apple silicon."""
+    from .speech_settings import apple_silicon
+
+    return {k: v for k, v in CLASSIFIERS.items() if k != "qwen" or apple_silicon()}
+
+
 def load_classifier(root=None):
     return load_preferences(root)["classifier"]
 
 
 def save_classifier(name, root=None):
-    if name not in CLASSIFIERS:
-        raise ValueError("Choose laya or provider")
     _save_preference("classifier", name, root)
 
 
@@ -72,7 +83,7 @@ def load_preferences(root=None):
         **speech,
         "classifier": (
             name
-            if isinstance(name, str) and name in CLASSIFIERS
+            if isinstance(name, str) and name in available_classifiers()
             else DEFAULT_CLASSIFIER
         ),
         "context_lines": (
@@ -101,7 +112,9 @@ def save_preferences(changes, root=None):
         not isinstance(changes["classifier"], str)
         or changes["classifier"] not in CLASSIFIERS
     ):
-        raise ValueError("Choose laya or provider")
+        raise ValueError("Choose laya, qwen or provider")
+    if "classifier" in changes and changes["classifier"] not in available_classifiers():
+        raise ValueError(f"{CLASSIFIERS['qwen']} needs an Apple silicon Mac")
     if "context_lines" in changes and (
         type(changes["context_lines"]) is not int
         or not 1 <= changes["context_lines"] <= MAX_CONTEXT_LINES
@@ -232,20 +245,16 @@ class ProviderClassifier:
         )
 
 
-class LayaClassifier:
-    """No model in the agent process, including when attached to a remote host."""
+class LocalClassifier:
+    """The device service's Laya or Qwen worker. No model in the agent process,
+    including when attached to a remote host."""
 
-    def __init__(self, client, auth):
-        self.client, self.auth = client, auth
+    def __init__(self, client, auth, model=DEFAULT_CLASSIFIER):
+        self.client, self.auth, self.model = client, auth, model
 
-    async def decide(self, request):
+    async def _job(self, **request):
         ticket = await self.client.call(
-            "classifier_submit",
-            **self.auth(),
-            records=request.records,
-            context=request.context,
-            transcript_context=request.transcript_context,
-            context_lines=request.context_lines,
+            "classifier_submit", **self.auth(), model=self.model, **request
         )
         async with asyncio.timeout(10):
             while True:
@@ -253,13 +262,32 @@ class LayaClassifier:
                     "classifier_result", **self.auth(), job_id=ticket["job_id"]
                 )
                 if result["done"]:
-                    decision = VoiceDecision.from_wire(result["result"])
-                    if decision.context_event_ids != [
-                        r["event_id"] for r in request.transcript_context
-                    ]:
-                        raise VoiceError(
-                            "context_unsupported",
-                            "Voice service did not acknowledge transcript context; restart the voice service",
-                        )
-                    return decision
+                    return result["result"]
                 await asyncio.sleep(0.05)
+
+    async def decide(self, request):
+        decision = VoiceDecision.from_wire(
+            await self._job(
+                records=request.records,
+                context=request.context,
+                transcript_context=request.transcript_context,
+                context_lines=request.context_lines,
+            )
+        )
+        if decision.context_event_ids != [
+            r["event_id"] for r in request.transcript_context
+        ]:
+            raise VoiceError(
+                "context_unsupported",
+                "Voice service did not acknowledge transcript context; restart the voice service",
+            )
+        return decision
+
+    async def answer(self, held, question, text):
+        """The reply to "was that for me?": {"answer": yes|no|other, ...}."""
+        result = await self._job(task="answer", held=held, question=question, text=text)
+        if result.get("answer") not in {"yes", "no", "other"}:
+            raise VoiceError(
+                "invalid_decision", "Classifier returned an invalid answer"
+            )
+        return result

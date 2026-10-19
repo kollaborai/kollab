@@ -11,7 +11,8 @@ real-style.jsonl); it is private and this script never copies it elsewhere.
 
   train      LoRA on the train splits (MLX), epoch picked on calibration;
              --playback adds generated echo/talk-over cases, --real the private split
-  score      per-case probabilities and latency: mlx, llama, torch or laya
+  score      per-case probabilities and latency: mlx, llama, torch or laya;
+             runtime runs the shipped worker's own code (kollabor_voice.qwen_worker)
   laya-head  ablation: refit the Laya RBF intent head on the same data
   report     accuracy and runtime-policy counts from score files
 
@@ -28,47 +29,14 @@ from pathlib import Path
 
 BENCH = Path(__file__).parent
 sys.path.insert(0, str(BENCH.parent / "src"))
+# The prompts the shipped worker sends: training and scoring use the same ones.
+from kollabor_voice.qwen_worker import LABELS, prompt_text  # noqa: E402
+from kollabor_voice.qwen_worker import system_prompts as _system  # noqa: E402
+
 PRIVATE = Path.home() / ".kollab/voice/training"
 BASE = "Qwen/Qwen3-0.6B"
 BASE_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-LABELS = {
-    "intent": ("respond", "ignore"),
-    "answer": ("yes", "no", "other"),
-    "style": ("say", "rewrite"),
-}
 THRESHOLD = 0.8  # manifest.json minimum_probability, the Laya policy guard
-
-
-def _system():
-    from kollabor_voice.classifiers import LAYA_QUESTION
-    from kollabor_voice.speech_review import SPEECH_QUESTION
-
-    intent = LAYA_QUESTION["response"]
-    style = SPEECH_QUESTION["spoken_style"]
-    return {
-        "intent": (
-            f"{intent['instructions']} The microphone also picks up TV, videos, other "
-            "people in the room and the assistant's own voice.\n"
-            f"respond: {intent['criteria']['respond']}\n"
-            f"ignore: {intent['criteria']['ignore']}\n"
-            "Answer with one word: respond or ignore."
-        ),
-        "answer": (
-            "The voice assistant was unsure whether some speech was meant for it, so "
-            "it asked the user. Decide what the user's reply means.\n"
-            "yes: the speech was for the assistant.\n"
-            "no: it was not (the TV, someone else, ignore it).\n"
-            "other: the reply is not an answer to the question (background speech, "
-            "a new request, a filler).\n"
-            "Answer with one word: yes, no or other."
-        ),
-        "style": (
-            f"{style['instructions']}\n"
-            f"say: {style['criteria']['speak']}\n"
-            f"rewrite: {style['criteria']['rewrite']}\n"
-            "Answer with one word: say or rewrite."
-        ),
-    }
 
 
 def _fixture(name):
@@ -162,40 +130,6 @@ def load_cases(playback=False):
             out.append({**c, "task": "style", "source": "real", "split": "real-test",
                         "expected": "say" if c["expected"] == "speak" else c["expected"]})
     return out
-
-
-def messages(case, system):
-    if case["task"] == "intent":
-        parts = []
-        if case.get("context"):
-            parts.append("Recent chat:\n" + case["context"])
-        if case.get("transcript_context"):
-            lines = "\n".join(f"- {t[:200]}" for t in case["transcript_context"][-10:])
-            parts.append("Earlier microphone lines, oldest first:\n" + lines)
-        if case.get("assistant_playback"):
-            spoken = " ".join(f'"{t}"' for t in case["assistant_playback"])
-            parts.append("The assistant was speaking at the time: " + spoken)
-        parts.append(f'Heard now: "{case["text"]}"')
-        user = "\n\n".join(parts)
-    elif case["task"] == "answer":
-        user = (
-            f'The speech it asked about: "{case["held"]}"\n'
-            f'The assistant asked: "{case["question"]}"\n'
-            f'The reply: "{case["text"]}"'
-        )
-    else:
-        user = case["text"]
-    return [
-        {"role": "system", "content": system[case["task"]]},
-        {"role": "user", "content": user},
-    ]
-
-
-def prompt_text(tokenizer, case, system):
-    return tokenizer.apply_chat_template(
-        messages(case, system), add_generation_prompt=True, enable_thinking=False,
-        tokenize=False,
-    )
 
 
 # --------------------------------------------------------------------- train
@@ -359,6 +293,59 @@ def score_mlx(args):
         rows.append(_row(case, dict(zip(LABELS[case["task"]], probs)), ms))
     _write(args, rows, {"backend": "mlx", "model": str(args.model), "load_seconds": load_s,
                         "peak_memory_bytes": mx.get_peak_memory()})
+
+
+def _bench_records(case):
+    """The case as transcript records, the way the voice service hands them over."""
+    return case.get("records") or [{
+        "event_id": case["id"], "owner_epoch": "benchmark", "text": case["text"],
+        "language": "en", "started_at": "2026-09-26T00:00:00+00:00",
+        "ended_at": "2026-09-26T00:00:01+00:00",
+        "playback_overlap": [{"reply_id": "benchmark", "text": t}
+                             for t in case.get("assistant_playback", [])],
+    }]
+
+
+def score_runtime(args):
+    """The shipped worker's code path: records in, the runtime's decisions out."""
+    from kollabor_voice.qwen_worker import (
+        QwenVoiceModel,
+        predict,
+        predict_answer,
+        predict_speech,
+    )
+
+    started = time.monotonic()
+    model = QwenVoiceModel(args.model)
+    load_s = time.monotonic() - started
+    rows = []
+    for case in _eval_cases(args):
+        t0 = time.perf_counter()
+        if case["task"] == "intent":
+            decision = predict(model, _bench_records(case), case.get("context", ""),
+                               case.get("transcript_records") or [], 10)
+            probs = None  # a language the model is not for: deferred unscored
+            if decision.trace:
+                first = decision.trace[0]["passes"][0]
+                other = "ignore" if first["choice"] == "respond" else "respond"
+                # The trace rounds to 3 places; the decision used the raw value.
+                probs = {first["choice"]: first["probability"],
+                         other: 1 - first["probability"]}
+            verdict = decision.decision
+        elif case["task"] == "answer":
+            result = predict_answer(model, case["held"], case["question"], case["text"])
+            probs, verdict = result["probabilities"], result["answer"]
+        else:
+            result = predict_speech(model, case["text"])
+            verdict = {"speak": "say", "rewrite": "rewrite", "defer": "defer",
+                       "silent": "say"}[result.decision]
+        ms = 1000 * (time.perf_counter() - t0)
+        if case["task"] == "style":
+            # The model's raw split for argmax, untimed; the timed call is the policy.
+            probs = model.probabilities({"task": "style", "text": case["text"]})
+        rows.append(_row(case, probs, ms, verdict))
+    _write(args, rows, {"backend": "runtime", "model": str(args.model), "load_seconds": load_s,
+                        "peak_memory_bytes": model.mx.get_peak_memory()})
 
 
 def score_llama(args):
@@ -628,7 +615,7 @@ def main():
     t.add_argument("--layers", type=int, default=28)
     t.add_argument("--seed", type=int, default=0)
     s = sub.add_parser("score")
-    s.add_argument("backend", choices=["mlx", "llama", "torch", "laya"])
+    s.add_argument("backend", choices=["mlx", "runtime", "llama", "torch", "laya"])
     s.add_argument("--model", required=True, help="fused model dir, GGUF file or Laya bundle")
     s.add_argument("--task", action="append", choices=list(LABELS))
     s.add_argument("--head", help="laya: an ablation intent head from laya-head")
@@ -646,7 +633,8 @@ def main():
     elif args.command == "laya-head":
         laya_head(args)
     elif args.command == "score":
-        {"mlx": score_mlx, "llama": score_llama, "torch": score_torch, "laya": score_laya}[args.backend](args)
+        {"mlx": score_mlx, "runtime": score_runtime, "llama": score_llama, "torch": score_torch,
+         "laya": score_laya}[args.backend](args)
     else:
         report(args)
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from kollabor_voice import speech_settings
 from kollabor_voice.classifiers import load_preferences, save_preferences
 from kollabor_voice.speech_settings import speech_defaults
 
@@ -197,14 +198,14 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     shown = "".join(view._render_widget_modern(widgets["stt_engine"], 80, "last"))
     assert "Transcription Engine: Whisper Base" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
 
-    monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: False)
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
     refused = await VoicePanel().act(
         state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
     )
     assert not refused["ok"] and "Apple silicon" in refused["errors"]["stt_engine"]
     assert not (root / "preferences.json").exists()
 
-    monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: True)
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
     saved = await VoicePanel().act(
         state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
     )
@@ -212,3 +213,61 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     assert load_preferences()["stt_engine"] == "parakeet"
     fresh = {f["path"]: f for s in saved["panel"]["sections"] for f in s["fields"]}
     assert fresh["stt_engine"]["value"] == "parakeet"
+
+
+@pytest.mark.asyncio
+async def test_settings_offer_qwen_only_on_apple_silicon(voice, monkeypatch):
+    state, plugin, root = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    live = {"classifier": {"state": "warming", "name": "qwen", "detail": "Loading"}}
+    monkeypatch.setattr(
+        "kollabor_voice.client.VoiceClient.call", AsyncMock(return_value=live)
+    )
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["classifier"]["options"] == ["laya", "qwen", "provider"]
+    assert fields["classifier"]["option_labels"]["qwen"] == "Fine-Tuned Qwen3 0.6B"
+    assert fields["classifier"]["value"] == "laya"  # the default is unchanged
+    assert fields["classifier_status"]["value"] == "Laya · off"
+    saved = await VoicePanel().act(
+        state, "save", {"changes": {"classifier": "qwen"}, "target": "device"}
+    )
+    assert saved["ok"] and load_preferences()["classifier"] == "qwen"
+    fresh = {f["path"]: f for s in saved["panel"]["sections"] for f in s["fields"]}
+    assert fresh["classifier_status"]["value"] == "Fine-Tuned Qwen3 0.6B · warming"
+    assert fresh["classifier_status"]["help"] == "Loading"
+    assert plugin.classifier_name == "qwen"
+
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["classifier"]["options"] == ["laya", "provider"]
+    assert fields["classifier"]["value"] == "laya"  # a saved qwen reads as the default
+    refused = await VoicePanel().act(
+        state, "save", {"changes": {"classifier": "qwen"}, "target": "device"}
+    )
+    assert not refused["ok"] and "classifier" in refused["errors"]
+
+
+@pytest.mark.asyncio
+async def test_voice_classifier_command_switches_and_status_names_the_worker(
+    voice, monkeypatch
+):
+    state, plugin, _ = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
+    handler = VoiceModeCommandHandler(
+        SimpleNamespace(register_command=lambda _: None), state._event_bus
+    )
+    result = await handler.handle_voicemode(
+        SimpleNamespace(args=["classifier", "qwen"])
+    )
+    assert result.success and "Fine-Tuned Qwen3 0.6B" in result.message
+    assert load_preferences()["classifier"] == "qwen"
+    live = {"classifier": {"state": "ready", "name": "qwen", "pid": 4242}}
+    monkeypatch.setattr(
+        "kollabor_voice.client.VoiceClient.call", AsyncMock(return_value=live)
+    )
+    status = await handler.handle_voicemode(SimpleNamespace(args=["status"]))
+    assert "Classifier: Fine-Tuned Qwen3 0.6B · ready · worker 4242" in status.message
+    usage = await handler.handle_voicemode(SimpleNamespace(args=["nonsense"]))
+    assert "classifier [laya|qwen|provider]" in usage.message

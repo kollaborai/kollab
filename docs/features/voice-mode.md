@@ -22,8 +22,10 @@ transcript. The web UI shows the same line above the message box.
   on the right what was heard, what the classifier read (transcript history, recent
   conversation, the agent's own speech), each pass's answer, the decision, and what
   reached the agent. Lines dropped as the agent's own voice show as `echo`. It
-  updates while open. Without a terminal it names the classifier and both choices.
+  updates while open. Without a terminal it names the classifier and the choices.
 - `/voice classifier laya` selects the default local classifier.
+- `/voice classifier qwen` selects Fine-Tuned Qwen3 0.6B, also local, on an
+  Apple silicon Mac (see [Select a classifier](#select-a-classifier)).
 - `/voice classifier provider` selects the active AI provider instead.
 - `/voice context` shows the recent transcript window (default 10 lines).
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
@@ -34,7 +36,7 @@ transcript. The web UI shows the same line above the message box.
   Select Whisper Base or Parakeet v3 under Transcription Engine (see
   [Select a transcription engine](#select-a-transcription-engine)), and Kokoro or
   VibeVoice and their voices under Speech Engine. The panel also shows microphone,
-  operating state, transcription readiness and speech readiness. Saving does not enable the microphone.
+  operating state, classifier readiness, transcription readiness and speech readiness. Saving does not enable the microphone.
   Preferences are shared across chats on the device running Kollab; an attached
   remote host's web settings apply to that host.
   `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` are no longer registered.
@@ -44,7 +46,7 @@ transcript. The web UI shows the same line above the message box.
 ```mermaid
 flowchart TD
     Start["/voice on"] --> Plugin["VoicePlugin connects to device voice service"]
-    Plugin --> Prepare["Prepare local Whisper and Kokoro<br/>Prepare Laya if selected"]
+    Plugin --> Prepare["Prepare local Whisper and Kokoro<br/>Prepare Laya or Qwen if selected"]
     Prepare --> Ready{"Service and selected classifier ready?"}
     Ready -->|waiting| Poll["Poll readiness"]
     Poll --> Ready
@@ -60,8 +62,10 @@ flowchart TD
 
     Observe --> Classifier{"Selected classifier"}
     Classifier -->|Laya default| Laya["Local Laya worker<br/>transcript + conversation context"]
+    Classifier -->|Qwen option, Apple silicon| Qwen["Local Qwen worker<br/>same context"]
     Classifier -->|Provider option| Provider["Configured provider classifier"]
     Laya --> Intent{"Decision"}
+    Qwen --> Intent
     Provider --> Intent
     Intent -->|Ignore| NoTurn["No chat turn; transcript stays logged"]
     Intent -->|Unsure| Ask["Voice asks: Sorry, was that for me?"]
@@ -71,7 +75,7 @@ flowchart TD
     Admit --> Agent["Normal Kollab conversation and permission flow<br/>local or attached/Hub agent"]
     Agent -.->|no answer yet| Progress["Still-working lines"]
     Agent --> Reply["Voice-tagged reply<br/>display_text + spoken_text"]
-    Reply --> Review["Review spoken text<br/>one rewrite; provider final check if Laya rejects"]
+    Reply --> Review["Review spoken text<br/>one rewrite; provider final check if the local classifier rejects"]
     Review -->|approved| Synthesize["Local speech queue + Kokoro synthesis"]
     Review -->|still rejected| Strip["Speak it with code, links<br/>and paths taken out"]
     Strip --> Synthesize
@@ -139,7 +143,9 @@ has no audio dependencies. First use installs the pinned audio dependencies into
 Downloads resume and must match the sizes and SHA256 hashes in the bundled
 manifest before loading. Verified models work offline. Laya runs in one persistent
 Python worker owned by the device service, with its own pinned environment and
-verified `typed-decisions` checkpoint. Multiple agents share the same worker;
+verified `typed-decisions` checkpoint. Fine-Tuned Qwen3 0.6B, when selected on an
+Apple silicon Mac, runs the same way in its own worker and pinned MLX runtime.
+Multiple agents share the same worker;
 changing the responding conversation does not reload idle model weights. Laya
 uses a bundled voice intent head over its frozen checkpoint. The current
 [local evaluation](../../packages/kollabor-voice/bench/README.md) records its
@@ -150,7 +156,7 @@ Data lives in `~/.kollab/voice/`:
 
 - `transcripts/YYYY-MM-DD.jsonl`: timestamped recognized speech, including speech
   the AI ignores. Partial audio and explicit gaps are marked and never dispatched.
-- `models/`: verified default models.
+- `models/`: verified models.
 - `cache/speech/`: audio of voice's own lines (acknowledgements, "was that for
   me?", still-working lines) so they play without synthesis, one file per line
   and voice, deleted three days after it last played. Agent replies are never
@@ -162,7 +168,8 @@ Data lives in `~/.kollab/voice/`:
 - `preferences.json`: selected classifier; never microphone activation.
 - `voiceprint.json`: your voiceprint from `/voice enroll`, 192 numbers made by the
   speaker model, never audio. Readable only by you; never synced or sent.
-- `logs/service.log` and `logs/laya.log`: setup and worker diagnostics.
+- `logs/service.log`, `logs/laya.log` and `logs/qwen.log`: setup and worker
+  diagnostics.
 
 Raw microphone audio is not saved. Owned, closed daily transcript files expire
 after 30 days. Active files and legacy project transcripts are preserved. The
@@ -170,7 +177,8 @@ socket and transcript files are restricted to the current OS user.
 
 ## When the AI responds
 
-After speech is written to the transcript, Laya decides locally whether it is
+After speech is written to the transcript, the local classifier (Laya, or Qwen
+when selected) decides whether it is
 addressed to the assistant. A voice-specific decision contract includes the full
 utterance, the previous 10 complete transcript lines by default, the last six
 visible conversation messages (three exchanges, 200 characters each) and any
@@ -232,11 +240,12 @@ Tool calls, tool results and private reasoning never become spoken content.
 Before playback, the selected classifier checks that narration reads as natural
 speech. One or two short sentences are preferred, but length alone is never a
 reason to rewrite: a longer reply is still spoken. Laya uses a separate style
-head over the same loaded encoder. If Laya is unsure, the agent's configured
+head over the same loaded encoder; Qwen uses the same model. If the local
+classifier is unsure, the agent's configured
 provider performs a tool-free style check of only the spoken text. Format limits
 still reject code, lists, links and paths. A rejected spoken reply gets one
 tool-free nudge to the responding agent to rewrite it, then is checked again. If
-Laya rejects that rewrite despite valid formatting, the configured provider
+the local classifier rejects that rewrite despite valid formatting, the configured provider
 makes one final style decision. A missing spoken field is created on that host
 first, and that counts as the one rewrite. A reply still rejected after its one
 rewrite is spoken with code, links, paths and markup taken out; it is skipped
@@ -266,7 +275,7 @@ blindly submitted again. Restarting or changing the owner starts at the current
 transcript position and does not replay old speech.
 
 Attached chats keep audio on the device running the TUI. Transcript observation
-uses the local Laya worker by default, or the attached agent for the provider
+uses the local Laya (or Qwen) worker by default, or the attached agent for the provider
 option. Request admission runs through the attached agent; spoken replies come back
 to the local speaker queue. No audio model or microphone starts in the remote
 agent process.
@@ -338,7 +347,7 @@ Voice recovers on its own; nothing waits for `/voice retry`:
 - A failed speech engine (a VibeVoice worker that timed out or exited) is
   prepared again on the next sentence, and on the next start.
 - A failed or timed-out classifier keeps speech pending and retries with the
-  same growing wait; a failed Laya worker is prepared again.
+  same growing wait; a failed Laya or Qwen worker is prepared again.
 - A voice service call that answers late (models loading, a worker starting) is
   waited for, not treated as a stop.
 - Another chat taking the microphone is not a failure: this chat shows Active
@@ -372,6 +381,45 @@ Implementation and measured platform/acceptance coverage are recorded in
 [`implementation-status.md`](../../specs/voice-mode/implementation-status.md).
 
 
+## Select a classifier
+
+Laya is the default. On an Apple silicon Mac, Classifier in `/voice config` (or
+`/voice classifier qwen`) also offers **Fine-Tuned Qwen3 0.6B**: Qwen3-0.6B
+(Apache-2.0) with a LoRA adapter trained on synthetic fixtures and generated echo
+and talk-over cases, no household speech. One model makes all three local
+decisions, each as one constrained token: whether speech is for the agent, what
+the reply to "Sorry, was that for me?" means (yes, no, or not an answer) and
+whether a spoken reply reads as natural speech. With Laya or the provider, word
+rules read that reply; Qwen reads it beside the held words and the question.
+Other platforms are not offered it, and saving it there is refused.
+
+It runs as MLX 8-bit in its own worker process and pinned runtime (`mlx` 0.32.4,
+`mlx-lm` 0.32.2), loaded once, with 645 MB of weights checked against the
+manifest's SHA-256 before loading. Intent and style decide at a probability of
+0.8 or more and ask or defer below it, as Laya does; it judges each utterance
+once, with its history. Non-English speech is asked about. Switching closes the
+old worker; speech stays pending until the new one is ready. Classifier
+Readiness and `/voice status` show its state.
+
+On one day of real household speech (M2 Max):
+
+| Measure | Qwen | Laya |
+| --- | --- | --- |
+| Intent, right / wrong / unsure | 70 / 18 / 13 | 45 / 20 / 36 |
+| Replies to "was that for me?" | 59/60 synthetic, 11/12 real | 44/60 synthetic (word rules) |
+| Spoken style, right / wrong / unsure | 71 / 22 / 26 | 65 / 21 / 33 |
+| Intent latency p50 / p95 | 96 / 118 ms | 102 / 130 ms |
+| Peak memory | 1.75 GB | 3.87 GB |
+
+Its mistakes lean the other way from Laya's: 12 of its 18 are false wakes, mostly
+room or TV fragments; most of Laya's are misses
+([benchmark](../../packages/kollabor-voice/bench/README.md#fine-tuned-qwen3-06b)).
+
+The weights have no download source yet. Until they do, selecting Qwen reports
+the folder they belong in: put the seven files of the fused 8-bit model in
+`~/.kollab/voice/models/qwen/voice-qwen-v1/`. They load only when every size and
+SHA-256 matches the manifest.
+
 ## Select a transcription engine
 
 Open `/voice config` (terminal) or Settings → Voice (web), choose Transcription
@@ -403,7 +451,7 @@ Differences to know:
   30 s is transcribed by Whisper instead, and Parakeet is prepared again five
   minutes later.
 - Parakeet transcribes 25 European languages but does not report which one, so
-  its text reaches the Laya classifier as English. Whisper's non-English speech is
+  its text reaches the local classifier as English. Whisper's non-English speech is
   deferred to the agent.
 
 ## Select a speech engine

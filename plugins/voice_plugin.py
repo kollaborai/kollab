@@ -247,13 +247,15 @@ class VoicePlugin(BasePlugin):
         revision = self._preference_revision()
         if revision == self._preferences_revision:
             return
-        from kollabor_voice.classifiers import load_preferences
+        from kollabor_voice.classifiers import LOCAL_CLASSIFIERS, load_preferences
 
         preferences = load_preferences()
         changed = preferences != self._voice_preferences
         self._voice_preferences = preferences
         if self.classifier_name != preferences["classifier"]:
-            self._needs_classifier_prepare = preferences["classifier"] == "laya"
+            self._needs_classifier_prepare = (
+                preferences["classifier"] in LOCAL_CLASSIFIERS
+            )
         self.classifier_name = preferences["classifier"]
         self.context_lines = preferences["context_lines"]
         self._preferences_revision = revision
@@ -274,7 +276,7 @@ class VoicePlugin(BasePlugin):
             self._classifier_generation += 1
             self._last_decision = None
             self._observer_error = self._routing_error
-            self._needs_classifier_prepare = self.classifier_name == "laya"
+            self._needs_classifier_prepare = self._local_classifier
             self._retry.set()
         if self._needs_classifier_prepare and self._client and self.requested:
             await self._prepare_classifier()
@@ -284,7 +286,7 @@ class VoicePlugin(BasePlugin):
         from kollabor_voice.classifiers import CLASSIFIERS
 
         if name not in CLASSIFIERS:
-            raise ValueError("Choose laya or provider")
+            raise ValueError("Choose laya, qwen or provider")
         await self.configure_voice({"classifier": name})
         self._retry.set()
         self._refresh()
@@ -422,11 +424,40 @@ class VoicePlugin(BasePlugin):
     async def _prepare_classifier(self):
         # Cache the state the service just entered. Until the next heartbeat the
         # observer would read the old "error" and latch it again.
-        prepared = await self._patient_call("classifier_prepare")
+        prepared = await self._patient_call(
+            "classifier_prepare", model=self.classifier_name
+        )
         self._state = {**self._state, "classifier": prepared}
 
+    @property
+    def _local_classifier(self):
+        """Laya or Qwen: run by the device service's worker, not the provider."""
+        from kollabor_voice.classifiers import LOCAL_CLASSIFIERS
+
+        return self.classifier_name in LOCAL_CLASSIFIERS
+
+    def _classifier_status(self, state):
+        """The service's worker status for this chat's classifier.
+
+        "off" while the service has the other local classifier loaded; an error
+        when the service predates the selected one (it has no "name").
+        """
+        from kollabor_voice.classifiers import CLASSIFIERS
+
+        classifier = state.get("classifier") or {}
+        name = classifier.get("name")
+        if classifier and name is None and self.classifier_name != "laya":
+            return {
+                "state": "error",
+                "detail": f"The voice service predates {CLASSIFIERS[self.classifier_name]}; "
+                "restart the voice service after updating Kollab",
+            }
+        if (name or "laya") != self.classifier_name:
+            return {"state": "off"}
+        return classifier
+
     async def retry_voice(self):
-        if self.classifier_name == "laya" and self._client and self.requested:
+        if self._local_classifier and self._client and self.requested:
             await self._prepare_classifier()
         if (
             self.requested
@@ -478,22 +509,22 @@ class VoicePlugin(BasePlugin):
                 or initial.get("speech", {}).get("state") == "error"
             ):
                 initial = await self._patient_call("retry")
-            if self.classifier_name == "laya":
-                await self._patient_call("classifier_prepare")
+            if self._local_classifier:
+                await self._prepare_classifier()
                 initial = await self._patient_call("status")
             # Model initialization can hold the Python runtime long enough to
             # exceed a capture lease. Acquire ownership only once loading ends.
             # Cancelling this task during setup therefore cannot open the mic.
             while not initial.get("ready") or (
-                self.classifier_name == "laya"
-                and initial.get("classifier", {}).get("state") != "ready"
+                self._local_classifier
+                and self._classifier_status(initial).get("state") != "ready"
             ):
-                classifier = initial.get("classifier", {})
-                if initial.get("ready") and self.classifier_name == "laya":
+                classifier = self._classifier_status(initial)
+                if initial.get("ready") and self._local_classifier:
                     update({**initial, **classifier})
                     if classifier.get("state") == "error":
                         raise RuntimeError(
-                            classifier.get("detail", "Laya setup failed")
+                            classifier.get("detail", "Voice classifier setup failed")
                         )
                 else:
                     update(initial)
@@ -532,8 +563,8 @@ class VoicePlugin(BasePlugin):
                         "voice claim timed out (attempt %d/3); retrying", attempt + 1
                     )
                     await asyncio.sleep(0.5 * (attempt + 1))
-            if self.classifier_name == "laya":
-                await self._patient_call("classifier_prepare")
+            if self._local_classifier:
+                await self._prepare_classifier()
             cursor = self._lease["cursor"]
             rpc = self._event_bus.get_service("rpc_client")
             if rpc:
@@ -766,8 +797,9 @@ class VoicePlugin(BasePlugin):
                     if not self._routing_error:
                         logger.info("Voice observer retrying: %s", self._observer_error)
                         self._observer_error = None
-                        self._needs_classifier_prepare = (
-                            self._state.get("classifier", {}).get("state") == "error"
+                        self._needs_classifier_prepare = self._local_classifier and (
+                            self._classifier_status(self._state).get("state")
+                            in {"error", "off"}
                         )
                         self._observer_backoff = min(
                             self._observer_backoff * 2, OBSERVER_RETRY_MAX_S
@@ -775,15 +807,18 @@ class VoicePlugin(BasePlugin):
                         self._refresh()
                 self._retry.clear()
                 continue
-            if self.classifier_name == "laya":
-                classifier = self._state.get("classifier", {})
+            if self._local_classifier:
+                classifier = self._classifier_status(self._state)
                 if classifier.get("state") == "error":
                     self._observer_error = classifier.get(
-                        "detail", "Laya failed; retrying"
+                        "detail", "Voice classifier failed; retrying"
                     )
                     self._refresh()
                     continue
                 if classifier.get("state") != "ready":
+                    if classifier.get("state") == "off":
+                        # Another chat loaded the other local classifier.
+                        self._needs_classifier_prepare = True
                     await asyncio.sleep(0.15)
                     continue
             # Audio chunks are storage/Whisper boundaries, not conversational
@@ -831,7 +866,7 @@ class VoicePlugin(BasePlugin):
                     if earliest - datetime.fromisoformat(r["ended_at"]).timestamp() <= 2
                 ]
                 candidates = previous + records
-                from kollabor_voice.acks import address, answer
+                from kollabor_voice.acks import address
 
                 heard = " ".join(r["text"] for r in records)
                 held = self._clarifying
@@ -839,7 +874,8 @@ class VoicePlugin(BasePlugin):
                     # Nobody answered "was that for me?": likely background.
                     self._clarify_pause_until = self._question_ends() + CLARIFY_PAUSE_S
                     held = self._clarifying = None
-                reply = answer(heard) if held else None
+                answered = {}
+                reply = await self._answer(heard, held, answered) if held else None
                 self._decision_deferred_ids = []
                 if reply == "no":
                     selected, how = [], "declined"
@@ -886,6 +922,7 @@ class VoicePlugin(BasePlugin):
                         decision={
                             "decision": "ignore" if how == "declined" else "respond",
                             "detail": VOICE_ROUTES[how],
+                            **(answered if how != "addressed" else {}),
                         },
                     )
                 if how == "declined":
@@ -935,7 +972,8 @@ class VoicePlugin(BasePlugin):
                     self._classifier_entry["note"] = "Unsure, and not asking right now"
                 return
             self._clarifying = {"records": selected, "asked": now}
-            await self._say(
+            # What the human heard; the Qwen model reads it with their answer.
+            self._clarifying["question"] = await self._say(
                 "clarify_background" if self._background_heard() else "clarify", epoch
             )
             return
@@ -959,6 +997,30 @@ class VoicePlugin(BasePlugin):
             self._acked[key],
             answered=kind in {"mic_check", "thanks", "greeting"},
         )
+
+    async def _answer(self, heard, held, answered):
+        """The reply to "was that for me?": "yes", "no", or None for other speech.
+
+        The Qwen model reads it with the held words and the question; the other
+        classifiers use the acks rules. ``answered`` gets the model's call for
+        /voice classifier.
+        """
+        from kollabor_voice.acks import answer
+
+        if self.classifier_name != "qwen":
+            return answer(heard)
+        from kollabor_voice.classifiers import LocalClassifier
+
+        result = await LocalClassifier(self._client, self._auth, "qwen").answer(
+            " ".join(r["text"] for r in held["records"]),
+            held.get("question") or "",
+            heard,
+        )
+        answered.update(
+            model=result.get("model", ""),
+            confidence=round(result["probabilities"][result["answer"]], 3),
+        )
+        return None if result["answer"] == "other" else result["answer"]
 
     def _background_heard(self):
         """Speech kept arriving that was not for us: probably a TV in the room."""
@@ -1037,14 +1099,14 @@ class VoicePlugin(BasePlugin):
     async def observe_records(self, records):
         from kollabor_voice.classifiers import (
             DecisionRequest,
-            LayaClassifier,
+            LocalClassifier,
             ProviderClassifier,
         )
 
         if not records:
             return []
-        if self.classifier_name == "laya":
-            classifier = LayaClassifier(self._client, self._auth)
+        if self._local_classifier:
+            classifier = LocalClassifier(self._client, self._auth, self.classifier_name)
             rpc = self._event_bus.get_service("rpc_client")
             context = (
                 (
@@ -1388,7 +1450,10 @@ class VoicePlugin(BasePlugin):
         fixed = format_decision(text)
         if fixed:
             return fixed
-        if self.classifier_name == "laya":
+        if self._local_classifier:
+            from kollabor_voice.classifiers import CLASSIFIERS
+
+            label = CLASSIFIERS[self.classifier_name]
             local = await self._client.review_speech(
                 text, self._lease["epoch"], self._lease["token"]
             )
@@ -1406,8 +1471,8 @@ class VoicePlugin(BasePlugin):
             result = await self._provider_speech_review(text, local.reason)
             return SpeechDecision(
                 result.decision,
-                f"{'Laya rejected rewrite' if adjudicate else 'Laya unsure'}; {result.reason}",
-                "laya+provider",
+                f"{label} {'rejected rewrite' if adjudicate else 'unsure'}; {result.reason}",
+                f"{self.classifier_name}+provider",
             )
         return await self._provider_speech_review(text)
 

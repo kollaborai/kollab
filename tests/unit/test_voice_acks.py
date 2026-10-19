@@ -323,3 +323,99 @@ async def test_the_question_waits_until_voice_stops_talking(plugin):
     assert plugin._activity({"state": "listening"})["stage"] == "asking"
     await hear(plugin, record(2, "Yes."), until=lambda: plugin.delivered)
     assert plugin.delivered[0]["message"] == held["text"]
+
+
+def qwen_service(plugin, answer):
+    """A voice service whose Qwen worker answers "was that for me?" with ``answer``."""
+    asked = []
+
+    async def call(op, **params):
+        if op == "classifier_submit":
+            asked.append(params)
+            return {"job_id": "job"}
+        if op == "classifier_result":
+            return {
+                "done": True,
+                "result": {
+                    "answer": answer,
+                    "probabilities": {
+                        "yes": 0.03,
+                        "no": 0.02,
+                        "other": 0.01,
+                        answer: 0.94,
+                    },
+                    "provider": "qwen",
+                    "model": "qwen3-0.6b-voice-v1",
+                },
+            }
+        return {}
+
+    plugin.classifier_name = "qwen"
+    plugin._state = {"classifier": {"state": "ready", "name": "qwen"}}
+    plugin._client.call = AsyncMock(side_effect=call)
+    return asked
+
+
+@pytest.mark.asyncio
+async def test_qwen_reads_the_answer_with_the_held_words_and_the_question(plugin):
+    asked = qwen_service(plugin, "no")
+    unsure(plugin, "1")
+    held = record(1, "Check the build status.")
+    await hear(plugin, held, until=lambda: plugin._clarifying)
+    question = spoken(plugin)[0]
+    assert question in LINES["clarify"] and plugin._clarifying["question"] == question
+    # The rules would call this a yes; the model's no decides.
+    await hear(plugin, record(2, "Yeah right, that was the TV."))
+    assert asked[-1]["task"] == "answer" and asked[-1]["model"] == "qwen"
+    assert (asked[-1]["held"], asked[-1]["question"]) == (held["text"], question)
+    assert asked[-1]["text"] == "Yeah right, that was the TV."
+    assert plugin.delivered == [] and plugin._clarifying is None
+    entry = plugin.classifier_log()[-1]
+    assert entry["decision"]["decision"] == "ignore"
+    assert entry["decision"]["model"] == "qwen3-0.6b-voice-v1"
+    assert entry["decision"]["confidence"] == 0.94
+
+
+@pytest.mark.asyncio
+async def test_qwen_yes_sends_the_held_words_and_other_keeps_listening(plugin):
+    qwen_service(plugin, "other")
+    unsure(plugin, "1")
+    held = record(1, "Check the build status.")
+    await hear(plugin, held, until=lambda: plugin._clarifying)
+    await hear(plugin, record(2, "And now the weather."))
+    assert plugin.delivered == [] and plugin._clarifying  # not an answer: still asking
+    qwen_service(plugin, "yes")
+    await hear(plugin, record(3, "Mm-hmm."), until=lambda: plugin.delivered)
+    [data] = plugin.delivered
+    assert data["message"] == held["text"]
+
+
+def test_the_chat_waits_for_its_own_classifier_and_names_an_old_service(plugin):
+    plugin.classifier_name = "qwen"
+    ready = {"state": "ready", "name": "qwen"}
+    assert plugin._classifier_status({"classifier": ready}) == ready
+    # The service has Laya loaded: Qwen is not ready, so the chat prepares it.
+    assert plugin._classifier_status(
+        {"classifier": {"state": "ready", "name": "laya"}}
+    ) == {"state": "off"}
+    old = plugin._classifier_status({"classifier": {"state": "ready"}})
+    assert old["state"] == "error" and "restart the voice service" in old["detail"]
+    plugin.classifier_name = "laya"
+    assert (
+        plugin._classifier_status({"classifier": {"state": "ready"}})["state"]
+        == "ready"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_names_the_model_and_a_switch_prepares_again(plugin):
+    plugin.classifier_name = "qwen"
+    plugin._client.call = AsyncMock(
+        return_value={"state": "installing", "name": "qwen"}
+    )
+    await plugin._prepare_classifier()
+    plugin._client.call.assert_awaited_with("classifier_prepare", model="qwen")
+    assert plugin._state["classifier"]["name"] == "qwen"
+    assert plugin._local_classifier
+    plugin.classifier_name = "provider"
+    assert not plugin._local_classifier

@@ -19,8 +19,8 @@ STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
 TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
 
 
-def parakeet_supported():
-    """Parakeet runs on MLX, which needs an Apple silicon Mac."""
+def apple_silicon():
+    """MLX, which Parakeet v3 and the Qwen classifier run on, needs an Apple silicon Mac."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
@@ -92,7 +92,7 @@ def speech_errors(preferences, *, check_files=False):
     for key, options in choices.items():
         if preferences.get(key) not in options:
             errors[key] = "Choose one of the available options"
-    if preferences.get("stt_engine") == "parakeet" and not parakeet_supported():
+    if preferences.get("stt_engine") == "parakeet" and not apple_silicon():
         errors["stt_engine"] = "Parakeet v3 needs an Apple silicon Mac"
     for key in ("echo_cancellation", "speaker_gate"):
         if not isinstance(preferences.get(key), bool):

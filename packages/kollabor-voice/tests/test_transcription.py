@@ -31,7 +31,7 @@ def root(monkeypatch):
     # Short: the service's socket path must fit in sun_path.
     with tempfile.TemporaryDirectory(prefix="kv-", dir="/tmp") as directory:
         monkeypatch.setenv("KOLLAB_VOICE_ROOT", directory)
-        monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: True)
+        monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
         yield Path(directory)
 
 
@@ -176,7 +176,7 @@ def test_close_during_setup_never_keeps_a_worker(root, monkeypatch):
 
 def test_parakeet_needs_apple_silicon(root, monkeypatch):
     save_preferences({"stt_engine": "parakeet"}, root)
-    monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: False)
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
     assert load_preferences(root)["stt_engine"] == "whisper"
     with pytest.raises(ValueError, match="Apple silicon"):
         save_preferences({"stt_engine": "parakeet"}, root)
