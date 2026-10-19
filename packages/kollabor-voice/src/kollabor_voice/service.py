@@ -91,6 +91,17 @@ class VoiceService:
         self.classifier_jobs = {}
         self.speech_review_jobs = {}
         self.speech_review_started = {}
+        from .echo import PlaybackReference
+        from .speaker import SpeakerGate
+
+        # Filters in front of transcription; both off until preferences say so.
+        self.gate = SpeakerGate(root)
+        self.gate_task = None
+        self.reference = PlaybackReference()
+        self.echo_cancellation = False
+        self.echo = None  # EchoCanceller while capturing with it on
+        self.echo_error = None
+        self._capture_preferences_revision = "unread"
 
     def progress(self, **state):
         self.setup = state
@@ -175,9 +186,9 @@ class VoiceService:
                         )
             self.worker_failures.clear()
             if self.output is None:
-                self.output = SpeechQueue(
-                    self.root, self.speech.stream, self.player or StreamPlayer()
-                )
+                player = self.player or StreamPlayer()
+                player.reference = self.reference  # what echo cancellation removes
+                self.output = SpeechQueue(self.root, self.speech.stream, player)
                 self.tasks.append(
                     asyncio.create_task(self.output.run(), name="voice-output")
                 )
@@ -256,6 +267,12 @@ class VoiceService:
             "transcription": (
                 self.stt.status() if self.stt else {"state": "off", "engine": None}
             ),
+            "speaker": self.gate.status(),
+            "echo_cancellation": {
+                "enabled": self.echo_cancellation,
+                "active": self.echo is not None,
+                "detail": self.echo_error or "",
+            },
             "audio_warmup_seconds": self.audio_warmup_seconds,
         }
 
@@ -323,6 +340,9 @@ class VoiceService:
                     self.prepare(), name="voice-setup"
                 )
             return self.status()
+        if op == "speaker_forget":
+            # Deleting a voiceprint needs no microphone lease.
+            return {"forgotten": self.gate.forget(), "speaker": self.gate.status()}
         delegated = self.delegates.get(request.get("token"))
         if delegated:
             if op not in {
@@ -358,6 +378,11 @@ class VoiceService:
         if op == "heartbeat":
             self.owner["heartbeat"] = time.monotonic()
             return self.status()
+        if op == "speaker_enroll":
+            # The owner's next 30 seconds of speech; never sent while enrolling.
+            self.gate.enroll()
+            self.prepare_gate()
+            return self.gate.status()
         if op == "classifier_submit":
             for key, task in list(self.classifier_jobs.items()):
                 if task.done():
@@ -527,6 +552,7 @@ class VoiceService:
 
             self.transcript.probe()
             self.segmenter = (self.segmenter_factory or SpeechSegmenter)()
+            self.echo = self.new_echo() if self.echo_cancellation else None
             self.recorder = (
                 self.recorder_factory()
                 if self.recorder_factory
@@ -566,6 +592,7 @@ class VoiceService:
         self.classifier_jobs.clear()
         if previous and self.output:
             self.output.cancel(previous["epoch"], forget=True)
+        self.gate.cancel()  # an unfinished enrollment belongs to that owner
         self.owner = None
         self.delegates.clear()
 
@@ -586,6 +613,43 @@ class VoiceService:
             if segment:
                 self.submit(segment, final=False)
         self.segmenter = None
+        self.echo = None
+
+    def new_echo(self):
+        """An echo canceller for this capture, or None when it cannot load."""
+        try:
+            from .echo import EchoCanceller
+
+            echo, self.echo_error = EchoCanceller(self.reference), None
+            return echo
+        except Exception as exc:  # e.g. a runtime prepared before pywebrtc-audio
+            self.echo_error = f"Echo cancellation unavailable: {exc}"
+            log.warning(self.echo_error)
+            return None
+
+    def apply_capture_preferences(self):
+        from .classifiers import load_preferences
+
+        preferences = load_preferences(self.root)
+        self.gate.configure(preferences)
+        self.prepare_gate()
+        self.echo_cancellation = preferences["echo_cancellation"]
+        if self.segmenter and self.echo_cancellation != (self.echo is not None):
+            self.echo = self.new_echo() if self.echo_cancellation else None
+
+    def prepare_gate(self):
+        """Load the speaker model in the background once the gate needs it."""
+        if not self.gate.needed or self.gate.model is not None:
+            return
+        if self.gate_task is None or self.gate_task.done():
+            self.gate_task = asyncio.create_task(
+                asyncio.to_thread(self.gate.prepare), name="speaker-prepare"
+            )
+            self.gate_task.add_done_callback(
+                lambda task: task.cancelled()
+                or not task.exception()
+                or log.warning("Speaker gate not ready: %s", task.exception())
+            )
 
     def capture_stuck(self, call):
         # The stuck thread holds CoreAudio's device mutex, so no stream in this
@@ -637,8 +701,11 @@ class VoiceService:
 
             self.segmenter = (self.segmenter_factory or SpeechSegmenter)()
         self.last_seq = frame.seq
-        start = time.time() - time.monotonic() + frame.ts - len(frame.audio) / 16000
-        for segment in self.segmenter.feed(frame.audio, start):
+        audio, captured = frame.audio, frame.ts - len(frame.audio) / 16000
+        if self.echo is not None:
+            audio = self.echo.process(audio, captured)  # voice's own speech removed
+        start = time.time() - time.monotonic() + captured
+        for segment in self.segmenter.feed(audio, start):
             self.submit(segment, final=final)
 
     async def watch(self):
@@ -670,6 +737,10 @@ class VoiceService:
                         self.stt_prepare_task = asyncio.create_task(
                             self.prepare_transcription(retry), name="stt-prepare"
                         )
+                revision = self._preferences_revision()
+                if revision != self._capture_preferences_revision:
+                    self._capture_preferences_revision = revision
+                    self.apply_capture_preferences()
                 async with self.lifecycle:
                     for task in self.tasks:
                         if (
@@ -721,6 +792,17 @@ class VoiceService:
         except OSError:
             return None
 
+    async def judge_speaker(self, audio, overlap):
+        """Speaker fields for a transcript record. A failing gate passes speech."""
+        if not self.gate.needed:
+            return {}
+        try:
+            return await asyncio.to_thread(self.gate.judge, audio, overlap)
+        except Exception as exc:
+            log.exception("Speaker gate failed")
+            self.gate.state, self.gate.detail = "error", f"Speaker gate failed: {exc}"
+            return {}
+
     async def prepare_transcription(self, force=False):
         try:
             await asyncio.to_thread(self.stt.configure, force)
@@ -758,6 +840,10 @@ class VoiceService:
                     final = segment.final and bool(
                         self.owner and self.owner["epoch"] == epoch and self.recorder
                     )
+                    # Who spoke: the enrolled user, another speaker, unjudged.
+                    fields = await self.judge_speaker(segment.audio, bool(overlap))
+                    if self.echo is not None:
+                        fields["echo_cancellation"] = True
                     record = self.transcript.append(
                         {
                             "type": "transcript",
@@ -768,12 +854,15 @@ class VoiceService:
                             "final": final,
                             "owner_epoch": epoch,
                             "playback_overlap": overlap,
+                            **fields,
                         }
                     )
-                    # Heard is what a person said: the mic picking up voice's
-                    # own playback is not shown, and talking over it shows
-                    # only the person's words.
+                    # Heard is what the user said: the mic picking up voice's
+                    # own playback or another speaker is not shown, and talking
+                    # over voice shows only the person's words.
                     own = "" if is_playback_echo(record) else strip_playback(record)
+                    if fields.get("speaker") == "other_speaker":
+                        own = ""
                     if own and self.owner and self.owner["epoch"] == epoch:
                         self.last_transcript = {**record, "text": own}
             except asyncio.CancelledError:
@@ -801,6 +890,7 @@ class VoiceService:
             self.setup_task,
             self.speech_prepare_task,
             self.stt_prepare_task,
+            self.gate_task,
             *self.tasks,
         ]
         for task in tasks:

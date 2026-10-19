@@ -10,6 +10,10 @@ from pathlib import Path
 
 from .control import manifest
 
+# Cosine score at or above which a segment is the enrolled user (speaker.py).
+# Measured false accepts and rejects: bench/README.md.
+SPEAKER_THRESHOLD = 0.45
+
 # Engines by preference id; the labels are what people read.
 STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
 TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
@@ -68,6 +72,11 @@ def speech_defaults():
         "vibevoice_device": "auto",
         "vibevoice_steps": 5,
         "vibevoice_cfg": 1.5,
+        # Filters in front of transcription (echo.py, speaker.py); off until
+        # turned on.
+        "echo_cancellation": False,
+        "speaker_gate": False,
+        "speaker_threshold": SPEAKER_THRESHOLD,
     }
 
 
@@ -85,10 +94,14 @@ def speech_errors(preferences, *, check_files=False):
             errors[key] = "Choose one of the available options"
     if preferences.get("stt_engine") == "parakeet" and not parakeet_supported():
         errors["stt_engine"] = "Parakeet v3 needs an Apple silicon Mac"
+    for key in ("echo_cancellation", "speaker_gate"):
+        if not isinstance(preferences.get(key), bool):
+            errors[key] = "Must be on or off"
     for key, low, high, step in (
         ("kokoro_speed", 0.5, 2.0, 0.1),
         ("vibevoice_steps", 1, 20, 1),
         ("vibevoice_cfg", 1.0, 3.0, 0.1),
+        ("speaker_threshold", 0.0, 1.0, 0.01),
     ):
         value = preferences.get(key)
         if (

@@ -1,0 +1,326 @@
+{
+ "human": "Hey, stop for a second and open the readme file instead.",
+ "voice_seconds": 16.9,
+ "runs": [
+  {
+   "echo_delay_ms": -40,
+   "talk_over_speech_to_echo_db": -7.1,
+   "erle_db": 34.9,
+   "ms_per_30ms_frame": 0.24,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what failed.",
+     "voice_words": 0.23,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, the test power seconded open the meeting pilot, but I'm not.",
+     "voice_words": 0.03,
+     "human_words": 0.27
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the ReadMe file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Hey. Seconded.",
+     "voice_words": 0.0,
+     "human_words": 0.09
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 0,
+   "talk_over_speech_to_echo_db": -7.1,
+   "erle_db": 34.6,
+   "ms_per_30ms_frame": 0.34,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what failed.",
+     "voice_words": 0.23,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, the test car second and open the window with the lens of our image.",
+     "voice_words": 0.0,
+     "human_words": 0.45
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Hey, what's more, second and above community? Let's do it.",
+     "voice_words": 0.03,
+     "human_words": 0.27
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 120,
+   "talk_over_speech_to_echo_db": -6.9,
+   "erle_db": 32.8,
+   "ms_per_30ms_frame": 0.21,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what she'll.",
+     "voice_words": 0.2,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "So don't throw a second and open the weekly file and step on your mind.",
+     "voice_words": 0.03,
+     "human_words": 0.55
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and open-locking. Let's go.",
+     "voice_words": 0.0,
+     "human_words": 0.64
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 300,
+   "talk_over_speech_to_echo_db": -6.5,
+   "erle_db": 13.1,
+   "ms_per_30ms_frame": 0.23,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what she...",
+     "voice_words": 0.2,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and open the weekly file list date.",
+     "voice_words": 0.0,
+     "human_words": 0.82
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "A stop was taken in the open for weeks.",
+     "voice_words": 0.03,
+     "human_words": 0.45
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": -40,
+   "talk_over_speech_to_echo_db": -1.0,
+   "erle_db": 34.3,
+   "ms_per_30ms_frame": 0.21,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what failed.",
+     "voice_words": 0.23,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and open the witty file in stack.",
+     "voice_words": 0.03,
+     "human_words": 0.82
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the ReadMe file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and over for me. The car was bad.",
+     "voice_words": 0.0,
+     "human_words": 0.64
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 0,
+   "talk_over_speech_to_echo_db": -1.0,
+   "erle_db": 31.3,
+   "ms_per_30ms_frame": 0.21,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what failed",
+     "voice_words": 0.23,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and open the reedney file instead.",
+     "voice_words": 0.0,
+     "human_words": 0.91
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Pay, score 4 second and have a weekly filing stack.",
+     "voice_words": 0.0,
+     "human_words": 0.27
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 120,
+   "talk_over_speech_to_echo_db": -0.9,
+   "erle_db": 33.2,
+   "ms_per_30ms_frame": 0.22,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what she'll.",
+     "voice_words": 0.2,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "I'll take, stop for a second and open the weekly file instead.",
+     "voice_words": 0.03,
+     "human_words": 0.82
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "Stay stock for a second and open the VT Funnel next day.",
+     "voice_words": 0.0,
+     "human_words": 0.55
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  },
+  {
+   "echo_delay_ms": 300,
+   "talk_over_speech_to_echo_db": -0.5,
+   "erle_db": 11.9,
+   "ms_per_30ms_frame": 0.22,
+   "without": {
+    "voice_alone": {
+     "heard": "I look at the build logs and tell you what she...",
+     "voice_words": 0.2,
+     "human_words": 0.18
+    },
+    "talk_over": {
+     "heard": "Hey, stop for a second and open the weekly file instead.",
+     "voice_words": 0.0,
+     "human_words": 0.91
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   },
+   "with": {
+    "voice_alone": {
+     "heard": "",
+     "voice_words": 0.0,
+     "human_words": 0.0
+    },
+    "talk_over": {
+     "heard": "a stop for a second and open 3D filing state.",
+     "voice_words": 0.0,
+     "human_words": 0.55
+    },
+    "human_alone": {
+     "heard": "Hey, stop for a second and open the readme file instead.",
+     "voice_words": 0.0,
+     "human_words": 1.0
+    }
+   }
+  }
+ ]
+}

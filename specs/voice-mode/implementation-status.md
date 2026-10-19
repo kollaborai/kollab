@@ -280,7 +280,10 @@ active-process evidence. Changes remain local and uncommitted; no release is cla
   cancellation and producer scope tested. Real simultaneous multi-agent speech and
   physical stop latency remain unmeasured.
 - V17: echo context, classifier decisions and main-agent silence are covered by
-  controlled tests. No acoustic echo cancellation or general talk-over claim.
+  controlled tests. Echo cancellation (AEC3 fed the playback reference) and the
+  speaker gate exist behind off-by-default settings, measured in a simulated room
+  and on recorded speech (bench/README.md). Neither is proven on real speakers and
+  a microphone; no general talk-over claim.
 - V18: installed wheel/client/assets/offline singleton verified on macOS arm64 and
   Python 3.12. Linux is not live-accepted; Windows remains unsupported.
 

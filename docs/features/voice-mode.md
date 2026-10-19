@@ -27,6 +27,8 @@ transcript. The web UI shows the same line above the message box.
 - `/voice classifier provider` selects the active AI provider instead.
 - `/voice context` shows the recent transcript window (default 10 lines).
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
+- `/voice enroll` saves your voiceprint from your next 30 seconds of speech; `/voice
+  enroll forget` deletes it. See [Echo cancellation and the speaker gate](#echo-cancellation-and-the-speaker-gate).
 - `/voice config` opens Voice Configuration in the TUI or Settings → Voice in the web UI.
   Change the classifier and transcript context there, then save for this device.
   Select Whisper Base or Parakeet v3 under Transcription Engine (see
@@ -158,6 +160,8 @@ Data lives in `~/.kollab/voice/`:
 - `consumers/`: per-chat cursors and pending records for interrupted delivery.
 - `admissions.sqlite3`: durable request identities used to avoid duplicate turns.
 - `preferences.json`: selected classifier; never microphone activation.
+- `voiceprint.json`: your voiceprint from `/voice enroll`, 192 numbers made by the
+  speaker model, never audio. Readable only by you; never synced or sent.
 - `logs/service.log` and `logs/laya.log`: setup and worker diagnostics.
 
 Raw microphone audio is not saved. Owned, closed daily transcript files expire
@@ -247,8 +251,9 @@ a nudge when its text is rejected. Repeating an admission does not repeat matchi
 sentences. Cancellation and ownership changes prevent a late rewrite from playing.
 
 Echo the playback match misses still reaches the classifier with the overlapping
-playback text as context. Overlapping speech remains in the transcript. This is
-not acoustic echo cancellation. Recognition and response decisions can be
+playback text as context. Overlapping speech remains in the transcript. Echo
+Cancellation (off by default, see below) removes voice's own speech from the
+audio before transcription. Recognition and response decisions can be
 imperfect; use `/voice off` to close the microphone immediately.
 
 If inference fails, the transcript remains pending instead of becoming an
@@ -287,6 +292,40 @@ Voice speaks before the agent does, so speech never meets silence:
 
 Each line is said once per batch of words, even when admission is retried. Its
 audio is kept in `cache/speech/`, so a line voice has said before plays at once.
+
+## Echo cancellation and the speaker gate
+
+Two filters sit in front of transcription. Both are off until you turn them on
+under Echo and Speaker in `/voice config` (terminal) or Settings → Voice (web).
+
+**Echo Cancellation** removes voice's own speech from the microphone. The speaker
+queue records what it plays and when; WebRTC's echo canceller (AEC3) subtracts
+it from each microphone frame. Only voice's playback is removed: a TV, other
+people and other apps keep their sound. With it on, voice's replies stop showing
+up as heard speech. Talking over voice gets harder, though: while voice speaks,
+the canceller also turns down your words, so an interruption is heard less
+reliably. See the [measurements](../../packages/kollabor-voice/bench/README.md#echo-cancellation).
+
+**Speaker Gate** passes only your voice to the classifier. Turn voice on, run
+`/voice enroll` and talk for 30 seconds, alone in a quiet room; it prints a
+passage you can read. Lines heard while voice speaks, and lines unlike the rest,
+are left out of the voiceprint. Nothing you say during enrollment reaches the
+agent; the status row counts the seconds. Then turn on Speaker Gate. Each line
+of a second or more is compared with your voiceprint; a line below Speaker
+Threshold (default 0.45) is marked another speaker. It stays in the transcript
+as context for later decisions and never reaches the agent. Lines under a
+second are not checked and pass. `/voice classifier` lists gated lines as `not
+you` and enrollment lines as `enroll`, with each line's score; `/voice status`
+shows both filters.
+
+The speaker model (3D-Speaker ERes2Net, Apache-2.0, 26.5 MB) downloads once,
+pinned and checked like the other models, the first time the gate or enrollment
+needs it. On recorded speech it rejected 1.6% of a speaker's own lines and let
+through 0.5% of other people's and 0.01% of a TV film's
+([measurements](../../packages/kollabor-voice/bench/README.md#speaker-gate)).
+Raising the threshold keeps out more of the TV and more of you.
+`/voice enroll forget` deletes the voiceprint; a new speaker model needs a new
+enrollment.
 
 ## Recovery
 

@@ -20,10 +20,33 @@ logger = logging.getLogger(__name__)
 def _word(entry: Dict[str, Any]) -> str:
     if entry.get("echo"):
         return "echo"
+    if entry.get("other_speaker"):
+        return "not you"  # the list's word column is 7 wide
+    if entry.get("enrolling"):
+        return "enroll"
     if entry.get("error"):
         return "error"
     decision = (entry.get("decision") or {}).get("decision")
     return VOICE_DECISION_WORDS.get(decision, "pending")
+
+
+SPEAKER_WORDS = {
+    "user": ("good", "voice: yours"),
+    "other_speaker": ("warn", "voice: another speaker"),
+    "unverified": ("dim", "voice: too short to check"),
+}
+
+
+def _speaker_line(record: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Who the speaker gate says spoke, and whether echo was cancelled first."""
+    style, parts = "dim", []
+    speaker, score = record.get("speaker"), record.get("speaker_score")
+    if speaker in SPEAKER_WORDS:
+        style, word = SPEAKER_WORDS[speaker]
+        parts.append(word + (f" ({score:.2f})" if score is not None else ""))
+    if record.get("echo_cancellation"):
+        parts.append("echo cancelled")
+    return (style, "  " + " · ".join(parts)) if parts else None
 
 
 def _clock(at: Optional[float]) -> str:
@@ -42,10 +65,26 @@ def detail_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
         lines.append(("text", f'  "{record.get("text", "")}"'))
         for overlap in record.get("playback_overlap") or []:
             lines.append(("warn", f'  while the agent said: "{overlap.get("text", "")}"'))
+        heard = _speaker_line(record)
+        if heard:
+            lines.append(heard)
 
-    if entry.get("echo"):
+    reason = (
+        "The microphone heard the agent's own voice."
+        if entry.get("echo")
+        else (
+            "The speaker gate heard another voice: kept as context."
+            if entry.get("other_speaker")
+            else (
+                "Voice enrollment: your words make the voiceprint."
+                if entry.get("enrolling")
+                else None
+            )
+        )
+    )
+    if reason:
         lines.append(("heading", "Not classified"))
-        lines.append(("dim", "  The microphone heard the agent's own voice."))
+        lines.append(("dim", f"  {reason}"))
         lines.append(("heading", "Sent to the agent"))
         lines.append(("dim", "  nothing"))
         return lines

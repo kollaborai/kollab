@@ -494,6 +494,11 @@ transcripts during overlap; let Laya classify self-echo using playback context,
 not by deleting the microphone log. Do not ship speaker mode until the echo-loop
 and talk-over tests pass. A sophisticated AEC stack is justified only if those
 tests demonstrate a need; the existing placeholder is not evidence of protection.
+Amended 2026-10-19: the 2026-10-18 live test showed the need (the microphone
+transcribed voice's own playback, and another person's words reached the agent).
+`echo.py` feeds WebRTC AEC3 the speaker queue's playback reference and `speaker.py`
+gates lines on an enrolled voiceprint before classification; both are off by
+default and measured in `packages/kollabor-voice/bench/README.md`.
 
 ## 5. Keep, rewrite, retire
 

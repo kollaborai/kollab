@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -200,6 +201,16 @@ class StreamPlayer:
         self.pending = []
         self.lead = 0.0  # seconds to hold before starting (SpeechQueue, per run)
         self.played = self.underruns = 0  # per open stream, logged on finish
+        # echo.PlaybackReference: what plays and when, for echo cancellation.
+        self.reference = None
+        self.sounds_until = 0.0  # monotonic time the audio handed over ends
+
+    def _send(self, audio):
+        """Write to the device, telling the reference when this audio sounds."""
+        if self.reference is not None:
+            start = max(self.sounds_until, time.monotonic() + self.stream.latency)
+            self.sounds_until = self.reference.play(audio, self.rate, start)
+        return self.stream.write(audio[:, None])
 
     def write(self, samples, rate, cancelled: threading.Event) -> bool:
         """Blocking like the device. False (and nothing more plays) once cancelled."""
@@ -227,9 +238,7 @@ class StreamPlayer:
                 self.abort()
                 return False
             # write() reports an underrun: the device ran dry before this chunk.
-            self.underruns += bool(
-                self.stream.write(audio[offset : offset + 512, None])
-            )
+            self.underruns += bool(self._send(audio[offset : offset + 512]))
         self.played += len(audio)
         return True
 
@@ -241,7 +250,7 @@ class StreamPlayer:
             if self.pending:
                 audio, self.pending = np.concatenate(self.pending), []
                 self.stream.start()
-                self.stream.write(audio[:, None])
+                self._send(audio)
                 self.played += len(audio)
             if self.stream.active:
                 self.stream.stop()
@@ -255,6 +264,7 @@ class StreamPlayer:
             self.stream.close()
             self.stream, self.pending = None, []
             self.played = self.underruns = 0
+            self.sounds_until = 0.0
 
     def abort(self):
         """Drop everything buffered and release the device at once."""
@@ -264,6 +274,9 @@ class StreamPlayer:
             if self.stream.active:
                 self.stream.abort()
         finally:
+            if self.reference is not None:
+                self.reference.cut()  # what was still buffered never sounds
             self.stream.close()
             self.stream, self.pending = None, []
             self.played = self.underruns = 0
+            self.sounds_until = 0.0

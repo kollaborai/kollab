@@ -39,7 +39,9 @@ class VoiceConfigAltView(ConfigAltView):
                         "config_path": field["path"],
                         "current_value": field["value"],
                         "decimal_places": (
-                            1 if isinstance(field.get("step"), float) else 0
+                            len(str(field["step"]).partition(".")[2])
+                            if isinstance(field.get("step"), float)
+                            else 0
                         ),
                     }
                     for field in section["fields"]

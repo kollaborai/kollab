@@ -5,7 +5,9 @@
     "kokoro-onnx==0.6.1",
     "sounddevice==0.5.6",
     "numpy==2.5.3",
-    "onnxruntime==1.30.0"
+    "onnxruntime==1.30.0",
+    "pywebrtc-audio==0.2.0",
+    "kaldi-native-fbank==1.22.3"
   ],
   "voice": "af_heart",
   "bundles": {
@@ -149,6 +151,21 @@
         ]
       }
     }
+  },
+  "speaker": {
+    "model": "3dspeaker-eres2net-voxceleb",
+    "license": "Apache-2.0",
+    "license_url": "https://www.modelscope.cn/models/iic/speech_eres2net_sv_en_voxceleb_16k/summary",
+    "attribution": "3D-Speaker ERes2Net trained on VoxCeleb by Alibaba Tongyi, ONNX export by k2-fsa sherpa-onnx",
+    "revision": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+    "base_url": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/",
+    "files": [
+      {
+        "name": "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        "size": 26485263,
+        "sha256": "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5"
+      }
+    ]
   },
   "tts": {
     "vibevoice": {

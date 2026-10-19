@@ -42,6 +42,10 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                             "classifier",
                             "See each decision; add laya or provider to switch",
                         ),
+                        (
+                            "enroll",
+                            "Save your voiceprint from 30 seconds of speech; forget deletes it",
+                        ),
                     ]
                 ],
             )
@@ -85,10 +89,25 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 return CommandResult(
                     success=False, message=str(exc), display_type="error"
                 )
+        if action in {"enroll", "enroll forget"}:
+            try:
+                message = await (
+                    plugin.forget_voiceprint()
+                    if action == "enroll forget"
+                    else plugin.enroll_voice()
+                )
+                return CommandResult(success=True, message=message)
+            except (ValueError, OSError, RuntimeError) as exc:
+                return CommandResult(
+                    success=False, message=str(exc), display_type="error"
+                )
         if action not in {"", "on", "off", "retry"}:
             return CommandResult(
                 success=False,
-                message="Usage: /voice [on|off|status|retry|config|classifier [laya|provider]|context [1–50]]",
+                message=(
+                    "Usage: /voice [on|off|status|retry|config"
+                    "|classifier [laya|provider]|context [1–50]|enroll [forget]]"
+                ),
                 display_type="error",
             )
         if action == "retry":
@@ -157,17 +176,26 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 "pending": state.get("pending", 0),
                 "classifier_name": state.get("classifier_name", "laya"),
             }
-        except OSError, TimeoutError, ValueError:
-            pass
+        except OSError, TimeoutError, ValueError, RuntimeError:
+            pass  # not running, an older service, or a socket path too long
         last = state.get("last_transcript") or {}
         output = state.get("output") or {}
         classifier = state.get("classifier") or {}
-        from kollabor_voice.classifiers import CLASSIFIERS
+        from kollabor_voice.classifiers import CLASSIFIERS, load_preferences
         from kollabor_voice.speech_settings import STT_ENGINES, TTS_ENGINES
+
+        from kollabor.panels.voice import voiceprint_text
 
         name = state.get("classifier_name", "laya")
         transcription = state.get("transcription") or {}
         speech_engine = state.get("speech", {}).get("engine")
+        # No service running: the saved settings are what will apply.
+        saved = load_preferences()
+        echo = state.get("echo_cancellation") or {"enabled": saved["echo_cancellation"]}
+        speaker = state.get("speaker") or {
+            "enabled": saved["speaker_gate"],
+            "threshold": saved["speaker_threshold"],
+        }
         lines = [
             f"Voice {state.get('state', 'off').replace('_', ' ').title()}",
             f"Service: {state.get('pid') or 'not running'} · owner: {state.get('owner') or 'none'}",
@@ -183,6 +211,12 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 if name == "laya"
                 else ""
             ),
+            "Echo cancellation: "
+            + ("on" if echo.get("enabled") else "off")
+            + (" · removing voice's speech" if echo.get("active") else ""),
+            f"Speaker gate: {'on' if speaker.get('enabled') else 'off'}"
+            f" · threshold {speaker['threshold']:.2f}"
+            f" · voiceprint: {voiceprint_text(speaker).lower()}",
             f"Microphone: {state.get('device') or 'not recording'}",
             f"Transcript: {state.get('transcript_path') or 'not open'}",
             f"Last heard: {last.get('ended_at', 'none')} {last.get('text', '')[:160]}",
@@ -209,6 +243,8 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             output.get("error"),
             state.get("speech", {}).get("detail"),
             transcription.get("detail"),
+            echo.get("detail"),
+            speaker.get("detail"),
             classifier.get("detail") if name == "laya" else None,
         ):
             if value:

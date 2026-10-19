@@ -204,7 +204,67 @@ def voice_sections(plugin, live=None) -> list[dict]:
                 ),
             ],
         },
+        {
+            "id": "filters",
+            "title": "Echo and Speaker",
+            "fields": [
+                make_field(
+                    "echo_cancellation",
+                    "checkbox",
+                    "Echo Cancellation",
+                    value=preferences["echo_cancellation"],
+                    help=(
+                        "Removes voice's own speech from the microphone before "
+                        "transcription. A TV, other people and other apps are kept."
+                    ),
+                ),
+                make_field(
+                    "speaker_gate",
+                    "checkbox",
+                    "Speaker Gate",
+                    value=preferences["speaker_gate"],
+                    help=(
+                        "Only your voice reaches the classifier. Other voices stay in "
+                        "the transcript as context. Needs a voiceprint: /voice enroll."
+                    ),
+                ),
+                make_field(
+                    "speaker_threshold",
+                    "spinbox",
+                    "Speaker Threshold",
+                    value=preferences["speaker_threshold"],
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    help=(
+                        "How close to your voiceprint a line must sound (0–1). Higher "
+                        "keeps out more of the TV and more of you."
+                    ),
+                ),
+                make_field(
+                    "voiceprint",
+                    "label",
+                    "Voiceprint",
+                    value=voiceprint_text(state.get("speaker") or {}),
+                    help=(
+                        "Made by /voice enroll from 30 seconds of your speech; no audio "
+                        "is kept. /voice enroll forget deletes it."
+                    ),
+                ),
+            ],
+        },
     ]
+
+
+def voiceprint_text(speaker: dict) -> str:
+    enrollment, saved = speaker.get("enrollment"), speaker.get("voiceprint")
+    if enrollment:
+        return f"Enrolling: {enrollment['seconds']:.0f} of {enrollment['target']:.0f} seconds"
+    if saved:
+        return f"Saved from {saved['seconds']:.0f} seconds of speech"
+    if "voiceprint" not in speaker and (service_root() / "voiceprint.json").exists():
+        return "Saved"  # the voice service is not running to say more
+    return "None yet"
 
 
 class VoicePanel:

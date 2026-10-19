@@ -35,6 +35,14 @@ CONTEXT_MESSAGES = 6  # recent chat messages the classifier reads (three exchang
 PROGRESS_AFTER_S = (8, 17)  # still-working lines while the agent has said nothing
 # A stopped observer tries again on its own, waiting longer each time (seconds).
 OBSERVER_RETRY_S, OBSERVER_RETRY_MAX_S = 5, 120
+# /voice enroll: about 30 seconds read aloud, covering most English sounds.
+ENROLL_PASSAGE = (
+    "On quiet mornings I make coffee, open the window and listen to the birds. "
+    "Then I check my notes, fix whatever broke overnight and plan the day. My "
+    "favorite lunch is a warm bowl of soup with fresh bread. In the evening we "
+    "walk the dog past the park, talk about the weather, and watch the sky turn "
+    "orange, purple and gray before it gets dark."
+)
 
 
 class VoicePlugin(BasePlugin):
@@ -199,6 +207,12 @@ class VoicePlugin(BasePlugin):
             stage = "asking"
         else:
             stage = "listening"
+        speaker = state.get("speaker") or {}
+        enrollment = speaker.get("enrollment")
+        if enrollment and stage != "speaking" and state.get("state") == "listening":
+            stage = f"enrolling {enrollment['seconds']:.0f}/{enrollment['target']:.0f}s"
+        elif time.time() - (speaker.get("saved_at") or 0) < 10:
+            stage = "voiceprint saved"
         level = float(state.get("level") or 0)
         # -60 dBFS (a quiet room) .. -15 dBFS (speech up close) as 0..1.
         loudness = (20 * math.log10(max(level, 1e-6)) + 60) / 45
@@ -275,6 +289,38 @@ class VoicePlugin(BasePlugin):
         self._retry.set()
         self._refresh()
         return f"Voice classifier: {CLASSIFIERS[name]}. Saved for this device; pending speech is preserved."
+
+    async def enroll_voice(self):
+        """Save the user's voiceprint from their next 30 seconds of speech."""
+        if not (self.requested and self._lease and self._client):
+            raise RuntimeError(
+                "Turn voice on first (/voice on), then run /voice enroll"
+            )
+        await self._client.call("speaker_enroll", **self._auth())
+        self._refresh()
+        return (
+            "Voice enrollment: talk for 30 seconds, alone in a quiet room. Read this "
+            "aloud, or say anything:\n\n" + ENROLL_PASSAGE + "\n\nNothing you say "
+            "reaches the agent until it finishes; the status row counts the seconds. "
+            "Only the voiceprint is kept, never the audio. Turn on Speaker Gate in "
+            "/voice config to use it."
+        )
+
+    async def forget_voiceprint(self):
+        """Delete the voiceprint, with or without the voice service running."""
+        from kollabor_voice.client import VoiceClient
+        from kollabor_voice.control import service_root
+
+        try:
+            result = await (self._client or VoiceClient()).call("speaker_forget")
+            forgotten = result["forgotten"]
+        except OSError, TimeoutError, ValueError, RuntimeError:
+            # Not running, or a service from before the speaker gate.
+            path = service_root() / "voiceprint.json"
+            forgotten = path.exists()
+            path.unlink(missing_ok=True)
+        self._refresh()
+        return "Voiceprint deleted" if forgotten else "No voiceprint was saved"
 
     def set_context_lines(self, value):
         from kollabor_voice.classifiers import save_context_lines
@@ -682,6 +728,27 @@ class VoicePlugin(BasePlugin):
                 self._log_classifier(echoes, echo=True)
                 logger.info(
                     "Dropped %d microphone line(s) echoing playback", len(echoes)
+                )
+                continue
+            # The speaker gate heard another voice (the TV, other people), or
+            # the user reading for enrollment: never classified or delivered.
+            # Other voices stay as context for later decisions.
+            gated = [
+                r
+                for r in self._pending
+                if r.get("speaker") in {"other_speaker", "enrolling"}
+            ]
+            if gated:
+                dropped = {r["event_id"] for r in gated}
+                self._pending[:] = [
+                    r for r in self._pending if r["event_id"] not in dropped
+                ]
+                for kind in ("other_speaker", "enrolling"):
+                    lines = [r for r in gated if r["speaker"] == kind]
+                    if lines:
+                        self._log_classifier(lines, **{kind: True})
+                self._remember_transcripts(
+                    [r for r in gated if r["speaker"] == "other_speaker"]
                 )
                 continue
             for record in self._pending:
