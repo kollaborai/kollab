@@ -7,8 +7,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { EngineApi, GemAppearance } from "@/api";
-import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES } from "./gem-face";
+import type { EngineApi, GemAppearance, GemLook } from "@/api";
+import { AURAS, COAT_KNOBS, EYE_STYLES, FUR_STYLES, HAIR_COLORS, HAIR_STYLES, HAT_STYLES, SEASONS, SPARKLES } from "./gem-face";
 import { GEM_CUTS } from "./gem-specs";
 import { lookKey, resolveGemLook, type GemLookVocabulary, type ResolvedGemLook } from "./gem-look";
 
@@ -16,6 +16,15 @@ const everyday = (style: { group: string }) => style.group !== "Halloween" && st
 /** The out-of-season eyes and hats Random Look draws from (the engine's birth roll uses the same). */
 export const EVERYDAY_FACES = EYE_STYLES.filter(everyday).map((style) => style.id);
 export const EVERYDAY_HATS = HAT_STYLES.filter(everyday).map((style) => style.id);
+
+/** Hair or fur for Random Look, at the engine's birth odds (gem_appearance.py HAIR_SHARE, FUR_SHARE). */
+export function randomCoat(): Pick<GemLook, "hair" | "hairColor" | "fur"> {
+  const roll = Math.random();
+  const pick = <T,>(pool: readonly T[]) => pool[Math.floor(Math.random() * pool.length)];
+  if (roll < 0.25) return { hair: pick(HAIR_STYLES).id, hairColor: pick(HAIR_COLORS).rgb, fur: "none" };
+  if (roll < 0.35) return { hair: "none", fur: pick(FUR_STYLES).id };
+  return { hair: "none", fur: "none" };
+}
 
 /** The studio's color swatches; an agent the pool gives no color is born with one. */
 export const GEM_SWATCHES: readonly [number, number, number][] = [

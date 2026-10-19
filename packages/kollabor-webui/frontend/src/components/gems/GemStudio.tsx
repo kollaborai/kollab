@@ -23,6 +23,7 @@ import { GemAvatar } from "./GemAvatar";
 import {
   EVERYDAY_FACES,
   EVERYDAY_HATS,
+  randomCoat,
   GEM_LOOK_VOCABULARY,
   GEM_SWATCHES,
   GemAppearancePreview,
@@ -276,7 +277,7 @@ function StudioBody({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => set({ face: pick(EVERYDAY_FACES), hat: pick(EVERYDAY_HATS) })}
+                  onClick={() => set({ face: pick(EVERYDAY_FACES), hat: pick(EVERYDAY_HATS), ...randomCoat() })}
                   disabled={!current}
                 >
                   <Dices className="size-4" />
