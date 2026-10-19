@@ -4,7 +4,8 @@ name: Binaries
 # publish.yml calls this for every release tag and attaches the binaries to the
 # GitHub Release, where install.sh and /upgrade download them.
 #
-# The full binary/desktop matrix runs only on pushes to main and release tags.
+# The full binary/desktop matrix runs on pushes to main. Release tags use the
+# publish.yml workflow_call below, which keeps each release to one full matrix.
 # Pull requests prove the packaging path with the single ci/binary-smoke job in
 # ci.yml instead -- four macOS/Linux binary builds plus two desktop builds per
 # PR was the dominant CI cost and left the required check waiting on runner
@@ -12,7 +13,6 @@ name: Binaries
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_call:
     inputs:
       version:
