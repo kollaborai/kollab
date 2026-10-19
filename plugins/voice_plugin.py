@@ -1011,14 +1011,30 @@ class VoicePlugin(BasePlugin):
             return answer(heard)
         from kollabor_voice.classifiers import LocalClassifier
 
-        result = await LocalClassifier(self._client, self._auth, "qwen").answer(
+        said, question = (
             " ".join(r["text"] for r in held["records"]),
             held.get("question") or "",
-            heard,
         )
+        result = await LocalClassifier(self._client, self._auth, "qwen").answer(
+            said, question, heard
+        )
+        confidence = round(result["probabilities"][result["answer"]], 3)
         answered.update(
             model=result.get("model", ""),
-            confidence=round(result["probabilities"][result["answer"]], 3),
+            confidence=confidence,
+            # What the model read and said, shown by /voice classifier.
+            trace=[
+                {
+                    "state": {"held": said, "question": question, "reply": heard},
+                    "passes": [
+                        {
+                            "label": "answer",
+                            "choice": result["answer"],
+                            "probability": confidence,
+                        }
+                    ],
+                }
+            ],
         )
         return None if result["answer"] == "other" else result["answer"]
 

@@ -374,6 +374,14 @@ async def test_qwen_reads_the_answer_with_the_held_words_and_the_question(plugin
     assert entry["decision"]["decision"] == "ignore"
     assert entry["decision"]["model"] == "qwen3-0.6b-voice-v1"
     assert entry["decision"]["confidence"] == 0.94
+    # /voice classifier shows what the model read, not the transcript window.
+    (trace,) = entry["decision"]["trace"]
+    assert trace["state"] == {
+        "held": held["text"],
+        "question": question,
+        "reply": "Yeah right, that was the TV.",
+    }
+    assert trace["passes"] == [{"label": "answer", "choice": "no", "probability": 0.94}]
 
 
 @pytest.mark.asyncio
