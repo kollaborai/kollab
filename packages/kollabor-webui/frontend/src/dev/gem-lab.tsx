@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "../styles.css";
 import { GemAvatar } from "@/components/gems/GemAvatar";
 import { GEM_MOTIONS, gemEngine, type GemMotion } from "@/components/gems/gem-engine";
+import { GEM_CUTS, type GemCut } from "@/components/gems/gem-specs";
 import {
   EYE_STYLES,
   HAT_STYLES,
@@ -14,7 +15,7 @@ import {
 } from "@/components/gems/gem-face";
 
 // Dev-only gem studio (vite serves /gem-lab.html; the build only takes
-// index.html): compare eye styles, hats, seasons, motions and activities on the
+// index.html): compare eye styles, hats, shapes, seasons, motions and activities on the
 // pool. Crowd puts the pool four times over at sidebar size, to watch the frame rate.
 const POOL: [string, number[], string][] = [
   ["lapis", [30, 90, 180], "communication"], ["sapphire", [15, 82, 186], "communication"],
@@ -71,6 +72,7 @@ function Lab() {
   const [size, setSize] = useState(96);
   const [activity, setActivity] = useState<Activity>("idle");
   const [hat, setHat] = useState<HatStyle | "auto">("auto");
+  const [cut, setCut] = useState<GemCut | null>(null);
   const [season, setSeason] = useState<Season | "auto">("auto");
   const [face, setFace] = useState<EyeStyle>("disney");
   const [motion, setMotion] = useState<GemMotion | null>(null);
@@ -87,6 +89,7 @@ function Lab() {
           caste={caste}
           face={style}
           hat={hat}
+          cut={cut}
           season={season}
           motion={motion}
           activity={activity === "offline" || activity === "booting" ? null : activity}
@@ -121,6 +124,12 @@ function Lab() {
           <Chip active={motion === null} onClick={() => setMotion(null)}>Born</Chip>
           {GEM_MOTIONS.map((m) => (
             <Chip key={m} active={m === motion} onClick={() => setMotion(m)}>{MOTION_LABELS[m]}</Chip>
+          ))}
+        </Row>
+        <Row label="Shape">
+          <Chip active={cut === null} onClick={() => setCut(null)}>Born</Chip>
+          {GEM_CUTS.map((c) => (
+            <Chip key={c} active={c === cut} onClick={() => setCut(c)}>{c}</Chip>
           ))}
         </Row>
         <Row label="Season">

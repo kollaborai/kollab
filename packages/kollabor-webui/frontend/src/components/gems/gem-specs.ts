@@ -25,7 +25,8 @@ export type GemCut =
   | "hex"
   | "ingot"
   | "octahedron"
-  | "cloud";
+  | "cloud"
+  | "person";
 
 /** How the body takes light (gem-blob.ts paintBody). */
 export type GemMaterial = {
@@ -114,8 +115,8 @@ const CUTS: readonly GemCut[] = [
   "pear", "trillion", "heart", "hopper", "hex", "ingot", "octahedron",
 ];
 
-/** Every shape a user can pick in the studio, in the order it shows them. */
-export const GEM_CUTS: readonly GemCut[] = [...CUTS, "cloud"];
+/** Every shape a user can pick in the studio, in the order it shows them. A person is picked, never drawn from a name. */
+export const GEM_CUTS: readonly GemCut[] = [...CUTS, "cloud", "person"];
 
 /** A gem of the pool: it wears the pool's color, never a born one. */
 export const isPoolGem = (name?: string | null): boolean => Boolean(name && GEMS[name.toLowerCase()]);

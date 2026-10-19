@@ -1,4 +1,4 @@
-import type { AvatarSpec, GemAppearance, GemLook } from "@/api";
+import type { AvatarSpec, GemAppearance, GemLook, LookColor } from "@/api";
 
 /**
  * The ids a saved look may use (gem-face.ts's eye, hat and season styles), and
@@ -10,6 +10,14 @@ export type GemLookVocabulary = {
   seasons: ReadonlySet<string>;
   /** Body shapes (gem-specs.ts GemCut); absent, a picked shape is ignored. */
   cuts?: ReadonlySet<string>;
+  /** Hair and fur styles, "none" among them; absent, a gem's coats are ignored. */
+  hairs?: ReadonlySet<string>;
+  furs?: ReadonlySet<string>;
+  /** Each coat knob's range (gem-face.ts COAT_KNOBS); absent, knob settings are ignored. */
+  knobs?: Readonly<Record<string, readonly [number, number]>>;
+  /** Auras and sparkle amounts; absent, a gem's auras are ignored. */
+  auras?: ReadonlySet<string>;
+  sparkles?: ReadonlySet<string>;
   birthFaces: readonly string[];
   birthHats: readonly string[];
   birthColors: readonly (readonly [number, number, number])[];
@@ -29,6 +37,18 @@ export type ResolvedGemLook = {
   cut?: string;
   /** The avatar the user picked over the roster's. */
   avatar?: AvatarSpec;
+  /** Hair and fur, picked over the born look ("none" takes born hair off), and their colors. */
+  hair?: string;
+  hairColor?: LookColor;
+  fur?: string;
+  furColor?: LookColor;
+  /** The user's settings of their knobs, each held to its range; nothing is born with them. */
+  hairKnobs?: Record<string, number>;
+  furKnobs?: Record<string, number>;
+  /** The user's auras, sparkle amount and aura color; nothing is born with them. */
+  auras?: string[];
+  sparkles?: string;
+  auraColor?: LookColor;
 };
 
 /**
@@ -73,6 +93,20 @@ const isColor = (value: unknown): value is [number, number, number] =>
   Array.isArray(value) &&
   value.length === 3 &&
   value.every((channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255);
+const lookColor = (value: unknown): LookColor | undefined => (value === "gem" || isColor(value) ? value : undefined);
+
+/** Known knobs only, each held to its range. */
+function knobSettings(value: unknown, ranges: Readonly<Record<string, readonly [number, number]>>) {
+  if (!value || typeof value !== "object") return undefined;
+  const kept: Record<string, number> = {};
+  for (const [knob, setting] of Object.entries(value)) {
+    const range = ranges[knob];
+    if (Array.isArray(range) && typeof setting === "number" && Number.isFinite(setting)) {
+      kept[knob] = Math.min(range[1], Math.max(range[0], setting));
+    }
+  }
+  return Object.keys(kept).length ? kept : undefined;
+}
 
 /**
  * One gem's look (`key` from lookKey): the user's Gem Studio picks over the
@@ -108,6 +142,33 @@ export function resolveGemLook(
   if (vocabulary.cuts) {
     const cut = known(own.cut, vocabulary.cuts);
     if (cut) look.cut = cut;
+  }
+  if (vocabulary.hairs) {
+    const hair = known(own.hair, vocabulary.hairs) ?? known(rolled.hair, vocabulary.hairs);
+    const hairColor = lookColor(own.hairColor) ?? lookColor(rolled.hairColor);
+    if (hair) look.hair = hair;
+    if (hairColor) look.hairColor = hairColor;
+  }
+  if (vocabulary.furs) {
+    const fur = known(own.fur, vocabulary.furs) ?? known(rolled.fur, vocabulary.furs);
+    const furColor = lookColor(own.furColor) ?? lookColor(rolled.furColor);
+    if (fur) look.fur = fur;
+    if (furColor) look.furColor = furColor;
+  }
+  if (vocabulary.knobs) {
+    const hairKnobs = knobSettings(own.hairKnobs, vocabulary.knobs);
+    const furKnobs = knobSettings(own.furKnobs, vocabulary.knobs);
+    if (hairKnobs) look.hairKnobs = hairKnobs;
+    if (furKnobs) look.furKnobs = furKnobs;
+  }
+  if (vocabulary.auras) {
+    const valid = vocabulary.auras;
+    const auras = [...new Set((Array.isArray(own.auras) ? own.auras : []).filter((aura) => valid.has(aura)))];
+    const sparkles = known(own.sparkles, vocabulary.sparkles ?? new Set());
+    const auraColor = lookColor(own.auraColor);
+    if (auras.length) look.auras = auras;
+    if (sparkles) look.sparkles = sparkles;
+    if (auraColor) look.auraColor = auraColor;
   }
   return look;
 }

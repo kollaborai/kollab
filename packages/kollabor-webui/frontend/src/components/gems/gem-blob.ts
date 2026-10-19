@@ -147,6 +147,7 @@ export const SHAPES = [
   "hopper",
   "hex",
   "ingot",
+  "person",
 ] as const;
 export type Shape = (typeof SHAPES)[number];
 
@@ -219,9 +220,9 @@ const RAW: Radial[] = [
   ),
   // ingot: a bar, narrower on top.
   polyhedron([[0, -1, 0, 0.52], [0, 1, 0, 0.5], unit(0.94, 0.34, 0, 0.8), unit(-0.94, 0.34, 0, 0.8), unit(0, 0.3, 0.954, 0.62), unit(0, 0.3, -0.954, 0.62)], 9),
+  // person: a head, round over the brow and narrowing to the chin; hair grows from it (gem-fur.ts).
+  halves(0.8, 0.98, 2.1, 1.02, 1.7),
 ];
-
-const at = (shape: Shape) => SHAPES.indexOf(shape);
 
 /** The shape mix each cut rests in, by weight. An egg is a drop rounded out by a ball. */
 const HOME: Record<GemCut, Partial<Record<Shape, number>>> = {
@@ -240,6 +241,7 @@ const HOME: Record<GemCut, Partial<Record<Shape, number>>> = {
   ingot: { ingot: 1 },
   octahedron: { octa: 1 },
   cloud: { cloud: 1 },
+  person: { person: 1 },
 };
 
 /** The weights (one per SHAPES entry) of the shape a cut rests in. */
@@ -248,8 +250,11 @@ export function homeWeights(cut: GemCut): number[] {
   return SHAPES.map((shape) => mix[shape] ?? 0);
 }
 
-/** Height of the face's center on each shape: on a brilliant's girdle, mid-body elsewhere. */
-const FACE_Y = [0, 0.06, 0.04, -0.04, 0.04, 0, -0.04, 0.12, -0.02, -0.02, 0.06, 0, 0.02, 0.02];
+/**
+ * Height of the face's center on each shape: on a brilliant's girdle, a little
+ * under the middle of a person's head (the hair takes the top), mid-body elsewhere.
+ */
+const FACE_Y = [0, 0.06, 0.04, -0.04, 0.04, 0, -0.04, 0.12, -0.02, -0.02, 0.06, 0, 0.02, 0.02, -0.06];
 
 /** The face's height for a shape mix. */
 export function faceHeight(w: ArrayLike<number>): number {
@@ -364,26 +369,24 @@ export function bodyPoint(
 const WEIGHT_VECTORS = Math.ceil(SHAPES.length / 4);
 const WEIGHT_LIST = SHAPES.map((_, i) => `uW${i >> 2}.${"xyzw"[i & 3]}`).join(", ");
 
-const BODY_VERT = /* glsl */ `
+/** The body's surface, shared by its mesh and the coat that grows from it (gem-fur.ts). */
+export const SURFACE_GLSL = /* glsl */ `
 uniform highp sampler2D uShapes;
 ${Array.from({ length: WEIGHT_VECTORS }, (_, i) => `uniform vec4 uW${i};`).join("\n")}
 uniform float uWob;
 uniform float uTime;
 uniform float uShear;
-varying vec3 vN;
-varying vec3 vV;
-varying vec3 vD;
-varying float vY;
-void main() {
+// The body toward d (a unit vector) from the shape tables' row for \`vertex\`:
+// its point and its unnormalized normal, wobbled and sheared.
+void surface(int vertex, vec3 d, out vec3 p, out vec3 n) {
   float w[${SHAPES.length}] = float[${SHAPES.length}](${WEIGHT_LIST});
   vec4 s = vec4(0.0);
   for (int k = 0; k < ${SHAPES.length}; k++) {
     if (w[k] != 0.0) {
-      int i = gl_VertexID * ${SHAPES.length} + k;
+      int i = vertex * ${SHAPES.length} + k;
       s += w[k] * texelFetch(uShapes, ivec2(i % ${SHAPE_ROW}, i / ${SHAPE_ROW}), 0);
     }
   }
-  vec3 d = position;
   float r = s.w;
   vec3 m = s.xyz;
   // Wobble scales the radius by g; the normal picks up g's slope along the surface.
@@ -394,15 +397,58 @@ void main() {
   float g = 1.0 + uWob * 2.4 * sn.x * sn.y * sn.z;
   m = g * m - r * uWob * (grad - dot(grad, d) * d);
   r *= g;
-  vec3 p = d * r;
+  p = d * r;
   p.x += uShear * (p.y + 1.0) * 0.5;
-  vec3 n = vec3(m.x, m.y - 0.5 * uShear * m.x, m.z);
+  n = vec3(m.x, m.y - 0.5 * uShear * m.x, m.z);
+}`;
+
+/** The uniforms SURFACE_GLSL reads. */
+export function surfaceUniforms() {
+  return {
+    uShapes: { value: null },
+    ...Object.fromEntries(Array.from({ length: WEIGHT_VECTORS }, (_, i) => [`uW${i}`, { value: new Vector4() }])),
+    uWob: { value: 0 },
+    uTime: { value: 0 },
+    uShear: { value: 0 },
+  };
+}
+
+const BODY_VERT = /* glsl */ `
+${SURFACE_GLSL}
+varying vec3 vN;
+varying vec3 vV;
+varying vec3 vD;
+varying float vY;
+void main() {
+  vec3 p;
+  vec3 n;
+  surface(gl_VertexID, position, p, n);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   vN = normalize(normalMatrix * n);
   vV = normalize(-mv.xyz);
-  vD = d;
+  vD = position;
   vY = p.y;
   gl_Position = projectionMatrix * mv;
+}`;
+
+/**
+ * Where a coat grows: nowhere (uCoat 0), the head (1) above a hairline over
+ * the brow that drops uBack toward the back, kept to a strip uStrip wide when
+ * that is set, or all over (2).
+ */
+export const COAT_GLSL = /* glsl */ `
+uniform float uCoat;
+uniform float uHairline;
+uniform float uBack;
+uniform float uStrip;
+float coat(vec3 d) {
+  if (uCoat < 0.5) return 0.0;
+  if (uCoat > 1.5) return 1.0;
+  float front = d.z / max(length(d.xz), 1e-3);
+  float line = uHairline - uBack * (1.0 - front);
+  float m = smoothstep(line, line + 0.12, d.y);
+  if (uStrip > 0.0) m *= smoothstep(uStrip, 0.55 * uStrip, abs(d.x));
+  return m;
 }`;
 
 const BODY_FRAG = /* glsl */ `
@@ -418,10 +464,16 @@ uniform float uIris;
 uniform float uFleck;
 uniform vec3 uFleckColor;
 uniform vec3 uSheen;
+// Under hair or fur of a color of their own: their root color (gem-fur.ts dressCoat).
+uniform vec3 uScalp;
+uniform float uScalpMix;
+uniform vec3 uUnderFur;
+uniform float uUnderFurMix;
 varying vec3 vN;
 varying vec3 vV;
 varying vec3 vD;
 varying float vY;
+${COAT_GLSL}
 float hash(vec3 p) {
   return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
 }
@@ -442,6 +494,9 @@ void main() {
     float speck = step(0.78, hash(id)) * smoothstep(0.3, 0.1, length(fract(cell) - 0.5 - 0.3 * jitter));
     base = mix(base, uFleckColor, speck * uFleck);
   }
+  // The body under a coat takes its root color, so no gem shows between the strands.
+  base = mix(base, uUnderFur, uUnderFurMix);
+  base = mix(base, uScalp, uScalpMix * coat(vD));
   vec3 col = base * (0.62 + 0.42 * wrap) * (1.0 - 0.3 * uMetal);
   // Light carried through the body, brightest through the thick middle and on the shadow side.
   col += base * uClear * (0.16 * facing * facing + 0.12 * (1.0 - wrap));
@@ -472,11 +527,7 @@ export function bodyMaterial(): ShaderMaterial {
     vertexShader: BODY_VERT,
     fragmentShader: BODY_FRAG,
     uniforms: {
-      uShapes: { value: null },
-      ...Object.fromEntries(Array.from({ length: WEIGHT_VECTORS }, (_, i) => [`uW${i}`, { value: new Vector4() }])),
-      uWob: { value: 0 },
-      uTime: { value: 0 },
-      uShear: { value: 0 },
+      ...surfaceUniforms(),
       uTop: { value: new Color() },
       uBottom: { value: new Color() },
       uRim: { value: new Color() },
@@ -489,6 +540,14 @@ export function bodyMaterial(): ShaderMaterial {
       uFleck: { value: 0 },
       uFleckColor: { value: new Color() },
       uSheen: { value: new Color(0, 0, 0) },
+      uCoat: { value: 0 },
+      uHairline: { value: 0.4 },
+      uBack: { value: 0 },
+      uStrip: { value: 0 },
+      uScalp: { value: new Color() },
+      uScalpMix: { value: 0 },
+      uUnderFur: { value: new Color() },
+      uUnderFurMix: { value: 0 },
     },
   });
 }

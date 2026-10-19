@@ -102,6 +102,64 @@ export const HAT_STYLES: Option<HatStyle>[] = [
   { id: "elf", label: "Elf", group: "Christmas" },
 ];
 
+/**
+ * Hair and fur grow from the gem in 3D (gem-fur.ts), apart from its hat, which
+ * sits on top. A gem can wear both: fur all over, hair on its head.
+ */
+export type HairStyle = "short" | "long" | "spiky" | "mohawk";
+export type FurStyle = "short" | "shaggy";
+export const HAIR_STYLES: { id: HairStyle; label: string }[] = [
+  { id: "short", label: "Short" },
+  { id: "long", label: "Long" },
+  { id: "spiky", label: "Spiky" },
+  { id: "mohawk", label: "Mohawk" },
+];
+export const FUR_STYLES: { id: FurStyle; label: string }[] = [
+  { id: "short", label: "Short" },
+  { id: "shaggy", label: "Shaggy" },
+];
+/** What a coat's look turns on (gem-fur.ts CoatStyle), set over its style's own; `hair` marks the knobs only hair has. */
+export type CoatKnob = "dark" | "tip" | "length" | "lie" | "sway" | "clump" | "fall" | "bangs" | "gloss" | "hairline" | "back" | "strip";
+export type CoatKnobs = Partial<Record<CoatKnob, number>>;
+export const COAT_KNOBS: { key: CoatKnob; label: string; min: number; max: number; step: number; hair?: true }[] = [
+  { key: "dark", label: "Root Darkness", min: 0, max: 1, step: 0.01 },
+  { key: "tip", label: "Tip Lightness", min: 0, max: 1, step: 0.01 },
+  { key: "length", label: "Length", min: 0.05, max: 0.8, step: 0.01 },
+  { key: "lie", label: "Lie Flat", min: 0, max: 5, step: 0.05 },
+  { key: "sway", label: "Sway", min: 0, max: 1, step: 0.01 },
+  { key: "clump", label: "Clump", min: 0, max: 1, step: 0.01 },
+  { key: "fall", label: "Fall", min: 0, max: 2, step: 0.01 },
+  { key: "bangs", label: "Bangs", min: 0, max: 1, step: 0.01, hair: true },
+  { key: "gloss", label: "Sheen", min: 0, max: 1, step: 0.01 },
+  { key: "hairline", label: "Hairline", min: 0, max: 1, step: 0.01, hair: true },
+  { key: "back", label: "Drop At Back", min: 0, max: 1.2, step: 0.01, hair: true },
+  { key: "strip", label: "Strip Width", min: 0, max: 0.6, step: 0.01, hair: true },
+];
+/** Natural hair shades, darkest first; a gem born with hair wears one (the engine's roll uses the same). */
+export const HAIR_COLORS: { label: string; rgb: [number, number, number] }[] = [
+  { label: "Black", rgb: [30, 26, 24] },
+  { label: "Brown", rgb: [95, 60, 35] },
+  { label: "Auburn", rgb: [150, 60, 35] },
+  { label: "Blonde", rgb: [225, 190, 120] },
+  { label: "Gray", rgb: [170, 170, 175] },
+  { label: "White", rgb: [235, 232, 225] },
+];
+
+/** Auras around a gem (gem-aura.ts), any mix of them, in one aura color. */
+export type Aura = "glow" | "flames" | "orbit";
+export const AURAS: { id: Aura; label: string }[] = [
+  { id: "glow", label: "Glow" },
+  { id: "flames", label: "Flames" },
+  { id: "orbit", label: "Orbit" },
+];
+/** How much a gem sparkles; unpicked, it twinkles as it always has (more when it dances). */
+export type Sparkle = "none" | "few" | "lots";
+export const SPARKLES: { id: Sparkle; label: string }[] = [
+  { id: "none", label: "None" },
+  { id: "few", label: "Few" },
+  { id: "lots", label: "Lots" },
+];
+
 export const SEASONS: Option<Season>[] = [
   { id: "none", label: "None", group: "" },
   { id: "halloween", label: "Halloween", group: "" },

@@ -9,11 +9,16 @@ pointed at this engine shows the same gems::
      "gems": {"lapis": {"face": "disney", "hat": "crown", "color": [30, 90, 180]}}}
 
 ``born`` is the random eyes and hat a gem gets the first time the engine sees
-it alive (``record_births``, from ``GET /agents``). It sticks: nothing rolls it
-again, and the studio's save keeps it from disk whatever the request says.
+it alive (``record_births``, from ``GET /agents``), and for some gems hair in a
+natural color or fur. It sticks: nothing rolls it again, and the studio's save
+keeps it from disk whatever the request says.
 ``gems`` holds the user's picks, drawn over the born look. A pick may also
 carry an ``avatar`` that replaces the roster's for that agent everywhere: a
 gem, initials, an emoji, or a small picture stored inline as a data URL.
+Hair and fur (``hair``, ``fur``) take a color each (``hairColor``,
+``furColor``: three ints, or ``"gem"`` for the body's own) and the user's
+settings of their styles' knobs (``hairKnobs``, ``furKnobs``: numbers by
+knob name); auras (``auras``, ``sparkles``) take one color (``auraColor``).
 
 A name repeats across folders and computers (a koordinator per project), and
 each of those agents dresses on its own. A bare name is the agent in the
@@ -29,6 +34,7 @@ dropped rather than stored.
 
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -51,9 +57,20 @@ MAX_EMOJI = 16
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}(@[^\x00-\x1f\x7f]{1,1024})?$")
 
 # What a gem can be born with: gem-face.ts's EYE_STYLES and HAT_STYLES without
-# the Halloween and Christmas groups (a test keeps the two in step).
+# the Halloween and Christmas groups, its HAIR_STYLES in a HAIR_COLORS shade,
+# and FUR_STYLES in the gem's own color (a test keeps the two in step).
 BIRTH_FACES = ("pill", "dot", "disney", "kawaii", "diamond", "heart", "triclops", "shades", "visor", "googly", "pixel")
 BIRTH_HATS = ("none", "party", "top", "beanie", "crown", "wizard", "cap", "headphones", "hardhat", "beret")
+BIRTH_HAIRS = ("short", "long", "spiky", "mohawk")
+BIRTH_HAIR_COLORS = ((30, 26, 24), (95, 60, 35), (150, 60, 35), (225, 190, 120), (170, 170, 175), (235, 232, 225))
+BIRTH_FURS = ("short", "shaggy")
+# The share of new gems born with hair, and with fur; the rest are born bare.
+HAIR_SHARE = 0.25
+FUR_SHARE = 0.1
+MAX_AURAS = 8
+# A coat's knob settings: how many, and how far out (the web UI holds each to its knob's range).
+MAX_KNOBS = 16
+KNOB_LIMIT = 10.0
 
 
 def appearance_path() -> Path:
@@ -71,6 +88,23 @@ def _color(value: Any) -> Optional[List[int]]:
     if not all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in value):
         return None
     return list(value)
+
+
+def _look_color(value: Any) -> Any:
+    """A coat or aura color: three 0-255 ints, or "gem" for the body's own."""
+    return "gem" if value == "gem" else _color(value)
+
+
+def _knobs(value: Any) -> Optional[Dict[str, float]]:
+    """A coat's knob settings (gem-face.ts COAT_KNOBS): finite numbers by knob name."""
+    if not isinstance(value, dict):
+        return None
+    knobs: Dict[str, float] = {}
+    for name, setting in list(value.items())[:MAX_KNOBS]:
+        number = isinstance(setting, (int, float)) and not isinstance(setting, bool)
+        if _slug(name) and number and math.isfinite(setting):
+            knobs[name] = max(-KNOB_LIMIT, min(KNOB_LIMIT, float(setting)))
+    return knobs or None
 
 
 def _avatar(value: Any) -> Optional[Dict[str, str]]:
@@ -92,10 +126,20 @@ def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     look: Dict[str, Any] = {}
-    for key in ("face", "hat"):
+    for key in ("face", "hat", "hair", "fur"):
         slug = _slug(value.get(key))
         if slug:
             look[key] = slug
+    # A born coat has its color too (hair in a natural shade).
+    for key in ("hairColor", "furColor"):
+        color = _look_color(value.get(key))
+        if color:
+            look[key] = color
+    # The user's settings of a coat's knobs; never born.
+    for key in ("hairKnobs", "furKnobs"):
+        knobs = _knobs(value.get(key)) if allow_color else None
+        if knobs:
+            look[key] = knobs
     # A picked body shape (gem-specs.ts GEM_CUTS); like color, never born.
     cut = _slug(value.get("cut")) if allow_color else None
     if cut:
@@ -107,6 +151,18 @@ def _look(value: Any, allow_color: bool) -> Dict[str, Any]:
     avatar = _avatar(value.get("avatar")) if allow_color else None
     if avatar:
         look["avatar"] = avatar
+    # Auras are the user's picks only.
+    auras = value.get("auras") if allow_color else None
+    if isinstance(auras, list):
+        kept = list(dict.fromkeys(slug for slug in map(_slug, auras[:MAX_AURAS]) if slug))
+        if kept:
+            look["auras"] = kept
+    sparkles = _slug(value.get("sparkles")) if allow_color else None
+    if sparkles:
+        look["sparkles"] = sparkles
+    aura_color = _look_color(value.get("auraColor")) if allow_color else None
+    if aura_color:
+        look["auraColor"] = aura_color
     return look
 
 
@@ -189,7 +245,14 @@ def record_births(names: Iterable[str]) -> None:
     newborn = [name for name in dict.fromkeys(names) if _slug(name) and name not in born]
     newborn = newborn[: max(0, MAX_GEMS - len(born))]
     for name in newborn:
-        born[name] = {"face": random.choice(BIRTH_FACES), "hat": random.choice(BIRTH_HATS)}
+        look: Dict[str, Any] = {"face": random.choice(BIRTH_FACES), "hat": random.choice(BIRTH_HATS)}
+        roll = random.random()
+        if roll < HAIR_SHARE:
+            look["hair"] = random.choice(BIRTH_HAIRS)
+            look["hairColor"] = list(random.choice(BIRTH_HAIR_COLORS))
+        elif roll < HAIR_SHARE + FUR_SHARE:
+            look["fur"] = random.choice(BIRTH_FURS)
+        born[name] = look
     if newborn:
         try:
             _write(doc)

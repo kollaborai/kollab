@@ -132,3 +132,51 @@ test("a picked avatar and a known shape come through; an unknown shape does not"
   // A vocabulary with no shapes ignores a picked one.
   assert.equal(resolveGemLook(appearance, "omar", VOCABULARY).cut, undefined);
 });
+
+test("hair and fur go over the coat a gem was born with, and auras keep only known ids", () => {
+  const vocabulary = {
+    ...VOCABULARY,
+    hairs: new Set(["none", "short", "long"]),
+    furs: new Set(["none", "short"]),
+    auras: new Set(["glow", "orbit"]),
+    sparkles: new Set(["none", "few", "lots"]),
+  };
+  const appearance = {
+    born: { lapis: { hair: "long", hairColor: [95, 60, 35] }, ruby: { fur: "short" } },
+    gems: {
+      lapis: { hair: "short" },
+      ruby: { fur: "none", furColor: "gem" as const, auras: ["glow", "flames", "glow"], sparkles: "lots", auraColor: [1, 2, 3] },
+      opal: { hair: "mullet", hairColor: [300, 0, 0], auras: "glow" as unknown as string[] },
+    },
+  };
+  const lapis = resolveGemLook(appearance, "lapis", vocabulary);
+  // A new style keeps the born shade.
+  assert.equal(lapis.hair, "short");
+  assert.deepEqual(lapis.hairColor, [95, 60, 35]);
+  const ruby = resolveGemLook(appearance, "ruby", vocabulary);
+  assert.equal(ruby.fur, "none", "None takes born fur off");
+  assert.equal(ruby.furColor, "gem");
+  assert.deepEqual(ruby.auras, ["glow"]);
+  assert.equal(ruby.sparkles, "lots");
+  assert.deepEqual(ruby.auraColor, [1, 2, 3]);
+  const opal = resolveGemLook(appearance, "opal", vocabulary);
+  assert.equal(opal.hair, undefined);
+  assert.equal(opal.hairColor, undefined);
+  assert.equal(opal.auras, undefined);
+});
+
+test("knob settings keep known knobs only, each held to its range, and are never born", () => {
+  const vocabulary = { ...VOCABULARY, knobs: { length: [0.05, 0.8], lie: [0, 5] } as const };
+  const appearance = {
+    born: { lapis: { hairKnobs: { length: 0.5 } } },
+    gems: {
+      lapis: { hairKnobs: { length: 2, lie: 1.5, sway: 0.3, constructor: 1 }, furKnobs: { lie: Number.NaN } },
+      ruby: { furKnobs: { length: 0.01 } },
+    },
+  };
+  const lapis = resolveGemLook(appearance, "lapis", vocabulary);
+  assert.deepEqual(lapis.hairKnobs, { length: 0.8, lie: 1.5 });
+  assert.equal(lapis.furKnobs, undefined);
+  assert.deepEqual(resolveGemLook(appearance, "ruby", vocabulary).furKnobs, { length: 0.05 });
+  assert.equal(resolveGemLook({ born: appearance.born }, "lapis", vocabulary).hairKnobs, undefined);
+});

@@ -5,6 +5,15 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.8] - 2026-10-18
+
+### Added
+- Web: gems can grow hair or fur. Properties and the Gem Studio have a Hair tab: Short, Long, Spiky or Mohawk hair on the head and Short or Shaggy fur all over, alone or together, each in the gem's own color, a natural shade or any color you pick. They are thousands of 3D strands that sway as the gem moves and still read as a coat in the sidebar. Every knob of a style (length, how flat it lies, fall, clump, sway, bangs, hairline, sheen and the rest) can be set for each gem. A hat sits snug on the head over the hair: one that covers the crown presses it flat and the rest hangs from under the band. Some gems are born with hair or fur, and a Person shape gives hair a head to grow on.
+- Web: an Aura tab dresses a gem in a glow, flames, orbiting orbs and sparkles, mixed as you like, in one color you pick. Auras are quiet while the agent idles, stronger while it works and gone while it is offline. Sparkles moved here, and can now be turned off or up.
+
+### Fixed
+- Web: a shape picked in the Gem Studio shows on its gem right away.
+
 ## [0.16.7] - 2026-10-18
 
 ### Added
