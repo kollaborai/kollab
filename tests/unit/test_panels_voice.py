@@ -183,6 +183,7 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     from kollabor_voice import speech_settings
 
     state, plugin, root = voice
+    monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)
     panel = await VoicePanel().describe(state, {})
     fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
     engine = fields["stt_engine"]
@@ -199,10 +200,15 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     assert "Transcription Engine: Whisper Base" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
 
     monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
+    # Elsewhere Parakeet is not offered, and saving it anyway is refused.
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    assert fields["stt_engine"]["options"] == ["whisper"]
+    assert fields["stt_engine"]["help"] == "Local speech recognition with Whisper Base."
     refused = await VoicePanel().act(
         state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
     )
-    assert not refused["ok"] and "Apple silicon" in refused["errors"]["stt_engine"]
+    assert not refused["ok"] and "stt_engine" in refused["errors"]
     assert not (root / "preferences.json").exists()
 
     monkeypatch.setattr(speech_settings, "apple_silicon", lambda: True)

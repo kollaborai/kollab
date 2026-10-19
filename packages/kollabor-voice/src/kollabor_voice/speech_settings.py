@@ -24,6 +24,11 @@ def apple_silicon():
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
+def available_stt_engines():
+    """The transcription engines this machine can run: Parakeet only on Apple silicon."""
+    return {k: v for k, v in STT_ENGINES.items() if k != "parakeet" or apple_silicon()}
+
+
 KOKORO_VOICES = (
     "af_alloy",
     "af_aoede",

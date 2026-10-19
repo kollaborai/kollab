@@ -16,6 +16,7 @@ from kollabor_voice.speech_settings import (
     KOKORO_VOICES,
     STT_ENGINES,
     TTS_ENGINES,
+    available_stt_engines,
     speech_errors,
 )
 
@@ -44,6 +45,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
     speech = state.get("speech", {})
     transcription = state.get("transcription", {})
     classifiers = available_classifiers()
+    engines = available_stt_engines()
     return [
         {
             "id": "preferences",
@@ -98,12 +100,14 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "dropdown",
                     "Transcription Engine",
                     value=preferences["stt_engine"],
-                    options=list(STT_ENGINES),
-                    option_labels=STT_ENGINES,
+                    options=list(engines),
+                    option_labels=engines,
                     help=(
                         "Local speech recognition. Parakeet v3 needs an Apple silicon "
                         "Mac and downloads 2.5 GB once; Whisper Base transcribes "
                         "until it is ready."
+                        if "parakeet" in engines
+                        else "Local speech recognition with Whisper Base."
                     ),
                 ),
                 make_field(

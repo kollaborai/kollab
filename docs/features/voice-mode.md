@@ -425,8 +425,8 @@ SHA-256 matches the manifest.
 Open `/voice config` (terminal) or Settings → Voice (web), choose Transcription
 Engine and save for this device. **Whisper Base** is the default. **Parakeet v3**
 is NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, the `mlx-community` MLX conversion)
-running on the GPU through `parakeet-mlx`; it needs an Apple silicon Mac and the
-setting refuses it elsewhere. The choice applies without restarting voice.
+running on the GPU through `parakeet-mlx`; it needs an Apple silicon Mac and is
+not offered elsewhere. The choice applies without restarting voice.
 
 Selecting Parakeet installs its own pinned runtime into `~/.kollab/voice/runtimes/`
 and downloads 2.5 GB of weights once, at a pinned revision checked against the
