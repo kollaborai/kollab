@@ -229,3 +229,66 @@ accents beyond these four voices, languages other than English.
 ```sh
 PYTHONPATH=src ~/.kollab/voice/runtimes/<voice runtime>/bin/python bench/stt_bench.py --clips /tmp/stt-clips --idle 30,120,300
 ```
+
+## Fine-tuned Qwen3-0.6B
+
+`qwen-voice-results.json` comes from `qwen_voice.py`. One LoRA adapter on
+Qwen3-0.6B (Apache-2.0, pinned revision) makes all three voice decisions, each
+as a single constrained token: intent (`respond`/`ignore`), the reply to "was
+that for me?" (`yes`/`no`/`other`) and spoken style (`say`/`rewrite`). It is
+trained on this folder's synthetic fixtures plus generated echo and talk-over
+cases, with no household speech. The real test is private household microphone
+speech kept outside the repository (101 intent groups from one day, 12 replies
+to the question, 119 spoken updates); only aggregates are recorded.
+
+On the real day, under the runtime policy (0.8 threshold), MLX 8-bit against
+the shipped Laya policy:
+
+| Measure | Qwen | Laya |
+| --- | --- | --- |
+| Intent, argmax correct | 79/101 | 47/101 |
+| Intent, right / wrong / deferred | 70 / 18 / 13 | 45 / 20 / 36 |
+| Answers, synthetic heldout | 59/60 | 44/60 (regex) |
+| Style, right / wrong / deferred | 71 / 22 / 26 | 65 / 21 / 33 |
+| Intent latency p50 / p95 | 96 / 118 ms | 102 / 130 ms |
+| Peak memory footprint | 1.75 GB | 3.87 GB |
+| Download | 645 MB | 846 MB |
+
+Synthetic intent: 40/40 acceptance and all eight echo regressions decided
+automatically and correctly (Laya 37/40; 3 automatic, 5 deferred). Qwen's 18
+real errors are 12 false wakes (mostly room or TV fragments) and 6 misses (3
+"can you hear me?" checks, 3 questions mixed into echo of its own reply);
+Laya's are mostly misses (15). Style has no clear winner: both over-reject plain
+spoken updates. 8-bit matches fp16; 4-bit loses 5 correct real intent decisions
+and 2 real answers. Also fitting on the private real days gave 79→82 argmax and
+18→13 errors: a lever for a local per-user fine-tune, never a published model.
+
+Recommendation: ship it on Apple Silicon for all three decisions, as MLX 8-bit
+through `mlx==0.32.4` (already pinned for Parakeet), `mlx-metal==0.32.4`,
+`mlx-lm==0.32.2`, `transformers==5.20.1`, `tokenizers==0.23.3` and
+`numpy==2.5.4`, with the MLX buffer cache capped (uncapped it reached 15 GB).
+Keep Laya on other platforms until the same weights are measured through the
+existing torch runtime on Linux CPU (on MPS: p50 104 ms, 2.7 GB). GGUF Q8_0
+through llama.cpp was fastest (p50 87 ms, 0.59 GB), but llama-cpp-python 0.3.36
+has no wheel for this Mac and compiled from source.
+
+Distribution: one Hugging Face model repo holds `mlx-8bit/`, the adapter and a
+model card with the exact prompts; `manifest.json` pins its revision and every
+file's size and SHA-256 like the Laya bundle. A GitHub Release on the kollab
+repo carries the same files as a mirror; the downloader tries Hugging Face first
+and accepts mirror bytes only when size and SHA-256 match. Nothing is uploaded
+or wired into the runtime yet.
+
+Not proven: one test day, and 92 of the 101 real intent labels are the author's
+annotations (9 are the user's own answers to "was that for me?"); recent chat
+for real cases is reconstructed; latency comes from a machine shared with live
+agents and a VM.
+
+```sh
+python bench/qwen_voice.py train --playback --out ADAPTER
+python -m mlx_lm fuse --model ~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca --adapter-path ADAPTER --save-path FUSED
+python -m mlx_lm convert --hf-path FUSED --mlx-path FUSED-8bit -q --q-bits 8 --q-group-size 64
+python bench/qwen_voice.py score mlx --model FUSED-8bit --out /tmp/qwen.json
+python bench/qwen_voice.py score laya --model ~/.kollab/voice/models/laya/1c5edc17a7acd8701df6fc341c0d179f1c62c982 --out /tmp/laya.json
+python bench/qwen_voice.py report /tmp/qwen.json /tmp/laya.json
+```
