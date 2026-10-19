@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from kollabor_voice.classifiers import CLASSIFIERS
+from kollabor_voice.classifiers import CLASSIFIERS, available_classifiers
 
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
@@ -305,9 +305,10 @@ class VoiceClassifierAltView(AltView):
 
     def _render_footer(self, width: int, height: int, theme: Any) -> None:
         assert self.renderer is not None
-        name = getattr(self.plugin, "classifier_name", "") or "none"
+        name = getattr(self.plugin, "classifier_name", "")
         hints = (
-            f" Classifier: {name} (/voice classifier laya|provider)"
+            f" Classifier: {CLASSIFIERS.get(name, 'none')}"
+            f" (/voice classifier {'|'.join(available_classifiers())})"
             " · Tab: switch · Up/Down: move · q/Esc: close"
         )
         self.renderer.write_at(0, height - 2, solid_fg(str(C["half_bottom"]) * width, theme.dark[1]), "")

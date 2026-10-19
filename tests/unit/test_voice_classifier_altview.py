@@ -90,7 +90,7 @@ async def test_events_left_and_what_laya_saw_and_said_right():
         "words alone    respond  0.99",
         "unsure (defer) · confidence 0.71 · voice-intent-v1 · 0.38s",
         '"Yes, I can hear you."',
-        "Classifier: laya",
+        "Classifier: Laya (/voice classifier laya|",
     ):
         assert text in right + left, text
 

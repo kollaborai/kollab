@@ -1,6 +1,6 @@
 {
   "name": "voice classifier qwen",
-  "description": "On an Apple silicon Mac, /voice config offers Fine-Tuned Qwen3 0.6B beside Laya (the default); selecting it saves it for this device without starting the microphone or the voice service, and /voice status names it",
+  "description": "On an Apple silicon Mac, /voice config offers Fine-Tuned Qwen3 0.6B beside Laya (the default); selecting it saves it for this device without starting the microphone or the voice service, and /voice status names it; the /voice classifier log names it in its footer",
   "config": {
     "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 3,
@@ -128,6 +128,23 @@
       "action": "wait_for",
       "pattern": "Classifier: Fine-Tuned Qwen3 0.6B · off · worker not running",
       "timeout": 8
+    },
+    {
+      "action": "section",
+      "title": "The decision log names the saved classifier"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "classifier"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Classifier: Fine-Tuned Qwen3 0.6B \\(/voice classifier laya\\|qwen\\|provider\\)",
+      "timeout": 8
+    },
+    {
+      "action": "escape"
     }
   ]
 }

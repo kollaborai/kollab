@@ -29,8 +29,18 @@ own voice service and its workers were left running untouched):
 - A Spanish line was deferred as not English. The plugin's status check passed
   on the new service and, against the user's running older service, reported
   that it predates Fine-Tuned Qwen3 0.6B and must be restarted.
-- Not exercised live: microphone speech into the qwen path, switching back to
-  Laya inside one service (unit-tested), Linux.
+- Real microphone, from a Ghostty-owned tmux session (it has microphone
+  permission) running this checkout's TUI in a throwaway HOME with a fake
+  model, lines played with `say`: "Can you check whether the build passed?"
+  was sent (respond 1.00); a TV line was ignored; a Spanish line was held and
+  voice asked "Sorry, was that for me?"; "Yes, it was.", said over the
+  question, was read by the model as yes (0.99) and the held line reached the
+  agent. A reply given after the 12-second window was judged on its own, as
+  designed.
+- Not exercised live: switching back to Laya inside one service (unit-tested),
+  Linux.
+- Seen in the same run, not caused by this change: after a voice turn the TUI
+  leaves the previous input box and status rows on screen; typed turns clear.
 
 Voice-package and unit voice tests, the full unit suite (7196 passed) and the
 tmux specs `voice-classifier-qwen.json`, `voice-transcription-engine.json`,
