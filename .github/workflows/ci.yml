@@ -45,6 +45,14 @@ jobs:
       - name: Run unit tests
         run: uv run python -m pytest tests/unit/ -q
 
+      # The voice package runs on its own 3.12/3.13 runtime and needs numpy,
+      # which the workspace venv lacks, so tests/unit never collected it.
+      - name: Run voice package tests
+        run: >-
+          uv run --no-project --python 3.12 --with numpy==2.5.3
+          --with pytest --with pytest-asyncio
+          python -m pytest packages/kollabor-voice/tests -q
+
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 
