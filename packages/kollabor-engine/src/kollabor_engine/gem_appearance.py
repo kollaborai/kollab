@@ -230,6 +230,16 @@ def save_appearance(doc: Any) -> Dict[str, Any]:
     return clean
 
 
+def _birth_coat() -> Dict[str, Any]:
+    """Hair, fur or neither; "none" records that the coat was rolled and came up bare."""
+    roll = random.random()
+    if roll < HAIR_SHARE:
+        return {"hair": random.choice(BIRTH_HAIRS), "hairColor": list(random.choice(BIRTH_HAIR_COLORS))}
+    if roll < HAIR_SHARE + FUR_SHARE:
+        return {"fur": random.choice(BIRTH_FURS)}
+    return {"hair": "none"}
+
+
 def record_births(names: Iterable[str]) -> None:
     """Give each gem in ``names`` without a born look a random one, for good.
 
@@ -245,15 +255,12 @@ def record_births(names: Iterable[str]) -> None:
     newborn = [name for name in dict.fromkeys(names) if _slug(name) and name not in born]
     newborn = newborn[: max(0, MAX_GEMS - len(born))]
     for name in newborn:
-        look: Dict[str, Any] = {"face": random.choice(BIRTH_FACES), "hat": random.choice(BIRTH_HATS)}
-        roll = random.random()
-        if roll < HAIR_SHARE:
-            look["hair"] = random.choice(BIRTH_HAIRS)
-            look["hairColor"] = list(random.choice(BIRTH_HAIR_COLORS))
-        elif roll < HAIR_SHARE + FUR_SHARE:
-            look["fur"] = random.choice(BIRTH_FURS)
-        born[name] = look
-    if newborn:
+        born[name] = {"face": random.choice(BIRTH_FACES), "hat": random.choice(BIRTH_HATS), **_birth_coat()}
+    # A gem born before hair existed has no coat key at all: it gets its coat roll once.
+    unrolled = [name for name, look in born.items() if "hair" not in look and "fur" not in look]
+    for name in unrolled:
+        born[name].update(_birth_coat())
+    if newborn or unrolled:
         try:
             _write(doc)
         except OSError as exc:
