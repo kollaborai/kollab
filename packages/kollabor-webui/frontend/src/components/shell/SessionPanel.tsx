@@ -481,14 +481,14 @@ export function SessionPanel({
       <span className="sr-only" role={statusError ? "alert" : "status"}>{status || (session.acp_waiting ? "Waiting for Approval" : "")}</span>
       {isMobile ? (
         <Sheet open={sheetOpen} onOpenChange={onSheetOpenChange}>
-          <SheetContent side="right" className="w-72 max-w-[85vw] gap-0 overflow-y-auto p-4 pt-10">
+          <SheetContent side="right" className="bg-sidebar top-2 right-2 bottom-auto h-auto max-h-[calc(100%-1rem)] w-72 max-w-[85vw] gap-0 overflow-y-auto rounded-xl p-4 pt-10 shadow-lg">
             <SheetTitle className="sr-only">Session Controls</SheetTitle>
             <SheetDescription className="sr-only">{sessionLabel}</SheetDescription>
             {body(null)}
           </SheetContent>
         </Sheet>
       ) : open ? (
-        <aside aria-label="Session Controls" className="bg-background flex w-60 shrink-0 flex-col overflow-y-auto border-l p-3">
+        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-60 shrink-0 flex-col self-start overflow-y-auto rounded-xl p-3 shadow-lg">
           {body(
             <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
               <PanelRightClose className="size-4" />
@@ -496,7 +496,7 @@ export function SessionPanel({
           )}
         </aside>
       ) : (
-        <aside aria-label="Session Controls" className="bg-background flex w-10 shrink-0 flex-col items-center gap-1 border-l py-2">
+        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-10 shrink-0 flex-col items-center gap-1 self-start overflow-y-auto rounded-xl py-2 shadow-lg">
           <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>
             {statusError ? <CircleAlert className="text-destructive size-4" /> : <PanelRightOpen className="size-4" />}
           </TooltipIconButton>
