@@ -1630,13 +1630,22 @@ def render_session(width: int, ctx: Optional[WidgetContext]) -> str:
                     conversation_manager, "current_session_id", "unknown"
                 )
 
-        # Strip timestamp prefix if present (format: YYMMDDHHMM-name-name)
-        # Session names are like "2601231430-quantum-spark"
+        # Strip timestamp prefix if present (format: YYMMDDHHMM-name-name-token)
+        # Session names are like "2601231430-quantum-spark-7k2x"; drop the
+        # timestamp and the trailing uniqueness token, keep the words.
         if "-" in session_name and session_name[0].isdigit():
             parts = session_name.split("-", 1)
             if len(parts) == 2 and len(parts[0]) == 10 and parts[0].isdigit():
                 # Has timestamp prefix, remove it for display
                 display_name = parts[1]
+                words = display_name.rsplit("-", 1)
+                if (
+                    len(words) == 2
+                    and len(words[1]) == 4
+                    and words[1][0].isdigit()
+                    and words[1].isalnum()
+                ):
+                    display_name = words[0]
             else:
                 display_name = session_name
         else:

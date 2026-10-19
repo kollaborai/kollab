@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Kollab needs Python 3.14 or later. CI no longer tests 3.12. The voice service keeps its own Python 3.12 or 3.13 runtime for its speech models.
 
+### Fixed
+- Two sessions started in the same minute could draw the same id, and resuming or branching one then overwrote the other's saved transcript. Session ids now end in a short random token (2610180756-quantum-spark-7k2x); the status bar, /resume, the conversation browsers and the web UI still show only the two words.
+
 ## [0.16.8] - 2026-10-18
 
 ### Added

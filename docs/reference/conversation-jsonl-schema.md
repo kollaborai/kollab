@@ -17,8 +17,13 @@ leading slash. Example:
   /Users/example/dev/kollab -> Users_example_dev_kollab
 
 File naming:
-  {YYMMDDHHMM}-{name}.jsonl       (current format)
-  session_{YYYYMMDD_HHMMSS}.jsonl  (legacy format)
+  {YYMMDDHHMM}-{name}-{token}.jsonl  (current format, e.g. 2604201816-omega-wave-3k9d)
+  {YYMMDDHHMM}-{name}.jsonl          (before the token)
+  session_{YYYYMMDD_HHMMSS}.jsonl     (legacy format)
+
+{name} is two words; {token} is four characters, a digit then three
+lowercase letters or digits, so two sessions started in the same minute
+never share a file. Lists and the status bar show only {name}.
 
 Each file is one session. One JSON object per line. Lines are appended
 in chronological order.

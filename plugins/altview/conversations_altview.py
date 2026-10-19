@@ -7,6 +7,7 @@ Two-pane layout: sessions list on left, message preview on right.
 import logging
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.session_naming import strip_session_decorations
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
 from kollabor_tui.key_parser import KeyPress
@@ -384,11 +385,9 @@ class ConversationsAltView(AltView):
 
     def _get_display_name(self, session_id: str) -> str:
         """Extract display name from session ID."""
-        if "-" in session_id:
-            parts = session_id.split("-", 1)
-            if len(parts) > 1:
-                return parts[1]
-            return session_id
+        stripped = strip_session_decorations(session_id)
+        if stripped != session_id:
+            return stripped
         elif session_id.startswith("session_"):
             return session_id[8:]
         return session_id

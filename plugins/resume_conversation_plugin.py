@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from kollabor_ai.session_naming import strip_session_decorations
 from kollabor_events.data_models import (
     ConversationMetadata,
 )
@@ -485,9 +486,7 @@ class ResumeConversationPlugin:
             # Extract session name
             session_name = ""
             if conv.session_id and "-" in conv.session_id:
-                parts = conv.session_id.split("-", 1)
-                if len(parts) > 1:
-                    session_name = parts[1]
+                session_name = strip_session_decorations(conv.session_id)
 
             # Clean subtitle with session name
             subtitle_parts = []
@@ -573,8 +572,8 @@ class ResumeConversationPlugin:
             assert self.conversation_manager is not None
             messages = self.conversation_manager.get_session_messages(session_id)
             # Format title - extract readable part from session_id (e.g., "2512301235-shadow-rise" -> "shadow-rise")
-            parts = session_id.split("-", 1)
-            title_text = parts[1] if len(parts) > 1 else session_id[:12]
+            stripped = strip_session_decorations(session_id)
+            title_text = stripped if stripped != session_id else session_id[:12]
 
         if not messages:
             return CommandResult(
@@ -1271,9 +1270,7 @@ class ResumeConversationPlugin:
             # Extract session name from session_id (e.g., "2601241708-wolf-blade" -> "wolf-blade")
             session_name = ""
             if conv.session_id and "-" in conv.session_id:
-                parts = conv.session_id.split("-", 1)
-                if len(parts) > 1:
-                    session_name = parts[1]
+                session_name = strip_session_decorations(conv.session_id)
 
             # Cleaner subtitle format with session name
             subtitle_parts = []
@@ -1377,9 +1374,7 @@ class ResumeConversationPlugin:
             # Extract session name
             session_name = ""
             if conv.session_id and "-" in conv.session_id:
-                parts = conv.session_id.split("-", 1)
-                if len(parts) > 1:
-                    session_name = parts[1]
+                session_name = strip_session_decorations(conv.session_id)
 
             # Relevance score if available
             relevance_text = (
@@ -1491,9 +1486,7 @@ class ResumeConversationPlugin:
             # Extract session name
             session_name = ""
             if conv.session_id and "-" in conv.session_id:
-                parts = conv.session_id.split("-", 1)
-                if len(parts) > 1:
-                    session_name = parts[1]
+                session_name = strip_session_decorations(conv.session_id)
 
             # Clean subtitle with session name
             subtitle_parts = []
