@@ -36,10 +36,9 @@ kollabor_agent/
 │   ├── task.py                   (148 lines)  task_checkpoint/complete/approve/reject
 │   ├── context.py                (125 lines)  context_query, curate, evict
 │   └── git.py                    (52 lines)   git operations
-├── tool_generators/              (3 files)    Schema/doc generators
+├── tool_generators/              (2 files)    Schema/doc generators
 │   ├── markdown.py               (154 lines)  ToolDefinition -> markdown docs
-│   ├── xml_regex.py              (71 lines)   ToolDefinition -> XML regex pattern
-│   └── native_json.py            (70 lines)   ToolDefinition -> JSON schema
+│   └── xml_regex.py              (71 lines)   ToolDefinition -> XML regex pattern
 ├── file_operations_executor.py   (1471 lines) Safe file ops with backups/validation
 ├── shell_executor.py             (365 lines)  Async shell command execution
 ├── shell_command_service.py      (409 lines)  !-prefix shell command service
@@ -69,11 +68,10 @@ The tool system has four layers:
    Modules in `tool_definitions/` auto-register on import via `register_all()`.
    Supports lookup by name, native_name (underscore form), or XML tag.
 
-3. **ToolGenerators** (`tool_generators/`) — Generate three artifacts from
+3. **ToolGenerators** (`tool_generators/`) — Generate two artifacts from
    each ToolDefinition:
    - `markdown.py` — Markdown docs injected into agent system prompts
    - `xml_regex.py` — Regex pattern for parsing XML tool tags in LLM responses
-   - `native_json.py` — JSON schema for native API function calling
 
 4. **ToolExecutor** (`tool_executor.py`) — Unified dispatch engine. Routes
    tool calls to the correct handler:
