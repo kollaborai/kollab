@@ -1548,7 +1548,7 @@ class TerminalLLMChat:
                 hub_plugins = [
                     plugin
                     for plugin in self.plugin_instances.values()
-                    if hasattr(plugin, "wait_until_ready")
+                    if hasattr(plugin, "wait_until_ready") and getattr(plugin, "enabled", True)
                 ]
                 for hub_plugin in {
                     id(plugin): plugin for plugin in hub_plugins

@@ -48,3 +48,26 @@ async def test_active_profile_reports_the_harness_model():
     assert state._acp_harness_model() == "sonnet"
     acp.active = False
     assert state._acp_harness_model() == ""
+
+
+@pytest.mark.asyncio
+async def test_picked_harness_model_is_restored_at_start(tmp_path):
+    options = [{"id": "model", "category": "model", "type": "select", "currentValue": "haiku",
+                "options": [{"value": "haiku"}, {"value": "sonnet"}]}]
+
+    class Runner:
+        def advertised_config_options(self):
+            return [dict(o) for o in options]
+
+        async def set_config_option(self, config_id, value):
+            options[0]["currentValue"] = value
+            return self.advertised_config_options()
+
+    orchestrator = ACPOrchestrator.__new__(ACPOrchestrator)
+    orchestrator._runner, orchestrator._closed = Runner(), False
+    orchestrator._profile_name = "claude-code"
+    orchestrator._options_path = tmp_path / "options.json"
+    await orchestrator.set_config_option("model", "sonnet")
+    options[0]["currentValue"] = "haiku"  # a restarted harness is back on its default
+    await orchestrator._restore_options(SimpleNamespace(name="claude-code", model=""))
+    assert options[0]["currentValue"] == "sonnet"
