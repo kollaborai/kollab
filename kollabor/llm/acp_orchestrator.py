@@ -73,6 +73,10 @@ class ACPOrchestrator:
         self._user_history_tasks: dict[str, asyncio.Task] = {}
         self._observed_turns: dict[tuple[str, int], _ObservedTurn] = {}
         self._display_turn: tuple[str, int] | None = None
+        # Voice data of a mic turn, by request id, until its reply is spoken.
+        self.voice_turns: dict[str, dict[str, Any]] = {}
+        # Voice epochs whose rules already went to the harness.
+        self.voice_rules_epochs: set[Any] = set()
         from pathlib import Path
         from kollabor_config.config_utils import get_project_data_dir
         self._bindings = ACPBindingStore(Path(get_project_data_dir()) / "acp" / "sessions")
@@ -536,6 +540,21 @@ class ACPOrchestrator:
         sys.stderr.buffer.write(b"[acp] " + chunk)
         sys.stderr.buffer.flush()
 
+    def _speak_reply(self, voice: dict[str, Any], text: str) -> None:
+        """Hand a mic turn's reply to voice, as the native pipeline does."""
+        from kollabor_ai.response_channels import split_response_channels
+
+        display_text, spoken_text = split_response_channels(text)
+        if not display_text.strip() and not spoken_text:
+            return
+        task = asyncio.create_task(self.event_bus.emit_with_hooks(
+            "voice_response_ready",
+            {"voice": voice, "display_text": display_text, "spoken_text": spoken_text},
+            "llm_service",
+        ), name="acp-voice-reply")
+        self._delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_tasks.discard)
+
     def _on_runner_update(self, update: dict[str, Any]) -> None:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
         key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
@@ -569,7 +588,15 @@ class ACPOrchestrator:
                 display.hide_loading()
                 display.end_streaming_response()
                 if observed is not None:
-                    display.display_complete_response(thinking_duration=0, response=observed.text)
+                    from kollabor_ai.response_channels import display_response_text
+
+                    display.display_complete_response(
+                        thinking_duration=0, response=display_response_text(observed.text)
+                    )
+        if kind == "turn_finished" and observed is not None:
+            voice = self.voice_turns.pop(key[0], None)
+            if voice is not None:
+                self._speak_reply(voice, observed.text)
             elif kind == "agent_thought_chunk" and key == self._display_turn:
                 display.show_loading(str((payload.get("content") or {}).get("text") or "Harness is thinking")[:120])
         if kind in {"tool_call", "tool_call_update"}:

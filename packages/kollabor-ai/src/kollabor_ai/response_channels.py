@@ -75,6 +75,11 @@ def protect_response_channels(text, restore, *, partial=False):
 
 def display_response_text(text, *, partial=False):
     """Visible response for replay or streaming; preserve literal code examples."""
+    return split_response_channels(text, partial=partial)[0]
+
+
+def split_response_channels(text, *, partial=False):
+    """(visible text, spoken text or None) of a whole reply; code is never narration."""
     restore = {}
 
     def code(match):
@@ -83,10 +88,10 @@ def display_response_text(text, *, partial=False):
         return key
 
     masked = re.sub(r"```.*?(?:```|$)|`[^`\n]*(?:`|$)", code, text, flags=re.S)
-    visible, _ = protect_response_channels(masked, restore, partial=partial)
+    visible, spoken = protect_response_channels(masked, restore, partial=partial)
     for key, original in restore.items():
         visible = visible.replace(key, original)
-    return visible
+    return visible, spoken
 
 
 def display_stream_text(text):
