@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { bundleName, titleCase } from "./panel-model";
+import { VersionsSection } from "./VersionsSection";
 
 /**
  * The Session tab: profile / model / effort overrides for this daemon only.
@@ -232,6 +233,7 @@ export function SessionSettings({
             </span>
           )}
         </div>
+        <VersionsSection api={api} />
       </div>
       <footer className="bg-muted/30 flex shrink-0 flex-col gap-2 px-4 py-3 sm:px-6">
         {message ? (
