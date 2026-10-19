@@ -98,6 +98,11 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install uv (desktop_release.py stages the runtime with uvx)
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
       - name: Test Apple signing helper and documented build commands
         run: python desktop/tests/test_apple_signing.py
 
@@ -184,6 +189,11 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
             libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf \
             xvfb xauth dbus-x11 xdotool
+
+      - name: Install uv (desktop_release.py stages the runtime with uvx)
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
 
       - uses: actions/download-artifact@v8
         with:
