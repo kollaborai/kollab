@@ -160,7 +160,7 @@ def test_a_voice_turn_shows_what_the_user_said():
     from kollabor_voice.observer import voice_preamble
 
     first = {"event_ids": ["a"], "transcript_context": [{"text": "earlier ] line"}]}
-    later = {"event_ids": ["b"], "uncertain_event_ids": ["b"]}
+    later = {"event_ids": ["b"], "spoken_ack": "One moment."}
     history = [
         _message("user", voice_preamble(first, False) + "Hello, can you hear me?", {"voice": first}),
         _message("user", voice_preamble(later, True) + "Are you there?", {"voice": later}),

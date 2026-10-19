@@ -35,7 +35,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("on", "Start listening in this chat"),
                         ("off", "Stop voice in this chat"),
                         ("status", "Show service, microphone and transcript status"),
-                        ("retry", "Retry setup or pending speech"),
+                        ("retry", "Retry now; voice also retries on its own"),
                         ("config", "Configure voice in the terminal or web UI"),
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
@@ -157,7 +157,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 "pending": state.get("pending", 0),
                 "classifier_name": state.get("classifier_name", "laya"),
             }
-        except (OSError, TimeoutError, ValueError):
+        except OSError, TimeoutError, ValueError:
             pass
         last = state.get("last_transcript") or {}
         output = state.get("output") or {}

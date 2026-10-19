@@ -521,6 +521,7 @@ async def test_classifier_command_lists_and_validates_choices(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_uncertain_background_does_not_block_the_next_user_request():
+    from kollabor_voice.acks import LINES
     from kollabor_voice.store import utc
 
     plugin = VoicePlugin(event_bus=FakeBus(), config={})
@@ -552,22 +553,75 @@ async def test_uncertain_background_does_not_block_the_next_user_request():
 
     async def deliver(data):
         delivered.append(data)
-        if len(delivered) == 1:
-            plugin._pending.append(request)
-        else:
-            plugin.requested = False
+        plugin.requested = False
         return {"status": "queued"}
 
     plugin.observe_records = observe
     plugin._deliver = deliver
     task = asyncio.create_task(plugin._observe_loop())
-    await asyncio.wait_for(task, 1)
+    async with asyncio.timeout(1):
+        # Unsure about the background: the classifier asks instead of sending it.
+        while not plugin._clarifying:
+            await asyncio.sleep(0.01)
+        plugin._pending.append(request)
+        await task
     assert plugin._observer_error is None
-    assert delivered[0]["message"] == background["text"]
-    assert delivered[0]["voice"]["uncertain_event_ids"] == ["background"]
-    assert delivered[1]["message"] == request["text"]
-    assert delivered[1]["voice"]["uncertain_event_ids"] == []
+    [sent] = delivered
+    assert sent["message"] == request["text"]
+    assert sent["voice"]["spoken_ack"] in LINES["question"]
+    assert plugin._clarifying is None
     assert plugin.status()["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_late_heartbeat_renews_routing_after_a_daemon_stall():
+    daemon = VoicePlugin(event_bus=FakeBus(), config={})
+    await daemon._remote_bind({"epoch": "e", "client_id": "c"})
+    daemon._remote_binding["heartbeat"] -= 10  # this daemon's loop was busy
+    assert await daemon._remote_heartbeat({"epoch": "e"}) == {"alive": True}
+    daemon._check_remote({"epoch": "e"})  # routing works again
+    with pytest.raises(RuntimeError, match="expired"):
+        await daemon._remote_heartbeat({"epoch": "another window"})
+
+
+@pytest.mark.asyncio
+async def test_routing_rides_out_timeouts_and_binds_again_when_refused(monkeypatch):
+    from kollabor_rpc import RpcTimeoutError
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.requested = True
+    plugin._lease = {"epoch": "e"}
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    calls = []
+
+    async def call(method, params, timeout=None):
+        calls.append(method)
+        if len(calls) == 1:
+            raise RpcTimeoutError("busy daemon")
+        if len(calls) == 2:
+            assert plugin._observer_error is None, "a timeout never stops routing"
+            raise RuntimeError("Remote voice lease expired")
+        if method == "voice.bind":
+            assert plugin._observer_error.startswith("AI connection lost; reconnecting")
+            return {"bound": True, "names": ["Kollab", "aquamarine"]}
+        plugin.requested = False
+        return {"alive": True}
+
+    await asyncio.wait_for(plugin._keep_remote_alive(SimpleNamespace(call=call)), 2)
+    assert calls == [
+        "voice.heartbeat",
+        "voice.heartbeat",
+        "voice.bind",
+        "voice.heartbeat",
+    ]
+    assert plugin._routing_error is None and plugin._observer_error is None
+    assert plugin._retry.is_set()
+    assert plugin._agent_names == ["Kollab", "aquamarine"]
 
 
 def test_microphone_core_widget_registration_and_absent_service():
@@ -588,13 +642,42 @@ def test_microphone_widget_renders_live_listening_and_last_heard():
     from kollabor_tui.status.core_widgets import WidgetContext, render_microphone
 
     bus = FakeBus()
-    bus.register_service("voice_plugin", SimpleNamespace(status=lambda: {
-        "state": "listening",
-        "last_transcript": {"text": "check the microphone"},
-    }))
+    bus.register_service(
+        "voice_plugin",
+        SimpleNamespace(
+            status=lambda: {
+                "state": "listening",
+                "last_transcript": {"text": "check the microphone"},
+            }
+        ),
+    )
     rendered = render_microphone(40, WidgetContext(event_bus=bus))
     assert "mic listening" in rendered
     assert "check the microphone" in rendered
+
+
+def test_microphone_widget_shows_the_level_stage_and_spoken_line():
+    from kollabor_tui.status.core_widgets import WidgetContext, render_microphone
+    from kollabor_tui.status.utils import strip_ansi
+
+    activity = {"stage": "hearing", "level": 0.5, "said": None}
+    bus = FakeBus()
+    bus.register_service(
+        "voice_plugin",
+        SimpleNamespace(
+            status=lambda: {
+                "state": "listening",
+                "activity": activity,
+                "last_transcript": {"text": "check the tests"},
+            }
+        ),
+    )
+    ctx = WidgetContext(event_bus=bus)
+    assert "mic ▃▅▁ hearing: check the tests" in strip_ansi(render_microphone(80, ctx))
+    activity.update(stage="speaking", level=0.0, said="One moment.")
+    rendered = strip_ansi(render_microphone(80, ctx))
+    assert "mic ▁▁▁ speaking · said: One moment." in rendered
+    assert "check the tests" not in rendered
 
 
 def test_microphone_widget_renders_off_state():
@@ -787,9 +870,9 @@ async def test_first_bind_timeout_retries_and_never_kills_the_voice_client(
                 await asyncio.sleep(0.01)
             return True
 
-        assert await wait_for(lambda: timeouts["n"] == 2), (
-            f"bind must retry exactly once (saw {timeouts['n']})"
-        )
+        assert await wait_for(
+            lambda: timeouts["n"] == 2
+        ), f"bind must retry exactly once (saw {timeouts['n']})"
 
         assert not stopped, f"voice client died: {stopped}"
         assert plugin.requested is True, "a bind timeout must never flip requested off"
@@ -865,13 +948,13 @@ async def test_bind_outage_after_retries_keeps_voice_local_only(tmp_path_factory
                 await asyncio.sleep(0.01)
             return True
 
-        assert await wait_until(lambda: calls["bind"] >= 3), (
-            f"bind attempts seen: {calls['bind']}"
-        )
+        assert await wait_until(
+            lambda: calls["bind"] >= 3
+        ), f"bind attempts seen: {calls['bind']}"
         # The ladder ends with a final backoff sleep before surfacing the error.
-        assert await wait_until(lambda: plugin._routing_error is not None), (
-            "terminal routing error must surface after the last retry"
-        )
+        assert await wait_until(
+            lambda: plugin._routing_error is not None
+        ), "terminal routing error must surface after the last retry"
     finally:
         client_module.VoiceClient = real_cls
 
@@ -883,3 +966,150 @@ async def test_bind_outage_after_retries_keeps_voice_local_only(tmp_path_factory
 
     plugin.requested = False
     await asyncio.gather(asyncio.wait_for(task, 1), return_exceptions=True)
+
+
+class DyingClient:
+    """A voice service that fails as soon as voice starts."""
+
+    attempts = 0
+    error = RuntimeError("voice service died")
+
+    async def ensure(self, update):
+        type(self).attempts += 1
+        raise type(self).error
+
+    async def call(self, *args, **kwargs):
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_voice_client_starts_again_on_its_own(monkeypatch, tmp_path):
+    import kollabor_voice.client
+
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.setattr(kollabor_voice.client, "VoiceClient", DyingClient)
+    DyingClient.attempts, DyingClient.error = 0, RuntimeError("voice service died")
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin._restart_delay = 0.01
+    await plugin.start_voice()
+    async with asyncio.timeout(2):
+        while DyingClient.attempts < 3:
+            await asyncio.sleep(0.01)
+    assert plugin.requested
+    assert "restarting in" in plugin._state["detail"]
+    assert plugin._restart_delay > 0.02  # waits longer each time
+    await plugin.stop_voice()
+    assert not plugin.requested
+
+
+@pytest.mark.asyncio
+async def test_voice_stays_off_when_another_chat_takes_the_microphone(
+    monkeypatch, tmp_path
+):
+    import kollabor_voice.client
+    from kollabor_voice.control import VoiceError
+
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.setattr(kollabor_voice.client, "VoiceClient", DyingClient)
+    DyingClient.attempts = 0
+    DyingClient.error = VoiceError("superseded", "Voice moved to another chat")
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin._restart_delay = 0.01
+    await plugin.start_voice()
+    await asyncio.wait_for(plugin._controller, 2)
+    await asyncio.sleep(0.05)
+    assert DyingClient.attempts == 1
+    assert not plugin.requested and plugin._state["state"] == "active_elsewhere"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_speech_engine_is_prepared_again_on_start(monkeypatch, tmp_path):
+    import kollabor_voice.client
+
+    calls = []
+
+    class BrokenSpeech:
+        """The speech engine failed while the rest of the service is fine."""
+
+        async def ensure(self, update):
+            return {"state": "off", "speech": {"state": "error", "detail": "stopped"}}
+
+        async def call(self, op, **kwargs):
+            calls.append(op)
+            return {}
+
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.setattr(kollabor_voice.client, "VoiceClient", BrokenSpeech)
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    await plugin.start_voice()
+    async with asyncio.timeout(2):
+        while not calls:
+            await asyncio.sleep(0.01)
+    # Prepared again first, not restarted forever on the same error.
+    assert calls[0] == "retry"
+    await plugin.stop_voice()
+
+
+def test_classifier_context_reads_the_last_three_exchanges():
+    bus = FakeBus()
+    roles = ["user", "assistant"] * 5
+    history = [
+        SimpleNamespace(role=r, content=f"message {i}") for i, r in enumerate(roles)
+    ]
+    bus.register_service("llm_service", SimpleNamespace(conversation_history=history))
+    context = VoicePlugin(event_bus=bus, config={})._conversation_context()
+    assert context.splitlines() == [f"{roles[i]}: message {i}" for i in range(4, 10)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answered", [True, False])
+async def test_no_still_working_lines_after_voice_answered_itself(
+    answered, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.validate_turn = AsyncMock()
+    plugin._watch_progress = lambda voice: setattr(plugin, "watched", voice)
+    voice = {
+        "admission_id": "id",
+        "epoch": "epoch",
+        "spoken_ack": "Yes, I can hear you.",
+    }
+    voice["answered"] = answered
+    data = {"message": "Can you hear me?", "voice": voice}
+    await plugin.admit(data, AsyncMock(return_value={"status": "queued"}))
+    assert hasattr(plugin, "watched") is not answered
+    await plugin.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_voice_service_is_waited_for_not_a_stop():
+    from kollabor_voice.control import VoiceError
+
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.requested = True
+    late = TimeoutError("voice service did not answer 'status' within 2s")
+    plugin._client = SimpleNamespace(
+        call=AsyncMock(side_effect=[late, late, {"ok": 1}])
+    )
+    assert await plugin._patient_call("status") == {"ok": 1}
+    plugin._client.call = AsyncMock(side_effect=[late] * 4)
+    with pytest.raises(TimeoutError):
+        await plugin._patient_call("status")
+    refused = VoiceError("lease_expired", "Voice connection expired")
+    plugin._client.call = AsyncMock(side_effect=[refused, {"ok": 1}])
+    with pytest.raises(VoiceError):
+        await plugin._patient_call("heartbeat")
+    assert plugin._client.call.await_count == 1
+
+
+@pytest.mark.parametrize("service_state", ["off", "loading", "installing", "starting"])
+def test_voice_reads_starting_until_the_microphone_is_live(service_state):
+    plugin = VoicePlugin(event_bus=FakeBus(), config={})
+    plugin.requested = True
+    plugin._state = {"state": service_state}
+    assert plugin.status()["state"] == "starting"
+    assert plugin.status()["activity"]["stage"] == "starting"
+    plugin.requested = False
+    plugin._state = {"state": "off"}
+    assert plugin.status()["state"] == "off"

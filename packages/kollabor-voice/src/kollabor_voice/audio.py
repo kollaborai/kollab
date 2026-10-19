@@ -147,14 +147,20 @@ class LocalModels:
         for _ in segments:
             pass
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, names=()):
+        # Whisper spells names it was primed with: "Aquamarine", not "Awkwamari".
+        others = [n for n in names if n.lower() != "kollab"]
         segments, info = self.whisper.transcribe(
             audio,
             beam_size=1,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             condition_on_previous_text=False,
-            initial_prompt="Kollab is the assistant's name.",
+            initial_prompt=(
+                f"The assistant is called {', '.join(others)}, or Kollab."
+                if others
+                else "Kollab is the assistant's name."
+            ),
             temperature=0,
         )
         # Whisper can hallucinate repetitions on a tiny trailing fragment at the

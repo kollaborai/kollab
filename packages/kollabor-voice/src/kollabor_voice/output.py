@@ -2,6 +2,7 @@
 
 Synthesis runs ahead of playback: while one sentence plays, the next is
 already being generated, and each sentence plays from its first chunk.
+Voice's own fixed lines replay from speech_cache instead of being synthesized.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from collections import deque
 from pathlib import Path
 
 from .control import VoiceError
+from .speech_cache import SpeechCache
 from .store import repair_tail
 
 # Audio held back beyond the computed lead, for synthesis jitter.
@@ -64,6 +66,7 @@ class SpeechQueue:
         # seconds per second of speech (above 1 is slower than real time).
         self.word_s, self.rtf = 0.4, 1.25
         self.run_ids, self.last_interval = set(), None  # ids the current lead covers
+        self.cache = SpeechCache(root)
         self.receipt_path = root / "speech.jsonl"
         # Crashed speech is never replayed. Finalize its durable receipt instead.
         if self.receipt_path.exists():
@@ -207,6 +210,14 @@ class SpeechQueue:
             await asyncio.to_thread(self._synthesize, item, chunks)
 
     def _synthesize(self, item, chunks):
+        key = self.cache.key(item["producer_id"], item["sentence"])
+        cached = key and self.cache.load(key)
+        if cached:
+            # One stored chunk and no synthesis, so rtf and word_s stay as learned.
+            chunks.put(cached)
+            chunks.put(None)
+            return
+        kept = []
         audio = iter(self.stream(item["sentence"]))
         started, produced = time.monotonic(), 0.0
         try:
@@ -214,6 +225,8 @@ class SpeechQueue:
                 if item["cancelled"].is_set():
                     break
                 chunks.put(chunk)
+                if key:
+                    kept.append(chunk)
                 produced += len(chunk[0]) / chunk[1]
             else:
                 if produced:
@@ -221,6 +234,8 @@ class SpeechQueue:
                     elapsed = time.monotonic() - started
                     self.rtf = 0.7 * self.rtf + 0.3 * elapsed / produced
                     self.word_s = 0.7 * self.word_s + 0.3 * produced / words
+                    if key:  # whole sentences only, never a cancelled part
+                        self.cache.store(key, kept)
             chunks.put(None)
         except Exception as exc:
             chunks.put(exc)

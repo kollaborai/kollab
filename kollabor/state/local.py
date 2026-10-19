@@ -1016,12 +1016,17 @@ class LocalStateService(StateService):
                     logger.debug(f"plugin_registry count error: {e}")
 
         voice_requested = voice_running = False
+        voice_activity = {}
         if self._event_bus is not None:
             try:
                 voice_plugin = self._event_bus.get_service("voice_plugin")
                 voice = voice_plugin.status() if voice_plugin is not None else {}
                 voice_requested = bool(voice.get("requested"))
                 voice_running = bool(voice.get("running"))
+                voice_activity = dict(voice.get("activity") or {})
+                transcript = voice.get("last_transcript") or {}
+                if voice_requested and transcript.get("text"):
+                    voice_activity["heard"] = transcript["text"]
             except Exception as e:
                 logger.debug(f"voice status error: {e}")
 
@@ -1043,6 +1048,7 @@ class LocalStateService(StateService):
             plugin_count=plugin_count,
             voice_requested=voice_requested,
             voice_running=voice_running,
+            voice_activity=voice_activity,
             startup_state=startup_state,
             startup_error=startup_error,
         )

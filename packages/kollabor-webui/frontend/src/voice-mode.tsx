@@ -11,15 +11,36 @@ import {
 } from "react";
 import type { EngineApi } from "./api";
 
+/** VoicePlugin._activity, polled while voice is on. */
+export type VoiceActivity = {
+  /** listening, hearing, transcribing, deciding, asking, speaking, or the service state. */
+  stage?: string;
+  /** Microphone loudness, 0..1. */
+  level?: number;
+  /** A line the classifier just said itself ("One moment."). */
+  said?: string | null;
+  /** The last line the microphone heard. */
+  heard?: string;
+};
+
 export type VoiceMode = {
   /** A /voice command is in flight; the mic holds still until it settles. */
   pending: boolean;
   /** The last /voice on reported success and no later off did. */
   on: boolean;
   toggle: () => void;
+  activity: VoiceActivity | null;
 };
 
-const IDLE: VoiceMode = { pending: false, on: false, toggle: () => undefined };
+const IDLE: VoiceMode = {
+  pending: false,
+  on: false,
+  toggle: () => undefined,
+  activity: null,
+};
+
+/** How often the composer reads the voice stage while voice is on. */
+const ACTIVITY_POLL_MS = 600;
 
 const VoiceModeContext = createContext<VoiceMode>(IDLE);
 
@@ -33,10 +54,12 @@ export const useVoiceMode = () => useContext(VoiceModeContext);
  * The mic's state is the daemon's own: `voice_requested` from
  * VoicePlugin.status(), carried in the session state's system snapshot. It is
  * read on mount (so a reload, or voice mode started from the terminal, shows
- * the real state) and again once each toggle's run ends. The reply's
+ * the real state), again once each toggle's run ends, and every
+ * ACTIVITY_POLL_MS while voice is on, with `voice_activity`, so the composer
+ * shows that the microphone hears and what voice is doing. The reply's
  * `command_success` in history is the fallback for a daemon that predates the
- * field. ponytail: no polling, so a voice service that fails later shows at
- * the next mount or toggle; poll the state route if that matters.
+ * field. ponytail: voice started from the terminal shows at the next mount or
+ * toggle, since nothing polls while the mic is off.
  */
 export function VoiceModeProvider({
   api,
@@ -51,6 +74,7 @@ export function VoiceModeProvider({
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const [on, setOn] = useState(false);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
+  const [activity, setActivity] = useState<VoiceActivity | null>(null);
   const sawRun = useRef(false);
 
   /** The daemon's voice_requested, or undefined when it cannot say. */
@@ -120,6 +144,34 @@ export function VoiceModeProvider({
     };
   }, [api, isRunning, pending, readRequested, sessionId]);
 
+  // While voice is on, follow the service: a stopped service or /voice off from
+  // the terminal turns the mic off here too.
+  useEffect(() => {
+    if (!on) {
+      setActivity(null);
+      return;
+    }
+    let cancelled = false;
+    let timer = 0;
+    const poll = async () => {
+      let system: Record<string, unknown> | null | undefined;
+      try {
+        system = (await api.getSessionState(sessionId)).system;
+      } catch {
+        system = undefined;
+      }
+      if (cancelled) return;
+      setActivity((system?.voice_activity as VoiceActivity | undefined) ?? null);
+      if (system?.voice_requested === false && !pending) setOn(false);
+      timer = window.setTimeout(poll, ACTIVITY_POLL_MS);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, on, pending, sessionId]);
+
   // A command whose run never started must not leave the mic stuck.
   useEffect(() => {
     if (!pending) return;
@@ -128,8 +180,8 @@ export function VoiceModeProvider({
   }, [pending]);
 
   const value = useMemo(
-    () => ({ pending: pending !== null, on, toggle }),
-    [on, pending, toggle],
+    () => ({ pending: pending !== null, on, toggle, activity }),
+    [activity, on, pending, toggle],
   );
   return (
     <VoiceModeContext.Provider value={value}>

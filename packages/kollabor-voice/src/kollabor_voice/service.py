@@ -28,6 +28,7 @@ from .control import (
     service_root,
     socket_path,
 )
+from .observer import is_playback_echo, strip_playback
 from .store import TranscriptLog, utc
 
 log = logging.getLogger(__name__)
@@ -178,7 +179,7 @@ class VoiceService:
         except Exception as exc:
             log.exception("Voice setup failed")
             self.error = str(exc)
-            self.progress(state="error", detail=f"{exc}. Run /voice retry")
+            self.progress(state="error", detail=str(exc))
 
     def authorize(self, token, epoch):
         if (
@@ -186,7 +187,7 @@ class VoiceService:
             or time.monotonic() - self.owner["heartbeat"] >= LEASE_SECONDS
         ):
             raise VoiceError(
-                "lease_expired", "Voice connection expired; run /voice retry"
+                "lease_expired", "Voice connection expired"
             )
         if token != self.owner["token"] or epoch != self.owner["epoch"]:
             raise VoiceError(
@@ -324,6 +325,10 @@ class VoiceService:
             request["producer_id"] = delegated["producer_id"]
         else:
             self.authorize(request.get("token"), request.get("epoch"))
+        if op == "hint":
+            # The owner's agent names prime transcription for its lease.
+            self.owner["names"] = [str(n)[:40] for n in request.get("names", [])][:8]
+            return {"names": self.owner["names"]}
         if op == "delegate":
             if len(self.delegates) >= 128:
                 raise VoiceError("queue_full", "Voice delegation limit reached")
@@ -652,7 +657,7 @@ class VoiceService:
                         ):
                             self.worker_failures.add(task.get_name())
                             raise RuntimeError(
-                                f"{task.get_name()} stopped: {task.exception()}. Run /voice retry"
+                                f"{task.get_name()} stopped: {task.exception()}"
                             )
                     if (
                         self.owner
@@ -704,7 +709,9 @@ class VoiceService:
             try:
                 self.transcribing = True
                 text, language = await asyncio.to_thread(
-                    self.models.transcribe, segment.audio
+                    self.models.transcribe,
+                    segment.audio,
+                    (self.owner or {}).get("names", ()),
                 )
                 if text:
                     overlap = (
@@ -727,8 +734,12 @@ class VoiceService:
                             "playback_overlap": overlap,
                         }
                     )
-                    if self.owner and self.owner["epoch"] == epoch:
-                        self.last_transcript = record
+                    # Heard is what a person said: the mic picking up voice's
+                    # own playback is not shown, and talking over it shows
+                    # only the person's words.
+                    own = "" if is_playback_echo(record) else strip_playback(record)
+                    if own and self.owner and self.owner["epoch"] == epoch:
+                        self.last_transcript = {**record, "text": own}
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

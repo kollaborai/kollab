@@ -227,7 +227,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor._execute_llm_turn = AsyncMock(return_value="parent")
         voice = {
             "epoch": "epoch", "reply_id": "reply",
-            "uncertain_event_ids": ["heard"],
+            "spoken_ack": "Let me check on that.",
             "playback_context": ["Should I run the tests?"],
         }
         self.loop.run_until_complete(self.processor.process_message_batch(
@@ -236,7 +236,7 @@ class TestQueueProcessor(unittest.TestCase):
         message = self.add_message_fn.call_args.args[0]
         self.assertEqual(message.metadata["voice"], voice)
         self.assertIn("Voice instructions", message.content)
-        self.assertIn("classifier is unsure", message.content)
+        self.assertIn('[you already said: "Let me check on that."]', message.content)
         self.assertIn("one period (.) with no tools", message.content)
         self.assertIn("Should I run the tests?", message.content)
         self.assertEqual(self.processor.active_voice, voice)
@@ -251,7 +251,7 @@ class TestQueueProcessor(unittest.TestCase):
         )
 
         def say(text, **voice):
-            voice = {"epoch": "e1", "uncertain_event_ids": [], **voice}
+            voice = {"epoch": "e1", **voice}
             self.loop.run_until_complete(self.processor.process_message_batch(
                 [QueuedInput(text, voice)], "parent"
             ))
@@ -265,8 +265,9 @@ class TestQueueProcessor(unittest.TestCase):
             "[voice mode on: the user said this aloud]\nRun the tests",
         )
         self.assertEqual(
-            say("hmm", uncertain_event_ids=["x"]),
-            "[voice mode on: the user said this aloud] [intent unsure]\nhmm",
+            say("Check the build", spoken_ack="On it."),
+            '[voice mode on: the user said this aloud] [you already said: "On it."]'
+            "\nCheck the build",
         )
         # a new voice session, or rules that compaction dropped, send them again
         self.assertIn("<display_text>", say("Hi again", epoch="e2"))

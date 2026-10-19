@@ -332,8 +332,8 @@ Voice Listening · MacBook Pro Microphone · mic [|||..]
 Voice Listening · transcribing · 1 segment waiting
 Heard 14:03:22 · "Can you check the failing test?"
 Voice Listening · speaking · 2 sentences queued
-Voice Error · microphone unavailable · /voice retry
-Voice Disconnected · service heartbeat lost · /voice retry
+Voice Starting · microphone unavailable · restarting in 5s
+Voice Starting · service heartbeat lost · restarting in 10s
 Voice Off
 ```
 

@@ -16,7 +16,7 @@ from kollabor_voice.classifiers import (
     save_context_lines,
 )
 from kollabor_voice.control import VoiceError
-from kollabor_voice.observer import parse_decision, voice_instructions
+from kollabor_voice.observer import parse_decision, voice_preamble
 from kollabor_voice.store import utc
 
 from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
@@ -52,7 +52,7 @@ async def test_ignored_lines_reach_later_decisions_and_main_agent_without_replay
 ):
     tv = record(1, "I'm watching TV. That is background noise.")
     hello = record(2, "Hello.")
-    request = record(3, "Kollab, check the tests.")
+    request = record(3, "Can you check the tests?")
     observed, delivered = [], []
     plugin.classifier_name = "provider"
     plugin.requested = True
@@ -84,7 +84,7 @@ async def test_ignored_lines_reach_later_decisions_and_main_agent_without_replay
     assert delivered[0]["message"] == request["text"]
     assert delivered[0]["voice"]["event_ids"] == [request["event_id"]]
     assert delivered[0]["voice"]["transcript_context"] == [tv, hello]
-    assert tv["text"] in voice_instructions(delivered[0]["voice"])
+    assert tv["text"] in voice_preamble(delivered[0]["voice"], True)
     assert plugin._recent_transcripts == [tv, hello, request]
 
 
@@ -111,7 +111,7 @@ async def test_same_batch_ignored_notice_reaches_main_agent_as_history(
 ):
     older = record(1, "The television is on.")
     tv = record(2, "That is background noise.")
-    hello = record(3, "Hello, can you hear me?")
+    hello = record(3, "Hello, can you check the build?")
     later = record(4, "The program continues.")
     delivered = []
     plugin.classifier_name = provider
@@ -145,14 +145,18 @@ async def test_same_batch_ignored_notice_reaches_main_agent_as_history(
     plugin._client.call = call
     plugin._observe_with_provider = AsyncMock(return_value=[hello])
     plugin._deliver = deliver
+    task = asyncio.create_task(plugin._observe_loop())
     async with asyncio.timeout(2):
-        await plugin._observe_loop()
+        if provider == "laya":
+            # Laya is unsure: the classifier asks, and a yes sends the speech.
+            while not plugin._clarifying:
+                await asyncio.sleep(0.01)
+            plugin._pending.append(record(5, "Yes."))
+        await task
     assert delivered[0]["message"] == hello["text"]
     assert delivered[0]["voice"]["event_ids"] == ["3"]
     assert delivered[0]["voice"]["transcript_context"] == [older, tv]
-    assert later["text"] not in voice_instructions(delivered[0]["voice"])
-    if provider == "laya":
-        assert delivered[0]["voice"]["uncertain_event_ids"] == ["3"]
+    assert later["text"] not in voice_preamble(delivered[0]["voice"], True)
 
 
 @pytest.mark.asyncio
@@ -299,12 +303,17 @@ def _laya_agent(with_history, alone):
     """Fake Laya head: (choice, probability) for the pass with history, and without."""
 
     def classify(state, _):
-        has_history = bool(state.get("recent_transcripts") or state["recent_conversation"])
+        has_history = bool(
+            state.get("recent_transcripts") or state["recent_conversation"]
+        )
         choice, p = with_history if has_history else alone
         other = "respond" if choice == "ignore" else "ignore"
         return {
             "answers": {
-                "response": {"choice": choice, "probabilities": {choice: p, other: 1 - p}}
+                "response": {
+                    "choice": choice,
+                    "probabilities": {choice: p, other: 1 - p},
+                }
             }
         }
 
@@ -324,6 +333,8 @@ def _laya_agent(with_history, alone):
         (("respond", 0.607), ("ignore", 0.998), "ignore"),  # background chatter
         (("ignore", 0.607), ("ignore", 0.998), "ignore"),
         (("respond", 0.99), ("ignore", 0.6), "respond"),  # history is the sure one
+        # history surely ignores words that lean respond alone: ask the human
+        (("ignore", 0.91), ("respond", 0.72), "defer"),  # "Tell me what you're..."
         # no pass is sure, or the sure ones split: the agent decides
         (("ignore", 0.71), ("respond", 0.6), "defer"),
         (("ignore", 0.99), ("respond", 0.99), "defer"),
@@ -367,7 +378,10 @@ def _heard(text, *spoken):
         ("yes i can hear you", ["Yes, I can hear you."]),
         ("I can hear you", ["Yes, I can hear you."]),  # a chunk of the reply
         ("Yes I can here you", ["Yes, I can hear you."]),  # one transcription slip
-        ("Yes, I can hear you. Anything else?", ["Yes, I can hear you.", "Anything else?"]),
+        (
+            "Yes, I can hear you. Anything else?",
+            ["Yes, I can hear you.", "Anything else?"],
+        ),
         ("Okay.", ["Okay."]),
         ("I'll handle it here.", ["I’ll handle it here."]),  # curly apostrophe
     ],
@@ -440,3 +454,21 @@ def test_decision_traces_what_laya_read_and_each_pass():
         {"label": "with context", "choice": "ignore", "probability": 0.71},
         {"label": "words alone", "choice": "respond", "probability": 0.99},
     ]
+
+
+def test_talking_over_playback_keeps_only_the_human_words():
+    from kollabor_voice.observer import strip_playback
+
+    overlap = [{"text": "Bear with me, still looking into it.", "reply_id": "r"}]
+    record = {
+        "text": "Bear with me still looking into- Hello, can you hear me?",
+        "playback_overlap": overlap,
+    }
+    assert strip_playback(record) == "Hello, can you hear me?"
+    # Two shared words are not an echo run: "can hear" stays the human's.
+    mine = {
+        "text": "Can you hear me?",
+        "playback_overlap": [{"text": "I can hear you."}],
+    }
+    assert strip_playback(mine) == "Can you hear me?"
+    assert strip_playback({"text": "Run the tests."}) == "Run the tests."

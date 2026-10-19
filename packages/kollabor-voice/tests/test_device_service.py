@@ -76,7 +76,7 @@ class Models:
     def warmup(self):
         pass
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, names=()):
         return "Kollab, check the tests.", "en"
 
     def synthesize(self, text):
@@ -196,6 +196,25 @@ async def test_expired_owner_stops_without_promoting_another_client(service, roo
     assert (await client.call("status"))["state"] == "off"
     with pytest.raises(VoiceError):
         await client.call("heartbeat", **auth(lease))
+
+
+@pytest.mark.asyncio
+async def test_heard_shows_only_what_a_person_said(service, root):
+    client = VoiceClient(root)
+    await claim(client)
+    playback = "Bear with me, still looking into it."
+    service.output.overlap = lambda start, end: [{"reply_id": "r", "text": playback}]
+    now = time.time()
+
+    async def hear(text):
+        service.models.transcribe = lambda audio, names=(): (text, "en")
+        service.submit(AudioSegment(np.ones(16000, np.float32), now - 1, now))
+        await service.segments.join()
+        return (await client.call("status"))["last_transcript"]
+
+    assert await hear(playback) is None  # voice's own speech is not shown
+    talk_over = await hear("Bear with me still looking into it. Can you hear me?")
+    assert talk_over["text"] == "Can you hear me?"
 
 
 @pytest.mark.asyncio

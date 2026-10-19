@@ -134,14 +134,14 @@ class VibeVoiceWorker:
     def _receive(self, identity, timeout):
         if not select.select([self.process.stdout], [], [], timeout)[0]:
             self.close()
-            raise TimeoutError("VibeVoice inference timed out; use /voice retry")
+            raise TimeoutError("VibeVoice inference timed out")
         line = self.process.stdout.readline(16 * 1024 * 1024)
         if not line.endswith(b"\n"):
             raise RuntimeError("VibeVoice worker stopped or returned excessive audio")
         response = json.loads(line)
         if response.get("id") != identity:
             self.close()
-            raise RuntimeError("VibeVoice response identity differs; use /voice retry")
+            raise RuntimeError("VibeVoice response identity differs")
         return response
 
     def close(self):
@@ -165,7 +165,7 @@ class SpeechEngine:
         state = dict(self.state)
         if self.worker and self.worker.process.poll() is not None:
             state.update(
-                state="error", detail="VibeVoice worker stopped; use /voice retry"
+                state="error", detail="VibeVoice worker stopped"
             )
         return state
 
@@ -216,7 +216,11 @@ class SpeechEngine:
     def stream(self, text):
         """Yield (samples, rate) chunks; VibeVoice yields while it generates."""
         with self.lock:
-            self.configure()
+            # A failed engine (timed out, worker died) starts again here, on the
+            # next sentence, instead of failing every sentence after it.
+            # ponytail: a crash-looping engine pays its load per sentence; add a
+            # backoff if that shows up.
+            self.configure(force=self.status()["state"] == "error")
             if self.status()["state"] != "ready":
                 raise RuntimeError(self.status()["detail"])
             preferences = self.preferences

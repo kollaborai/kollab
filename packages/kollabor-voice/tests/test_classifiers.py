@@ -264,3 +264,31 @@ def test_long_conversation_context_never_displaces_current_utterance():
     assert observed[0]["text"] == record["text"]
     assert len(json.dumps(observed[0])) <= 204
     assert observed[0]["recent_conversation"]
+
+
+def test_trimmed_conversation_keeps_its_newest_lines():
+    from types import SimpleNamespace
+
+    from kollabor_voice.laya_worker import predict
+
+    observed = []
+
+    def classify(state, questions):
+        observed.append(state.copy())
+        choice = {"choice": "respond", "probabilities": {"respond": 0.99, "ignore": 0.01}}
+        return {"answers": {"response": choice}}
+
+    agent = SimpleNamespace(
+        cfg={"max_len": 300, "head_max_len": 64},
+        tok=SimpleNamespace(encode=lambda state: list(state)),
+        predict=classify,
+    )
+    record = {
+        "event_id": "request",
+        "text": "Aquamarine, what changed?",
+        "started_at": "2026-09-26T00:00:00+00:00",
+        "ended_at": "2026-09-26T00:00:01+00:00",
+    }
+    context = "".join(f"user: old {i}\n" for i in range(80)) + "assistant: newest reply"
+    predict(agent, [record], context)
+    assert observed[0]["recent_conversation"].endswith("assistant: newest reply")

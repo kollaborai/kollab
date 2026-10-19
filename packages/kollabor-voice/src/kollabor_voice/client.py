@@ -125,12 +125,12 @@ class VoiceClient:
                 return {
                     **data,
                     "state": "error",
-                    "detail": "Voice setup stopped; run /voice retry",
+                    "detail": "Voice setup stopped",
                 }
             if time.time() - data["updated_at"] > 960:
                 return {
                     "state": "error",
-                    "detail": "Voice setup stopped; run /voice retry",
+                    "detail": "Voice setup stopped",
                 }
             return data
         except (OSError, ValueError, KeyError):
@@ -159,7 +159,7 @@ class VoiceClient:
                         "setup_failed", state.get("detail", "Voice setup failed")
                     )
                 await asyncio.sleep(0.3)
-        raise VoiceError("setup_timeout", "Voice setup timed out; run /voice retry")
+        raise VoiceError("setup_timeout", "Voice setup timed out")
 
     async def voice_out(
         self,

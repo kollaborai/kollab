@@ -495,6 +495,9 @@ class SystemInfoSnapshot(Snapshot):
     # listening now. Both False when the voice plugin is not loaded.
     voice_requested: bool = False
     voice_running: bool = False
+    # VoicePlugin._activity(): stage (listening, hearing, deciding, asking,
+    # speaking...), mic level 0..1, and the line the classifier just said.
+    voice_activity: dict[str, Any] = field(default_factory=dict)
     # A published Hub socket precedes deferred provider/adapter startup.
     startup_state: str = ""
     startup_error: str = ""

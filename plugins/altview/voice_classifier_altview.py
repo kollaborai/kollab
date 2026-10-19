@@ -85,18 +85,19 @@ def detail_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
         if decision.get("detail"):
             lines.append(("dim", f"  {decision['detail']}"))
 
+    if entry.get("said"):
+        lines.append(("heading", "Said"))
+        lines.append(("text", f'  "{entry['said']}"'))
+
     lines.append(("heading", "Sent to the agent"))
     sent = set(entry.get("delivered") or [])
-    unsure = set(decision.get("deferred_event_ids") or [])
     if not sent:
         lines.append(("dim", "  nothing"))
     if entry.get("note"):
         lines.append(("warn", f"  {entry['note']}"))
     for record in records:
         if record.get("event_id") in sent:
-            how = "as unsure speech" if record["event_id"] in unsure else "as speech"
-            style = "warn" if record["event_id"] in unsure else "good"
-            lines.append((style, f'  {how}: "{record.get("text", "")}"'))
+            lines.append(("good", f'  "{record.get("text", "")}"'))
     return lines
 
 

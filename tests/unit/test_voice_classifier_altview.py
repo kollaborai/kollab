@@ -36,7 +36,7 @@ UNSURE = {
         "deferred_event_ids": ["e76"],
         "confidence": 0.71,
         "model": "voice-intent-v1",
-        "detail": "Laya is uncertain. Asking the agent to decide whether a response is needed.",
+        "detail": "Laya is uncertain. Asking the human whether it was for the agent.",
         "trace": [
             {
                 "state": {
@@ -50,7 +50,8 @@ UNSURE = {
             }
         ],
     },
-    "delivered": ["e76"],
+    "said": "Yes, I can hear you.",
+    "delivered": [],
 }
 SENT = {
     "seq": 1,
@@ -88,7 +89,7 @@ async def test_events_left_and_what_laya_saw_and_said_right():
         "with context   respond  0.71",
         "words alone    respond  0.99",
         "unsure (defer) · confidence 0.71 · voice-intent-v1 · 0.38s",
-        'as unsure speech: "Hello, can you hear me?"',
+        '"Yes, I can hear you."',
         "Classifier: laya",
     ):
         assert text in right + left, text

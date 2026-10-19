@@ -7,9 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Voice: the lines voice says itself (acknowledgements, "Sorry, was that for me?", still-working lines) are kept on disk in `~/.kollab/voice/cache/speech/`, so a line it has said before plays at once instead of being synthesized again. A file is deleted three days after it last played; agent replies are never kept.
+
 ### Changed
 - Web: Session Controls is a panel at the chat's right edge, open by default, instead of a popover. It holds the session's name, the Chat and Trajectory views and every control that sat in the chat header, so on a computer the chat has no header bar and the sidebar no hide button. Hide the panel to a slim rail; the browser remembers. On a phone the Session button opens it as a sheet.
 - Web: the sidebar's footer (Hidden Agents, Apps, Agents, Gem Studio, Settings) is one row of icons.
+- Voice: a mic check ("can you hear me?"), thanks or a bare name is answered by voice at once and still reaches the agent with that answer, so the agent can add more or hold off with a lone period. No still-working lines follow a turn voice already answered.
+- Voice: after "Sorry, was that for me?", a no stops these questions for two minutes (was ten) and no answer stops them for 30 seconds (was two minutes).
+- Voice: a spoken reply is no longer rewritten for its length. One or two sentences are preferred, but a longer reply is still spoken, and a reply still unsuitable after its one rewrite is spoken with code, links and paths taken out instead of skipped.
+- Voice: the classifier reads the chat's last three exchanges (was the last two messages) and drops the oldest text first when that runs over Laya's context. Whisper is told the agent's names, so it writes "Aquamarine" instead of a near miss.
+- Voice: speech more than 30 seconds old by the time voice can decide is kept as context and never sent; `/voice retry` no longer sends it.
+
+### Fixed
+- Voice recovers on its own instead of waiting for `/voice retry`. When the voice service dies, its lease expires, setup fails or capture stops, the chat starts voice again after 5 seconds, waiting longer each time up to two minutes; the status row reads `starting` until the microphone is live. A late answer from a busy voice service no longer turns voice off, and no message tells you to run `/voice retry`.
+- Voice: a VibeVoice worker that timed out or exited left every later reply silent. The speech engine is prepared again on the next sentence.
+- Voice: talking over voice's own speech merged both into one line. The words voice was saying are cut, and only yours are judged and sent.
+- Voice: replies no longer go quiet between sentences. VibeVoice streams audio as it generates, and the next sentence is synthesized while one plays.
+- Voice: packaged builds (wheel, release binary, Kollab.app) shipped without Laya's classifier heads, so `/voice` stopped with "Laya setup failed".
+- Voice: stopping the microphone no longer deadlocks CoreAudio, a recorder start or stop that hangs restarts the voice service instead of freezing every later `/voice`, and a slow first bind right after the daemon starts no longer turns voice off.
 
 ## [0.17.0] - 2026-10-18
 

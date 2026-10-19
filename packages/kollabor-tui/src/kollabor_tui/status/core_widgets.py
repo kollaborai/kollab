@@ -166,6 +166,13 @@ def voice_classifier_label(state: dict) -> str:
     return f"{name} {word}" + (f" {pending} pending" if pending else "")
 
 
+def _level_meter(level: float) -> str:
+    """Three bars that rise with the microphone level: proof it hears the room."""
+    return "".join(
+        bar if level >= step else "▁" for bar, step in zip("▃▅▇", (0.15, 0.45, 0.75))
+    )
+
+
 def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
     """Render live microphone state from the event-bus voice service."""
     try:
@@ -178,12 +185,22 @@ def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
         if voice_state not in {"off", "starting", "listening", "error"}:
             voice_state = "error" if state.get("observer_error") else "off"
         label = f"mic {voice_state}"
+        # Live while listening: the level, and hearing / deciding / asking /
+        # speaking as the voice plugin works (VoicePlugin._activity).
+        activity = state.get("activity") or {}
+        if voice_state == "listening" and activity:
+            meter = _level_meter(float(activity.get("level") or 0))
+            label = f"mic {meter} {activity.get('stage') or 'listening'}"
         classifier = voice_classifier_label(state) if voice_state != "off" else ""
         if classifier:
             label = f"{label} · {classifier}"
         transcript = state.get("last_transcript") or {}
         heard = str(transcript.get("text") or "").strip()
-        if heard and voice_state in {"listening", "error"} and width >= 16:
+        said = activity.get("said") if voice_state == "listening" else None
+        if said and width >= 16:
+            available = max(4, width - len(label) - 9)
+            label = f"{label} · said: {_middle_truncate(said, available)}"
+        elif heard and voice_state in {"listening", "error"} and width >= 16:
             available = max(4, width - len(label) - 2)
             label = f"{label}: {_middle_truncate(heard, available)}"
         color = {
