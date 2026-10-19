@@ -375,12 +375,25 @@ class VoicePlugin(BasePlugin):
             if not self.requested:
                 return
             self._claim_id = uuid.uuid4().hex
-            self._lease = await self._client.call(
-                "claim",
-                client_id=self.client_id,
-                activated_at=activated,
-                claim_id=self._claim_id,
-            )
+            # The service may be finishing a prior capture (teardown, VAD
+            # load); its claim can exceed the client's 2s exchange budget
+            # while still succeeding server-side. Retry instead of dying.
+            for attempt in range(3):
+                try:
+                    self._lease = await self._client.call(
+                        "claim",
+                        client_id=self.client_id,
+                        activated_at=activated,
+                        claim_id=self._claim_id,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if attempt == 2 or not self.requested:
+                        raise
+                    logger.warning(
+                        "voice claim timed out (attempt %d/3); retrying", attempt + 1
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
             if self.classifier_name == "laya":
                 await self._client.call("classifier_prepare")
             cursor = self._lease["cursor"]
@@ -434,7 +447,7 @@ class VoicePlugin(BasePlugin):
             if self._observer:
                 self._observer.cancel()
             self._refresh()
-            logger.warning("Voice client stopped: %s", exc)
+            logger.warning("Voice client stopped: %r", exc)
 
     async def _bind_remote(self, rpc):
         """Bind the lease to remote routing, surviving daemon cold-start congestion.

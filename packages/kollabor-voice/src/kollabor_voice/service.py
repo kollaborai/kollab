@@ -534,9 +534,20 @@ class VoiceService:
     async def stop_capture(self):
         if self.recorder:
             recorder, self.recorder = self.recorder, None
-            await asyncio.to_thread(recorder.stop)
-            while not recorder.frames.empty():
-                self.consume_frame(recorder.frames.get_nowait(), final=False)
+            try:
+                # CoreAudio can deadlock inside AudioOutputUnitStop (observed
+                # live: HALB_Mutex::Lock held forever). Bounded so the
+                # lifecycle lock is released and voice stays recoverable
+                # instead of wedging every future claim.
+                await asyncio.wait_for(asyncio.to_thread(recorder.stop), timeout=5)
+            except asyncio.TimeoutError:
+                log.error(
+                    "recorder.stop did not finish within 5s; abandoning the "
+                    "capture thread and continuing teardown"
+                )
+            finally:
+                while not recorder.frames.empty():
+                    self.consume_frame(recorder.frames.get_nowait(), final=False)
         if self.segmenter:
             segment = self.segmenter.flush()
             if segment:

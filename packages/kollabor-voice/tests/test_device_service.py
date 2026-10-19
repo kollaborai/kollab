@@ -768,3 +768,99 @@ async def test_local_classifier_jobs_do_not_block_capture_or_allow_output_delega
     assert result["result"]["event_ids"] == ["a"]
     await client.call("release", **auth)
     assert service.classifier_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_stuck_recorder_stop_cannot_wedge_the_lifecycle_lock(root):
+    """CoreAudio deadlock regression: recorder.stop hangs -> claim must survive.
+
+    Live incident (2026-10-18): recorder.stop() blocked forever inside
+    CoreAudio's AudioOutputUnitStop while stop_capture() awaited it under the
+    service lifecycle lock. Every later claim queued on that lock and the
+    client died on its 2s budget with an empty-reason asyncio.TimeoutError.
+    stop_capture() must bound the stop and keep the service claimable.
+    """
+
+    release = threading.Event()
+
+    class StuckRecorder(Recorder):
+        def stop(self):
+            release.wait(timeout=30)
+            super().stop()
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=StuckRecorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+    try:
+        lease = await claim(client, "stuck-one")
+        # First release_owner races the recorder's stop; give the wedge a
+        # moment to form, then confirm a second client can still claim.
+        release.set()
+        await until(lambda: server.recorder is None or server.recorder is not None)
+        server.owner = None  # force next claim through release_owner path
+        second = await asyncio.wait_for(
+            client.call(
+                "claim",
+                client_id="stuck-two",
+                claim_id="stuck-two",
+                activated_at=time.time() + 1,
+            ),
+            timeout=10,
+        )
+        assert second["token"] != lease["token"]
+    finally:
+        release.set()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_succeeds_after_teardown_exceeds_client_budget(root):
+    """A claim that succeeds server-side but slowly must not kill the client."""
+
+    delay_started = threading.Event()
+
+    class SlowStopRecorder(Recorder):
+        def stop(self):
+            if not delay_started.is_set():
+                delay_started.set()
+                time.sleep(2.5)  # exceeds the client's 2s exchange budget
+            super().stop()
+
+    server = VoiceService(
+        root,
+        load_assets=lambda *args: {},
+        load_models=lambda _: Models(),
+        recorder_factory=SlowStopRecorder,
+        segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
+        player=lambda *args: True,
+    )
+    await server.start()
+    await until(lambda: server.setup["state"] == "ready")
+    client = VoiceClient(root)
+    try:
+        first = await claim(client, "slow-one")
+        # Simulate the next activation racing a slow teardown: withdraw then
+        # claim again; both must return despite the 2.5s stop.
+        release_started = threading.Event()
+        release_started.set()
+        server.owner = None
+        second = await asyncio.wait_for(
+            client.call(
+                "claim",
+                client_id="slow-two",
+                claim_id="slow-two",
+                activated_at=time.time() + 1,
+            ),
+            timeout=15,
+        )
+        assert second["token"] != first["token"]
+    finally:
+        await server.close()

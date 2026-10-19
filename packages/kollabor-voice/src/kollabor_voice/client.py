@@ -56,7 +56,10 @@ class VoiceClient:
                 writer.close()
                 await writer.wait_closed()
 
-        return await asyncio.wait_for(exchange(), 2.0)
+        # claim rides the lifecycle lock; a slow capture teardown (CoreAudio
+        # stop, VAD model load) can legitimately exceed a 2s budget while the
+        # server still completes the claim. Callers retry on TimeoutError.
+        return await asyncio.wait_for(exchange(), 2.0 if op != "claim" else 8.0)
 
     def launch(self) -> None:
         if os.name != "posix":
