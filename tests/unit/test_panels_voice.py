@@ -1,6 +1,7 @@
 """Voice preferences persist across the TUI, web/RPC and active chat boundaries."""
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -126,6 +127,7 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
         {"context_lines": True},
         {"classifier": "vibevoice"},
         {"tts_voice": "other"},
+        {"stt_engine": "nemo"},
         {"unknown": "x"},
         {"classifier": "provider", "context_lines": 0},
     ],
@@ -171,3 +173,42 @@ def test_concurrent_updates_preserve_sibling_and_unknown_keys(voice):
         "classifier": "provider",
         "context_lines": 23,
     }
+
+
+@pytest.mark.asyncio
+async def test_transcription_engine_is_selectable_with_readable_labels(
+    voice, monkeypatch
+):
+    from kollabor_voice import speech_settings
+
+    state, plugin, root = voice
+    panel = await VoicePanel().describe(state, {})
+    fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
+    engine = fields["stt_engine"]
+    assert (engine["type"], engine["value"]) == ("dropdown", "whisper")
+    assert engine["option_labels"] == {
+        "whisper": "Whisper Base",
+        "parakeet": "Parakeet v3",
+    }
+    assert fields["transcription_status"]["value"] == "not loaded · off"
+    view = VoiceConfigAltView(plugin)
+    view._load_widgets()
+    widgets = {w.config_path: w for ws in view._section_widgets for w in ws}
+    shown = "".join(view._render_widget_modern(widgets["stt_engine"], 80, "last"))
+    assert "Transcription Engine: Whisper Base" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
+
+    monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: False)
+    refused = await VoicePanel().act(
+        state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
+    )
+    assert not refused["ok"] and "Apple silicon" in refused["errors"]["stt_engine"]
+    assert not (root / "preferences.json").exists()
+
+    monkeypatch.setattr(speech_settings, "parakeet_supported", lambda: True)
+    saved = await VoicePanel().act(
+        state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}
+    )
+    assert saved["ok"]
+    assert load_preferences()["stt_engine"] == "parakeet"
+    fresh = {f["path"]: f for s in saved["panel"]["sections"] for f in s["fields"]}
+    assert fresh["stt_engine"]["value"] == "parakeet"

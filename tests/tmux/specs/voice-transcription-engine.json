@@ -1,0 +1,116 @@
+{
+  "name": "voice transcription engine",
+  "description": "/voice config offers Whisper Base (the default) and Parakeet v3; selecting Parakeet saves it for this device without starting the microphone",
+  "config": {
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
+    },
+    {
+      "action": "section",
+      "title": "Whisper Base is the default"
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "nav_mode"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Transcription Engine: Whisper Base",
+      "timeout": 5
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Transcription Readiness"
+    },
+    {
+      "action": "section",
+      "title": "Select Parakeet v3 and save it for this device"
+    },
+    {
+      "action": "arrow",
+      "direction": "Right"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Transcription Engine: Parakeet v3",
+      "timeout": 5
+    },
+    {
+      "action": "control",
+      "key": "s"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice settings saved for this device",
+      "timeout": 8
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "section",
+      "title": "A fresh /voice config reads the saved choice"
+    },
+    {
+      "action": "escape"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 8
+    },
+    {
+      "action": "slash_command",
+      "command": "voice",
+      "subcommand": "config"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Voice Configuration",
+      "timeout": 8
+    },
+    {
+      "action": "nav_mode"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Transcription Engine: Parakeet v3",
+      "timeout": 5
+    },
+    {
+      "action": "shell",
+      "description": "the choice is saved for the device and the microphone never started",
+      "command": "cat \"$HOME/.kollab/voice/preferences.json\"; test ! -e \"$HOME/.kollab/voice/service.sock\" && echo no-voice-service",
+      "assert_contains": "\"stt_engine\": \"parakeet\""
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "no-voice-service"
+    },
+    {
+      "action": "escape"
+    }
+  ]
+}

@@ -6,7 +6,12 @@ from typing import Any
 
 from kollabor_voice.classifiers import CLASSIFIERS, MAX_CONTEXT_LINES, load_preferences
 from kollabor_voice.control import service_root
-from kollabor_voice.speech_settings import KOKORO_VOICES, speech_errors
+from kollabor_voice.speech_settings import (
+    KOKORO_VOICES,
+    STT_ENGINES,
+    TTS_ENGINES,
+    speech_errors,
+)
 
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 from .config import validate_config_changes
@@ -31,6 +36,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
     from kollabor_voice.control import manifest
 
     speech = state.get("speech", {})
+    transcription = state.get("transcription", {})
     return [
         {
             "id": "preferences",
@@ -42,6 +48,7 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "Classifier",
                     value=preferences["classifier"],
                     options=list(CLASSIFIERS),
+                    option_labels=CLASSIFIERS,
                     help=(
                         "Laya runs locally. Provider uses the active AI profile, "
                         "sends transcript context to it and can incur charges."
@@ -65,17 +72,24 @@ def voice_sections(plugin, live=None) -> list[dict]:
             "fields": [
                 make_field(
                     "stt_engine",
-                    "label",
+                    "dropdown",
                     "Transcription Engine",
-                    value="Whisper base",
-                    help="Local speech recognition; currently fixed.",
+                    value=preferences["stt_engine"],
+                    options=list(STT_ENGINES),
+                    option_labels=STT_ENGINES,
+                    help=(
+                        "Local speech recognition. Parakeet v3 needs an Apple silicon "
+                        "Mac and downloads 2.5 GB once; Whisper Base transcribes "
+                        "until it is ready."
+                    ),
                 ),
                 make_field(
                     "tts_engine",
                     "dropdown",
                     "Speech Engine",
                     value=preferences["tts_engine"],
-                    options=["kokoro", "vibevoice"],
+                    options=list(TTS_ENGINES),
+                    option_labels=TTS_ENGINES,
                     help=("Local synthesis. Selecting VibeVoice prepares its isolated runtime "
                           "and warms the model in the background."),
                 ),
@@ -145,11 +159,22 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     step=0.1,
                 ),
                 make_field(
+                    "transcription_status",
+                    "label",
+                    "Transcription Readiness",
+                    value=(
+                        f"{STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
+                        f" · {transcription.get('state', 'off')}"
+                    ),
+                    help=transcription.get("detail", ""),
+                ),
+                make_field(
                     "speech_status",
                     "label",
                     "Speech Readiness",
                     value=(
-                        f"{speech.get('engine') or 'not loaded'} · {speech.get('state', 'off')}"
+                        f"{TTS_ENGINES.get(speech.get('engine'), speech.get('engine')) or 'not loaded'}"
+                        f" · {speech.get('state', 'off')}"
                     ),
                     help=speech.get("detail", ""),
                 ),

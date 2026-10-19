@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Voice: Parakeet v3 is a second transcription engine on Apple silicon Macs. Pick it under Transcription Engine in `/voice config`; Whisper Base stays the default. It downloads 2.5 GB once, checked against a pinned SHA-256, and runs on the GPU in its own process: on an M2 Max it transcribed an utterance in a median 69 ms against Whisper Base's 562 ms. Whisper transcribes while Parakeet prepares and whenever it stops, and `/voice status` names the engine that is live. Parakeet cannot be told the agent names, so "Kollab" comes out as "Colab".
 - Voice: the lines voice says itself (acknowledgements, "Sorry, was that for me?", still-working lines) are kept on disk in `~/.kollab/voice/cache/speech/`, so a line it has said before plays at once instead of being synthesized again. A file is deleted three days after it last played; agent replies are never kept.
 
 ### Changed

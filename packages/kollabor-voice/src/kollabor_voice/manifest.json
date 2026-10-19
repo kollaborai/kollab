@@ -120,6 +120,36 @@
       }
     }
   },
+  "stt": {
+    "parakeet": {
+      "model": "nvidia/parakeet-tdt-0.6b-v3",
+      "runtime": [
+        "parakeet-mlx==0.5.3",
+        "mlx==0.32.4",
+        "librosa==1.0.0",
+        "numpy==2.5.3"
+      ],
+      "bundle": {
+        "license": "CC-BY-4.0",
+        "license_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+        "attribution": "Parakeet TDT 0.6B v3 by NVIDIA, MLX conversion by mlx-community",
+        "revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+        "base_url": "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/resolve/ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15/",
+        "files": [
+          {
+            "name": "config.json",
+            "size": 244093,
+            "sha256": "f320f1292511f34ec47f513755fe20fd01dbfc09a925d42730e66059a6e1ef4c"
+          },
+          {
+            "name": "model.safetensors",
+            "size": 2508288736,
+            "sha256": "05e01c7f396c298cf7d23f61da7b504adeab698f0aaeafd9c82d198625464592"
+          }
+        ]
+      }
+    }
+  },
   "tts": {
     "vibevoice": {
       "revision": "16fb2cb1217c9934a886e1948ffb06120caa2df5",

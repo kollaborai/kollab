@@ -108,3 +108,49 @@ and private reasoning never reach the speech classifier or synthesis.
 python bench/train_voice_head.py --task speech --model ~/.kollab/voice/models/laya/1c5edc17a7acd8701df6fc341c0d179f1c62c982 --fixtures bench/spoken-style.json --out /tmp/spoken-style.safetensors
 python bench/evaluate_spoken.py --model ~/.kollab/voice/models/laya/1c5edc17a7acd8701df6fc341c0d179f1c62c982 --out /tmp/spoken-style-policy.json
 ```
+
+## Speech-to-text: Whisper Base vs Parakeet v3
+
+`stt-results.json` comes from `stt_bench.py`. Twenty requests, most of them
+addressed to an agent by name, are spoken by four macOS `say` voices (Samantha,
+Daniel, Karen, Rishi) at 16 kHz: 80 clean utterances, and the same 80 with
+another voice saying another sentence 10 dB below (babble). Each engine runs the
+service's own code on every utterance, one engine after the other: Whisper Base
+through `LocalModels.transcribe` (CPU int8, primed with the agent names as the
+service primes it), Parakeet v3 through `ParakeetWorker` (MLX on the GPU in its
+own process; it takes no priming). M2 Max, macOS 27.2, 30 minutes after a reboot
+(load average 4–7).
+
+| Measure | Whisper Base | Parakeet v3 |
+| --- | --- | --- |
+| Latency p50 / p95, clean | 562 / 611 ms | 69 / 92 ms |
+| Latency p50 / p95, babble | 558 / 592 ms | 73 / 84 ms |
+| Word error rate, clean | 2.8% | 1.4% |
+| Word error rate, babble | 6.1% | 6.3% |
+| Agent names right, clean | 54/60 | 51/60 |
+| Agent names right, babble | 56/60 | 49/60 |
+| First utterance after 30 / 120 / 300 s of quiet | 587 / 570 / 569 ms | 129 / 128 / 110 ms |
+
+Both engines wrote aquamarine, lapis and zircon right in clean speech. Neither
+knows "Kollab": Whisper got it 6 of 16 times with priming, Parakeet never
+("Column", "Colib", "Colab", "Coleb", "Colub", "Colin"). Parakeet's other misses
+were "Safaya" and "Safi up" for sapphire (Rishi's voice), "Zirkon" and
+"Aquamarines". Its worker was ready 2.9 s after start with the files on disk and
+holds about 1.6 GB.
+
+A live run used the real service with `/voice on` and Parakeet selected, `say`
+playing through the MacBook Pro speakers into its microphone: 7 of 9 lines came
+back exact, each in 0.12–0.55 s (the first after a pause the slowest). It wrote
+"Zirkon" and "Column", and once heard "Aquamarine, what time is it in Tokyo?" as
+"Yeah."; the replay was exact.
+
+Not settled: an earlier run on this Mac under heavy memory pressure (36–67 GB of
+swap in use, a training job on the GPU) saw Parakeet's first utterance after
+30–180 s of quiet take 14–113 s against Whisper's 1.6–3.5 s, most likely macOS
+compressing the idle worker's memory. That run's file was lost to a reboot and
+the calm run above does not show it. Not measured: the real user's voice,
+accents beyond these four voices, languages other than English.
+
+```sh
+PYTHONPATH=src ~/.kollab/voice/runtimes/<voice runtime>/bin/python bench/stt_bench.py --clips /tmp/stt-clips --idle 30,120,300
+```

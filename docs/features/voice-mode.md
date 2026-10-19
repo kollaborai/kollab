@@ -29,8 +29,10 @@ transcript. The web UI shows the same line above the message box.
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.
 - `/voice config` opens Voice Configuration in the TUI or Settings → Voice in the web UI.
   Change the classifier and transcript context there, then save for this device.
-  Select Kokoro or VibeVoice and configure their voices there. The panel also shows
-  microphone, transcription engine, operating state and speech readiness. Saving does not enable the microphone.
+  Select Whisper Base or Parakeet v3 under Transcription Engine (see
+  [Select a transcription engine](#select-a-transcription-engine)), and Kokoro or
+  VibeVoice and their voices under Speech Engine. The panel also shows microphone,
+  operating state, transcription readiness and speech readiness. Saving does not enable the microphone.
   Preferences are shared across chats on the device running Kollab; an attached
   remote host's web settings apply to that host.
   `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` are no longer registered.
@@ -49,7 +51,7 @@ flowchart TD
 
     Lease --> Capture["Recorder captures audio frames"]
     Capture --> Segment["Segmenter groups speech into utterances"]
-    Segment --> STT["Local Whisper transcribes"]
+    Segment --> STT["Local Whisper or Parakeet transcribes"]
     STT --> Log["Append timestamped transcript"]
     Log -.-> Status["Status row: mic state + latest transcript"]
     Log --> Observe["VoicePlugin reads final transcript<br/>waits for speech to settle"]
@@ -128,7 +130,8 @@ the microphone by itself.
 ## What is local
 
 One process per OS user owns the microphone, speech models and speaker. It uses
-Whisper base on CPU and Kokoro ONNX with `af_heart`. The lightweight agent client
+Whisper base on CPU (or Parakeet v3 on an Apple silicon GPU, when selected) and
+Kokoro ONNX with `af_heart`. The lightweight agent client
 has no audio dependencies. First use installs the pinned audio dependencies into
 `~/.kollab/voice/runtimes/`; it does not install them into your agent environment.
 Downloads resume and must match the sizes and SHA256 hashes in the bundled
@@ -329,6 +332,40 @@ is recorded as cancelled and is never automatically replayed.
 Implementation and measured platform/acceptance coverage are recorded in
 [`implementation-status.md`](../../specs/voice-mode/implementation-status.md).
 
+
+## Select a transcription engine
+
+Open `/voice config` (terminal) or Settings → Voice (web), choose Transcription
+Engine and save for this device. **Whisper Base** is the default. **Parakeet v3**
+is NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, the `mlx-community` MLX conversion)
+running on the GPU through `parakeet-mlx`; it needs an Apple silicon Mac and the
+setting refuses it elsewhere. The choice applies without restarting voice.
+
+Selecting Parakeet installs its own pinned runtime into `~/.kollab/voice/runtimes/`
+and downloads 2.5 GB of weights once, at a pinned revision checked against the
+manifest's SHA-256 before loading. It runs in its own worker process, loaded once.
+Whisper stays loaded: it transcribes while Parakeet installs, downloads and warms,
+and whenever Parakeet stops; Parakeet is prepared again five minutes after a
+failure. Transcription Readiness and `/voice status` show which engine is live and
+any download progress or error. The same voice activity detector cuts speech into
+utterances for both.
+
+On an M2 Max, Parakeet took a median 69 ms per utterance against Whisper Base's
+562 ms, with half the word errors on clean speech and the same share with a
+second voice talking
+([benchmark](../../packages/kollabor-voice/bench/README.md#speech-to-text-whisper-base-vs-parakeet-v3)).
+Differences to know:
+
+- Whisper is told the agent names; Parakeet has no way to be. In the benchmark it
+  still wrote aquamarine, lapis and zircon right, but never "Kollab" ("Column",
+  "Colab", "Colib").
+- On a Mac short of memory the first utterance after a pause can stall while
+  macOS brings the idle worker back: one run saw 14–113 s. A line that takes over
+  30 s is transcribed by Whisper instead, and Parakeet is prepared again five
+  minutes later.
+- Parakeet transcribes 25 European languages but does not report which one, so
+  its text reaches the Laya classifier as English. Whisper's non-English speech is
+  deferred to the agent.
 
 ## Select a speech engine
 

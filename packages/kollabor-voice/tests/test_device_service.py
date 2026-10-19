@@ -128,7 +128,8 @@ def test_client_has_no_heavy_startup_imports():
 
 
 def test_manifest_contains_complete_hashes():
-    for bundle in manifest()["bundles"].values():
+    spec = manifest()
+    for bundle in [*spec["bundles"].values(), spec["stt"]["parakeet"]["bundle"]]:
         assert bundle["license"] and bundle["revision"]
         for item in bundle["files"]:
             assert len(item["sha256"]) == 64

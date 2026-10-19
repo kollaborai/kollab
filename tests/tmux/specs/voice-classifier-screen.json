@@ -2,13 +2,18 @@
   "name": "voice classifier screen",
   "description": "/voice classifier opens the two-pane decision screen; Esc returns to the prompt",
   "config": {
-    "command": "sh -c 'cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec kollab --no-daemon'",
-    "app_init_sleep": 5,
+    "command": "sh -c 'R=$(pwd); cd \"$(mktemp -d)\" && KOLLAB_NO_HUB=1 exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 3,
     "show_captures": false
   },
   "steps": [
     {
       "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "mic off",
+      "timeout": 30
     },
     {
       "action": "section",

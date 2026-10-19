@@ -59,6 +59,9 @@ class VoiceService:
         self.speech = None
         self.speech_prepare_task = None
         self._speech_preferences_revision = None
+        self.stt = None
+        self.stt_prepare_task = None
+        self._stt_preferences_revision = None
         self.owner = None
         self.delegates = {}
         self.withdrawn_claims = {}
@@ -117,6 +120,7 @@ class VoiceService:
             from .audio import LocalModels, StreamPlayer
             from .output import SpeechQueue
             from .speech import SpeechEngine
+            from .transcription import TranscriptionEngine
 
             loop = asyncio.get_running_loop()
 
@@ -141,6 +145,16 @@ class VoiceService:
             await asyncio.to_thread(
                 self.speech.configure, self.speech.status()["state"] == "error"
             )
+            if self.stt is None:
+                self.stt = TranscriptionEngine(
+                    self.root, lambda audio, names: self.models.transcribe(audio, names)
+                )
+            if self.stt_prepare_task is None or self.stt_prepare_task.done():
+                # Whisper transcribes while a slower engine prepares.
+                self.stt_prepare_task = asyncio.create_task(
+                    self.prepare_transcription(self.stt.status()["state"] == "error"),
+                    name="stt-prepare",
+                )
             if self.transcript is None:
                 self.transcript = TranscriptLog(self.root, self.instance_id)
             for task in list(self.tasks):
@@ -167,7 +181,7 @@ class VoiceService:
                 self.tasks.append(
                     asyncio.create_task(self.output.run(), name="voice-output")
                 )
-            self.progress(state="ready", detail="Whisper base and speech ready")
+            self.progress(state="ready", detail="Transcription and speech ready")
             async with self.lifecycle:
                 if (
                     self.owner
@@ -238,6 +252,9 @@ class VoiceService:
                 self.speech.status()
                 if self.speech
                 else {"state": "off", "engine": None}
+            ),
+            "transcription": (
+                self.stt.status() if self.stt else {"state": "off", "engine": None}
             ),
             "audio_warmup_seconds": self.audio_warmup_seconds,
         }
@@ -633,11 +650,7 @@ class VoiceService:
                     from .classifiers import load_preferences
                     from .speech_settings import speech_key
 
-                    try:
-                        st = (self.root / "preferences.json").stat()
-                        revision = st.st_mtime_ns, st.st_ino
-                    except OSError:
-                        revision = None
+                    revision = self._preferences_revision()
                     changed = revision != self._speech_preferences_revision
                     self._speech_preferences_revision = revision
                     if (
@@ -646,6 +659,16 @@ class VoiceService:
                     ):
                         self.speech_prepare_task = asyncio.create_task(
                             self.prepare_speech(), name="speech-prepare"
+                        )
+                if self.stt and (
+                    self.stt_prepare_task is None or self.stt_prepare_task.done()
+                ):
+                    revision = self._preferences_revision()
+                    retry = self.stt.retry_due()
+                    if revision != self._stt_preferences_revision or retry:
+                        self._stt_preferences_revision = revision
+                        self.stt_prepare_task = asyncio.create_task(
+                            self.prepare_transcription(retry), name="stt-prepare"
                         )
                 async with self.lifecycle:
                     for task in self.tasks:
@@ -691,6 +714,19 @@ class VoiceService:
                     await self.stop_capture()
             await asyncio.sleep(0.02)
 
+    def _preferences_revision(self):
+        try:
+            st = (self.root / "preferences.json").stat()
+            return st.st_mtime_ns, st.st_ino
+        except OSError:
+            return None
+
+    async def prepare_transcription(self, force=False):
+        try:
+            await asyncio.to_thread(self.stt.configure, force)
+        except Exception:
+            log.exception("Transcription engine preparation failed")
+
     async def prepare_speech(self):
         try:
             await asyncio.to_thread(self.speech.configure)
@@ -709,7 +745,7 @@ class VoiceService:
             try:
                 self.transcribing = True
                 text, language = await asyncio.to_thread(
-                    self.models.transcribe,
+                    self.stt.transcribe,
                     segment.audio,
                     (self.owner or {}).get("names", ()),
                 )
@@ -761,15 +797,20 @@ class VoiceService:
         # Persist admitted trailing speech before ending workers.
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.segments.join(), 15)
-        for task in [self.setup_task, self.speech_prepare_task, *self.tasks]:
+        tasks = [
+            self.setup_task,
+            self.speech_prepare_task,
+            self.stt_prepare_task,
+            *self.tasks,
+        ]
+        for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(
-            *(t for t in [self.setup_task, self.speech_prepare_task, *self.tasks] if t),
-            return_exceptions=True,
-        )
+        await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
         if self.speech:
             await asyncio.to_thread(self.speech.close)
+        if self.stt:
+            await asyncio.to_thread(self.stt.close)
         await self.classifier.close()
         path = socket_path(self.root)
         if path.exists():

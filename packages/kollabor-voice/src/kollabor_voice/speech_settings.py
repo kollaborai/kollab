@@ -4,9 +4,21 @@ from __future__ import annotations
 
 import math
 import os
+import platform
+import sys
 from pathlib import Path
 
 from .control import manifest
+
+# Engines by preference id; the labels are what people read.
+STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
+TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
+
+
+def parakeet_supported():
+    """Parakeet runs on MLX, which needs an Apple silicon Mac."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
 
 KOKORO_VOICES = (
     "af_alloy",
@@ -46,6 +58,7 @@ def speech_defaults():
     if (installed / "config.json").is_file():
         model = str(installed)
     return {
+        "stt_engine": "whisper",
         "tts_engine": "kokoro",
         "kokoro_voice": "af_heart",
         "kokoro_speed": 1.0,
@@ -61,7 +74,8 @@ def speech_defaults():
 def speech_errors(preferences, *, check_files=False):
     errors = {}
     choices = {
-        "tts_engine": ("kokoro", "vibevoice"),
+        "stt_engine": tuple(STT_ENGINES),
+        "tts_engine": tuple(TTS_ENGINES),
         "kokoro_voice": KOKORO_VOICES,
         "vibevoice_voice": tuple(manifest()["tts"]["vibevoice"]["voices"]),
         "vibevoice_device": ("auto", "mps", "cuda", "cpu"),
@@ -69,6 +83,8 @@ def speech_errors(preferences, *, check_files=False):
     for key, options in choices.items():
         if preferences.get(key) not in options:
             errors[key] = "Choose one of the available options"
+    if preferences.get("stt_engine") == "parakeet" and not parakeet_supported():
+        errors["stt_engine"] = "Parakeet v3 needs an Apple silicon Mac"
     for key, low, high, step in (
         ("kokoro_speed", 0.5, 2.0, 0.1),
         ("vibevoice_steps", 1, 20, 1),

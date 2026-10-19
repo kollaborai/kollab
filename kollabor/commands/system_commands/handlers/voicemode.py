@@ -163,13 +163,17 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         output = state.get("output") or {}
         classifier = state.get("classifier") or {}
         from kollabor_voice.classifiers import CLASSIFIERS
+        from kollabor_voice.speech_settings import STT_ENGINES, TTS_ENGINES
 
         name = state.get("classifier_name", "laya")
+        transcription = state.get("transcription") or {}
+        speech_engine = state.get("speech", {}).get("engine")
         lines = [
             f"Voice {state.get('state', 'off').replace('_', ' ').title()}",
             f"Service: {state.get('pid') or 'not running'} · owner: {state.get('owner') or 'none'}",
-            "Transcription: Whisper base",
-            f"Speech: {state.get('speech', {}).get('engine') or 'not loaded'} · "
+            f"Transcription: {STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
+            f" · {transcription.get('state', 'off')}",
+            f"Speech: {TTS_ENGINES.get(speech_engine, speech_engine) or 'not loaded'} · "
             f"{state.get('speech', {}).get('voice') or 'no voice'} · "
             f"{state.get('speech', {}).get('state', 'off')}",
             f"Context: previous {state.get('context_lines', 10)} transcript lines",
@@ -204,6 +208,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             state.get("observer_error"),
             output.get("error"),
             state.get("speech", {}).get("detail"),
+            transcription.get("detail"),
             classifier.get("detail") if name == "laya" else None,
         ):
             if value:
