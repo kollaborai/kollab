@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Voice: two filters in front of transcription, both off until you turn them on under Echo and Speaker in `/voice config`. Echo Cancellation removes voice's own speech from the microphone with WebRTC's echo canceller, fed what the speaker plays: in a simulated room voice's words vanished from the transcript, but talking over voice is heard less reliably. Speaker Gate passes only your voice to the classifier: `/voice enroll` saves a voiceprint from 30 seconds of your speech (`/voice enroll forget` deletes it), and other voices stay in the transcript as context and never reach the agent. On recorded speech it rejected 1.6% of a speaker's own lines and let through 0.5% of other people's and 0.01% of a TV film's. The speaker model (3D-Speaker ERes2Net, 26.5 MB) downloads once, checked against a pinned SHA-256. The voice runtime gains two small packages, so the first `/voice on` after updating prepares it again.
 
 ### Changed
+- Kollab needs Python 3.14 or later. CI no longer tests 3.12. The voice service keeps its own Python 3.12 or 3.13 runtime for its speech models.
 - Web: Session Controls is a panel at the chat's right edge, open by default, instead of a popover. It holds the session's name, the Chat and Trajectory views and every control that sat in the chat header, so on a computer the chat has no header bar and the sidebar no hide button. Hide the panel to a slim rail; the browser remembers. On a phone the Session button opens it as a sheet.
 - Web: the sidebar's footer (Hidden Agents, Apps, Agents, Gem Studio, Settings) is one row of icons.
 - Web: the sidebar and Session Controls float as rounded cards with a margin around them, and Session Controls ends at its last control instead of running to the bottom of the window. The sidebar's edge shows a line on hover: drag it, or focus it and use the arrow keys, to resize the sidebar.
@@ -32,13 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Voice: replies no longer go quiet between sentences. VibeVoice streams audio as it generates, and the next sentence is synthesized while one plays.
 - Voice: packaged builds (wheel, release binary, Kollab.app) shipped without Laya's classifier heads, so `/voice` stopped with "Laya setup failed".
 - Voice: stopping the microphone no longer deadlocks CoreAudio, a recorder start or stop that hangs restarts the voice service instead of freezing every later `/voice`, and a slow first bind right after the daemon starts no longer turns voice off.
-
-## [0.17.0] - 2026-10-18
-
-### Changed
-- Kollab needs Python 3.14 or later. CI no longer tests 3.12. The voice service keeps its own Python 3.12 or 3.13 runtime for its speech models.
-
-### Fixed
+- Voice: `/voice on` right after a session starts no longer stops with "voice.bind timed out after 2s". The first bind gets more time and retries, and a failed bind keeps voice running on this computer. A stuck microphone start or stop no longer wedges the voice service, and a stop now says why.
 - Two sessions started in the same minute could draw the same id, and resuming or branching one then overwrote the other's saved transcript. Session ids now end in a short random token (2610180756-quantum-spark-7k2x); the status bar, /resume, the conversation browsers and the web UI still show only the two words.
 
 ## [0.16.8] - 2026-10-18
