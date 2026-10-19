@@ -210,12 +210,40 @@ class DaemonHandle:
                     self.startup_error = str(message.get("message") or "ACP startup failed")
                 self._fan_out(_normalize_event(message))
         except asyncio.CancelledError:
+            self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
             raise
         except (ConnectionError, OSError) as e:
             logger.info("daemon %s stream closed: %s", self.identity, e)
-        finally:
-            # Wake every SSE consumer so requests don't hang on a dead daemon.
-            self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
+        # A live local daemon that dropped us (its hub socket was re-created) takes
+        # us back on the same path; without this every later call is a
+        # BrokenPipeError until the engine restarts.
+        if not self._closed and self.socket_path and self.pid and self.alive:
+            if await self._reattach():
+                return
+        # Wake every SSE consumer so requests don't hang on a dead daemon.
+        self._fan_out({"type": "daemon_closed", "session_id": self.session_id})
+
+    async def _reattach(self, attempts: int = 20, delay: float = 0.5) -> bool:
+        """Attach again to the same socket. True once a new read loop runs."""
+        if self.rpc is not None:
+            self.rpc.close()  # pending calls fail now instead of hanging
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        for _ in range(attempts):
+            await asyncio.sleep(delay)
+            if self._closed or not self.alive:
+                return False
+            try:
+                await self.connect(self.socket_path)
+            except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as e:
+                logger.debug("daemon %s reattach failed: %s", self.identity, e)
+                continue
+            logger.info("engine session %s reattached to daemon %s", self.session_id, self.identity)
+            return True
+        return False
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)

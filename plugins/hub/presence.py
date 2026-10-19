@@ -508,6 +508,11 @@ class PresenceManager:
                     continue
             except OSError:
                 continue
+            # A socket that answers belongs to a live agent this process just
+            # cannot see (another HOME, so another presence dir, shares this
+            # folder). Unlinking it cuts that agent off from every new client.
+            if PresenceManager._socket_responds(str(sock)):
+                continue
             try:
                 sock.unlink(missing_ok=True)
                 removed += 1
