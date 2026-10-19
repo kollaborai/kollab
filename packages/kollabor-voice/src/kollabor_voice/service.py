@@ -113,7 +113,7 @@ class VoiceService:
     async def prepare(self):
         try:
             from .assets import ensure_models
-            from .audio import LocalModels, play_audio
+            from .audio import LocalModels, StreamPlayer
             from .output import SpeechQueue
             from .speech import SpeechEngine
 
@@ -161,7 +161,7 @@ class VoiceService:
             self.worker_failures.clear()
             if self.output is None:
                 self.output = SpeechQueue(
-                    self.root, self.speech.synthesize, self.player or play_audio
+                    self.root, self.speech.stream, self.player or StreamPlayer()
                 )
                 self.tasks.append(
                     asyncio.create_task(self.output.run(), name="voice-output")

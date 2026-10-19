@@ -1,4 +1,4 @@
-"""Isolated VibeVoice inference worker. Returns waveforms and never plays audio."""
+"""Isolated VibeVoice inference worker. Streams waveform chunks and never plays audio."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import contextlib
 import copy
 import json
 import sys
+import threading
 
 
 class Engine:
@@ -60,8 +61,10 @@ class Engine:
             )
         )
 
-    def synthesize(self, text):
+    def stream(self, text, emit):
+        """Pass each audio chunk to emit while the rest is still generating."""
         import numpy as np
+        from vibevoice.modular.streamer import AudioStreamer
 
         inputs = self.processor.process_input_with_cached_prompt(
             text=text,
@@ -74,26 +77,45 @@ class Engine:
             key: value.to(self.device) if self.torch.is_tensor(value) else value
             for key, value in inputs.items()
         }
-        with self.torch.inference_mode():
-            result = self.model.generate(
-                **inputs,
-                cfg_scale=self.cfg,
-                tokenizer=self.processor.tokenizer,
-                generation_config={"do_sample": False},
-                verbose=False,
-                all_prefilled_outputs=copy.deepcopy(self.prompt),
-            )
-        if not result.speech_outputs or result.speech_outputs[0] is None:
+        streamer, stop, failed = AudioStreamer(batch_size=1), threading.Event(), []
+
+        def generate():
+            try:
+                with self.torch.inference_mode():
+                    self.model.generate(
+                        **inputs,
+                        cfg_scale=self.cfg,
+                        tokenizer=self.processor.tokenizer,
+                        generation_config={"do_sample": False},
+                        verbose=False,
+                        all_prefilled_outputs=copy.deepcopy(self.prompt),
+                        audio_streamer=streamer,
+                        return_speech=False,
+                        stop_check_fn=stop.is_set,
+                    )
+            except BaseException as exc:  # noqa: BLE001 - reported to the service
+                failed.append(exc)
+            finally:
+                streamer.end()
+
+        thread = threading.Thread(target=generate, name="vibevoice", daemon=True)
+        thread.start()
+        total = 0
+        try:
+            for chunk in streamer.get_stream(0):
+                audio = chunk.float().numpy().reshape(-1)
+                total += audio.size
+                if total > self.rate * 120 or not np.isfinite(audio).all():
+                    raise RuntimeError("VibeVoice returned an invalid waveform")
+                if audio.size:
+                    emit(audio.astype("<f4"))
+        finally:
+            stop.set()  # a no-op once generation ended; halts it after an error
+            thread.join()
+        if failed:
+            raise failed[0]
+        if not total:
             raise RuntimeError("VibeVoice returned no waveform")
-        audio = result.speech_outputs[0].detach().float().cpu().numpy().squeeze()
-        if (
-            audio.ndim != 1
-            or not audio.size
-            or audio.size > self.rate * 120
-            or not np.isfinite(audio).all()
-        ):
-            raise RuntimeError("VibeVoice returned an invalid waveform")
-        return audio.astype("<f4"), self.rate
 
 
 def main():
@@ -106,19 +128,24 @@ def main():
             with contextlib.redirect_stdout(sys.stderr):
                 if request["op"] == "prepare":
                     engine = Engine(request["config"])
-                    engine.synthesize("Voice is ready to respond.")
+                    engine.stream("Voice is ready to respond.", lambda _: None)
                     response = {
                         "ok": True,
                         "device": engine.device,
                         "rate": engine.rate,
                     }
-                elif request["op"] == "synthesize" and engine is not None:
-                    samples, rate = engine.synthesize(request["text"])
-                    response = {
-                        "ok": True,
-                        "rate": rate,
-                        "audio": base64.b64encode(samples.tobytes()).decode(),
-                    }
+                elif request["op"] == "stream" and engine is not None:
+                    identity = request.get("id")
+
+                    def emit(samples):
+                        chunk = base64.b64encode(samples.tobytes()).decode()
+                        output.write(
+                            json.dumps({"id": identity, "chunk": chunk}) + "\n"
+                        )
+                        output.flush()
+
+                    engine.stream(request["text"], emit)
+                    response = {"ok": True, "done": True, "rate": engine.rate}
                 else:
                     raise ValueError("Unknown speech request")
         except Exception as exc:

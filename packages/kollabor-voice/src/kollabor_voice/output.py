@@ -1,10 +1,15 @@
-"""One sentence FIFO with durable receipts and cancellation fences."""
+"""Sentence FIFO with durable receipts and cancellation fences.
+
+Synthesis runs ahead of playback: while one sentence plays, the next is
+already being generated, and each sentence plays from its first chunk.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import queue
 import re
 import threading
 import time
@@ -13,6 +18,9 @@ from pathlib import Path
 
 from .control import VoiceError
 from .store import repair_tail
+
+# Audio held back beyond the computed lead, for synthesis jitter.
+LEAD_MARGIN_S = 0.3
 
 
 def silent_response(text: str) -> bool:
@@ -39,15 +47,23 @@ def sentences(text: str) -> list[str]:
 
 
 class SpeechQueue:
-    def __init__(self, root: Path, synthesize, play, capacity=64):
-        self.synthesize, self.play = synthesize, play
+    def __init__(self, root: Path, stream, player, capacity=64):
+        # stream(text) yields (samples, rate) chunks; player writes them to the
+        # device (write/finish/abort, audio.StreamPlayer).
+        self.stream, self.player = stream, player
         self.capacity = capacity
         self.queue = asyncio.Queue(maxsize=capacity)
+        # Sentences handed from synthesis to playback, at most two ahead.
+        self.ready = asyncio.Queue(maxsize=2)
         self.jobs = {}
         self.replies = {}
         self.active = None
         self.intervals = deque(maxlen=128)
         self.error = None
+        # Learned from each sentence: seconds of speech per word, and synthesis
+        # seconds per second of speech (above 1 is slower than real time).
+        self.word_s, self.rtf = 0.4, 1.25
+        self.run_ids, self.last_interval = set(), None  # ids the current lead covers
         self.receipt_path = root / "speech.jsonl"
         # Crashed speech is never replayed. Finalize its durable receipt instead.
         if self.receipt_path.exists():
@@ -129,7 +145,8 @@ class SpeechQueue:
                     )
                 )
             ids.append(job_id)
-        if len(candidates) + self.queue.qsize() + bool(self.active) > self.capacity:
+        waiting = self.queue.qsize() + self.ready.qsize() + bool(self.active)
+        if len(candidates) + waiting > self.capacity:
             raise VoiceError(
                 "queue_full", "Voice output queue is full; the reply was not admitted"
             )
@@ -171,20 +188,62 @@ class SpeechQueue:
             }
 
     async def run(self):
+        producer = asyncio.create_task(self._produce(), name="voice-synthesis")
+        try:
+            await self._consume()
+        finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+
+    async def _produce(self):
         while True:
             item = await self.queue.get()
+            chunks = queue.Queue()  # (samples, rate) chunks, then None or the error
+            await self.ready.put((item, chunks))
+            if item["cancelled"].is_set():
+                chunks.put(None)
+                continue
+            self._state(item, "synthesizing")
+            await asyncio.to_thread(self._synthesize, item, chunks)
+
+    def _synthesize(self, item, chunks):
+        audio = iter(self.stream(item["sentence"]))
+        started, produced = time.monotonic(), 0.0
+        try:
+            for chunk in audio:
+                if item["cancelled"].is_set():
+                    break
+                chunks.put(chunk)
+                produced += len(chunk[0]) / chunk[1]
+            else:
+                if produced:
+                    words = max(1, len(item["sentence"].split()))
+                    elapsed = time.monotonic() - started
+                    self.rtf = 0.7 * self.rtf + 0.3 * elapsed / produced
+                    self.word_s = 0.7 * self.word_s + 0.3 * produced / words
+            chunks.put(None)
+        except Exception as exc:
+            chunks.put(exc)
+        finally:
+            getattr(audio, "close", lambda: None)()
+
+    async def _consume(self):
+        while True:
+            if self.ready.empty() and self.queue.empty():
+                # Nothing follows: play out the tail and release the device.
+                await asyncio.to_thread(self.player.finish)
+                self._close_run()
+            item, chunks = await self.ready.get()
             self.active = item
             interval = None
             try:
-                if item["cancelled"].is_set():
+                first = await asyncio.to_thread(chunks.get)
+                if isinstance(first, Exception):
+                    raise first
+                if first is None or item["cancelled"].is_set():
                     continue
-                self._state(item, "synthesizing")
-                samples, rate = await asyncio.to_thread(
-                    self.synthesize, item["sentence"]
-                )
-                if item["cancelled"].is_set():
-                    self._state(item, "cancelled")
-                    continue
+                if item["id"] not in self.run_ids:
+                    await self._start_run(item)
                 self._state(item, "playing")
                 interval = {
                     "reply_id": item["reply_id"],
@@ -193,25 +252,66 @@ class SpeechQueue:
                     "ended_at": None,
                 }
                 self.intervals.append(interval)
-                played = await asyncio.to_thread(
-                    self.play, samples, rate, item["cancelled"]
-                )
-                self._state(
-                    item,
-                    (
-                        "played"
-                        if played and not item["cancelled"].is_set()
-                        else "cancelled"
-                    ),
-                )
+                self.last_interval = interval
+                played = await asyncio.to_thread(self._play, item, first, chunks)
+                if played and not item["cancelled"].is_set():
+                    self._state(item, "played")
             except Exception as exc:
                 self.error = str(exc)
                 self._state(item, "failed", error=str(exc))
+                await asyncio.to_thread(self.player.abort)
             finally:
+                if item["cancelled"].is_set() and item["receipt"]["state"] not in {
+                    "cancelled",
+                    "failed",
+                }:
+                    # Playing changes to cancelled only once the device stops.
+                    self._state(item, "cancelled")
                 if interval:
                     interval["ended_at"] = time.time()
                 self.active = None
                 self.queue.task_done()
+
+    async def _start_run(self, item):
+        """Hold back enough audio that every sentence known now plays unbroken.
+
+        Synthesis slower than real time (rtf > 1) runs the device dry mid-word
+        unless T seconds of speech start with T * (rtf - 1) / rtf buffered.
+        """
+        if self.run_ids:
+            if self.rtf <= 1:
+                self.run_ids.add(item["id"])  # synthesis keeps ahead: play straight on
+                return
+            # Admitted after this run's lead was sized: pause here, between
+            # sentences, rather than run dry mid-word later.
+            await asyncio.to_thread(self.player.finish)
+            self._close_run()
+        pending = [
+            job
+            for job in self.jobs.values()
+            if job["receipt"]["state"] in {"queued", "synthesizing"}
+        ]
+        self.run_ids = {job["id"] for job in pending}
+        seconds = self.word_s * sum(len(job["sentence"].split()) for job in pending)
+        self.player.lead = seconds * max(0.0, self.rtf - 1) / self.rtf + LEAD_MARGIN_S
+
+    def _close_run(self):
+        # finish() returns once the device drained: the run's sound ends now,
+        # later than its last chunk was handed over (held lead, device buffer).
+        if self.last_interval:
+            self.last_interval["ended_at"] = time.time()
+        self.run_ids, self.last_interval = set(), None
+
+    def _play(self, item, chunk, chunks):
+        """Write each chunk as it arrives; False once the sentence is cancelled."""
+        while chunk is not None:
+            if isinstance(chunk, Exception):
+                raise chunk
+            samples, rate = chunk
+            if not self.player.write(samples, rate, item["cancelled"]):
+                return False
+            chunk = chunks.get()
+        return True
 
     def overlap(self, start, end):
         return [
@@ -223,6 +323,6 @@ class SpeechQueue:
     def status(self):
         return {
             "state": self.active["receipt"]["state"] if self.active else "idle",
-            "depth": self.queue.qsize(),
+            "depth": self.queue.qsize() + self.ready.qsize(),
             "error": self.error,
         }

@@ -53,6 +53,25 @@ class Recorder:
             self.running = False
 
 
+class Speaker:
+    """Fake StreamPlayer: records each written chunk instead of playing it."""
+
+    def __init__(self, on_write=None):
+        self.spoken, self.on_write, self.finished = [], on_write, 0
+
+    def write(self, samples, rate, cancelled):
+        if self.on_write:
+            return self.on_write(samples, rate, cancelled)
+        self.spoken.append(samples)
+        return not cancelled.is_set()
+
+    def finish(self):
+        self.finished += 1
+
+    def abort(self):
+        pass
+
+
 class Models:
     def warmup(self):
         pass
@@ -79,7 +98,7 @@ async def service(root):
         load_models=lambda _: Models(),
         recorder_factory=Recorder,
         segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
-        player=lambda *args: True,
+        player=Speaker(),
     )
     await server.start()
     await until(lambda: server.setup["state"] == "ready")
@@ -253,7 +272,7 @@ async def test_finishing_setup_after_release_never_opens_mic(root):
         load_assets=assets,
         load_models=lambda _: Models(),
         recorder_factory=Recorder,
-        player=lambda *args: True,
+        player=Speaker(),
     )
     await service.start()
     client = VoiceClient(root)
@@ -344,11 +363,11 @@ async def test_retry_clears_failed_setup_before_reporting_progress(root):
 
 
 def test_receipt_crash_tail_is_preserved_and_interrupted_speech_not_replayed(root):
-    q = SpeechQueue(root, lambda _: None, lambda *_: True)
+    q = SpeechQueue(root, lambda _: [], Speaker())
     q.admit("First sentence.", "r", "epoch", "p")
     with q.receipt_path.open("ab") as f:
         f.write(b'{"torn":')
-    recovered = SpeechQueue(root, lambda _: None, lambda *_: True)
+    recovered = SpeechQueue(root, lambda _: [], Speaker())
     receipts = [
         json.loads(line) for line in recovered.receipt_path.read_text().splitlines()
     ]
@@ -368,12 +387,8 @@ def test_sentence_split_preserves_abbreviations_decimals_and_final_fragment():
 
 @pytest.mark.asyncio
 async def test_output_all_sentences_and_idempotent_reply(root):
-    spoken = []
-    q = SpeechQueue(
-        root,
-        lambda text: (text, 1),
-        lambda text, rate, event: spoken.append(text) or True,
-    )
+    speaker = Speaker()
+    q = SpeechQueue(root, lambda text: [(text, 1)], speaker)
     result = q.admit(
         "First sentence. Second sentence. Final", "reply", "epoch", "producer"
     )
@@ -385,22 +400,22 @@ async def test_output_all_sentences_and_idempotent_reply(root):
     await q.queue.join()
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
-    assert spoken == ["First sentence.", "Second sentence.", "Final"]
+    assert speaker.spoken == ["First sentence.", "Second sentence.", "Final"]
     assert all(item["receipt"]["state"] == "played" for item in q.jobs.values())
 
 
 @pytest.mark.asyncio
 async def test_cancel_during_synthesis_fences_late_result_and_keeps_later_reply(root):
     started, finish = threading.Event(), threading.Event()
-    played = []
+    speaker = Speaker()
 
     def synth(text):
         if text == "Cancel me.":
             started.set()
             finish.wait(2)
-        return text, 1
+        yield text, 1
 
-    q = SpeechQueue(root, synth, lambda text, *_: played.append(text) or True)
+    q = SpeechQueue(root, synth, speaker)
     q.admit("Cancel me.", "old", "epoch", "one")
     q.admit("Keep me.", "new", "epoch", "two")
     worker = asyncio.create_task(q.run())
@@ -410,7 +425,7 @@ async def test_cancel_during_synthesis_fences_late_result_and_keeps_later_reply(
     await q.queue.join()
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
-    assert played == ["Keep me."]
+    assert speaker.spoken == ["Keep me."]
     events = [json.loads(line) for line in q.receipt_path.read_text().splitlines()]
     assert not any(e["reply_id"] == "old" and e["state"] == "played" for e in events)
     assert any(e["reply_id"] == "old" and e["state"] == "cancelled" for e in events)
@@ -425,7 +440,7 @@ async def test_cancel_playback_and_queue_overload(root):
         cancelled.wait(2)
         return not cancelled.is_set()
 
-    q = SpeechQueue(root, lambda _: ([], 1), play, capacity=1)
+    q = SpeechQueue(root, lambda _: [([], 1)], Speaker(play), capacity=1)
     q.admit("First.", "one", "epoch", "one")
     with pytest.raises(VoiceError, match="full"):
         q.admit("Second.", "two", "epoch", "two")
@@ -439,11 +454,153 @@ async def test_cancel_playback_and_queue_overload(root):
 
 
 @pytest.mark.asyncio
-async def test_explicit_and_final_speech_deduplicate_only_matching_sentences(root):
-    spoken = []
-    q = SpeechQueue(
-        root, lambda text: (text, 1), lambda text, *_: spoken.append(text) or True
+async def test_next_sentence_synthesizes_while_this_one_plays(root):
+    """Speak, pause, speak, pause (2026-10-18): synthesis waited for playback.
+
+    The first sentence's playback blocks until the second sentence's synthesis
+    has started; a queue that only synthesizes after playing never gets there.
+    """
+    second_started = threading.Event()
+
+    def synth(text):
+        if text == "Second.":
+            second_started.set()
+        yield text, 1
+
+    def write(samples, rate, cancelled):
+        if samples == "First.":
+            assert second_started.wait(2), "second sentence waited for playback"
+        return True
+
+    q = SpeechQueue(root, synth, Speaker(write))
+    q.admit("First. Second.", "reply", "epoch", "agent")
+    worker = asyncio.create_task(q.run())
+    await asyncio.wait_for(q.queue.join(), 5)
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    assert [item["receipt"]["state"] for item in q.jobs.values()] == ["played"] * 2
+
+
+@pytest.mark.asyncio
+async def test_run_lead_covers_synthesis_slower_than_real_time(root):
+    """16 underruns in 19s of speech (2026-10-18): a 1.2x real-time synth ran dry."""
+    from kollabor_voice.output import LEAD_MARGIN_S
+
+    speaker = Speaker()
+    q = SpeechQueue(root, lambda text: iter(()), speaker)
+    q.admit("One two three four five. Six seven eight nine ten.", "a", "epoch", "x")
+    first, second = q.jobs.values()
+    q.word_s, q.rtf = 0.5, 1.25
+    await q._start_run(first)
+    # 10 words * 0.5s = 5s of speech; 5 * 0.25 / 1.25 = 1s held back up front.
+    assert speaker.lead == pytest.approx(1 + LEAD_MARGIN_S)
+    assert q.run_ids == {first["id"], second["id"]} and not speaker.finished
+
+    for job in (first, second):
+        q._state(job, "played")
+    late = q.jobs[q.admit("Eleven twelve.", "b", "epoch", "x")["ids"][0]]
+    await q._start_run(late)  # admitted mid-run: the run ends between sentences
+    assert speaker.finished == 1 and q.run_ids == {late["id"]}
+    assert speaker.lead == pytest.approx(2 * 0.5 * 0.25 / 1.25 + LEAD_MARGIN_S)
+
+    q.rtf = 0.8
+    faster = q.jobs[q.admit("Thirteen.", "c", "epoch", "x")["ids"][0]]
+    await q._start_run(faster)  # synthesis keeps ahead: it joins the run
+    assert speaker.finished == 1 and faster["id"] in q.run_ids
+
+
+@pytest.mark.asyncio
+async def test_sentence_plays_from_its_first_chunk(root):
+    """Playback starts before the synthesizer has produced the rest."""
+    first_played = threading.Event()
+
+    def synth(text):
+        yield "chunk one", 1
+        assert first_played.wait(2), "playback waited for the whole sentence"
+        yield "chunk two", 1
+
+    def write(samples, rate, cancelled):
+        speaker.spoken.append(samples)
+        first_played.set()
+        return True
+
+    speaker = Speaker(write)
+    q = SpeechQueue(root, synth, speaker)
+    q.admit("One long sentence.", "reply", "epoch", "agent")
+    worker = asyncio.create_task(q.run())
+    await asyncio.wait_for(q.queue.join(), 5)
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    assert speaker.spoken == ["chunk one", "chunk two"]
+    assert next(iter(q.jobs.values()))["receipt"]["state"] == "played"
+
+
+def test_stream_player_prebuffers_then_plays_sentences_back_to_back(monkeypatch):
+    from types import SimpleNamespace
+
+    from kollabor_voice.audio import StreamPlayer
+
+    events = []
+
+    class Device:
+        def __init__(self, **kwargs):
+            self.active = False
+            events.append("open")
+
+        def start(self):
+            self.active = True
+            events.append("start")
+
+        def write(self, data):
+            events.append(len(data))
+            return False
+
+        def stop(self):
+            self.active = False
+            events.append("stop")
+
+        def abort(self):
+            self.active = False
+            events.append("abort")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setitem(
+        sys.modules, "sounddevice", SimpleNamespace(OutputStream=Device)
     )
+    player, go = StreamPlayer(), threading.Event()
+    rate = 1000  # the 0.4s prebuffer is 400 samples
+    assert player.write(np.ones(300, np.float32), rate, go)
+    assert events == ["open"]  # held back: a near-real-time synth cannot stutter
+    assert player.write(np.ones(300, np.float32), rate, go)
+    assert events[:2] == ["open", "start"] and sum(events[2:]) == 600
+    assert player.write(
+        np.ones(100, np.float32), rate, go
+    )  # next sentence, same stream
+    assert "stop" not in events and events.count("open") == 1
+    player.finish()
+    assert events[-2:] == ["stop", "close"] and player.stream is None
+
+    events.clear()
+    player.lead = 1.0  # a run sized for slow synthesis holds back 1000 samples
+    assert player.write(np.ones(600, np.float32), rate, go)
+    assert events == ["open"]
+    assert player.write(np.ones(600, np.float32), rate, go)
+    assert events[1] == "start" and sum(events[2:]) == 1200
+    player.finish()
+
+    events.clear()
+    assert player.write(np.ones(100, np.float32), rate, go)  # buffered, not played
+    go.set()
+    assert not player.write(np.ones(100, np.float32), rate, go)
+    assert events == ["open", "close"] and not player.pending  # cancel drops it all
+
+
+@pytest.mark.asyncio
+async def test_explicit_and_final_speech_deduplicate_only_matching_sentences(root):
+    speaker = Speaker()
+    q = SpeechQueue(root, lambda text: [(text, 1)], speaker)
     q.admit("First sentence.", "reply", "epoch", "one")
     result = q.admit("First sentence. The final result.", "reply", "epoch", "one")
     assert not result["duplicate"] and q.queue.qsize() == 2
@@ -451,7 +608,7 @@ async def test_explicit_and_final_speech_deduplicate_only_matching_sentences(roo
     await q.queue.join()
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
-    assert spoken == ["First sentence.", "The final result."]
+    assert speaker.spoken == ["First sentence.", "The final result."]
 
 
 def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request():
@@ -479,10 +636,8 @@ def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request(
 
 @pytest.mark.asyncio
 async def test_silent_period_never_reaches_synthesizer_or_speech_receipts(root):
-    spoken = []
-    queue = SpeechQueue(
-        root, lambda text: (text, 1), lambda text, *_: spoken.append(text) or True
-    )
+    speaker = Speaker()
+    queue = SpeechQueue(root, lambda text: [(text, 1)], speaker)
     assert sentences(" \n.\n ") == []
     assert queue.admit(".", "silence", "epoch", "agent")["silent"]
     assert not queue.jobs and not queue.receipt_path.exists()
@@ -491,7 +646,7 @@ async def test_silent_period_never_reaches_synthesizer_or_speech_receipts(root):
     await queue.queue.join()
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
-    assert spoken == ["I can help."]
+    assert speaker.spoken == ["I can help."]
 
 
 @pytest.mark.asyncio
@@ -700,7 +855,7 @@ async def test_microphone_waits_for_silent_audio_warmup(root):
         load_models=lambda _: WarmingModels(),
         recorder_factory=Recorder,
         segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
-        player=lambda *args: pytest.fail("Warm-up must never play audio"),
+        player=Speaker(lambda *_: pytest.fail("Warm-up must never play audio")),
     )
     await server.start()
     try:
@@ -778,7 +933,7 @@ def stuck_server(root, recorder_factory):
         load_models=lambda _: Models(),
         recorder_factory=recorder_factory,
         segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
-        player=lambda *args: True,
+        player=Speaker(),
     )
 
 
@@ -846,7 +1001,7 @@ async def test_claim_succeeds_after_teardown_exceeds_client_budget(root):
         load_models=lambda _: Models(),
         recorder_factory=SlowStopRecorder,
         segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
-        player=lambda *args: True,
+        player=Speaker(),
     )
     await server.start()
     await until(lambda: server.setup["state"] == "ready")
@@ -919,7 +1074,7 @@ async def test_client_timeout_carries_a_real_reason(root):
         load_models=lambda _: Models(),
         recorder_factory=Recorder,
         segmenter_factory=lambda: SpeechSegmenter(lambda _: True),
-        player=lambda *args: True,
+        player=Speaker(),
     )
     await server.start()
     await until(lambda: server.setup["state"] == "ready")
@@ -945,9 +1100,9 @@ async def test_client_timeout_carries_a_real_reason(root):
                 claim_id="t",
                 activated_at=time.time(),
             )
-        assert "did not answer 'claim'" in str(excinfo.value), (
-            f"reason missing: {excinfo.value!r}"
-        )
+        assert "did not answer 'claim'" in str(
+            excinfo.value
+        ), f"reason missing: {excinfo.value!r}"
     finally:
         release.set()
         holder.cancel()
