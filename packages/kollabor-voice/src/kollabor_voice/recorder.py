@@ -173,7 +173,11 @@ class Recorder:
     def _on_audio(self, indata, _frames, _time_info, status) -> None:
         """PortAudio callback. MUST NOT block. Runs on the audio thread."""
         if self._stop_flag.is_set():
-            raise _sd.CallbackStop  # stop pulling frames
+            # Drop the frame; stop() halts the stream. Raising CallbackStop
+            # here made PortAudio stop the unit from this thread while stop()
+            # stopped it from the control thread, and CoreAudio deadlocked on
+            # its HAL mutex (seen live: AudioOutputUnitStop vs AudioDeviceStop).
+            return
         now = time.monotonic()
         self._seq += 1
         self._frames_captured += 1

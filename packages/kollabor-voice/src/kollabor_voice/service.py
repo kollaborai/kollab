@@ -32,6 +32,9 @@ from .store import TranscriptLog, utc
 
 log = logging.getLogger(__name__)
 
+# A recorder start or stop that takes longer than this is stuck in CoreAudio.
+RECORDER_TIMEOUT_S = 5
+
 
 class VoiceService:
     def __init__(
@@ -71,6 +74,8 @@ class VoiceService:
         self.setup_task = None
         self.server = None
         self.lifecycle = asyncio.Lock()
+        self.shutdown = asyncio.Event()
+        self.stuck = False
         self.load_assets = load_assets
         self.load_models = load_models
         self.recorder_factory = recorder_factory
@@ -507,20 +512,19 @@ class VoiceService:
             )
             self.last_seq = None
             try:
-                # PortAudio device open can stall indefinitely (CoreAudio
-                # mutex, TCC prompts for a detached daemon). Bounded like
-                # stop_capture so a stalled start releases the lifecycle
-                # lock instead of wedging claim/watch.
-                await asyncio.wait_for(asyncio.to_thread(self.recorder.start), timeout=5)
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.recorder.start), timeout=RECORDER_TIMEOUT_S
+                )
             except asyncio.TimeoutError:
+                self.capture_stuck("recorder.start")
                 raise VoiceError(
                     "capture_start_timeout",
-                    "Microphone did not open within 5s; run /voice retry",
+                    "Microphone did not open; run /voice again to restart voice",
                 ) from None
         except Exception as exc:
             log.exception("Voice capture failed to start")
             self.error = str(exc)
-            if self.recorder:
+            if self.recorder and not self.stuck:
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(self.recorder.stop)
             self.recorder = None
@@ -547,16 +551,11 @@ class VoiceService:
         if self.recorder:
             recorder, self.recorder = self.recorder, None
             try:
-                # CoreAudio can deadlock inside AudioOutputUnitStop (observed
-                # live: HALB_Mutex::Lock held forever). Bounded so the
-                # lifecycle lock is released and voice stays recoverable
-                # instead of wedging every future claim.
-                await asyncio.wait_for(asyncio.to_thread(recorder.stop), timeout=5)
-            except asyncio.TimeoutError:
-                log.error(
-                    "recorder.stop did not finish within 5s; abandoning the "
-                    "capture thread and continuing teardown"
+                await asyncio.wait_for(
+                    asyncio.to_thread(recorder.stop), timeout=RECORDER_TIMEOUT_S
                 )
+            except asyncio.TimeoutError:
+                self.capture_stuck("recorder.stop")
             finally:
                 while not recorder.frames.empty():
                     self.consume_frame(recorder.frames.get_nowait(), final=False)
@@ -565,6 +564,18 @@ class VoiceService:
             if segment:
                 self.submit(segment, final=False)
         self.segmenter = None
+
+    def capture_stuck(self, call):
+        # The stuck thread holds CoreAudio's device mutex, so no stream in this
+        # process opens again. Restart: serve() exits and the next /voice
+        # launches a fresh service.
+        log.error(
+            "%s did not return within %ss; restarting the voice service",
+            call,
+            RECORDER_TIMEOUT_S,
+        )
+        self.stuck = True
+        self.shutdown.set()
 
     def submit(self, segment, final=True):
         if not self.owner:
@@ -756,15 +767,17 @@ class VoiceService:
 
 async def serve(root):
     service = VoiceService(root)
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(signum, stop.set)
+        loop.add_signal_handler(signum, service.shutdown.set)
     await service.start()
     try:
-        await stop.wait()
+        await service.shutdown.wait()
     finally:
         await service.close()
+    if service.stuck:
+        # Interpreter exit joins every executor thread, the stuck one too.
+        os._exit(1)
 
 
 def main():
