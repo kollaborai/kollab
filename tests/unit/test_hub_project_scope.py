@@ -170,10 +170,10 @@ def test_get_hub_dir_project_scoped_mode(monkeypatch, tmp_path):
 def test_get_socket_dir_global_mode(monkeypatch):
     monkeypatch.setenv("KOLLAB_HUB_PROJECT_SCOPED", "false")
 
-    from plugins.hub.presence import get_socket_dir
+    from plugins.hub.presence import SOCKET_DIR_ROOT, get_socket_dir
 
     d = get_socket_dir()
-    assert str(d) == "/tmp/kollabor-hub"
+    assert d == SOCKET_DIR_ROOT
 
 
 def test_get_socket_dir_project_scoped_is_subdir(monkeypatch):
@@ -181,12 +181,11 @@ def test_get_socket_dir_project_scoped_is_subdir(monkeypatch):
     monkeypatch.setenv("KOLLAB_PROJECT_ROOT", "/test/project")
 
     from plugins.hub import project_scope
-    from plugins.hub.presence import get_socket_dir
+    from plugins.hub.presence import SOCKET_DIR_ROOT, get_socket_dir
 
     project_scope.resolve_project_root.cache_clear()
     d = get_socket_dir()
-    assert str(d).startswith("/tmp/kollabor-hub/")
-    assert str(d) != "/tmp/kollabor-hub"
+    assert d.parent == SOCKET_DIR_ROOT
     # 12 hex chars for the project key
     tail = str(d).rsplit("/", 1)[-1]
     assert len(tail) == 12
