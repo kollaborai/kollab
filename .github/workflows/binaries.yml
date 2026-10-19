@@ -4,15 +4,24 @@ name: Binaries
 # publish.yml calls this for every release tag and attaches the binaries to the
 # GitHub Release, where install.sh and /upgrade download them.
 #
-# The full binary/desktop matrix runs only on pushes to main and on release
-# tags, through publish.yml.
-# Pull requests prove the packaging path with the single ci/binary-smoke job in
-# ci.yml instead -- four macOS/Linux binary builds plus two desktop builds per
+# The full binary/desktop matrix runs on pushes to main, on pull requests that
+# change packaging (the paths below, release PRs among them), and on release tags
+# through publish.yml. Other pull requests prove the packaging path with the
+# single ci/binary-smoke job in ci.yml instead -- four macOS/Linux binary builds plus two desktop builds per
 # PR was the dominant CI cost and left the required check waiting on runner
 # queues.
 on:
   push:
     branches: [main]
+  # A change to how the app is packaged gets the whole matrix before it merges. A
+  # release PR always matches (it bumps desktop/src-tauri/tauri.conf.json), so the
+  # release prep is built on every platform before anything is tagged.
+  pull_request:
+    paths:
+      - ".github/workflows/binaries.yml"
+      - "scripts/build_binary.py"
+      - "scripts/desktop_release.py"
+      - "desktop/**"
   # No tags trigger: publish.yml calls this for every release tag. A tags trigger
   # here built every binary and desktop app twice per release.
   workflow_call:
@@ -112,8 +121,19 @@ jobs:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
-      - name: Install pinned Tauri CLI
-        run: cargo install tauri-cli --locked --version "2.12.0"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # The npm package ships the prebuilt CLI; `cargo install` compiled it on every run.
+      - name: Check pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.12.0 --version
+
+      # Reuses compiled crates between runs: an uncached Intel build took 40 minutes.
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
 
       - name: Unpack the CLI into the app runtime and set the release version
         env:
@@ -122,7 +142,7 @@ jobs:
 
       - name: Build unsigned Kollab.app
         working-directory: desktop
-        run: cargo tauri build --config src-tauri/tauri.release.json --bundles app
+        run: npx --yes @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.json --bundles app
 
       - name: Package unsigned desktop assets
         env:
@@ -211,6 +231,12 @@ jobs:
 
       - name: Check pinned Tauri CLI
         run: npx --yes @tauri-apps/cli@2.12.0 --version
+
+      # Reuses compiled crates between runs: an uncached Intel build took 40 minutes.
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
 
       - name: Test Linux runtime ownership
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
