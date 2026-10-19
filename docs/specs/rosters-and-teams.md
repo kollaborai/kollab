@@ -213,7 +213,7 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
 `AgentLibrary`, `launch-choices.ts`, `team-model.ts`), `hooks/use-rosters.ts`.
 
 - **Names.** A persona is called by its `display_name` in rows (live, offline, remote),
-  the chat header, Session Controls, Who Is Online and the Session settings tab, and
+  the Session Controls panel, Who Is Online and the Session settings tab, and
   falls back to its identity in Title Case (`agentName` in `utils/session-display.ts`).
   Gem Studio dresses gems only. A persona with no gem look has nothing to dress: its
   Properties (row menu, double-click on its picture, or the greeting's picture) show its

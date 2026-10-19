@@ -46,7 +46,7 @@ returns success with an empty message).
 
 ### 2. the Settings button reaches none of `/config`
 
-the browser's **Settings** dialog (`SessionToolbar.tsx:645`; the sidebar
+the browser's **Settings** dialog (`SessionPanel.tsx`; the sidebar
 opens it by clicking that button through the DOM, `App.tsx:502-506`) only
 edits session-only profile/model/effort overrides. it reaches none of the 157
 `/config` fields: 20 sections, of which 72 are checkbox, 56 slider, 14

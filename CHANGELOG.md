@@ -5,6 +5,12 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Web: Session Controls is a panel at the chat's right edge, open by default, instead of a popover. It holds the session's name, the Chat and Trajectory views and every control that sat in the chat header, so on a computer the chat has no header bar and the sidebar no hide button. Hide the panel to a slim rail; the browser remembers. On a phone the Session button opens it as a sheet.
+- Web: the sidebar's footer (Hidden Agents, Apps, Agents, Gem Studio, Settings) is one row of icons.
+
 ## [0.17.0] - 2026-10-18
 
 ### Changed

@@ -24,6 +24,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import { cliHarness } from "@/utils/cli-harness";
 import { sessionFolder, sessionSubtitle } from "@/utils/session-subtitle";
@@ -107,6 +108,9 @@ function FoldGroup({
     </Collapsible>
   );
 }
+
+const FOOTER_BUTTON =
+  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
 
 export function AppSidebar({
   sessions,
@@ -741,85 +745,85 @@ export function AppSidebar({
       </SidebarContent>
 
       <SidebarFooter className="p-2">
-        <SidebarMenu>
-          {hiddenError ? (
-            <SidebarMenuItem>
-              <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
-            </SidebarMenuItem>
-          ) : null}
+        {hiddenError ? (
+          <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
+        ) : null}
+        {/* One row of icons; each name shows on hover and to screen readers. */}
+        <div className="flex items-center justify-around">
           {hiddenList.length ? (
-            <SidebarMenuItem>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <SidebarMenuButton><EyeOff className="size-4" /><span>Hidden Agents ({hiddenList.length})</span></SidebarMenuButton>
-                </PopoverTrigger>
-                <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
-                  <p className="text-sm font-semibold">Hidden Agents</p>
-                  <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
-                  <ul className="my-2 max-h-64 overflow-y-auto">
-                    {hiddenList.map((agent) => (
-                      <li key={agent.key} className="flex items-center gap-2 py-1.5">
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm">{agent.label}</p>
-                          <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
-                        </div>
-                        <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
-                      </li>
-                    ))}
-                  </ul>
-                  <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
-                </PopoverContent>
-              </Popover>
-            </SidebarMenuItem>
+            <Popover>
+              <PopoverTrigger asChild>
+                <TooltipIconButton tooltip={`Hidden Agents (${hiddenList.length})`} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2`}>
+                  <EyeOff className="size-4" />
+                  <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span>
+                </TooltipIconButton>
+              </PopoverTrigger>
+              <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
+                <p className="text-sm font-semibold">Hidden Agents</p>
+                <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
+                <ul className="my-2 max-h-64 overflow-y-auto">
+                  {hiddenList.map((agent) => (
+                    <li key={agent.key} className="flex items-center gap-2 py-1.5">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm">{agent.label}</p>
+                        <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
+                      </div>
+                      <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
+                    </li>
+                  ))}
+                </ul>
+                <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
+              </PopoverContent>
+            </Popover>
           ) : null}
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={() => {
-                setOpenMobile(false);
-                onApps();
-              }}
-              disabled={!activeId}
-            >
-              <LayoutGrid className="size-4" />
-              <span>Apps</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={() => {
-                setOpenMobile(false);
-                onAgents();
-              }}
-            >
-              <Users className="size-4" />
-              <span>Agents</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={() => {
-                // On a phone the sidebar is a sheet: close it under the studio.
-                setOpenMobile(false);
-                onStudio();
-              }}
-            >
-              <Palette className="size-4" />
-              <span>Gem Studio</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={() => {
-                setOpenMobile(false);
-                onSettings();
-              }}
-              disabled={!activeId}
-            >
-              <Settings2 className="size-4" />
-              <span>Settings</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+          <TooltipIconButton
+            tooltip="Apps"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onApps();
+            }}
+            disabled={!activeId}
+          >
+            <LayoutGrid className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Agents"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onAgents();
+            }}
+          >
+            <Users className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Gem Studio"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              // On a phone the sidebar is a sheet: close it under the studio.
+              setOpenMobile(false);
+              onStudio();
+            }}
+          >
+            <Palette className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Settings"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onSettings();
+            }}
+            disabled={!activeId}
+          >
+            <Settings2 className="size-4" />
+          </TooltipIconButton>
+        </div>
       </SidebarFooter>
       <SidebarRail />
 

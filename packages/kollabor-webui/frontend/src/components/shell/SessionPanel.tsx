@@ -4,10 +4,14 @@ import {
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   CircleAlert,
   Eraser,
+  MessageSquare,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Plug,
   Plus,
@@ -15,10 +19,10 @@ import {
   Settings2,
   ShieldCheck,
   ShieldOff,
-  SlidersHorizontal,
   Terminal,
   Trash2,
   Users,
+  Waypoints,
 } from "lucide-react";
 import type {
   AgentPoolEntry,
@@ -50,8 +54,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { CliBadge } from "@/components/shell/CliBadge";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { cn } from "@/lib/utils";
+import { cliHarness } from "@/utils/cli-harness";
 import { Separator } from "@/components/ui/separator";
 import {
   APPROVAL_MODE_OPTIONS,
@@ -59,7 +68,7 @@ import {
   normalizeApprovalMode,
 } from "@/utils/approval-mode";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
-import { agentName, sessionHeading } from "@/utils/session-display";
+import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
 import {
   Select,
   SelectContent,
@@ -68,7 +77,41 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export function SessionToolbar({
+export type SessionView = "chat" | "trajectory";
+
+const VIEWS = [
+  ["chat", "Chat", MessageSquare],
+  ["trajectory", "Trajectory", Waypoints],
+] as const;
+
+// Whether the docked panel is open, per browser. Open unless closed here before.
+const PANEL_KEY = "kollab.session-panel";
+
+function storedOpen(): boolean {
+  try {
+    return window.localStorage.getItem(PANEL_KEY) !== "closed";
+  } catch {
+    return true;
+  }
+}
+
+function storeOpen(open: boolean) {
+  try {
+    window.localStorage.setItem(PANEL_KEY, open ? "open" : "closed");
+  } catch {
+    // Private windows and blocked storage just forget the choice.
+  }
+}
+
+// A panel row: small text, the width of the panel.
+const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs font-normal";
+
+/**
+ * The session's own column: who it is, Chat or Trajectory, and its controls.
+ * Docked at the chat's right edge and open by default; closed, it leaves a
+ * slim rail. On a phone it is a sheet the chat header opens.
+ */
+export function SessionPanel({
   api,
   session,
   profiles,
@@ -80,6 +123,10 @@ export function SessionToolbar({
   onSessionUpdated,
   onOpenSettings,
   onHistoryCleared,
+  view,
+  onViewChange,
+  sheetOpen,
+  onSheetOpenChange,
 }: {
   api: EngineApi;
   session: Session;
@@ -94,11 +141,16 @@ export function SessionToolbar({
   onOpenSettings: () => void;
   /** Called once the engine has cleared the history; resets the open thread. */
   onHistoryCleared: () => Promise<void>;
+  view: SessionView;
+  onViewChange: (view: SessionView) => void;
+  /** The phone sheet, opened from the chat header. */
+  sheetOpen: boolean;
+  onSheetOpenChange: (open: boolean) => void;
 }) {
-  const [controlsOpen, setControlsOpen] = useState(false);
+  const isMobile = useIsMobile();
+  const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
-  const controlsRef = useRef<HTMLButtonElement>(null);
-  const openingDialog = useRef(false);
+  const opener = useRef<HTMLElement | null>(null);
   const [mode, setMode] = useState(() =>
     normalizeApprovalMode(session.approval_mode),
   );
@@ -288,135 +340,181 @@ export function SessionToolbar({
   const activeProfile = profiles.find(
     (profile) => profile.name === (session.profile || profiles[0]?.name),
   );
-  const openDialog = (open: () => void) => {
-    openingDialog.current = true;
-    setControlsOpen(false);
-    open();
+  const toggle = (next: boolean) => {
+    setOpen(next);
+    storeOpen(next);
   };
-  const restoreControlsFocus = (event: Event) => {
+  // A dialog opens over the chat; on a phone the sheet steps aside for it.
+  const openDialog = (show: () => void) => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    onSheetOpenChange(false);
+    show();
+  };
+  // Closing a dialog returns focus to the row that opened it, while it is shown.
+  const restoreFocus = (event: Event) => {
+    if (!opener.current?.isConnected) return;
     event.preventDefault();
-    controlsRef.current?.focus();
+    opener.current.focus();
   };
+
+  const body = (action: ReactNode) => (
+    <div className="flex min-w-0 flex-col gap-3 text-xs">
+      <div className="flex min-w-0 items-start gap-1">
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-sm font-semibold" title={sessionLabel}>{sessionLabel}</h2>
+          <p className="text-muted-foreground truncate" title={session.session_id}>
+            {formatSessionName(session.name, session.session_id)}
+          </p>
+        </div>
+        {action}
+      </div>
+      <CliBadge harness={cliHarness(session)} className="text-muted-foreground" />
+      {session.acp_waiting && <p className="text-amber-600">Waiting for Approval</p>}
+      {status && <p className={statusError ? "text-destructive break-words" : "text-muted-foreground break-words"}>{status}</p>}
+      {usage && <p className="text-muted-foreground break-words tabular-nums" title="Current harness context usage">{usage}</p>}
+      <div className="flex flex-col gap-0.5" role="group" aria-label="Session view">
+        {VIEWS.map(([id, label, Icon]) => (
+          <Button
+            key={id}
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={view === id}
+            data-testid={`${id}-tab`}
+            onClick={() => {
+              onViewChange(id);
+              onSheetOpenChange(false);
+            }}
+            className={cn(ROW, view === id && "bg-accent text-accent-foreground font-medium")}
+          >
+            <Icon className="size-3.5" />
+            <span>{label}</span>
+          </Button>
+        ))}
+      </div>
+      <Separator />
+      <div className="flex min-w-0 flex-col gap-1">
+        <p className="text-muted-foreground font-medium">Model and Profile</p>
+        <Select
+          value={session.profile || profiles[0]?.name || "default"}
+          onValueChange={(next) => void changeProfile(next)}
+          disabled={!profiles.length}
+        >
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-full min-w-0 text-xs"
+            aria-label="Model"
+          >
+            <SelectValue placeholder="Model" className="min-w-0 flex-1">
+              {activeProfile ? (
+                <span className="min-w-0 truncate">
+                  {activeProfile.model || activeProfile.name}
+                  {activeProfile.model && activeProfile.name !== activeProfile.model ? (
+                    <span className="text-muted-foreground"> · {activeProfile.name}</span>
+                  ) : null}
+                </span>
+              ) : undefined}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent className="max-w-[calc(100vw-1.5rem)]">
+            {profiles.map((profile) => (
+              <SelectItem key={profile.name} value={profile.name}>
+                <span className="min-w-0 truncate">
+                  {profile.model || profile.name}
+                  {profile.model && profile.name !== profile.model ? (
+                    <span className="text-muted-foreground"> · {profile.name}</span>
+                  ) : null}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <p className="text-muted-foreground font-medium">Approval Mode</p>
+        <Select value={mode} onValueChange={(next) => void changeMode(next)}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-full text-xs"
+            aria-label="Approval mode"
+            title={formatApprovalMode(mode)}
+          >
+            {/* Trust All skips every approval prompt: an open shield says so. */}
+            {mode === "trust_all" ? (
+              <ShieldOff className="size-3.5 text-amber-500" />
+            ) : (
+              <ShieldCheck className="size-3.5" />
+            )}
+            <SelectValue>{formatApprovalMode(mode)}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {APPROVAL_MODE_OPTIONS.map(({ value, label }) => (
+              <SelectItem key={value} value={value}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <Separator />
+      <div className="flex flex-col gap-0.5">
+        <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => { setMcpOpen(true); void loadMcp(); })}>
+          <Plug className="size-3.5" /><span>MCP Servers</span>
+          <span className="text-muted-foreground ml-auto tabular-nums">{connectedCount}/{allServerNames.length}</span>
+        </Button>
+        <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => { setHubOpen(true); void loadAgents(); })}>
+          <Users className="size-3.5" /><span>Who Is Online</span>
+          <span className="text-muted-foreground ml-auto tabular-nums">{agents === null ? "…" : agents.length}</span>
+        </Button>
+        <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(onOpenSettings)}>
+          <Settings2 className="size-3.5" /><span>Settings</span>
+        </Button>
+        <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => setClearOpen(true))}>
+          <Eraser className="size-3.5" /><span>Clear History</span>
+        </Button>
+      </div>
+    </div>
+  );
 
   return (
     <>
       <span className="sr-only" role={statusError ? "alert" : "status"}>{status || (session.acp_waiting ? "Waiting for Approval" : "")}</span>
-      <Popover open={controlsOpen} onOpenChange={setControlsOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            ref={controlsRef}
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-label="Session Controls"
-            title={status || (session.acp_waiting ? "Waiting for Approval" : "Session Controls")}
-            className="h-8 shrink-0 gap-1.5 px-2"
-          >
-            {statusError ? <CircleAlert className="size-4 text-destructive" /> : <SlidersHorizontal className={session.acp_waiting ? "size-4 text-amber-600" : "size-4"} />}
-            <span className="hidden @min-[30rem]/shell-header:inline">Session Controls</span>
-            <span className="@min-[30rem]/shell-header:hidden">Controls</span>
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          align="end"
-          className="flex max-h-(--radix-popover-content-available-height) w-80 max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto"
-          aria-label="Session Controls"
-          onCloseAutoFocus={(event) => {
-            if (openingDialog.current) {
-              event.preventDefault();
-              openingDialog.current = false;
-            }
-          }}
-        >
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold">Session Controls</h2>
-            <p className="text-muted-foreground truncate text-xs" title={sessionLabel}>{sessionLabel}</p>
-          </div>
-          {session.acp_waiting && <p className="text-xs text-amber-600">Waiting for Approval</p>}
-          {status && <p className={statusError ? "text-destructive break-words text-xs" : "text-muted-foreground break-words text-xs"}>{status}</p>}
-          {usage && <p className="text-muted-foreground break-words text-xs tabular-nums" title="Current harness context usage">{usage}</p>}
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <p className="text-muted-foreground text-xs font-medium">Model and Profile</p>
-            <Select
-              value={session.profile || profiles[0]?.name || "default"}
-              onValueChange={(next) => void changeProfile(next)}
-              disabled={!profiles.length}
+      {isMobile ? (
+        <Sheet open={sheetOpen} onOpenChange={onSheetOpenChange}>
+          <SheetContent side="right" className="w-72 max-w-[85vw] gap-0 overflow-y-auto p-4 pt-10">
+            <SheetTitle className="sr-only">Session Controls</SheetTitle>
+            <SheetDescription className="sr-only">{sessionLabel}</SheetDescription>
+            {body(null)}
+          </SheetContent>
+        </Sheet>
+      ) : open ? (
+        <aside aria-label="Session Controls" className="bg-background flex w-60 shrink-0 flex-col overflow-y-auto border-l p-3">
+          {body(
+            <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
+              <PanelRightClose className="size-4" />
+            </TooltipIconButton>,
+          )}
+        </aside>
+      ) : (
+        <aside aria-label="Session Controls" className="bg-background flex w-10 shrink-0 flex-col items-center gap-1 border-l py-2">
+          <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>
+            {statusError ? <CircleAlert className="text-destructive size-4" /> : <PanelRightOpen className="size-4" />}
+          </TooltipIconButton>
+          {VIEWS.map(([id, label, Icon]) => (
+            <TooltipIconButton
+              key={id}
+              tooltip={label}
+              side="left"
+              aria-pressed={view === id}
+              data-testid={`${id}-tab`}
+              className={cn("size-7 p-1.5", view === id ? "bg-accent text-accent-foreground" : "text-muted-foreground")}
+              onClick={() => onViewChange(id)}
             >
-              <SelectTrigger
-                size="sm"
-                className="w-full min-w-0"
-                aria-label="Model"
-              >
-                <SelectValue placeholder="Model" className="min-w-0 flex-1">
-                  {activeProfile ? (
-                    <span className="min-w-0 truncate">
-                      {activeProfile.model || activeProfile.name}
-                      {activeProfile.model && activeProfile.name !== activeProfile.model ? (
-                        <span className="text-muted-foreground"> · {activeProfile.name}</span>
-                      ) : null}
-                    </span>
-                  ) : undefined}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent className="max-w-[calc(100vw-1.5rem)]">
-                {profiles.map((profile) => (
-                  <SelectItem key={profile.name} value={profile.name}>
-                    <span className="min-w-0 truncate">
-                      {profile.model || profile.name}
-                      {profile.model && profile.name !== profile.model ? (
-                        <span className="text-muted-foreground"> · {profile.name}</span>
-                      ) : null}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <p className="text-muted-foreground text-xs font-medium">Approval Mode</p>
-            <Select value={mode} onValueChange={(next) => void changeMode(next)}>
-              <SelectTrigger
-                size="sm"
-                className="w-full"
-                aria-label="Approval mode"
-                title={formatApprovalMode(mode)}
-              >
-                {/* Trust All skips every approval prompt: an open shield says so. */}
-                {mode === "trust_all" ? (
-                  <ShieldOff className="size-4 text-amber-500" />
-                ) : (
-                  <ShieldCheck className="size-4" />
-                )}
-                <SelectValue>{formatApprovalMode(mode)}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {APPROVAL_MODE_OPTIONS.map(({ value, label }) => (
-                  <SelectItem key={value} value={value}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <Separator />
-          <div className="flex flex-col gap-1">
-            <Button type="button" variant="ghost" className="justify-start gap-2" onClick={() => openDialog(() => { setMcpOpen(true); void loadMcp(); })}>
-              <Plug className="size-4" /><span>MCP Servers</span>
-              <span className="text-muted-foreground ml-auto text-xs tabular-nums">{connectedCount}/{allServerNames.length}</span>
-            </Button>
-            <Button type="button" variant="ghost" className="justify-start gap-2" onClick={() => openDialog(() => { setHubOpen(true); void loadAgents(); })}>
-              <Users className="size-4" /><span>Who Is Online</span>
-              <span className="text-muted-foreground ml-auto text-xs tabular-nums">{agents === null ? "…" : agents.length}</span>
-            </Button>
-            <Button type="button" variant="ghost" className="justify-start gap-2" onClick={() => openDialog(onOpenSettings)}>
-              <Settings2 className="size-4" /><span>Settings</span>
-            </Button>
-            <Button type="button" variant="ghost" className="justify-start gap-2" onClick={() => openDialog(() => setClearOpen(true))}>
-              <Eraser className="size-4" /><span>Clear History</span>
-            </Button>
-          </div>
-        </PopoverContent>
-      </Popover>
+              <Icon className="size-4" />
+            </TooltipIconButton>
+          ))}
+        </aside>
+      )}
 
       {/* MCP servers */}
       <Dialog
@@ -426,7 +524,7 @@ export function SessionToolbar({
           if (open) void loadMcp();
         }}
       >
-        <DialogContent className="sm:max-w-lg" onCloseAutoFocus={restoreControlsFocus}>
+        <DialogContent className="sm:max-w-lg" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
             <DialogTitle>MCP Servers</DialogTitle>
             <DialogDescription>
@@ -687,7 +785,7 @@ export function SessionToolbar({
           if (open) void loadAgents();
         }}
       >
-        <DialogContent className="sm:max-w-md" onCloseAutoFocus={restoreControlsFocus}>
+        <DialogContent className="sm:max-w-md" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
             <DialogTitle>Who Is Online</DialogTitle>
             <DialogDescription>
@@ -769,7 +867,7 @@ export function SessionToolbar({
 
       {/* Clear history */}
       <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
-        <AlertDialogContent onCloseAutoFocus={restoreControlsFocus}>
+        <AlertDialogContent onCloseAutoFocus={restoreFocus}>
           <AlertDialogHeader>
             <AlertDialogTitle>Clear Conversation History?</AlertDialogTitle>
             <AlertDialogDescription>
