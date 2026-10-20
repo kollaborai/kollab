@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
+- Docs: add a product-ready checklist and PR template requiring evidence or a
+  reasoned N/A for every change.
 
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
