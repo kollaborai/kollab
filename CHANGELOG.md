@@ -5,6 +5,16 @@ All notable changes to Kollab will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
+- Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
+
+### Fixed
+- ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
+- Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.
+
 ## [0.17.0] - 2026-10-19
 
 ### Added

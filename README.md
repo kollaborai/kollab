@@ -93,6 +93,15 @@ Keep these three names separate:
   credentials; a loadout combines a profile with a model and parameters such as
   effort or output budget.
 
+Copy a saved profile in the terminal with `/model copy <source-profile> <new-name>`,
+then switch with `/model set <new-name>`. The Web UI Profiles panel also has a
+Copy action. Copies retain ACP adapter commands and other settings stored only
+on the engine. The UI shows the provider and sanitized endpoint/ACP adapter.
+Environment-backed API keys are not copied: set
+`KOLLAB_<NEW_PROFILE>_API_KEY` (or `KOLLAB_API_KEY`) before copying an
+environment-backed profile. See [provider profiles](docs/features/profiles.md)
+for the full setup and failure behavior.
+
 This launch runs the `coder` bundle under the `lapis` identity with the
 `openai-oauth` provider profile:
 
@@ -592,7 +601,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | Command | Description |
 | --- | --- |
 | `/llm` | Switch model loadouts — provider + model + param presets |
-| `/model` | Quick model selection and reasoning effort (`/model effort max`) |
+| `/model` | Select a profile/model, copy a saved profile (`/model copy <source> <new-name>`), and set reasoning effort |
 | `/agent` | Switch agent definitions when available |
 | `/skill` | Load or unload agent skills when available |
 | `/setup` | Guided provider/profile setup |

@@ -482,9 +482,14 @@ Each provider has unique configuration options. See [providers.md](../providers.
   working directory, workspace, environment values, and install guidance.
 - In the Web UI, use Copy on a profile and choose a new name. The engine copies
   the stored settings server-side, so fields not shown in the form are retained.
-  Environment-backed API keys are not copied; configure `KOLLAB_<NEW_NAME>_API_KEY`
-  or `KOLLAB_API_KEY` first. Keyring references remain shared. ACP profiles do
-  not need a model string; their adapter command is the required
+  Environment-backed API keys are not copied. For a profile named
+  `team-anthropic`, set `KOLLAB_TEAM_ANTHROPIC_API_KEY` before copying:
+  ```bash
+  export KOLLAB_TEAM_ANTHROPIC_API_KEY="<your-api-key>"
+  /model copy anthropic-auto team-anthropic
+  ```
+  `KOLLAB_API_KEY` is a global fallback; keyring references remain shared. ACP
+  profiles do not need a model string; their adapter command is the required
   runtime setting.
 - Profiles with invalid configuration are skipped individually, not allowed to
   break the profile list. The Web UI displays the skipped names and diagnostics.
