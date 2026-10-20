@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copying. System-keyring references remain shared. OAuth and provisioned
   profiles cannot be copied; the form explains these rules before Create.
 
+### Changed
+- ACP: Gemini missing-auth guidance now lists API-key and Vertex AI setup
+  routes; live qualification remains open.
+
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
 - Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.

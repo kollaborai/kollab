@@ -34,9 +34,10 @@ approval modes and 43 MCP tools preserved. Fresh Claude and Codex requests sent
 through that Web UI each produced the exact requested reply. Original
 conversation messages and timestamps were preserved; the two native agents'
 dynamic Hub system context regenerated normally. This does not establish exact
-Claude vendor-session continuity: its vendor IDs rotated. Gemini still needs
-supported authentication; the existing Google Cloud project's Vertex API is
-disabled and no Gemini API key is configured.
+Claude vendor-session continuity: its vendor IDs rotated. Gemini's consumer
+sign-in was retired. Supported-auth positive qualification remains open; the
+available evidence covers the missing-auth path only and does not establish a
+live successful request.
 See the implementation checkpoint linked below for exact evidence and remaining
 gates.
 
@@ -50,6 +51,43 @@ the pinned guidance shown by `/llm`. Built-in profiles are `claude-code`,
 kollab --as claude --llm claude-code --detached
 kollab --attach claude
 ```
+
+### Gemini authentication
+
+Consumer sign-in for Gemini CLI is retired. For API-key authentication:
+
+1. Set `GEMINI_API_KEY` in the environment that launches Kollab.
+2. Add a named ACP profile under `kollabor.llm.profiles` in
+   `.kollab/config.json`, and allowlist the key name in `pass_env`:
+
+   The built-in profile currently has no `pass_env` allowlist, so the API-key
+   route needs this named profile.
+   ```json
+   {
+     "kollabor": {
+       "llm": {
+         "profiles": {
+           "gemini-api": {
+             "provider": "acp",
+             "command": ["gemini", "--acp"],
+             "pass_env": ["GEMINI_API_KEY"]
+           }
+         }
+       }
+     }
+   }
+   ```
+   Kollab filters provider-key variables from child environments unless they
+   are allowlisted. See [ACP profile setup](profiles.md).
+3. Restart Kollab and launch with `kollab --llm gemini-api`.
+
+For Vertex AI, enable `GOOGLE_GENAI_USE_VERTEXAI` and make the project and
+credentials available to the Gemini CLI child. If using `GOOGLE_API_KEY`, add
+it to `pass_env` too. Restart Kollab before retrying.
+
+Automated evidence currently covers missing-auth projection only. Positive
+authentication and prompt/tool/permission/cancel/shutdown qualification remain
+open; these instructions are not a live provider test.
 
 The harness owns its model, login, tools and context. Kollab owns the Hub name,
 windows, transcript, permission UI and routing. Provider API keys are stripped
