@@ -1,6 +1,6 @@
 # Issue #263 browser verification
 
-Captured from source commit `65cb9f23` on branch `issue-263-agent-list-order` with
+Captured from source commit `6989e735` on branch `issue-263-agent-list-order` with
 headless Google Chrome and the worktree-local Vite build.
 
 The sidebar API was intentionally mocked. Chrome blocked requests to the live
@@ -9,9 +9,10 @@ the mock supplied repeated local sessions for one identity/workspace, an offline
 overlap, a second workspace, and a remote network/device/workspace. It recorded
 the order POST. No live engine or real agent was contacted.
 
-Responsive checks used the following viewports. Document/body width matched the
-viewport at each size; workspace groups, remote device/workspace rows, and both
-Learn links were visible.
+Responsive checks used the following viewports. At 390 x 844, the sidebar was
+opened with Toggle Sidebar; it was open by default at 820 x 1180 and 1280 x 900.
+Document/body width matched each viewport, and workspace groups, remote
+device/workspace rows, and both Learn links were visible.
 
 390 x 844 phone viewport:
 
@@ -25,6 +26,10 @@ Learn links were visible.
 
 ![1280 x 900 sidebar with mocked API and Learn links](sidebar-1280.png)
 
+Keyboard focus in the light theme at 1280 x 900:
+
+![1280 x 900 sidebar with keyboard focus on the Agents Learn link in light mode](sidebar-focus-light-1280.png)
+
 The second live Lapis session row exposes Move Up and Move Down independently
 from other same-identity rows. Move Down sent unique session keys plus the
 persona/offline fallback anchor to the mock API:
@@ -33,9 +38,9 @@ persona/offline fallback anchor to the mock API:
 
 Accessibility and layout checks on the rendered Learn links:
 
-- Text contrast measured 17.95:1 against the sidebar background.
-- The foreground keyboard focus indicator measured 3.95:1, with a visible 2 px
-  outline; Tab reached both links and reported `:focus-visible`.
+- Link text contrast measured 17.95:1 in dark mode and 18.97:1 in light mode.
+- The 2 px foreground focus outline measured 17.95:1 in dark mode and 18.97:1
+  in light mode. Keyboard Tab reached both Learn links with `:focus-visible`.
 - Link text rendered at 12.6 px and each target measured 29 px high.
 - No horizontal overflow at the three viewport sizes; initial layout shift was
   0.000014 and no JavaScript/console errors were observed.
