@@ -337,6 +337,7 @@ class SystemPromptBuilder:
                 "hub_roster",
                 "hub_vault",
                 "hub_work_queue",
+                "hub_peers",
                 "active_llm",
             )
         ]

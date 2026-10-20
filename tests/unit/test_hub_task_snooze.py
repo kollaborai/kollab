@@ -61,6 +61,18 @@ def test_snooze_keeps_task_active_and_visible(ledger):
     assert card.id in [c.id for c in ledger.get_active_for("lapis")]
 
 
+
+def test_snooze_excludes_card_from_stall_detection_until_expiry(ledger):
+    card = _card(ledger)
+    now = time.time()
+    card.last_activity_at = now - 10_000
+    ledger._save_preserve(card)
+    ledger.snooze(card.id, minutes=30)
+
+    assert ledger.get_stalled(900, now=now) == []
+    assert [item.id for item in ledger.get_stalled(900, now=now + 31 * 60)] == [card.id]
+
+
 def test_snooze_does_not_reset_cron_ttl(ledger):
     card = _card(ledger)
     original = card.updated_at - 100
