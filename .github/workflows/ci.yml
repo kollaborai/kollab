@@ -134,3 +134,31 @@ jobs:
 
       - name: Run Gitleaks
         run: gitleaks detect --source . --redact --verbose
+
+  # One quick Linux binary build per run: proves scripts/build_binary.py and
+  # the packaging deps still work on every PR and main push, without paying
+  # the full 4-platform + desktop matrix (that runs only for release tags,
+  # via publish.yml -> binaries.yml).
+  binary-smoke:
+    name: ci/binary-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
+
+      # build_binary.py verifies its own output before exiting: it runs the
+      # binary with --version, kollab's imports and an HTTPS request.
+      - name: Build the Linux binary and check that it runs
+        env:
+          # science, the scie builder pex runs, reads the Python Standalone Builds
+          # release from the GitHub API; unauthenticated, runner IPs hit the rate limit.
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
+        run: python scripts/build_binary.py --out dist/bin
