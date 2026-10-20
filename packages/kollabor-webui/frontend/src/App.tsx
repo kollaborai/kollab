@@ -4,7 +4,7 @@ import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
-import { useThreadActivity } from "@/components/gems/activity";
+import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
@@ -120,6 +120,7 @@ function RuntimeShell({
   onOpenSettings,
   onHistoryCleared,
   onActivity,
+  eventActivity,
   onOpenProperties,
   refreshSignal,
   view,
@@ -139,6 +140,8 @@ function RuntimeShell({
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
   onActivity: (activity: Activity | null) => void;
+  /** What a turn this page did not start is doing, from the session's event stream. */
+  eventActivity: Activity | null;
   /** This session's Properties (its gem, double-clicked). */
   onOpenProperties: () => void;
   refreshSignal: number;
@@ -191,7 +194,7 @@ function RuntimeShell({
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
-  const activity = useThreadActivity(Boolean(transportError));
+  const activity = useThreadActivity(Boolean(transportError), eventActivity);
   const usageLabel = session.harness && session.acp_usage?.size !== undefined
     ? `${formatContextTokens(session.acp_usage.used ?? 0)}/${formatContextTokens(session.acp_usage.size)} Tokens${session.acp_usage.cost?.amount !== undefined ? ` · ${formatCost(session.acp_usage.cost)}` : ""}`
     : null;
@@ -368,6 +371,9 @@ export default function App() {
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
+  // Folded from the open session's events, so a hub-driven turn still animates.
+  const eventActivityRef = useRef(NO_LIVE_ACTIVITY);
+  const [eventActivity, setEventActivity] = useState<Activity | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -524,14 +530,22 @@ export default function App() {
         // Retry on the next event or polling cycle.
       }
     };
+    const resetEventActivity = () => {
+      eventActivityRef.current = NO_LIVE_ACTIVITY;
+      setEventActivity(null);
+    };
     const followEvents = async () => {
       // A turn is streaming; its history is still growing.
       let midTurn = false;
+      resetEventActivity();
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
             if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
+            // Same-value sets bail out, so a token stream does not re-render App.
+            eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
+            setEventActivity(liveActivity(eventActivityRef.current));
             // hub_message: another agent's message just landed in the
             // history, ahead of the reply it wakes. One that lands mid-turn
             // waits for turn_complete, which reloads the whole turn.
@@ -546,6 +560,8 @@ export default function App() {
             }
             if (type === "turn_complete") midTurn = false;
           }, () => {
+            // A reconnect may have missed the last turn's end.
+            resetEventActivity();
             // Open, so nothing slips past from here. The history_updated that
             // replaces a seed can have fired before this stream existed: ask
             // again now.
@@ -1078,6 +1094,7 @@ export default function App() {
                 onOpenSettings={openSettings}
                 onHistoryCleared={() => resetThread(activeSession.session_id)}
                 onActivity={setActiveActivity}
+                eventActivity={eventActivity}
                 onOpenProperties={() => openProperties(activeSession.session_id)}
                 view={sessionView}
                 onViewChange={setSessionView}

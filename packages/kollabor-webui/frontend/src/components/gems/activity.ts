@@ -14,22 +14,73 @@ const TOOL_ACTIVITY: Record<string, Activity> = {
   hub_ask_ctx: "messaging",
 };
 
+/** A harness (ACP) call names its kind; its title is display text. */
+const ACP_KIND: Record<string, Activity> = {
+  read: "reading",
+  search: "searching",
+  fetch: "searching",
+  think: "thinking",
+};
+
 /**
  * The gem action for a tool call. Live calls arrive as display names
  * ("terminal: ls", "web-search: q"); history carries the bare tool name.
  * Anything not looking, talking or tasking is hands-on work at the laptop.
  */
-export function toolActivity(name: string): Activity {
+export function toolActivity(name: string, kind?: string): Activity {
+  if (kind && ACP_KIND[kind]) return ACP_KIND[kind];
   const key = (name.match(/^([\w-]+):(?:\s|$)/)?.[1] ?? name).replaceAll("-", "_");
   return TOOL_ACTIVITY[key] ?? (key.startsWith("task_") ? "tasking" : "typing");
 }
 
+/** The ACP kind on a harness card's result (`metadata.acp.kind`), if any. */
+function harnessKind(result: unknown): string | undefined {
+  const acp = (result as { metadata?: { acp?: { kind?: unknown } } } | undefined)?.metadata?.acp;
+  return typeof acp?.kind === "string" ? acp.kind : undefined;
+}
+
 /**
- * What the open session's gem acts out, read from its live thread. Null while
- * nothing runs, so the sidebar falls back to the hub's presence state.
+ * A turn this page did not start (a hub message woke the agent, or it was
+ * typed in the terminal) never runs the thread, so its gem reads the session's
+ * event stream instead: running tools, then thinking or speaking.
  */
-export function useThreadActivity(failed: boolean): Activity | null {
-  return useAuiState((s) => {
+export type LiveActivity = { tools: ReadonlyArray<readonly [string, Activity]>; phase: Activity | null };
+export const NO_LIVE_ACTIVITY: LiveActivity = { tools: [], phase: null };
+
+export function nextLiveActivity(live: LiveActivity, event: { type?: string; [key: string]: unknown }): LiveActivity {
+  const id = String(event.tool_id ?? "");
+  switch (event.type) {
+    case "tool_start": {
+      const kind = typeof event.tool_type === "string" ? event.tool_type : undefined;
+      const act = toolActivity(String(event.tool_name ?? ""), kind);
+      return { ...live, tools: [...live.tools.filter(([tool]) => tool !== id), [id, act]] };
+    }
+    case "tool_result":
+      // The model reads the result next.
+      return { tools: live.tools.filter(([tool]) => tool !== id), phase: "thinking" };
+    case "thinking":
+      return { ...live, phase: "thinking" };
+    case "token":
+      return { ...live, phase: "speaking" };
+    case "turn_complete":
+    case "error":
+      return NO_LIVE_ACTIVITY;
+    default:
+      return live;
+  }
+}
+
+export function liveActivity(live: LiveActivity): Activity | null {
+  return live.tools.at(-1)?.[1] ?? live.phase;
+}
+
+/**
+ * What the open session's gem acts out, read from its live thread while this
+ * page runs the turn, else from `live` (the event stream). Null while nothing
+ * runs, so the sidebar falls back to the hub's presence state.
+ */
+export function useThreadActivity(failed: boolean, live: Activity | null = null): Activity | null {
+  const thread = useAuiState((s) => {
     const last = s.thread.messages.at(-1);
     if (!s.thread.isRunning) {
       const errored = last?.role === "assistant" && last.status?.type === "incomplete" && last.status.reason === "error";
@@ -37,8 +88,12 @@ export function useThreadActivity(failed: boolean): Activity | null {
     }
     if (last?.role !== "assistant") return "thinking";
     const part = last.parts.at(-1);
-    if (part?.type === "tool-call" && part.result === undefined) return toolActivity(part.toolName);
+    // A harness card carries an interim result while it runs.
+    if (part?.type === "tool-call" && (part.result === undefined || part.isPreliminary)) {
+      return toolActivity(part.toolName, harnessKind(part.result));
+    }
     if (part?.type === "text" && part.text) return "speaking";
     return "thinking";
   });
+  return thread ?? live;
 }
