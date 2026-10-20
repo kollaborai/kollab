@@ -305,8 +305,23 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
       </div>
 
       {result.status === "loading" ? (
-        <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground" role="status" aria-live="polite">
-          <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Loading release notes…
+        <div className="mt-3 grid gap-3 sm:grid-cols-2" role="status" aria-live="polite">
+          {[0, 1].map((index) => (
+            <div
+              key={index}
+              aria-hidden={index === 1}
+              className="min-h-32 rounded-xl border border-border/70 bg-background/60 p-3"
+            >
+              {index === 0 ? (
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" /> Loading release notes…
+                </p>
+              ) : null}
+              <div className="mt-4 h-2 w-2/3 animate-pulse rounded bg-muted" aria-hidden="true" />
+              <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" aria-hidden="true" />
+              <div className="mt-2 h-2 w-4/5 animate-pulse rounded bg-muted" aria-hidden="true" />
+            </div>
+          ))}
         </div>
       ) : result.status === "error" ? (
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm" role="alert">
