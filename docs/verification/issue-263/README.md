@@ -1,11 +1,12 @@
 # Issue #263 browser verification
 
-Captured on branch `issue-263-agent-list-order` at `74fdf792` with headless
+Captured on branch `issue-263-agent-list-order` at `270a0b0a` with headless
 Google Chrome and the worktree-local frontend build.
 
 The API was intentionally mocked. Chrome blocked requests to the live engine
 (`127.0.0.1:7433`, including WebSocket) and API proxy (`127.0.0.1:8080`); the
-mock supplied two local workspaces plus a remote network/device/workspace and
+mock supplied repeated local sessions for the same identity/workspace, an
+offline overlap, a second workspace, and a remote network/device/workspace. It
 recorded the order POST. No live engine or real agent was contacted.
 
 Responsive checks used these viewports. Document/body width matched the viewport
@@ -23,10 +24,11 @@ at each size; workspace groups and remote device/workspace rows were visible.
 
 ![1280 x 900 sidebar with mocked API](sidebar-1280.png)
 
-The remote agent action menu exposes Move Up; clicking it sent the expected
-network/device-scoped order to the mock API:
+The second live Lapis session row exposes Move Up and Move Down independently
+from the other same-identity rows; Move Down sent unique session keys plus the
+persona/offline fallback anchor to the mock API:
 
-![1280 x 900 remote agent order menu with mocked API](sidebar-order-menu-1280.png)
+![1280 x 900 duplicate local session order menu with mocked API](sidebar-order-menu-1280.png)
 
 This is responsive UI and menu evidence only, not an end-to-end engine/browser
 run. Engine persistence and stale-client behavior are covered separately by
