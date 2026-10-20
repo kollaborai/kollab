@@ -173,16 +173,15 @@ def test_requeue_stalled_is_noop_for_open_and_terminal(ledger):
     assert ledger.requeue_stalled(done.id) is None
 
 
-def test_touch_activity_updates_without_checkpoint(ledger):
+def test_checkpoint_updates_activity_and_audit(ledger):
     card = ledger.enqueue(assigner="a", directive="quiet work")
     ledger.claim(card.id, "lapis")
     before = ledger.get(card.id).last_activity_at
     time.sleep(0.01)
-    assert ledger.touch_activity(card.id) is True
+    assert ledger.checkpoint(card.id, "still working") is True
     after = ledger.get(card.id).last_activity_at
     assert after > before
-    # touch_activity adds no NEW checkpoint beyond the claim record.
-    assert ledger.get(card.id).checkpoints[-1]["note"] == "claimed by lapis"
+    assert ledger.get(card.id).checkpoints[-1]["note"] == "still working"
 
 
 def test_legacy_cards_without_activity_field_still_stall(ledger, tmp_path):
