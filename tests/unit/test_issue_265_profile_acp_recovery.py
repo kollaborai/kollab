@@ -158,6 +158,13 @@ def test_duplicate_acp_profile_preserves_and_persists_full_command(
     assert saved_copy["env"] == source.env
     assert saved_copy["install_guidance"] == source.install_guidance
 
+    reloaded = ProfileManager()
+    reloaded_copy = reloaded.get_profile("claude-code-custom-copy")
+    assert reloaded_copy is not None
+    assert reloaded_copy.command == source.command
+    assert reloaded_copy.cwd == source.cwd
+    assert reloaded_copy.env == source.env
+
 
 def test_profiles_api_copies_acp_from_server_without_requiring_model_text(
     isolated_profile_manager, tmp_path, monkeypatch
