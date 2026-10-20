@@ -18,28 +18,23 @@ state. Temporary rollback artifacts require an explicit retention/cleanup condit
 
 ## releases and the shared checkout
 
-For every release, read `docs/release-process.md`. The shared checkout on `main`
-is a coordination surface, not an editing surface: never stash, reset, clean,
-restore, or switch branches in it, and never build a release from uncommitted
-files or a scratch clone.
+We follow Trunk-Based Development (short-lived feature branches, one worktree
+per task) with Conventional Commits and SemVer. Feature work happens in git
+worktrees at `../kollab-wt/issue-<N>-<slug>`, branched off `origin/main`:
 
-Feature work happens in git worktrees. For each feature branch, create a
-worktree inside the project under `.worktree/<branch-name>/`, branched off
-`origin/main`:
+    git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/main
 
-    git worktree add .worktree/<branch-name> -b <branch-name> origin/main
+Edit, test, and commit inside the worktree; remove the worktree and branch
+after the PR merges. The shared checkout on `main` is a coordination and
+release surface, not an editing surface: never stash, reset, clean, restore,
+or switch branches in it, and never build a release from uncommitted files or
+a scratch clone.
 
-Edit and commit inside the worktree; the shared checkout root stays untouched.
-`.worktree/` is gitignored.
-
-The release carve-out still applies: releases are committed on local `main`
-by explicit paths (other people's edits stay uncommitted and out of it), then
-push `HEAD` to `release/X.Y.Z`, merge with a merge commit, `git pull --ff-only
-origin main`, and tag the merge. Once published, run `uv sync --all-extras`
-and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
-`~/.local/bin`). The release is not done until `main` matches `origin/main`,
-`git status` lists none of the release's files, and `kollab --version`
-reports the new version.
+Releases still run from the shared `main` checkout per
+`docs/release-process.md`; releases are tagged whenever Marco decides, and
+agents may create a release tag ONLY when Marco explicitly instructs them to.
+The full standard, including PR rules and CI gates, is
+SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
 
 ## project snapshot
 
