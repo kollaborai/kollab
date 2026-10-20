@@ -569,6 +569,26 @@ async def test_links_are_declared_once_and_again_only_on_change_or_a_new_session
 
 
 @pytest.mark.asyncio
+async def test_a_restart_redeclares_links_even_when_the_directory_fails(
+    people, monkeypatch
+):
+    ana, marco = people
+    await open_path(ana, marco)
+    async def directory_down(params):
+        raise RelayError("secure conversation transport failed")
+
+    monkeypatch.setattr(ana.bridge, "_rpc_directory", directory_down)
+    monkeypatch.setattr(ana.bridge.directory, "agents", lambda workspace: [])
+    ana.bridge._links_declared = None  # a new relay session after a restart
+    await ana.bridge._refresh_directory()
+    assert ana.bridge._links_declared == (
+        ana.client.status()["session"],
+        (marco.key,),
+    )
+
+
+
+@pytest.mark.asyncio
 async def test_a_failed_declaration_backs_off_and_a_forced_one_retries(people, monkeypatch):
     ana, marco = people
     attempts = []
