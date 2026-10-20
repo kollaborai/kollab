@@ -797,18 +797,13 @@ class Agent:
         """
         from kollabor_config.config_utils import get_agent_tier_dirs
 
-        # The hub docs teach the mesh. A solo or hub-disabled process is
-        # not on it (env set by the engine / kollabor.hub_env), so it gets
-        # none. KOLLAB_HUB_ENABLED (explicit opt-in) also admits the doc.
-        hub_on = any(
-            os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
-            for key in ("KOLLAB_HUB_ENABLED",)
-        )
+        # Hub protocol is available by default; only explicitly solo or
+        # disabled processes should omit it.
         hub_off = any(
             os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
             for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB")
         )
-        if hub_off or not hub_on:
+        if hub_off:
             return ""
 
         # Local overrides global overrides bundled by filename (the bundled

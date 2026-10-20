@@ -119,12 +119,9 @@ def test_off_mesh_agents_get_no_hub_docs(tmp_path, monkeypatch):
         ),
         patch("kollabor_config.config_utils.get_local_agents_dir", return_value=None),
     ):
-        # no hub env: off-mesh by default -> no hub protocol at all
-        assert agent._load_hub_protocol(renderer) == ""
-        # explicit opt-in admits the hub protocol doc
-        monkeypatch.setenv("KOLLAB_HUB_ENABLED", "1")
+        # hub protocol is on by default when no off-mesh marker is set
         assert "HUB" in agent._load_hub_protocol(renderer)
-        # solo/off-mesh env suppresses the protocol even when opted in
+        # an explicit solo/off-mesh marker suppresses the default protocol
         monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
         assert agent._load_hub_protocol(renderer) == ""
 
