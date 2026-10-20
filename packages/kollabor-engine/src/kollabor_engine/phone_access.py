@@ -167,10 +167,19 @@ def _validate_portal_url(value: str) -> str:
     ):
         raise PhoneAccessError("portal address must be an HTTP or HTTPS URL without credentials")
     try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        if not _valid_hostname(host):
-            raise PhoneAccessError("portal address must contain a valid LAN IP or DNS name")
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise PhoneAccessError(
+            "portal address must use a literal private LAN IP that is allowed by the WebUI",
+        ) from exc
+    if isinstance(address, ipaddress.IPv4Address):
+        allowed = address.is_link_local or any(address in network for network in _PRIVATE_V4)
+    else:
+        allowed = address.is_link_local or address in _PRIVATE_V6
+    if not allowed:
+        raise PhoneAccessError(
+            "portal address must use a literal private LAN IP that is allowed by the WebUI"
+        )
     return value.rstrip("/")
 
 
@@ -258,25 +267,6 @@ def _validated_settings(values: dict[str, Any], *, from_disk: bool = False) -> d
             ) from None
         raise
     return settings
-
-
-def _valid_local_address(host: str) -> bool:
-    try:
-        address = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        return False
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    if address.is_loopback or address.is_link_local:
-        return True
-    if isinstance(address, ipaddress.IPv4Address):
-        return any(address in network for network in _PRIVATE_V4)
-    return address in _PRIVATE_V6
-
-
-def client_on_own_network(host: str) -> bool:
-    """Accept loopback, RFC1918, IPv6 ULA, or link-local client addresses."""
-    return _valid_local_address(host)
 
 
 def _peer_name(value: str) -> str:

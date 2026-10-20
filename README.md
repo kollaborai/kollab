@@ -317,6 +317,26 @@ Model, Setup, Network, Voice and Prompts. Most map to the terminal's `/config`,
 `/llm`, `/model`, `/setup`, `/connect` and `/voice config` screens; Prompts is
 browser-only (type `/prompts` in web chat to open it). See [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
 
+### Private Phone Access
+
+Open **Session Settings > Phone Access** to create a distinct WireGuard peer and
+one-time QR for each phone. The phone can then open the WebUI's private LAN
+address and add it to the home screen. To make the WebUI reachable from home
+Wi-Fi, bind it to a specific private host address:
+
+```bash
+KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
+```
+
+Phone access is direct-bind only: wildcards, public interfaces, forwarded client
+headers and reverse proxies are rejected. Configure the WireGuard server endpoint,
+its UDP port-forward and DNS outside Kollab; install a host-admin peer apply helper
+for live add/revoke. Kollab never configures the router or edits the WireGuard
+base config; only the operator-owned helper applies generated phone peer snippets
+to the running server.
+See [Phone Access setup](docs/features/phone-access.md) before connecting a phone.
+
+
 ## Apps
 
 One place to give your agents more tools. Open **Apps** in the browser UI's sidebar, or run `/mcp` in the terminal (the manager lists the catalog's MCP servers; `a` adds one). Whatever you add is available to every agent on that computer, and the session you added it from uses it right away.

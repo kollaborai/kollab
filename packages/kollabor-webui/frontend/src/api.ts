@@ -818,7 +818,19 @@ export class EngineApi {
   async refreshToken() {
     try {
       const response = await fetch("/api/config", { cache: "no-store" });
-      if (!response.ok) return false;
+      if (response.status === 404) return false;
+      if (!response.ok) {
+        let detail = response.statusText || "WebUI authentication refresh failed.";
+        let body: unknown;
+        try {
+          body = await response.json();
+          const raw = (body as { detail?: unknown } | null)?.detail;
+          if (typeof raw === "string" && raw) detail = raw;
+        } catch {
+          // Keep status text for non-JSON errors.
+        }
+        throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+      }
       const config = (await response.json()) as EngineConfig;
       if (config.token && config.token !== this.token) {
         this.token = config.token;
@@ -832,8 +844,9 @@ export class EngineApi {
         }
         return true;
       }
-    } catch {
-      // Standalone builds may not have the webui config proxy.
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      // Standalone builds may not have the WebUI config proxy.
     }
     return false;
   }
@@ -868,20 +881,39 @@ export class EngineApi {
     return (await (await this.request(path, init)).json()) as T;
   }
 
-  /** Loads the engine URL and token once; every caller shares the result. */
+  /** Load the engine URL/token; report explicit WebUI access denials to the page. */
   loadConfig() {
-    this.config ??= (async () => {
+    if (this.config) return this.config;
+    const pending = (async () => {
       try {
         const response = await fetch("/api/config", { cache: "no-store" });
-        if (!response.ok) return null;
+        if (response.status === 404) return null;
+        if (!response.ok) {
+          let detail = response.statusText || "WebUI configuration is unavailable.";
+          let body: unknown;
+          try {
+            body = await response.json();
+            const raw = (body as { detail?: unknown } | null)?.detail;
+            if (typeof raw === "string" && raw) detail = raw;
+          } catch {
+            // Keep status text for non-JSON errors.
+          }
+          throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+        }
         const config = (await response.json()) as EngineConfig;
         if (config.engine_url) this.setBaseUrl(config.engine_url);
         if (config.token) this.setToken(config.token);
         return config;
-      } catch {
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        // Standalone builds may not have the WebUI config proxy.
         return null;
       }
     })();
+    this.config = pending.catch((error) => {
+      this.config = null;
+      throw error;
+    });
     return this.config;
   }
 

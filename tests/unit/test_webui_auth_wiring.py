@@ -25,7 +25,7 @@ class TestEngine401CarriesCorsHeaders:
 
         from kollabor_engine.server import create_app
 
-        client = TestClient(create_app())
+        client = TestClient(create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
         resp = client.get("/sessions", headers={"Origin": "http://127.0.0.1:8080"})
 
         assert resp.status_code == 401
@@ -42,7 +42,11 @@ class TestWebUiConfigShipsToken:
             "kollabor_engine.auth.read_token_from_disk", lambda: "test-token-123"
         )
 
-        client = TestClient(create_app("http://127.0.0.1:9999"))
+        client = TestClient(
+            create_app("http://127.0.0.1:9999"),
+            base_url="http://127.0.0.1",
+            client=("127.0.0.1", 12345),
+        )
         body = client.get("/api/config").json()
 
         assert body["engine_url"] == "http://127.0.0.1:9999"

@@ -19,7 +19,11 @@ def test_fresh_source_bundle_wins_over_stale_packaged_copy(monkeypatch, tmp_path
     (source / "index.html").write_text('<script src="/assets/current.js"></script>')
     (source / "assets" / "current.js").write_text("/* current ACP cards */")
     (packaged / "index.html").write_text("stale bundle")
-    with TestClient(server.create_app()) as client:
+    with TestClient(
+        server.create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345),
+    ) as client:
         assert "current.js" in client.get("/").text
         assert client.get("/assets/current.js").text == "/* current ACP cards */"
 
@@ -28,7 +32,11 @@ def test_installed_package_uses_its_bundle_without_source_output(monkeypatch, tm
     _, packaged = configure_bundles(monkeypatch, tmp_path)
     packaged.mkdir(parents=True)
     (packaged / "index.html").write_text("packaged ACP UI")
-    with TestClient(server.create_app()) as client:
+    with TestClient(
+        server.create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345),
+    ) as client:
         assert client.get("/").text == "packaged ACP UI"
 
 
@@ -36,7 +44,11 @@ def test_the_entry_page_is_always_revalidated(monkeypatch, tmp_path):
     source, _ = configure_bundles(monkeypatch, tmp_path)
     source.mkdir(parents=True)
     (source / "index.html").write_text("current")
-    with TestClient(server.create_app()) as client:
+    with TestClient(
+        server.create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345),
+    ) as client:
         for path in ("/", "/trajectory"):
             assert client.get(path).headers["cache-control"] == "no-cache", path
 

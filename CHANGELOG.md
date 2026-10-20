@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
 - Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
+- Web: Phone Access provisions one WireGuard peer per phone with a one-time QR and standalone home-screen portal. The operator configures the VPN endpoint, UDP forwarding, DNS, and host apply helper.
 
 ### Changed
 - ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and
@@ -42,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updating a model-less ACP profile to a native provider now requires a native model; invalid combinations return an actionable validation error without mutating the profile.
 - Web: a long profile name or model no longer widens the Profiles dialog past a phone screen and hides its buttons.
 - Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
+
+### Security
+- Restrict WebUI token bootstrap and phone APIs to exact private interface/phone-peer subnets; validate Host/Origin, disable forwarded-header trust, and never persist or redisclose client private keys.
 
 ## [0.17.0] - 2026-10-19
 

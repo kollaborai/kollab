@@ -9,10 +9,9 @@ from fastapi import APIRouter, Body, HTTPException, Request  # type: ignore[impo
 from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 from starlette.concurrency import run_in_threadpool  # type: ignore[import-not-found]
 
-from ..phone_access import PhoneAccessError, client_on_own_network, get_phone_access
+from ..phone_access import PhoneAccessError, get_phone_access
 
 router = APIRouter(prefix="/phone", tags=["phone"])
-CLIENT_HEADER = "x-kollab-client-ip"
 
 
 def _is_loopback(host: str) -> bool:
@@ -25,17 +24,14 @@ def _is_loopback(host: str) -> bool:
     return address.is_loopback
 
 
-def _client_address(request: Request) -> str:
-    """Trust the proxy's stamped address only when the engine socket is local."""
-    socket_host = request.client.host if request.client else ""
-    if _is_loopback(socket_host):
-        return request.headers.get(CLIENT_HEADER, socket_host)
-    return socket_host
-
-
+# Phone routes are reachable only via the same-host local Engine socket.
+# The WebUI validates exact interface/phone CIDRs before proxying API requests.
 def _guard(request: Request) -> None:
-    if not client_on_own_network(_client_address(request)):
-        raise HTTPException(403, "phone access is only available on your own network")
+    socket_host = request.client.host if request.client else ""
+    if not _is_loopback(socket_host):
+        raise HTTPException(
+            403, "phone access must use the authenticated local WebUI proxy"
+        )
 
 
 async def _call(fn, *args):

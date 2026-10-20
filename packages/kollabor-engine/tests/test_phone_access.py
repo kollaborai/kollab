@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import subprocess
@@ -9,8 +10,10 @@ import subprocess
 import kollabor_engine.phone_access as phone_access
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from kollabor_engine.phone_access import PhoneAccess
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 SERVER_PUB = base64.b64encode(bytes(32)).decode("ascii")
 SETTINGS = {
@@ -75,7 +78,24 @@ async def client(store):
         yield ac
 
 
+def _webui_local_network(monkeypatch):
+    networks = (
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("192.168.1.0/24"),
+    )
+    monkeypatch.setattr(
+        "kollabor_webui.server.interface_networks_for_hosts",
+        lambda _hosts: networks,
+    )
+    return ["127.0.0.1", "192.168.1.20"]
+
+
+
 async def _setup(client, **extra):
+
+
+
+
     response = await client.put("/phone/settings", json={**SETTINGS, **extra})
     assert response.status_code == 200, response.text
 
@@ -111,7 +131,7 @@ async def test_private_key_is_only_in_first_qr_and_never_persisted(
     # Later API responses contain only public settings/peer data, never a QR.
     later = [
         (await client.get("/phone")).text,
-        (await client.put("/phone/settings", json={"portal_url": "https://home.example"})).text,
+        (await client.put("/phone/settings", json={"portal_url": "https://192.168.1.20:8443"})).text,
     ]
     revoke_response = await client.delete(f"/phone/peers/{body['peer']['id']}")
     assert revoke_response.status_code == 200
@@ -265,6 +285,13 @@ async def test_settings_reject_command_injection_and_wireguard_line_injection(
     assert response.status_code == 400
     response = await client.post("/phone/peers", json={"name": "x\n[Peer]"})
     assert response.status_code == 400
+    response = await client.put(
+        "/phone/settings",
+        json={**SETTINGS, "portal_url": "http://home.example.net:8080"},
+    )
+    assert response.status_code == 400
+    response = await client.post("/phone/peers", json={"name": "x\n[Peer]"})
+    assert response.status_code == 400
     assert not fakes.calls
     assert not store.view()["peers"]
 
@@ -287,19 +314,6 @@ async def test_phone_routes_require_bearer_auth(monkeypatch, store):
             "/phone", headers={"Authorization": "Bearer valid-test-token"}
         )
         assert response.status_code == 200
-
-
-def test_only_real_local_or_private_client_addresses_are_accepted():
-    for address in (
-        "127.0.0.1", "10.1.2.3", "172.20.1.1", "192.168.2.4", "169.254.10.1",
-        "::1", "fd12:3456::2", "fe80::1",
-    ):
-        assert phone_access.client_on_own_network(address), address
-    for address in (
-        "8.8.8.8", "100.64.1.2", "192.0.2.1", "198.51.100.2", "203.0.113.9",
-        "2001:4860:4860::8888", "invalid",
-    ):
-        assert not phone_access.client_on_own_network(address), address
 
 
 @pytest.mark.asyncio
@@ -325,7 +339,7 @@ async def test_direct_remote_client_cannot_spoof_proxy_client_header(client, sto
 
 
 @pytest.mark.asyncio
-async def test_webui_proxy_overwrites_spoofed_client_header(store):
+async def test_webui_proxy_overwrites_spoofed_client_header(store, monkeypatch):
     from kollabor_engine.server import create_app as create_engine_app
     from kollabor_webui.server import create_app as create_webui_app
 
@@ -333,10 +347,11 @@ async def test_webui_proxy_overwrites_spoofed_client_header(store):
     proxy_app = create_webui_app(
         engine_url="http://engine",
         transport=ASGITransport(app=engine_app, client=("127.0.0.1", 9000)),
+        bind_hosts=_webui_local_network(monkeypatch),
     )
     async with AsyncClient(
         transport=ASGITransport(app=proxy_app, client=("203.0.113.9", 4567)),
-        base_url="http://webui",
+        base_url="http://192.168.1.20:8080",
     ) as remote:
         response = await remote.get(
             "/engine/phone",
@@ -360,7 +375,7 @@ def test_state_file_corruption_is_not_silently_overwritten(store):
 
 @pytest.mark.asyncio
 async def test_webui_private_phone_flow_preserves_no_store_and_one_time_delivery(
-    store, fakes
+    store, fakes, monkeypatch
 ):
     from kollabor_engine.server import create_app as create_engine_app
     from kollabor_webui.server import create_app as create_webui_app
@@ -369,10 +384,11 @@ async def test_webui_private_phone_flow_preserves_no_store_and_one_time_delivery
     proxy_app = create_webui_app(
         engine_url="http://engine",
         transport=ASGITransport(app=engine_app, client=("127.0.0.1", 9000)),
+        bind_hosts=_webui_local_network(monkeypatch),
     )
     async with AsyncClient(
         transport=ASGITransport(app=proxy_app, client=("192.168.1.10", 4567)),
-        base_url="http://webui",
+        base_url="http://192.168.1.20:8080",
     ) as remote:
         headers = {"Authorization": "Bearer test"}
         response = await remote.put(
@@ -397,9 +413,79 @@ async def test_webui_private_phone_flow_preserves_no_store_and_one_time_delivery
         assert private not in response.text
         assert "qr_svg" not in response.text
 
+
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=proxy_app, client=(body["peer"]["address"], 7777)
+            ),
+            base_url="http://192.168.1.20:8080",
+        ) as wg_phone:
+            tunnel_response = await wg_phone.get(
+                "/engine/phone", headers=headers
+            )
+        assert tunnel_response.status_code == 200
+        assert body["peer"]["id"] in tunnel_response.text
+
         response = await remote.delete(
             f"/engine/phone/peers/{body['peer']['id']}", headers=headers
         )
+
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=proxy_app, client=(body["peer"]["address"], 7777)
+            ),
+            base_url="http://192.168.1.20:8080",
+        ) as revoked_phone:
+            denied = await revoked_phone.get("/engine/phone", headers=headers)
+        assert denied.status_code == 403
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert private not in response.text
+
+
+@pytest.mark.asyncio
+async def test_engine_rejects_proxy_rewritten_client_ip(client, store):
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
+
+    wrapped = ProxyHeadersMiddleware(create_app(), trusted_hosts="127.0.0.1")
+    async with AsyncClient(
+        transport=ASGITransport(app=wrapped, client=("127.0.0.1", 9000)),
+        base_url="http://engine",
+    ) as proxied:
+        response = await proxied.get(
+            "/phone",
+            headers={
+                "Authorization": "Bearer test",
+                "x-forwarded-for": "192.168.1.10",
+            },
+        )
+    assert response.status_code == 403
+
+
+def test_engine_uvicorn_proxy_headers_are_disabled():
+    from kollabor_engine.__main__ import _build_uvicorn_config
+
+    config = _build_uvicorn_config(
+        FastAPI(), host="127.0.0.1", port=7433, log_level="warning"
+    )
+    assert config.proxy_headers is False
+
+
+@pytest.mark.asyncio
+async def test_direct_private_engine_client_must_use_webui_proxy(store):
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
+
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=create_app(), client=("192.168.1.50", 12345)
+        ),
+        base_url="http://engine",
+    ) as direct:
+        response = await direct.get(
+            "/phone",
+            headers={
+                "Authorization": "Bearer test",
+                "x-kollab-client-ip": "192.168.1.50",
+            },
+        )
+    assert response.status_code == 403

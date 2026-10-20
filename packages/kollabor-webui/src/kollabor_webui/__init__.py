@@ -10,6 +10,8 @@ import threading
 import time
 import webbrowser
 
+from .network_security import configured_bind_hosts, validate_bind_hosts
+
 
 def rebuild_stale_bundle() -> None:
     """Rebuild a source checkout's UI when its source is newer than its build.
@@ -51,6 +53,8 @@ def rebuild_stale_bundle() -> None:
 def _listen(hosts: list[str], port: int) -> list[socket.socket]:
     """A socket per host. 127.0.0.1 must bind; an extra host that cannot (its
     tunnel is down, say) is skipped so the local UI still starts."""
+    hosts = validate_bind_hosts(hosts)
+
     sockets = []
     for host in hosts:
         sock = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
@@ -68,8 +72,17 @@ def _listen(hosts: list[str], port: int) -> list[socket.socket]:
     return sockets
 
 
+def build_uvicorn_config(app):
+    """Build a direct-bind server; forwarded client headers are never trusted."""
+    import uvicorn  # type: ignore[import-not-found]
+
+    return uvicorn.Config(app, log_level="warning", proxy_headers=False)
+
+
+
 def main() -> None:
     """Launch the Kollab UI web server."""
+
 
     import uvicorn  # type: ignore[import-not-found]
 
@@ -77,10 +90,14 @@ def main() -> None:
 
     port = int(os.getenv("KOLLAB_WEBUI_PORT", "8080"))
     engine_url = os.getenv("KOLLAB_ENGINE_URL", "http://127.0.0.1:7433")
-    # Addresses to serve on besides 127.0.0.1, e.g. a WireGuard IP. Every page
-    # that reaches one gets the engine token: list private interfaces only.
-    extra = [host.strip() for host in os.getenv("KOLLAB_WEBUI_HOSTS", "").split(",") if host.strip()]
-    sockets = _listen(["127.0.0.1", *extra], port)
+    # Bind only explicit local addresses. This host allowlist is also used for
+    # safe Host validation and exact client-subnet checks in the WebUI app.
+    try:
+        bind_hosts = configured_bind_hosts()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    sockets = _listen(bind_hosts, port)
+    active_hosts = [str(sock.getsockname()[0]) for sock in sockets]
     rebuild_stale_bundle()
 
     print("\n  kollabor-webui starting...")
@@ -98,7 +115,8 @@ def main() -> None:
 
     threading.Thread(target=open_browser_delayed, daemon=True).start()
 
-    uvicorn.Server(uvicorn.Config(create_app(engine_url), log_level="warning")).run(sockets=sockets)
+    app = create_app(engine_url, bind_hosts=active_hosts)
+    uvicorn.Server(build_uvicorn_config(app)).run(sockets=sockets)
 
 
 if __name__ == "__main__":

@@ -23,12 +23,15 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
   const [qr, setQr] = useState<{ name: string; svg: string; portalUrl: string } | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState<string | null>(null);
 
   const settingsDirty =
     state !== null &&
     FIELDS.some((field) => (draft[field.key] ?? "") !== state.settings[field.key]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (initial = false) => {
+    if (initial) setLoading(true);
     try {
       const next = await api.phoneState();
       setState(next);
@@ -37,15 +40,18 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
     } catch (error) {
       setNotice({ kind: "error", text: errorText(error) });
       return false;
+    } finally {
+      if (initial) setLoading(false);
     }
   }, [api]);
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, [load]);
 
-  const run = async (action: () => Promise<void>) => {
+  const run = async (progressText: string, action: () => Promise<void>) => {
     setNotice(null);
+    setProgress(progressText);
     setBusy(true);
     try {
       await action();
@@ -53,6 +59,7 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
       setNotice({ kind: "error", text: errorText(error) });
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -63,6 +70,24 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
         Provision phones through your WireGuard server. You must configure its UDP port-forward,
         server and home-network portal address yourself; Kollab does not change router settings.
       </p>
+
+      <a
+        href="/learn?topic=phone-access"
+        className="text-xs underline underline-offset-2"
+      >
+        Learn about phone access
+      </a>
+
+      {loading ? (
+        <p className="text-muted-foreground text-xs" role="status" aria-live="polite">
+          Loading saved phone-access settings…
+        </p>
+      ) : null}
+      {progress ? (
+        <p className="text-muted-foreground text-xs" role="status" aria-live="polite">
+          {progress}
+        </p>
+      ) : null}
 
       {state && !state.apply_configured ? (
         <p className="rounded-md border p-2 text-xs break-words" role="status">
@@ -92,6 +117,7 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
               value={draft[field.key] ?? ""}
               placeholder={field.hint}
               autoComplete="off"
+              disabled={loading || !state}
               onChange={(event) => setDraft({ ...draft, [field.key]: event.target.value })}
             />
           </label>
@@ -108,7 +134,7 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
           variant="outline"
           disabled={busy || !state}
           onClick={() =>
-            run(async () => {
+            run("Saving phone-access settings…", async () => {
               const next = await api.savePhoneSettings(draft);
               setState(next);
               setDraft(next.settings);
@@ -123,6 +149,7 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
         <Input
           aria-label="Phone name"
+          disabled={loading || !state}
           value={name}
           placeholder="Phone name"
           maxLength={48}
@@ -134,7 +161,7 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
           className="shrink-0"
           disabled={busy || !state?.can_create || settingsDirty}
           onClick={() =>
-            run(async () => {
+            run("Creating the phone peer and applying the server change…", async () => {
               const made = await api.addPhone(name);
               setQr({
                 name: made.peer.name,
@@ -186,23 +213,27 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
                 variant="outline"
                 disabled={busy}
                 aria-label={`Revoke ${peer.name}`}
-                onClick={() =>
-                  run(async () => {
-                    if (!window.confirm(`Revoke ${peer.name}? This removes and disconnects that peer.`)) return;
+                onClick={() => {
+                  if (!window.confirm(`Revoke ${peer.name}? This removes and disconnects that peer.`)) return;
+                  void run(`Revoking ${peer.name} and applying the server change…`, async () => {
                     await api.revokePhone(peer.id);
                     setQr(null);
                     const refreshed = await load();
                     if (refreshed) {
                       setNotice({ kind: "success", text: `${peer.name} was revoked and disconnected.` });
                     }
-                  })
-                }
+                  });
+                }}
               >
                 Revoke
               </Button>
             </li>
           ))}
         </ul>
+      ) : state ? (
+        <p className="text-muted-foreground text-xs" role="status">
+          No phone peers yet. Save the server settings, then add a phone to provision its QR.
+        </p>
       ) : null}
       {notice ? (
         <p

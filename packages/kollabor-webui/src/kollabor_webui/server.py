@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,6 +13,19 @@ import anyio
 import httpx
 from fastapi import FastAPI, Request  # type: ignore[import-not-found]
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # type: ignore[import-not-found]
+
+from .network_security import (
+    allowed_hostnames,
+    client_in_networks,
+    configured_bind_hosts,
+    has_forwarded_client_headers,
+    host_is_allowed,
+    interface_networks_for_hosts,
+    is_forwarded_client_header,
+    networks_for_phone_peers,
+    request_origin_is_safe,
+    validate_bind_hosts,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
@@ -26,15 +41,26 @@ _HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailer", "transfer-encoding", "upgrade", "host", "content-length", "date", "server",
 }
+logger = logging.getLogger(__name__)
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 def _is_local(request: Request) -> bool:
-    """Whether the page was opened on this machine (a peer IP that is loopback)."""
-    host = request.client.host if request.client else ""
+    """Whether the page was opened on this machine (a real loopback peer)."""
+    if request.client is None:
+        return False
     try:
-        return ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(request.client.host.split("%", 1)[0])
     except ValueError:
-        return True  # no network peer at all: a test client or a unix socket
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_loopback
 
 
 def _assistant_static_dir() -> Path | None:
@@ -64,7 +90,12 @@ def _safe_asset(root: Path, asset_path: str) -> Path | None:
 def create_app(
     engine_url: str = "http://127.0.0.1:7433",
     transport: httpx.AsyncBaseTransport | None = None,
+    *,
+    bind_hosts: Sequence[str] | None = None,
 ) -> FastAPI:
+    bind_hosts = validate_bind_hosts(bind_hosts or configured_bind_hosts())
+    trusted_hosts = allowed_hostnames(bind_hosts)
+    interface_networks = interface_networks_for_hosts(bind_hosts)
     engine = httpx.AsyncClient(
         base_url=engine_url, transport=transport, timeout=httpx.Timeout(10.0, read=None)
     )
@@ -75,6 +106,83 @@ def create_app(
         await engine.aclose()
 
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+
+    def current_client_networks():
+        networks = interface_networks
+        try:
+            from kollabor_engine.phone_access import get_phone_access
+
+            state = get_phone_access().view()
+            settings = state["settings"]
+            if state["peers"] and settings["endpoint"] and settings["server_public_key"]:
+                peer_networks = networks_for_phone_peers(state["peers"])
+                networks = tuple(
+                    sorted(
+                        set(networks) | set(peer_networks),
+                        key=lambda network: (
+                            network.version,
+                            int(network.network_address),
+                            network.prefixlen,
+                        ),
+                    )
+                )
+        except Exception as exc:
+            # A corrupt/unavailable phone state must not broaden network access.
+            logger.warning("phone access subnet unavailable: %s", type(exc).__name__)
+        return networks
+
+    @app.middleware("http")
+    async def private_webui_boundary(request: Request, call_next):
+        path = request.url.path
+        sensitive = (
+            path == "/api"
+            or path.startswith("/api/")
+            or path == "/engine"
+            or path.startswith("/engine/")
+        )
+
+        def deny(detail: str, status_code: int = 403) -> JSONResponse:
+            return JSONResponse(
+                {"detail": detail}, status_code=status_code, headers=NO_STORE_HEADERS
+            )
+
+        if not host_is_allowed(request.headers.get("host", ""), trusted_hosts):
+            return deny(
+                "Open Kollab using its configured localhost or private-interface address.",
+                400,
+            )
+        # The supported contract is a direct private bind. Never reinterpret a
+        # client-supplied forwarding chain as a private/loopback source address.
+        if has_forwarded_client_headers(request.headers):
+            return deny(
+                "Forwarded client headers are unsupported; connect directly to Kollab.", 400
+            )
+        client_host = request.client.host if request.client else ""
+        if sensitive and not client_in_networks(client_host, current_client_networks()):
+            return deny("This Kollab WebUI is available only on configured private networks.")
+        if sensitive and not request_origin_is_safe(request, trusted_hosts):
+            return deny("API access must use the same allowed WebUI origin.")
+
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            if not sensitive:
+                raise
+            # Do not echo request URLs, headers, or exception text into bootstrap
+            # diagnostics; those values may contain credentials.
+            logger.warning("private WebUI request failed: %s", type(exc).__name__)
+            response = JSONResponse(
+                {"detail": "WebUI request failed; retry from the private Kollab address."},
+                status_code=500,
+                headers=NO_STORE_HEADERS,
+            )
+        if sensitive:
+            response.headers.update(NO_STORE_HEADERS)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        return response
+
 
     class _UpdateConfig:
         """The web server keeps no update cache: every check asks GitHub."""
@@ -137,6 +245,13 @@ def create_app(
         from kollabor_engine.auth import read_token_from_disk
 
         url = engine_url if _is_local(request) else f"{request.base_url}engine"
+        token = read_token_from_disk()
+        if not token:
+            return JSONResponse(
+                {"detail": "Kollab Engine authentication is not ready; retry shortly."},
+                status_code=503,
+                headers=NO_STORE_HEADERS,
+            )
         try:
             engine_version = (await engine.get("/version")).json().get("version", "")
         except httpx.HTTPError:
@@ -151,7 +266,7 @@ def create_app(
             kollab_version = ""
         return {
             "engine_url": url,
-            "token": read_token_from_disk(),
+            "token": token,
             # A page whose bundle predates (or postdates) the running engine
             # warns in the UI instead of failing on renamed API fields.
             "server_version": server_version,
@@ -174,16 +289,21 @@ def create_app(
             headers=[
                 (k, v)
                 for k, v in request.headers.items()
-                if k.lower() not in _HOP_BY_HOP and k.lower() != "x-kollab-client-ip"
-            ]
-            # The engine sees this server as its client; it needs the real one.
-            + [("x-kollab-client-ip", request.client.host if request.client else "")],
+                if k.lower() not in _HOP_BY_HOP
+                and k.lower() != "x-kollab-client-ip"
+                and not is_forwarded_client_header(k)
+            ],
             content=await request.body(),
         )
         try:
             response = await engine.send(upstream, stream=True)
         except httpx.HTTPError as exc:
-            return JSONResponse({"detail": f"Engine unreachable: {exc}"}, status_code=502)
+            logger.warning("engine proxy unavailable: %s", type(exc).__name__)
+            return JSONResponse(
+                {"detail": "Kollab Engine is unavailable; verify it is running."},
+                status_code=502,
+                headers=NO_STORE_HEADERS,
+            )
 
         async def body():
             # Streams (SSE, the assistant transport) pass through as they come;

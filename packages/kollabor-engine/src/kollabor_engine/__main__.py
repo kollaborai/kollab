@@ -73,6 +73,22 @@ def _flush_engine_log() -> None:
         _engine_stderr.close()
 
 
+def _build_uvicorn_config(app: Any, *, host: str, port: int, log_level: str):
+    """Configure the engine without trusting client-supplied forwarded headers."""
+    import uvicorn  # type: ignore[import-not-found]
+
+    return uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        log_config=None,
+        access_log=False,
+        proxy_headers=False,
+    )
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="Kollab Engine Server")
     subparsers = parser.add_subparsers(dest="command")
@@ -115,13 +131,8 @@ def main():
     log_level = args.log_level
 
     async def _serve():
-        config = uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            log_level=log_level,
-            log_config=None,
-            access_log=False,
+        config = _build_uvicorn_config(
+            app, host=host, port=port, log_level=log_level
         )
         server = uvicorn.Server(config)
 

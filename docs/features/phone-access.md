@@ -47,30 +47,43 @@ make the Kollab WebUI public. Keep the WebUI on private addresses only.
 ## Make the WebUI reachable on the home network
 
 By default, the WebUI binds to `127.0.0.1`. To serve it on the host's LAN
-address, list that private address in `KOLLAB_WEBUI_HOSTS` before starting Kollab:
+address, list that explicit private interface IP in `KOLLAB_WEBUI_HOSTS` before
+starting Kollab:
 
 ```sh
 KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
 ```
 
-The WebUI port defaults to `8080` and can be changed with
-`KOLLAB_WEBUI_PORT`. By default the engine remains on loopback; the WebUI proxies its API
-and stamps the actual client address for the engine's private-network gate.
-The WebUI returns its engine token to pages it serves, so do not bind it to a
-public interface or an untrusted/shared network. The phone routes also require
-engine bearer authentication and reject public client addresses.
+The WebUI port defaults to `8080` and can be changed with `KOLLAB_WEBUI_PORT`.
+The engine remains on loopback; browser requests reach it through the WebUI proxy.
+`KOLLAB_WEBUI_HOSTS` accepts literal loopback, RFC1918, IPv6 ULA, and link-local
+addresses only. Wildcards, unspecified/public addresses, and DNS names fail at
+startup with an actionable error. The WebUI verifies the Host and same-origin
+API request, then allows only clients in the exact CIDR assigned to a configured
+bind interface or the `/32` address of an active phone peer. Other addresses in
+the WireGuard pool and arbitrary RFC1918 networks do not inherit access.
+
+Phone access supports direct private binding only. Uvicorn proxy-header rewriting
+is disabled, and WebUI requests carrying `Forwarded` or `X-Forwarded-*` client
+chains are rejected. Do not place this WebUI behind a reverse proxy or public
+port-forward. A request must come from a configured private subnet and use the
+matching Host/Origin. The engine requires bearer authentication and accepts
+phone routes only through its loopback WebUI connection. `/api/config` provides
+the token only to allowed clients and every success/error response is `no-store`.
 
 If the WebUI host is not the WireGuard server, configure the phone's `AllowedIPs`
-to include the home LAN network that contains the WebUI host. Prefer the narrow
-LAN CIDR (for example `192.168.1.0/24`) instead of a broad route. The phone's
-portal URL should be the WebUI's private LAN address and port, for example
-`http://192.168.1.20:8080`. If the server itself hosts the WebUI, its tunnel
-address may be sufficient. Set the optional DNS field to an IP address reachable
-through the selected routes.
+to include the home LAN network containing the WebUI host. Prefer the narrow LAN
+CIDR (for example `192.168.1.0/24`) instead of a broad route. Set the portal URL
+to the numeric private WebUI address and port, for example
+`http://192.168.1.20:8080`; DNS names are for the WireGuard endpoint, not the
+WebUI Host in this direct-bind mode. If the server itself hosts the WebUI, its
+tunnel address may be sufficient. Set the optional DNS field to an IP address
+reachable through the selected routes.
 
-Use HTTPS with a certificate trusted by the phone when available. A home-LAN
-HTTP URL is not exposed through Kollab's router configuration and must remain on
-the private network.
+This direct-bind mode serves HTTP on the private network. Kollab does not install
+TLS or change the router. If a phone's OS requires trusted HTTPS to add a home
+screen app, do not add a public reverse proxy; the TLS-terminating proxy path is
+not supported by this phone-access security boundary.
 
 ## Configure the trusted server apply helper
 

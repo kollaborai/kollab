@@ -352,33 +352,46 @@ Fire-and-forget: failures are logged but non-fatal. Experimental — the
 DNS layer is still evolving and this var may be replaced or renamed.
 
 
-## Dev-only (not in pip package)
+## WebUI
 
-These packages are in the monorepo but not distributed via `pip install
-kollab`. Only relevant if you're running from source with the full
-workspace.
+These settings control the bundled browser UI served by `kollab --web-ui`.
+Phone Access uses direct private binding and a same-host engine.
 
 ### KOLLAB_WEBUI_PORT
 
-Port for the `kollabor-webui` dev server.
+Port for the direct-bound `kollabor-webui` server.
 
 Default: `8080`
 
 ### KOLLAB_WEBUI_HOSTS
 
-Comma-separated addresses the web UI listens on besides `127.0.0.1`, such as a
-VPN address, so another device can open it. Pages opened from another machine
-reach the engine through the web UI's `/engine` proxy. An address that cannot
-bind (its tunnel is down, say) is skipped. Every page that loads gets the engine
-token, so list private addresses only.
+Comma-separated literal interface IPs to bind besides `127.0.0.1`, such as the
+host's home-LAN or WireGuard address. Only loopback, RFC1918, IPv6 ULA, and
+link-local IPs are accepted. Wildcard, unspecified, public, and hostname values
+fail at startup; a private address not assigned to an active interface is
+skipped with a warning. Phone access trusts the exact CIDR assigned to each bound interface plus each
+active phone peer's exact `/32` address; it does not trust the full WireGuard
+pool or arbitrary RFC1918 clients. Uvicorn forwarded-header
+rewriting is disabled, forwarded client chains are rejected, and Host/Origin are
+checked. This is direct private binding only; reverse proxies and public port
+forwarding to the WebUI are not supported. Every allowed page can receive the
+engine token, so bind only to networks you trust.
 
 Default: unset (127.0.0.1 only)
 
 ### KOLLAB_ENGINE_URL
 
-URL of the `kollabor-engine` server that the webui connects to.
+URL of the same-host `kollabor-engine` server that the WebUI connects to. Phone
+Access requires the engine to be reachable over loopback; remote engine/proxy
+phone-access deployments are not supported.
 
 Default: `http://127.0.0.1:7433`
+
+## Dev-only (not in pip package)
+
+These packages are in the monorepo but not distributed via `pip install
+kollab`. Only relevant if you're running from source with the full
+workspace.
 
 
 ## Internal (do not set manually)
