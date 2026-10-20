@@ -9,17 +9,18 @@ export type LearnProgressState = {
   completed: LearnTopicId[];
   warning: string | null;
   canRetry: boolean;
+  canPersist: boolean;
   retryOperation: LearnProgressRetryOperation;
 };
 
 const STORAGE_READ_WARNING =
-  "Saved lesson progress could not be read. Enable site storage or continue without prior progress.";
+  "Saved progress could not be read. Enable site storage or continue without prior progress; existing data will not be overwritten until it can be read.";
 const STORAGE_WRITE_WARNING =
   "Lesson progress could not be saved. Enable site storage or keep learning without persistence.";
 const CORRUPT_WARNING =
-  "Saved lesson progress was unreadable and has been ignored. Completing a topic will save a fresh progress list.";
+  "Saved progress was unreadable; existing data was left untouched. Clear the kollab.learn.progress.v1 browser entry and reload to start fresh.";
 const UNKNOWN_TOPIC_WARNING =
-  "Some saved topics are no longer available. Remaining progress was kept; continue learning.";
+  "Some saved topics are no longer available; the stored entry was left untouched. Clear the kollab.learn.progress.v1 browser entry to reset it.";
 
 function normalizeLearnProgress(value: unknown): LearnTopicId[] {
   if (!Array.isArray(value)) return [];
@@ -51,19 +52,34 @@ export function readLearnProgress(storage?: LearnStorage): LearnProgressState {
       completed: [],
       warning: STORAGE_READ_WARNING,
       canRetry: true,
+      canPersist: false,
       retryOperation: "read",
     };
   }
-  if (!raw) return { completed: [], warning: null, canRetry: false, retryOperation: null };
+  if (!raw) {
+    return { completed: [], warning: null, canRetry: false, canPersist: true, retryOperation: null };
+  }
 
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    return { completed: [], warning: CORRUPT_WARNING, canRetry: false, retryOperation: null };
+    return {
+      completed: [],
+      warning: CORRUPT_WARNING,
+      canRetry: false,
+      canPersist: false,
+      retryOperation: null,
+    };
   }
   if (!Array.isArray(value)) {
-    return { completed: [], warning: CORRUPT_WARNING, canRetry: false, retryOperation: null };
+    return {
+      completed: [],
+      warning: CORRUPT_WARNING,
+      canRetry: false,
+      canPersist: false,
+      retryOperation: null,
+    };
   }
 
   const completed = normalizeLearnProgress(value);
@@ -72,6 +88,7 @@ export function readLearnProgress(storage?: LearnStorage): LearnProgressState {
     completed,
     warning: hasUnknownTopic ? UNKNOWN_TOPIC_WARNING : null,
     canRetry: false,
+    canPersist: !hasUnknownTopic,
     retryOperation: null,
   };
 }
@@ -97,4 +114,23 @@ export function toggleLearnProgress(
   if (next.has(topicId)) next.delete(topicId);
   else next.add(topicId);
   return LEARN_TOPICS.filter((topic) => next.has(topic.id)).map((topic) => topic.id);
+}
+
+export function applyToggleLearnProgress(
+  state: LearnProgressState,
+  topicId: LearnTopicId,
+  storage?: LearnStorage,
+): LearnProgressState {
+  if (!state.canPersist) {
+    return state;
+  }
+  const completedTopics = toggleLearnProgress(state.completed, topicId);
+  const warning = writeLearnProgress(completedTopics, storage);
+  return {
+    completed: completedTopics,
+    warning,
+    canRetry: Boolean(warning),
+    canPersist: true,
+    retryOperation: warning ? "write" : null,
+  };
 }

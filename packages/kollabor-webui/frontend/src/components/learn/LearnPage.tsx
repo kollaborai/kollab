@@ -25,8 +25,8 @@ import {
   type WhatsNewResult,
 } from "@/learn/changelog";
 import {
+  applyToggleLearnProgress,
   readLearnProgress,
-  toggleLearnProgress,
   writeLearnProgress,
 } from "@/learn/progress";
 
@@ -63,14 +63,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
   }, [route]);
 
   const toggleComplete = (topicId: LearnTopicId) => {
-    const completedTopics = toggleLearnProgress(progress.completed, topicId);
-    const warning = writeLearnProgress(completedTopics);
-    setProgress({
-      completed: completedTopics,
-      warning,
-      canRetry: Boolean(warning),
-      retryOperation: warning ? "write" : null,
-    });
+    setProgress(applyToggleLearnProgress(progress, topicId));
   };
 
   const retryUpdates = () => window.location.reload();
@@ -137,6 +130,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                   ...current,
                   warning,
                   canRetry: Boolean(warning),
+                  canPersist: true,
                   retryOperation: warning ? "write" : null,
                 };
               })}
@@ -272,9 +266,11 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                     </Button>
                     <span className="text-xs text-muted-foreground" aria-live="polite">
                       {progress.warning
-                        ? progress.canRetry
-                          ? "Progress cannot be saved in this browser yet."
-                          : "Saved progress needs attention; completing a topic will save a clean list."
+                        ? progress.retryOperation === "read"
+                          ? "Saved entries are left untouched until storage can be read."
+                          : progress.canPersist
+                            ? "Progress cannot be saved in this browser yet."
+                            : "Saved progress is left untouched until repaired."
                         : progress.completed.length > 0
                           ? "Progress is saved in this browser."
                           : "Progress will be saved in this browser as you complete lessons."}
