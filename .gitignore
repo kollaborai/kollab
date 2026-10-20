@@ -244,3 +244,6 @@ tests/live/local.env
 docs/handoff/agent-network/
 # Claude session dumps: never in the public repo
 20[0-9][0-9]-*-this-session-is-being-continued-*.txt
+
+# Git worktrees: feature work happens here, not in the shared checkout root
+.worktree/
