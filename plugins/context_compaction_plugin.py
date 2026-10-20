@@ -398,9 +398,10 @@ class ContextCompactionPlugin(BasePlugin):
     def _set_compaction_status(
         self, status: str, message: str, action: str = ""
     ) -> None:
-        """Publish persistent compaction state to TUI and semantic clients."""
+        """Publish persistent compaction state and retain its next action."""
         self._compaction_status = status
         self._compaction_status_message = message
+        self._compaction_status_action = action
         try:
             publish_semantic(
                 self.renderer,
@@ -412,6 +413,31 @@ class ContextCompactionPlugin(BasePlugin):
         except Exception:
             # Status display is best-effort and must not break compaction.
             logger.debug("Failed to publish compaction status", exc_info=True)
+
+        if status == "failed":
+            self._display_tui_compaction_failure(message, action)
+
+    def _display_tui_compaction_failure(self, message: str, action: str) -> None:
+        """Show failed compaction and its recovery action in the TUI."""
+        renderer = getattr(self, "renderer", None)
+        if renderer is None or getattr(renderer, "pipe_mode", False) is True:
+            return
+
+        coordinator = getattr(renderer, "message_coordinator", None)
+        display = getattr(coordinator, "display_message_sequence", None)
+        if not callable(display):
+            return
+
+        content = message.strip()
+        if action.strip() and action.strip() not in content:
+            content = f"{content}\nNext step: {action.strip()}"
+        try:
+            display([("system", content, {"display_type": "warning"})])
+        except Exception:
+            logger.warning(
+                "Failed to display compaction recovery action in TUI",
+                exc_info=True,
+            )
 
 
     def _register_status_widget(self) -> None:
@@ -648,6 +674,9 @@ class ContextCompactionPlugin(BasePlugin):
                     f"  status:         {getattr(self, '_compaction_status_message', '')}",
                 ]
             )
+            action = getattr(self, "_compaction_status_action", "")
+            if action:
+                lines.append(f"  next step:      {action}")
 
         return "\n".join(lines)
 

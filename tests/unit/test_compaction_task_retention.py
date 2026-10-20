@@ -223,3 +223,67 @@ def test_compaction_status_publishes_a_persistent_semantic_state() -> None:
         message="Automatic compaction paused because the prompt remains above threshold.",
         action="Run /compact now.",
     )
+
+
+def test_failed_compaction_action_is_visible_in_compact_status() -> None:
+    plugin = _plugin()
+    plugin.config = SimpleNamespace(get=lambda key, default=None: default)
+    plugin._fetch_display_history = lambda: _empty_history()
+    plugin._fetch_display_tokens = lambda: _empty_tokens()
+    plugin._profile_manager = None
+    plugin._get_token_threshold = lambda: 200_000
+    plugin._compaction_round = 1
+    plugin._compaction_in_progress = False
+    plugin._disabled_for_session = False
+    plugin._compaction_status = "failed"
+    plugin._compaction_status_message = "Compaction failed before shrinking context."
+    plugin._compaction_status_action = "Run /compact now or start a smaller conversation."
+
+    result = asyncio.run(
+        plugin._handle_compact_command(SimpleNamespace(args=["status"]))
+    )
+
+    assert "state:          failed" in result
+    assert "Run /compact now or start a smaller conversation." in result
+
+
+def test_failed_compaction_status_displays_tui_next_step() -> None:
+    plugin = _plugin()
+    displayed = []
+    coordinator = SimpleNamespace(display_message_sequence=displayed.extend)
+    plugin.renderer = SimpleNamespace(
+        pipe_mode=False,
+        message_coordinator=coordinator,
+    )
+
+    with patch("plugins.context_compaction_plugin.publish_semantic") as publish:
+        plugin._set_compaction_status(
+            "failed",
+            "The context-overflow compaction could not be started.",
+            action="Run /compact now or reduce conversation history.",
+        )
+
+    assert displayed, "TUI should get a visible recovery message"
+    assert plugin._compaction_status_action == (
+        "Run /compact now or reduce conversation history."
+    )
+    role, content, metadata = displayed[0]
+    assert role == "system"
+    assert "The context-overflow compaction could not be started." in content
+    assert "\nNext step: Run /compact now or reduce conversation history." in content
+    assert metadata["display_type"] == "warning"
+    publish.assert_called_once_with(
+        plugin.renderer,
+        "context_compaction_status",
+        status="failed",
+        message="The context-overflow compaction could not be started.",
+        action="Run /compact now or reduce conversation history.",
+    )
+
+
+async def _empty_history():
+    return []
+
+
+async def _empty_tokens():
+    return 0
