@@ -139,6 +139,18 @@ export type PermissionPrompt = {
   };
 };
 
+/** Reasoning effort levels (kollabor_ai EFFORT_LEVELS, cheapest first).
+ * Empty/undefined means the model default (no effort is sent). */
+export const EFFORT_LEVELS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+export type Effort = (typeof EFFORT_LEVELS)[number];
+
 export type Profile = {
   name: string;
   provider?: string;
@@ -149,6 +161,7 @@ export type Profile = {
   acp_adapter?: string;
   extra_header_names?: string[];
   temperature?: number;
+  effort?: string | null;
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
@@ -166,12 +179,16 @@ export type ProfileWrite = {
   description?: string;
   timeout?: number;
   top_p?: number | null;
+  /** Reasoning effort pin; "" / undefined = model default. */
+  effort?: string;
   streaming?: boolean;
   supports_tools?: boolean;
   extra_headers?: Record<string, string>;
+  /** Copy this stored profile: its key and every field left out come along. */
+  copy_from?: string;
 };
 
-export type ProfileUpdate = Partial<Omit<ProfileWrite, "name">> & {
+export type ProfileUpdate = Partial<Omit<ProfileWrite, "name" | "copy_from">> & {
   new_name?: string;
 };
 

@@ -119,7 +119,7 @@ Profiles, MCP, and hub routes:
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/profiles` | list configured profiles |
-| `POST` | `/profiles` | create profile |
+| `POST` | `/profiles` | create profile; `copy_from` starts it from a stored one (key and unshown settings included) |
 | `GET` | `/profiles/{name}` | inspect profile |
 | `PUT` | `/profiles/{name}` | update or rename profile |
 | `DELETE` | `/profiles/{name}` | delete profile |

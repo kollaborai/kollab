@@ -1,13 +1,17 @@
 import { useEffect, useState } from "react";
-import { Pencil, Plus, Trash2, Zap } from "lucide-react";
+import { Copy, Pencil, Plus, Trash2, Zap } from "lucide-react";
 
+import {
+  EFFORT_LEVELS,
+  type Profile,
+  type ProfileUpdate,
+  type ProfileWrite,
+} from "@/api";
 import {
   profileLoadWarningLines,
   profileTargetLabel,
   shouldSubmitBaseUrlUpdate,
 } from "./profile-target";
-
-import type { Profile, ProfileUpdate, ProfileWrite } from "@/api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,12 +72,14 @@ type ProfileWriteBody = {
   description?: string;
   timeout?: number;
   top_p?: number | null;
+  effort?: string;
   streaming?: boolean;
   supports_tools?: boolean;
   extra_headers?: Record<string, string>;
+  copy_from?: string;
 };
 
-type ProfileUpdateBody = Partial<Omit<ProfileWriteBody, "name">> & {
+type ProfileUpdateBody = Partial<Omit<ProfileWriteBody, "name" | "copy_from">> & {
   new_name?: string;
 };
 
@@ -88,6 +94,7 @@ const EMPTY_DRAFT: ProfileWriteBody = {
   description: "",
   timeout: 0,
   top_p: null,
+  effort: "",
   streaming: true,
   supports_tools: true,
 };
@@ -151,44 +158,46 @@ export function ProfilesDialog({
     setTestResult(null);
   };
 
+  // GET /profiles never returns the key, so the form starts with it blank.
+  const fromProfile = (p: Profile, name: string): ProfileWriteBody => ({
+    ...EMPTY_DRAFT,
+    name,
+    provider: p.provider || "anthropic",
+    model: p.model || "",
+    description: p.description || "",
+    base_url: p.base_url ?? "",
+    temperature: p.temperature ?? EMPTY_DRAFT.temperature,
+    effort: p.effort || EMPTY_DRAFT.effort,
+    streaming: p.streaming ?? EMPTY_DRAFT.streaming,
+    supports_tools: p.supports_tools ?? EMPTY_DRAFT.supports_tools,
+  });
+
   const startEdit = (p: Profile) => {
     setEditing(p.name);
     setCopyingFrom(null);
     setOriginalBaseUrl(p.base_url ?? "");
     setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
-    setDraft({
-      ...EMPTY_DRAFT,
-      name: p.name,
-      provider: p.provider || "anthropic",
-      model: p.model || "",
-      description: p.description || "",
-      base_url: p.base_url ?? "",
-      temperature: p.temperature ?? EMPTY_DRAFT.temperature,
-      streaming: p.streaming ?? EMPTY_DRAFT.streaming,
-      supports_tools: p.supports_tools ?? EMPTY_DRAFT.supports_tools,
-    });
+    setDraft(fromProfile(p, p.name));
     setError(null);
     setTestResult(null);
   };
 
+  // Copy from the stored profile so hidden fields remain server-side and are
+  // never re-sent from redacted API metadata.
   const startCopy = (p: Profile) => {
+    let name = `${p.name}-copy`;
+    if (profiles.some((q) => q.name === name)) {
+      let n = 2;
+      while (profiles.some((q) => q.name === `${p.name}-copy-${n}`)) n++;
+      name = `${p.name}-copy-${n}`;
+    }
     setEditing(null);
     setCopyingFrom(p.name);
-    setOriginalBaseUrl("");
-    setBaseUrlHasHiddenData(false);
+    setOriginalBaseUrl(p.base_url ?? "");
+    setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
     setReplaceHiddenBaseUrl(false);
-    setDraft({
-      ...EMPTY_DRAFT,
-      name: `${p.name}-copy`,
-      provider: p.provider || "anthropic",
-      model: p.model || "",
-      description: p.description || "",
-      base_url: p.base_url ?? "",
-      temperature: p.temperature ?? EMPTY_DRAFT.temperature,
-      streaming: p.streaming ?? EMPTY_DRAFT.streaming,
-      supports_tools: p.supports_tools ?? EMPTY_DRAFT.supports_tools,
-    });
+    setDraft(fromProfile(p, name));
     setError(null);
     setTestResult(null);
   };
@@ -198,13 +207,20 @@ export function ProfilesDialog({
     setError(null);
     try {
       if (copyingFrom) {
-        await api.createProfile({ name: draft.name, copy_from: copyingFrom });
+        await api.createProfile({
+          name: draft.name,
+          provider: draft.provider,
+          model: draft.model,
+          copy_from: copyingFrom,
+          effort: draft.effort || "",
+        });
       } else if (editing) {
         const body: ProfileUpdateBody = {
           provider: draft.provider,
           model: draft.model,
           description: draft.description,
           temperature: draft.temperature,
+          effort: draft.effort || "",
           streaming: draft.streaming,
           supports_tools: draft.supports_tools,
         };
@@ -291,7 +307,7 @@ export function ProfilesDialog({
           </div>
         )}
 
-        <div className="flex flex-col gap-2">
+        <div className="flex min-w-0 flex-col gap-2">
           {profiles.map((p) => (
             <div
               key={p.name}
@@ -300,7 +316,9 @@ export function ProfilesDialog({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium">{p.name}</div>
                 <div className="text-muted-foreground truncate text-xs">
-                  {[p.provider, p.model].filter(Boolean).join(" · ")}
+                  {[p.provider, p.model, p.effort && `${p.effort} effort`]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </div>
                 {profileTargetLabel(p) && (
                   <div className="truncate text-xs" title={profileTargetLabel(p) ?? undefined}>
@@ -334,7 +352,7 @@ export function ProfilesDialog({
                 title="Copy profile"
                 aria-label={`Copy ${p.name}`}
               >
-                Copy
+                <Copy className="size-4" />
               </Button>
               <Button
                 variant="ghost"
@@ -370,9 +388,11 @@ export function ProfilesDialog({
           </div>
           {copyingFrom && (
             <p className="mb-3 text-muted-foreground text-xs">
-              Stored settings, including ACP command and environment, are copied
-              server-side. Environment-backed API keys are not copied; configure a
-              key for the new profile first. Only the new name can be changed here.
+              Eligible profiles copy stored credentials and hidden settings,
+              including ACP runtime fields, server-side. Environment-backed API
+              keys are not copied; configure the new profile's API-key environment
+              variable first. OAuth and provisioned profiles cannot be copied.
+              You can change the name and reasoning effort here.
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2">
@@ -480,6 +500,25 @@ export function ProfilesDialog({
                   })
                 }
               />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="profile-effort">Reasoning Effort</Label>
+              <Select
+                value={draft.effort || ""}
+                onValueChange={(v) => setDraft({ ...draft, effort: v })}
+              >
+                <SelectTrigger id="profile-effort">
+                  <SelectValue placeholder="Model Default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">Model Default</SelectItem>
+                  {EFFORT_LEVELS.map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {level}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="profile-description">Description</Label>
