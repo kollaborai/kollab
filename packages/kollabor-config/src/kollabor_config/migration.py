@@ -501,6 +501,7 @@ class ProfileMigrator:
             from kollabor_ai.providers.security import PlaintextKeyStorage
 
             storage_path = get_global_config_path().parent / "keys.json"
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
             plaintext_storage = PlaintextKeyStorage(storage_path)
 
             # Use asyncio to run async method
@@ -513,7 +514,7 @@ class ProfileMigrator:
             )
             return True
         except Exception as e:
-            logger.debug(f"Failed to store in plaintext file: {e}")
+            logger.warning(f"Failed to store in plaintext file: {e}")
             return False
 
     def _validate_migrated_config(self, config: Dict[str, Any]) -> None:

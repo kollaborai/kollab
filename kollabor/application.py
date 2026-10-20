@@ -1058,6 +1058,7 @@ class TerminalLLMChat:
         """
         if os.environ.get("KOLLAB_HUB_PROJECT_SCOPED"):
             return
+        cfg_path: object = "<unresolved>"
         try:
             import json as _json
 
@@ -1070,8 +1071,12 @@ class TerminalLLMChat:
             cfg = _json.loads(cfg_path.read_text())
             scoped = cfg.get("plugins", {}).get("hub", {}).get("project_scoped", True)
             os.environ["KOLLAB_HUB_PROJECT_SCOPED"] = "1" if scoped else "0"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Unable to read global config for hub project scope from %s: %s",
+                cfg_path,
+                exc,
+            )
 
     def _resolve_attach_socket(self, identity: str) -> str | None:
         """Resolve a hub identity to its live unix socket path.

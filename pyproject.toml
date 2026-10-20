@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 addopts = "-p no:warnings"
+testpaths = ["tests"]
 # pytest-asyncio: silence the unset-scope deprecation nag that -W error turns
 # into an INTERNALERROR at configure time; "function" is the upstream default
 # direction and matches what the suite already assumes
