@@ -122,6 +122,7 @@ process with the fix merged (or cherry-picked) first.
 
 ## Definition of done
 
+- The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
 - Tracked task complete, tests green on the required CI checks.
 - PR approved by Marco and merged (or explicitly closed).
 - Worktree and branch removed after merge.
