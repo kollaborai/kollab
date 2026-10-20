@@ -778,3 +778,44 @@ async def test_a_request_this_daemon_does_not_know_is_answered_at_once():
         "type": "error",
         "msg": "this agent does not know 'from_the_future': restart it on the current kollab",
     }
+
+
+def test_connect_proxy_runs_the_operation_in_the_relay_owner():
+    """A window that lost the workspace lock gets the owner's answer, not a read-only screen."""
+
+    async def run():
+        owner = _make_plugin()
+        from plugins.hub.relay_commands import ConnectSnapshot
+
+        owner._connect_snapshot = AsyncMock(
+            return_value=ConnectSnapshot(
+                network="n", domain="d", trust="open", device="x", relay_online=True
+            )
+        )
+        owner._decide_join_request = AsyncMock(return_value="")
+        server = AgentSocketServer(
+            "owner-id",
+            lambda _message: None,
+            on_connect_proxy=owner._handle_connect_proxy,
+            socket_name=f"connect-proxy-{os.getpid()}",
+        )
+        sock_path = await server.start()
+        try:
+            wire = await AgentMessenger.request_connect_proxy(sock_path, "snapshot")
+            assert wire["network"] == "n"
+            args = {"enrollment_id": "e1", "decision": "accept"}
+            assert await AgentMessenger.request_connect_proxy(sock_path, "decide", args) == ""
+            owner._decide_join_request.assert_awaited_once_with("e1", "accept")
+            with pytest.raises(RuntimeError):
+                await AgentMessenger.request_connect_proxy(sock_path, "nope")
+
+            # The non-owner side forwards to that socket and returns the owner's answer.
+            other = _make_plugin()
+            other._connect_owner_socket = lambda: sock_path
+            snap = await other._connect_snapshot()
+            assert snap.network == "n" and not snap.read_only
+            assert await other._decide_join_request("e1", "accept") == ""
+        finally:
+            await server.stop()
+
+    asyncio.run(run())

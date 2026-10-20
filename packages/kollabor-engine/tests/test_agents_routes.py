@@ -272,8 +272,11 @@ class TestAgentPoolFolders:
     async def test_the_computer_view_lists_every_process_of_a_name(self, client, folders, monkeypatch):
         home, other = folders
         rows = [
-            live("k2", "koordinator", "working", "slow job", project=str(other)),
-            {**live("k1", "koordinator", project=str(home)), "solo": True},
+            {
+                **live("k2", "koordinator", "working", "slow job", project=str(other)),
+                "current_tool": {"name": "terminal", "type": "terminal"},
+            },
+            {**live("k1", "koordinator", project=str(home)), "solo": True, "current_tool": {}},
         ]
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge(rows))
 
@@ -287,6 +290,8 @@ class TestAgentPoolFolders:
                 "agent_id": "k1",
                 "state": "idle",
                 "current_task": "",
+                # Between tools: presence holds {}.
+                "current_tool": None,
                 "solo": True,
                 "project": str(home),
             },
@@ -295,6 +300,8 @@ class TestAgentPoolFolders:
                 "agent_id": "k2",
                 "state": "working",
                 "current_task": "slow job",
+                # The row's gem acts out the running tool with no chat open.
+                "current_tool": {"name": "terminal", "type": "terminal"},
                 "solo": False,
                 "project": str(other),
             },

@@ -560,6 +560,8 @@ class HubPlugin(BasePlugin):
         # Core components
         self._identity: Optional[AgentRuntime] = None
         self._presence: Optional[PresenceManager] = None
+        # tool_id -> the running tool presence shows (see _follow_tool).
+        self._running_tools: Dict[str, Dict[str, str]] = {}
         self._election: Optional[CoordinatorElection] = None
         self._socket_server: Optional[AgentSocketServer] = None
         self._endpoint_uri: str = ""  # advertised off-box A2A URI (if enabled)
@@ -1138,7 +1140,7 @@ class HubPlugin(BasePlugin):
         # Create display tap for live attach streaming
         from kollabor_tui.display_tap import DisplayTap
 
-        self._display_tap = DisplayTap(history_size=200)
+        self._display_tap = DisplayTap(history_size=200, on_event=self._follow_tool)
         if self.event_bus:
             self.event_bus.register_service("display_tap", self._display_tap)
 
@@ -5025,6 +5027,7 @@ class HubPlugin(BasePlugin):
                 on_network_status=self._handle_network_status_request,
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
+                on_connect_proxy=self._handle_connect_proxy,
                 on_acp_hub_status=self._handle_acp_hub_status,
                 on_acp_hub_call=self._handle_acp_hub_call,
                 socket_name=self._identity.identity,
@@ -9158,6 +9161,9 @@ class HubPlugin(BasePlugin):
                 return
 
             identity.state = AgentState.IDLE.value
+            # A tool whose result never came (cancelled) ends with the turn.
+            self._running_tools.clear()
+            identity.current_tool = {}
             self._last_activity_at = time.time()
             if self._presence:
                 self._presence.publish()
@@ -9170,6 +9176,41 @@ class HubPlugin(BasePlugin):
         """A response may still need tools or continuation; retain its work owner."""
         self._publish_idle_if_settled()
         return context
+
+    def _follow_tool(self, event: Dict[str, Any]) -> None:
+        """Keep the running tool in presence, from the display tap's events.
+
+        A sidebar gem whose chat is not open reads it to act the tool out, the
+        way the open chat's gem reads these same events. Native and harness
+        tools both publish them. Only the bare name and type go in: a command
+        line or path stays out of the presence file. The newest running tool
+        wins, as in the open chat.
+        """
+        kind = event.get("type")
+        tool_id = str(event.get("tool_id") or "")
+        if kind == "tool_start":
+            name = str(event.get("tool_name") or "")
+            tool_type = str(event.get("tool_type") or "")
+            # "terminal: ls" -> "terminal"; a harness call's title is display
+            # text ("Read /path"), so its ACP kind stands in for the name.
+            if event.get("acp_passthrough"):
+                name = tool_type
+            elif bare := re.match(r"([\w-]+):(?:\s|$)", name):
+                name = bare.group(1)
+            self._running_tools.pop(tool_id, None)
+            self._running_tools[tool_id] = {"name": name[:64], "type": tool_type[:64]}
+        elif kind == "tool_result":
+            self._running_tools.pop(tool_id, None)
+        elif kind in ("turn_complete", "error"):
+            self._running_tools.clear()
+        else:
+            return
+        tool = next(reversed(self._running_tools.values()), {})
+        identity = self._identity
+        if identity is not None and identity.current_tool != tool:
+            identity.current_tool = tool
+            if self._presence:
+                self._presence.publish()
 
     async def _broadcast_user_input(self, data, event=None):
         """Broadcast user input to all peers so they see what the human said."""
@@ -10500,6 +10541,41 @@ class HubPlugin(BasePlugin):
         """True in a window attached to a daemon, which owns the relay."""
         return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
 
+    def _connect_owner_socket(self) -> str:
+        """Hub socket of another process that owns this workspace's relay, else ""."""
+        if self._relay_commands is not None:
+            return ""
+        try:
+            owner = self._relay_agent.owner.owner()
+        except Exception:
+            return ""
+        if not owner or owner.get("pid") == os.getpid():
+            return ""
+        return str(owner.get("socket_path") or "")
+
+    async def _connect_via_owner(self, op: str, args: dict) -> tuple[bool, Any]:
+        """Run one /connect operation in the relay owner: (True, result), or
+        (False, None) when this process owns the relay or the owner is unreachable."""
+        path = self._connect_owner_socket()
+        if not path:
+            return False, None
+        try:
+            return True, await AgentMessenger.request_connect_proxy(path, op, args)
+        except Exception:
+            return False, None
+
+    async def _handle_connect_proxy(self, op: str, args: dict) -> Any:
+        """Owner side of `_connect_via_owner`; the reply may hold a join code."""
+        if op == "snapshot":
+            return (await self._connect_snapshot()).to_wire()
+        if op == "decide":
+            return await self._decide_join_request(
+                str(args.get("enrollment_id", "")), str(args.get("decision", ""))
+            )
+        if op == "offer":
+            return await self._run_connect_enrollment_offer(str(args.get("domain", "")))
+        raise ValueError("unknown connect operation")
+
     def _relay_owned_elsewhere(self) -> bool:
         """True in a process whose workspace relay another window owns."""
         if self._attached() or self._relay_commands is not None:
@@ -10531,11 +10607,15 @@ class HubPlugin(BasePlugin):
         relay behind the knock count) means the daemon runs the relay.
         """
         if not self._attached():
-            return (
-                self._shared_state_snapshot(domain)
-                if self._relay_owned_elsewhere()
-                else None
-            )
+            if not self._relay_owned_elsewhere():
+                return None
+            # The owner answers for this window, so nothing here is read-only
+            # unless the owner cannot be reached.
+            try:
+                snapshot = await self._connect_snapshot()
+            except Exception:
+                snapshot = None
+            return snapshot if snapshot is not None and snapshot.read_only else None
         snapshot = fetched
         if snapshot is None:
             try:
@@ -11039,6 +11119,11 @@ class HubPlugin(BasePlugin):
         what the shared state knows, marked read-only, so the window attached
         to it shows the same one line a second window does.
         """
+        from .relay_commands import ConnectSnapshot
+
+        ok, wire = await self._connect_via_owner("snapshot", {})
+        if ok:
+            return ConnectSnapshot.from_wire(wire)
         commands = self._relay_commands
         if commands is None:
             if self._relay_owned_elsewhere():
@@ -11050,6 +11135,11 @@ class HubPlugin(BasePlugin):
         """Accept or reject one join request; "" when decided, else the reason."""
         from .relay_state import RelayError
 
+        ok, reason = await self._connect_via_owner(
+            "decide", {"enrollment_id": enrollment_id, "decision": decision}
+        )
+        if ok:
+            return str(reason or "")
         try:
             await self._relay_agent.decide_enrollment_request(
                 enrollment_id,
@@ -11221,6 +11311,9 @@ class HubPlugin(BasePlugin):
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""
+        ok, offered = await self._connect_via_owner("offer", {"domain": domain})
+        if ok:
+            return offered if isinstance(offered, dict) else {"error": "connect offer could not be created"}
         if (
             not isinstance(domain, str)
             or not domain

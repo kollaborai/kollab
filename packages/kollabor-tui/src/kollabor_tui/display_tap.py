@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +69,18 @@ class DisplayTap:
     subscribers consume from asyncio tasks via queue.Queue (stdlib).
     """
 
-    def __init__(self, history_size: int = 200):
+    def __init__(
+        self,
+        history_size: int = 200,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         self._history: deque = deque(maxlen=history_size)
         self._subscribers: Dict[str, queue.Queue] = {}
         self._next_seq = 1
         self._lock = threading.Lock()
+        # The owner's own view of every event. Not a subscriber: the count of
+        # those says whether a window is attached.
+        self._on_event = on_event
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Publish a display event to all subscribers.
@@ -126,6 +133,12 @@ class DisplayTap:
 
             for client_id in dead:
                 self._subscribers.pop(client_id, None)
+
+        if self._on_event is not None:
+            try:
+                self._on_event(event)
+            except Exception:
+                logger.debug("DisplayTap on_event failed", exc_info=True)
 
     def subscribe(self, client_id: str) -> queue.Queue:
         """Add a subscriber. Returns thread-safe queue to consume from."""

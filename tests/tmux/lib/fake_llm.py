@@ -9,6 +9,8 @@ call into the reply: <functions.terminal>{"command": ...}</functions.terminal>.
 <tool_call> text, one without a name, as gpt-5.6-luna did; only the native one
 may run. The answer to a native tool result is "pong: the tool answered".
 "slowreply" holds the answer for SLOW_SECONDS, so a spec can act mid-turn.
+"slowtool" gets a <terminal> call that runs SLOW_SECONDS, so a check can watch
+a tool mid-call (the gem's tool animation).
 
 usage: fake_llm.py <port file>
 Binds a free port on 127.0.0.1 and writes it to <port file> once listening.
@@ -62,6 +64,9 @@ def _reply(body):
         return f"Running it.\n<tool_call>{nameless}</tool_call>\n<tool_call>{named}</tool_call>"
     if "runtool" in last:
         return "Running it.\n<terminal>echo fake-tool-ran</terminal>"
+    # The whole message, since a hub message ends in its </agent_hud> line.
+    if "slowtool" in _last_user_text(body):
+        return f"Running it.\n<terminal>sleep {SLOW_SECONDS}; echo slow-tool-ran</terminal>"
     if "fncall" in last:
         # The output (fn-text-ran) appears only if the command really ran.
         command = json.dumps({"command": "printf 'fn-%s-ran' text"})
