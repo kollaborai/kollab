@@ -494,9 +494,15 @@ Each provider has unique configuration options. See [providers.md](../providers.
 - Profiles with invalid configuration are skipped individually, not allowed to
   break the profile list. The Web UI displays the skipped names and diagnostics.
   Restore the reported setting (for example an ACP `command`) before copying.
-- Profile cards show the provider and model plus the actual endpoint or ACP
-  adapter. URL credentials, query parameters, and fragments are omitted from the
-  displayed endpoint.
+- Profile cards and API responses show the provider and a sanitized endpoint
+  or ACP adapter label. URL credentials, query parameters, fragments, header
+  values, ACP command arguments, and local runtime paths are omitted; header and
+  environment variable names may be shown without their values. State snapshots
+  and CLI summaries use the same safe endpoint label. Profile copies still
+  preserve all stored runtime settings server-side.
+- When an endpoint contains hidden URL data, editing it displays the safe URL.
+  Saving other fields without changing the endpoint preserves its stored value.
+  Use the explicit replace control to remove hidden credentials/query/fragment.
 - Missing persisted active/default profiles and unresolved `default_loadout`
   values emit warnings; startup falls back instead of silently using a different
   profile.

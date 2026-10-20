@@ -6,6 +6,7 @@ Handles /model command - quick model selector.
 import logging
 from typing import Any, Dict
 
+from kollabor_ai.profile_manager import redact_profile_endpoint
 from kollabor_events.models import (
     CommandCategory,
     CommandDefinition,
@@ -102,11 +103,18 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
         service = self._acp_service()
+        label = "model" if category == "model" else "reasoning effort"
         try:
             await service.set_config_option(str(option["id"]), value)
         except Exception as exc:
-            return CommandResult(success=False, message=str(exc), display_type="error")
-        label = "model" if category == "model" else "reasoning effort"
+            logger.warning(
+                "ACP %s option update failed (%s)", label, type(exc).__name__
+            )
+            return CommandResult(
+                success=False,
+                message=f"Could not update ACP {label}; check the adapter settings and logs.",
+                display_type="error",
+            )
         return CommandResult(success=True, message=f"ACP {label} set to {value}.", display_type="success")
 
     async def _announce_hub_model_switch(
@@ -238,10 +246,13 @@ class ModelCommandHandler(BaseCommandHandler):
                 return await self._switch_to_model(model_name)
 
         except Exception as e:
-            self.logger.error(f"Error in model command: {e}")
+            self.logger.error("Model command failed (%s)", type(e).__name__)
             return CommandResult(
                 success=False,
-                message=f"Error selecting model: {str(e)}",
+                message=(
+                    "Could not complete the model command. Check the selected "
+                    "profile and application logs."
+                ),
                 display_type="error",
             )
 
@@ -424,7 +435,9 @@ class ModelCommandHandler(BaseCommandHandler):
             model_info = OpenRouterModelInfo()
             models = await model_info.list_models()
         except Exception as e:
-            self.logger.warning(f"Unable to fetch OpenRouter models: {e}")
+            self.logger.warning(
+                "Unable to fetch OpenRouter models (%s)", type(e).__name__
+            )
             return []
 
         commands: list[Dict[str, Any]] = []
@@ -823,7 +836,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 )
                 return
             except Exception as exc:
-                self.logger.warning("state-service activation failed: %s", exc)
+                self.logger.warning(
+                    "State-service profile activation failed (%s)",
+                    type(exc).__name__,
+                )
 
         llm_service = self.llm_service
         if llm_service and hasattr(llm_service, "api_service"):
@@ -949,7 +965,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 )
                 synced = True
             except Exception as exc:
-                self.logger.warning("state-service model activation failed: %s", exc)
+                self.logger.warning(
+                    "State-service model activation failed (%s)",
+                    type(exc).__name__,
+                )
 
         if not synced and llm_service and hasattr(llm_service, "api_service"):
             await llm_service.api_service.reinitialize_provider(profile)
@@ -1005,9 +1024,17 @@ class ModelCommandHandler(BaseCommandHandler):
             try:
                 switched = await llm_service.switch_profile(profile_name)
             except Exception as exc:
+                self.logger.warning(
+                    "Profile switch failed for %r (%s)",
+                    profile_name,
+                    type(exc).__name__,
+                )
                 return CommandResult(
                     success=False,
-                    message=f"Could not switch to profile {profile_name!r}: {exc}",
+                    message=(
+                        f"Could not switch to profile {profile_name!r}. "
+                        "Check the profile configuration and application logs."
+                    ),
                     display_type="error",
                 )
             if not switched:
@@ -1041,9 +1068,17 @@ class ModelCommandHandler(BaseCommandHandler):
                     await acp_service.close()
                     raise RuntimeError("profile is no longer registered")
             except Exception as exc:
+                self.logger.warning(
+                    "ACP profile start failed for %r (%s)",
+                    profile_name,
+                    type(exc).__name__,
+                )
                 return CommandResult(
                     success=False,
-                    message=f"Could not start ACP profile {profile_name!r}: {exc}",
+                    message=(
+                        f"Could not start ACP profile {profile_name!r}. "
+                        "Check its adapter command and application logs."
+                    ),
                     display_type="error",
                 )
         else:
@@ -1086,7 +1121,13 @@ class ModelCommandHandler(BaseCommandHandler):
                 else "ACP command missing"
             )
         else:
-            target = profile.get_endpoint() or f"{provider} default endpoint"
+            endpoint_getter = getattr(profile, "get_display_endpoint", None)
+            endpoint = (
+                endpoint_getter()
+                if callable(endpoint_getter)
+                else redact_profile_endpoint(profile.get_endpoint())[0]
+            )
+            target = endpoint or f"{provider} default endpoint"
         return CommandResult(
             success=True,
             message=(

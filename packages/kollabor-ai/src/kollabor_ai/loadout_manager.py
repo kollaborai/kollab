@@ -566,8 +566,12 @@ class LoadoutManager:
                     try:
                         await state_service.set_active_profile(loadout.provider_profile, reload_profile=True)
                         return loadout
-                    except Exception:
-                        logger.exception("Remote ACP profile activation failed for '%s'", loadout.name)
+                    except Exception as exc:
+                        logger.error(
+                            "Remote ACP activation failed for %r (%s)",
+                            loadout.name,
+                            type(exc).__name__,
+                        )
                 logger.error("ACP loadout '%s' unavailable: no ACP orchestrator", loadout.name)
                 return None
             try:
@@ -576,8 +580,12 @@ class LoadoutManager:
                 if not self.profile_manager.set_active_profile(loadout.provider_profile):
                     await orchestrator.close()
                     return None
-            except Exception:
-                logger.exception("ACP loadout '%s' failed to start", loadout.name)
+            except Exception as exc:
+                logger.error(
+                    "ACP loadout %r failed to start (%s)",
+                    loadout.name,
+                    type(exc).__name__,
+                )
                 return None
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
@@ -586,8 +594,11 @@ class LoadoutManager:
             try:
                 if getattr(orchestrator, "active", False):
                     await orchestrator.close()
-            except Exception:
-                logger.exception("Failed to close ACP runner before native activation")
+            except Exception as exc:
+                logger.error(
+                    "Failed to close ACP runner before native activation (%s)",
+                    type(exc).__name__,
+                )
                 return None
 
         previous_model: Optional[str] = None
@@ -633,7 +644,10 @@ class LoadoutManager:
                 )
                 synced = True
             except Exception as exc:  # noqa: BLE001 -- fall back to direct activation
-                logger.warning(f"state-service loadout activation failed: {exc}")
+                logger.warning(
+                    "State-service loadout activation failed (%s)",
+                    type(exc).__name__,
+                )
 
         if not synced:
             self.profile_manager.set_active_profile(loadout.provider_profile)

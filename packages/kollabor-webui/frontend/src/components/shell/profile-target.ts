@@ -1,17 +1,15 @@
 export type ProfileTarget = {
   provider?: string;
   base_url?: string;
-  command?: string[];
+  acp_adapter?: string;
 };
 
 /** Display the effective destination without exposing URL credentials or query data. */
 export function profileTargetLabel(profile: ProfileTarget): string | null {
   const provider = profile.provider?.trim();
   if (provider?.toLowerCase() === "acp") {
-    const command = profile.command?.find((part) => part.trim());
-    if (!command) return "ACP command missing";
-    const executable = command.replaceAll("\\", "/").split("/").at(-1);
-    return executable ? `ACP adapter: ${executable}` : "ACP adapter configured";
+    const adapter = profile.acp_adapter?.trim();
+    return adapter ? `ACP adapter: ${adapter}` : "ACP command missing";
   }
 
   const baseUrl = profile.base_url?.trim();
@@ -37,5 +35,17 @@ export function profileLoadWarningLines(
 ): string[] {
   return Object.entries(invalidProfiles ?? {}).map(
     ([name, reason]) => `${name}: ${reason}`,
+  );
+}
+
+
+export function shouldSubmitBaseUrlUpdate(
+  originalUrl: string,
+  editedUrl: string,
+  containsHiddenData: boolean,
+  replaceHiddenData: boolean,
+): boolean {
+  return (
+    !containsHiddenData || editedUrl !== originalUrl || replaceHiddenData
   );
 }

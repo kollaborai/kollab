@@ -343,14 +343,21 @@ def render_endpoint(width: int, ctx: Optional[WidgetContext]) -> str:
         if not api_url and not provider and ctx and ctx.profile_manager:
             profile = ctx.profile_manager.get_active_profile()
             if profile:
-                api_url = profile.get_endpoint() or ""
+                display_endpoint = getattr(profile, "get_display_endpoint", None)
+                api_url = (
+                    display_endpoint()
+                    if callable(display_endpoint)
+                    else profile.get_endpoint() or ""
+                )
                 provider = getattr(profile, "provider", "") or ""
 
         if api_url:
             try:
                 endpoint = urlparse(api_url).hostname or "local"
             except Exception as e:
-                logger.warning(f"Failed to parse endpoint URL: {e}")
+                logger.warning(
+                    "Failed to parse endpoint URL (%s)", type(e).__name__
+                )
                 endpoint = "local"
         else:
             # No explicit base_url - show provider's default endpoint
@@ -367,7 +374,7 @@ def render_endpoint(width: int, ctx: Optional[WidgetContext]) -> str:
         text = _fg(_truncate(endpoint, width - 2), T().text)
         return f"{icon} {text}"
     except Exception as e:
-        logger.error(f"endpoint widget error: {e}")
+        logger.error("Endpoint widget error (%s)", type(e).__name__)
         return _fg("@ ?", T().text_dim)
 
 

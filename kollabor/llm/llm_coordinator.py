@@ -1377,7 +1377,10 @@ class LLMService:
                     f"(model={self._current_provider.model})"
                 )
         except Exception as e:
-            logger.warning(f"Provider initialization failed, using legacy system: {e}")
+            logger.warning(
+                "Provider initialization failed, using legacy system (%s)",
+                type(e).__name__,
+            )
             self._current_provider = None
 
     async def _announce_hub_model_switch(
@@ -1478,8 +1481,12 @@ class LLMService:
                         )
                         logger.info("Switched to ACP profile %r", profile_name)
                         return True
-                    except Exception:
-                        logger.exception("ACP profile switch failed for %r", profile_name)
+                    except Exception as exc:
+                        logger.error(
+                            "ACP profile switch failed for %r (%s)",
+                            profile_name,
+                            type(exc).__name__,
+                        )
                         return False
 
                 # Auto-refresh OAuth tokens and resolve model before switching
@@ -1516,12 +1523,16 @@ class LLMService:
                                     profile.model = resolved
                                     logger.info(f"Resolved model to: {resolved}")
                     except Exception as e:
-                        logger.warning(f"OAuth refresh during switch failed: {e}")
+                        logger.warning(
+                            "OAuth refresh during switch failed for %r (%s)",
+                            profile_name,
+                            type(e).__name__,
+                        )
                         self.renderer.message_coordinator.display_message_sequence(
                             [
                                 (
                                     "system",
-                                    f"oauth refresh failed: {e} — using cached token",
+                                    "OAuth refresh failed; using cached token.",
                                     {"display_type": "warning"},
                                 )
                             ]
@@ -1561,17 +1572,19 @@ class LLMService:
                     if acp_orchestrator is not None:
                         try:
                             await acp_orchestrator.close()
-                        except Exception:
-                            logger.exception(
-                                "Could not stop ACP profile %r during native switch",
+                        except Exception as exc:
+                            logger.error(
+                                "Could not stop ACP profile %r during native switch (%s)",
                                 active_profile.name,
+                                type(exc).__name__,
                             )
                             try:
                                 await acp_orchestrator.start(active_profile)
-                            except Exception:
-                                logger.exception(
-                                    "Could not restore ACP profile %r after failed switch",
+                            except Exception as restore_error:
+                                logger.error(
+                                    "Could not restore ACP profile %r after failed switch (%s)",
                                     active_profile.name,
+                                    type(restore_error).__name__,
                                 )
                             return False
 
@@ -1610,10 +1623,11 @@ class LLMService:
                             self.profile_manager.set_active_profile(
                                 profile_name, persist=False
                             )
-                        except Exception:
-                            logger.exception(
-                                "Could not update active profile %r for this session",
+                        except Exception as persist_error:
+                            logger.error(
+                                "Could not update active profile %r (%s)",
                                 profile_name,
+                                type(persist_error).__name__,
                             )
 
                 self.conversation_logger.set_provider(profile.provider)
@@ -1632,7 +1646,11 @@ class LLMService:
                 return True
 
             except Exception as e:
-                logger.error(f"Failed to switch profile to '{profile_name}': {e}")
+                logger.error(
+                    "Failed to switch profile %r (%s)",
+                    profile_name,
+                    type(e).__name__,
+                )
                 return False
 
     def _set_conversation_context(self):

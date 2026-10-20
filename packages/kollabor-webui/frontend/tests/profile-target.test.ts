@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   profileLoadWarningLines,
   profileTargetLabel,
+  shouldSubmitBaseUrlUpdate,
 } from "../src/components/shell/profile-target.ts";
 
 test("profile target shows the real endpoint without credentials or query data", () => {
@@ -20,7 +21,7 @@ test("ACP profile target shows only the adapter executable", () => {
   assert.equal(
     profileTargetLabel({
       provider: "acp",
-      command: ["/opt/kollab/claude-agent-acp", "--token=secret"],
+      acp_adapter: "claude-agent-acp",
     }),
     "ACP adapter: claude-agent-acp",
   );
@@ -32,7 +33,7 @@ test("profile target identifies default provider endpoints and missing ACP comma
     "openai default endpoint",
   );
   assert.equal(
-    profileTargetLabel({ provider: "acp", command: [] }),
+    profileTargetLabel({ provider: "acp" }),
     "ACP command missing",
   );
 });
@@ -43,4 +44,24 @@ test("profile load diagnostics are visible as stable name/reason rows", () => {
     ["broken-acp: ACP command is missing"],
   );
   assert.deepEqual(profileLoadWarningLines(undefined), []);
+});
+
+
+test("unchanged redacted endpoints are omitted from profile updates", () => {
+  assert.equal(
+    shouldSubmitBaseUrlUpdate("https://api.example/v1", "https://api.example/v1", true, false),
+    false,
+  );
+  assert.equal(
+    shouldSubmitBaseUrlUpdate("https://api.example/v1", "https://api.example/v2", true, false),
+    true,
+  );
+  assert.equal(
+    shouldSubmitBaseUrlUpdate("https://api.example/v1", "https://api.example/v1", true, true),
+    true,
+  );
+  assert.equal(
+    shouldSubmitBaseUrlUpdate("https://api.example/v1", "https://api.example/v1", false, false),
+    true,
+  );
 });

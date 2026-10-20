@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { Pencil, Plus, Trash2, Zap } from "lucide-react";
 
-import { profileLoadWarningLines, profileTargetLabel } from "./profile-target";
+import {
+  profileLoadWarningLines,
+  profileTargetLabel,
+  shouldSubmitBaseUrlUpdate,
+} from "./profile-target";
 
 import type { Profile, ProfileUpdate, ProfileWrite } from "@/api";
 import {
@@ -109,6 +113,9 @@ export function ProfilesDialog({
   const [providers, setProviders] = useState<string[]>([]);
   const [invalidProfiles, setInvalidProfiles] = useState<Record<string, string>>({});
   const [copyingFrom, setCopyingFrom] = useState<string | null>(null);
+  const [originalBaseUrl, setOriginalBaseUrl] = useState("");
+  const [baseUrlHasHiddenData, setBaseUrlHasHiddenData] = useState(false);
+  const [replaceHiddenBaseUrl, setReplaceHiddenBaseUrl] = useState(false);
   const loadWarnings = profileLoadWarningLines(invalidProfiles);
 
   // The engine names every provider it can run, so the picker never lags it.
@@ -136,6 +143,9 @@ export function ProfilesDialog({
   const startCreate = () => {
     setEditing(null);
     setCopyingFrom(null);
+    setOriginalBaseUrl("");
+    setBaseUrlHasHiddenData(false);
+    setReplaceHiddenBaseUrl(false);
     setDraft(EMPTY_DRAFT);
     setError(null);
     setTestResult(null);
@@ -144,6 +154,9 @@ export function ProfilesDialog({
   const startEdit = (p: Profile) => {
     setEditing(p.name);
     setCopyingFrom(null);
+    setOriginalBaseUrl(p.base_url ?? "");
+    setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
+    setReplaceHiddenBaseUrl(false);
     setDraft({
       ...EMPTY_DRAFT,
       name: p.name,
@@ -162,6 +175,9 @@ export function ProfilesDialog({
   const startCopy = (p: Profile) => {
     setEditing(null);
     setCopyingFrom(p.name);
+    setOriginalBaseUrl("");
+    setBaseUrlHasHiddenData(false);
+    setReplaceHiddenBaseUrl(false);
     setDraft({
       ...EMPTY_DRAFT,
       name: `${p.name}-copy`,
@@ -189,10 +205,19 @@ export function ProfilesDialog({
           model: draft.model,
           description: draft.description,
           temperature: draft.temperature,
-          base_url: draft.base_url,
           streaming: draft.streaming,
           supports_tools: draft.supports_tools,
         };
+        if (
+          shouldSubmitBaseUrlUpdate(
+            originalBaseUrl,
+            draft.base_url ?? "",
+            baseUrlHasHiddenData,
+            replaceHiddenBaseUrl,
+          )
+        ) {
+          body.base_url = draft.base_url ?? "";
+        }
         if (draft.api_key) body.api_key = draft.api_key;
         if (draft.name && draft.name !== editing) body.new_name = draft.name;
         await api.updateProfile(editing, body);
@@ -404,6 +429,24 @@ export function ProfilesDialog({
                 }
                 placeholder="https://api.example.com/v1"
               />
+              {editing && baseUrlHasHiddenData && (
+                <div className="space-y-2 text-xs text-amber-600">
+                  <p>
+                    Credentials, query parameters, or fragments are hidden.
+                    Saving without changes preserves the stored URL.
+                  </p>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={replaceHiddenBaseUrl}
+                      onChange={(event) =>
+                        setReplaceHiddenBaseUrl(event.target.checked)
+                      }
+                    />
+                    Replace the stored URL with the visible URL
+                  </label>
+                </div>
+              )}
             </div>
             <div className="grid gap-1.5 sm:col-span-2">
               <Label htmlFor="profile-api-key">

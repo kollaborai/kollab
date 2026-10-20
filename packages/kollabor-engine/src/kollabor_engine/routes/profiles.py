@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException  # type: ignore
 from pydantic import BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
+from kollabor_ai.profile_manager import redact_profile_endpoint
 from kollabor_ai.providers import (
     AuthenticationError,
     ProviderError,
@@ -81,13 +82,80 @@ def _get_profile_manager() -> ProfileManager:
     return ProfileManager()
 
 
+def _safe_acp_adapter(command: Any) -> Optional[str]:
+    """Return a known adapter or safe executable label, never raw arguments."""
+    if not isinstance(command, (list, tuple)) or not command:
+        return None
+
+    known_packages = {
+        "@agentclientprotocol/claude-agent-acp": "claude-agent-acp",
+        "@agentclientprotocol/codex-acp": "codex-acp",
+        "@google/gemini-cli": "gemini-cli",
+    }
+    for part in command:
+        if not isinstance(part, str):
+            continue
+        for package, label in known_packages.items():
+            if part == package or part.startswith(f"{package}@"):
+                return label
+
+    executable = command[0]
+    if not isinstance(executable, str) or not executable:
+        return None
+    basename = executable.replace(chr(92), "/").rsplit("/", 1)[-1]
+    safe_characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-"
+    sensitive_words = ("token", "secret", "password", "credential", "apikey")
+    if (
+        not basename
+        or not all(character in safe_characters for character in basename)
+        or any(word in basename.lower() for word in sensitive_words)
+    ):
+        return "ACP adapter configured"
+    return basename
+
+
 def _redacted_profile_dict(profile: LLMProfile) -> Dict[str, Any]:
-    """Return a profile payload safe for API responses."""
+    """Return profile metadata safe for list/get/create/update API responses."""
     result = profile.to_dict()
-    result.pop("api_key", None)
-    result.pop("api_token", None)
-    if "env" in result:
-        result["env_keys"] = sorted(result.pop("env"))
+    for key in (
+        "api_key",
+        "api_token",
+        "access_token",
+        "refresh_token",
+        "oauth_token",
+        "client_secret",
+        "secret",
+        "password",
+        "token",
+        "authorization",
+        "cookie",
+        "api_key_from_env",
+    ):
+        result.pop(key, None)
+
+    env = result.pop("env", None)
+    if isinstance(env, dict):
+        result["env_keys"] = sorted(str(key) for key in env)
+
+    extra_headers = result.pop("extra_headers", None)
+    if isinstance(extra_headers, dict):
+        result["extra_header_names"] = sorted(
+            str(key) for key in extra_headers
+        )
+
+    command = result.pop("command", None)
+    if str(result.get("provider", "")).lower() == "acp":
+        result["acp_adapter"] = _safe_acp_adapter(command)
+
+    base_url, has_hidden_data = redact_profile_endpoint(result.get("base_url"))
+    if "base_url" in result:
+        result["base_url"] = base_url
+    result["base_url_has_hidden_data"] = has_hidden_data
+
+    # Runtime paths, pass-through variable names, and install text are not
+    # needed by the browser; copies preserve them server-side via copy_from.
+    for key in ("cwd", "workspace", "pass_env", "install_guidance"):
+        result.pop(key, None)
     return result
 
 
@@ -411,15 +479,15 @@ async def test_profile(name: str):
             "success": False,
             "profile": name,
             "error": "api_error",
-            "message": str(e),
+            "message": f"Provider returned HTTP {e.response.status_code}",
         }
 
-    except (httpx.ConnectError, OSError) as e:
+    except (httpx.ConnectError, OSError):
         return {
             "success": False,
             "profile": name,
             "error": "connection_failed",
-            "message": f"Connection failed: {e}",
+            "message": "Connection failed. Check the profile endpoint and network.",
         }
 
     except AuthenticationError:
@@ -438,18 +506,27 @@ async def test_profile(name: str):
             "message": "Rate limited - try again later",
         }
 
-    except ProviderError as e:
+    except ProviderError:
         return {
             "success": False,
             "profile": name,
             "error": "api_error",
-            "message": str(e),
+            "message": (
+                "Provider test failed. Verify the profile's endpoint, credentials, "
+                "and model, then retry."
+            ),
         }
 
     except Exception as e:
+        logger.warning(
+            "Profile test failed for %s (%s)", name, type(e).__name__
+        )
         return {
             "success": False,
             "profile": name,
             "error": "internal_error",
-            "message": str(e),
+            "message": (
+                "The profile test failed unexpectedly. Check the endpoint "
+                "configuration and application logs."
+            ),
         }

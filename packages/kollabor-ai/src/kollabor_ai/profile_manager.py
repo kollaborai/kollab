@@ -32,6 +32,97 @@ from kollabor_config.config_utils import (
 logger = logging.getLogger(__name__)
 _NO_API_KEY_UPDATE = object()
 
+
+def _safe_profile_load_diagnostic(profile_data: Any, error: Exception) -> str:
+    """Keep profile-load errors actionable without echoing configured secrets."""
+    message = str(error) or type(error).__name__
+    sensitive_values: set[str] = set()
+    short_sensitive_value_found = False
+    sensitive_markers = (
+        "api_key",
+        "api_token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "secret",
+        "password",
+        "authorization",
+        "cookie",
+        "credential",
+        "token",
+    )
+
+    def add_value(value: Any) -> None:
+        nonlocal short_sensitive_value_found
+        if isinstance(value, str) and value:
+            if len(value) < 3:
+                short_sensitive_value_found = True
+            else:
+                sensitive_values.add(value)
+
+    def collect_values(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                collect_values(nested)
+        elif isinstance(value, (list, tuple, set)):
+            for nested in value:
+                collect_values(nested)
+        else:
+            add_value(value)
+
+    def collect(value: Any) -> None:
+        if not isinstance(value, dict):
+            collect_values(value)
+            return
+        for key, nested in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized == "base_url":
+                if isinstance(nested, str):
+                    add_value(nested)
+                    try:
+                        from urllib.parse import parse_qsl, urlsplit
+
+                        parsed = urlsplit(nested)
+                        add_value(parsed.username)
+                        add_value(parsed.password)
+                        add_value(parsed.fragment)
+                        for _name, query_value in parse_qsl(
+                            parsed.query, keep_blank_values=True
+                        ):
+                            add_value(query_value)
+                    except ValueError:
+                        pass
+                else:
+                    collect_values(nested)
+            elif normalized in {
+                "env",
+                "extra_headers",
+                "headers",
+                "command",
+                "cwd",
+                "workspace",
+                "install_guidance",
+            } or any(marker in normalized for marker in sensitive_markers):
+                collect_values(nested)
+            elif isinstance(nested, (dict, list, tuple, set)):
+                collect(nested)
+
+    collect(profile_data)
+    if short_sensitive_value_found:
+        return (
+            f"Invalid profile configuration ({type(error).__name__}); "
+            "configured values were suppressed"
+        )
+    for sensitive_value in sorted(sensitive_values, key=len, reverse=True):
+        message = message.replace(sensitive_value, "[redacted]")
+    message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
+    message = re.sub(
+        r"(?i)([?&](?:token|access_token|api_key|key|secret|password)=)[^&#\s]+",
+        r"\1[redacted]",
+        message,
+    )
+    return message[:500] or type(error).__name__
+
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
@@ -91,6 +182,41 @@ class EnvVarHint:
 
     name: str  # e.g., "KOLLAB_CLAUDE_TOKEN"
     is_set: bool  # True if env var exists and is non-empty
+
+
+def redact_profile_endpoint(value: Any) -> tuple[Any, bool]:
+    """Return a display-safe endpoint and whether URL data was hidden."""
+    if value is None or value == "":
+        return value, False
+    if not isinstance(value, str):
+        return "[configured endpoint]", True
+
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(value)
+        if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+            raise ValueError("not an absolute endpoint")
+        hostname = parsed.hostname
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        if parsed.port is not None:
+            hostname = f"{hostname}:{parsed.port}"
+        safe_value = urlunsplit(
+            (parsed.scheme, hostname, parsed.path, "", "")
+        )
+        hidden = bool(
+            parsed.username or parsed.password or parsed.query or parsed.fragment
+        )
+        return safe_value, hidden
+    except ValueError:
+        safe_value = re.sub(
+            r"(?i)^([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1", value
+        )
+        safe_value = re.sub(r"[?#].*$", "", safe_value)
+        if "@" in safe_value:
+            safe_value = safe_value.rsplit("@", 1)[-1]
+        return safe_value or "[configured endpoint]", safe_value != value
 
 
 @dataclass
@@ -307,7 +433,7 @@ class LLMProfile:
         return value
 
     def get_endpoint(self) -> str:
-        """Get endpoint URL, checking env var first. OPTIONAL field."""
+        """Get the configured endpoint for provider requests."""
         env_val = self._get_env_value("BASE_URL")
         if env_val:
             return env_val
@@ -315,6 +441,11 @@ class LLMProfile:
         if global_val:
             return global_val
         return self.base_url or ""
+
+    def get_display_endpoint(self) -> str:
+        """Get a safe endpoint label without URL credentials or query data."""
+        endpoint, _hidden = redact_profile_endpoint(self.get_endpoint())
+        return str(endpoint or "")
 
     def get_api_key(self) -> str:
         """Get API key with tiered resolution.
@@ -1161,7 +1292,7 @@ class ProfileManager:
             try:
                 profile = LLMProfile.from_dict(name, data)
             except Exception as exc:
-                reason = str(exc) or type(exc).__name__
+                reason = _safe_profile_load_diagnostic(data, exc)
                 self._invalid_profile_errors[name] = reason
                 logger.warning("Skipping invalid LLM profile %r: %s", name, reason)
                 continue
@@ -2340,19 +2471,24 @@ class ProfileManager:
             return f"Profile '{name}' not found"
 
         hints = profile.get_env_var_hints()
-        token_status = "[set]" if hints["token"].is_set else "[not set]"
-
+        token_hint = hints.get("token")
         tool_mode = "native" if profile.get_supports_tools() else "xml"
         lines = [
             f"Profile: {profile.name}",
-            f"  Endpoint: {profile.get_endpoint() or '(not configured)'}",
+            f"  Endpoint: {profile.get_display_endpoint() or '(not configured)'}",
             f"  Model: {profile.get_model() or '(not configured)'}",
-            f"  Token: {hints['token'].name} {token_status}",
-            f"  Temperature: {profile.get_temperature()}",
-            f"  Max Tokens: {profile.get_max_tokens() or '(API default)'}",
-            f"  Timeout: {profile.get_timeout()}s",
-            f"  Tool Calling: {tool_mode}",
         ]
+        if token_hint is not None:
+            token_status = "[set]" if token_hint.is_set else "[not set]"
+            lines.append(f"  Token: {token_hint.name} {token_status}")
+        lines.extend(
+            [
+                f"  Temperature: {profile.get_temperature()}",
+                f"  Max Tokens: {profile.get_max_tokens() or '(API default)'}",
+                f"  Timeout: {profile.get_timeout()}s",
+                f"  Tool Calling: {tool_mode}",
+            ]
+        )
         if profile.description:
             lines.append(f"  Description: {profile.description}")
 

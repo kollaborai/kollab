@@ -14,10 +14,14 @@ from kollabor_engine.routes import profiles as profile_routes
 
 from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
 from kollabor.llm.llm_coordinator import LLMService
+from kollabor.state.local import LocalStateService
 from kollabor_ai import LLMProfile, ProfileManager
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.loadout_manager import LoadoutManager
-from kollabor_ai.profile_manager import KEYRING_SENTINEL_PREFIX
+from kollabor_ai.profile_manager import (
+    KEYRING_SENTINEL_PREFIX,
+    _safe_profile_load_diagnostic,
+)
 from kollabor_ai.providers.errors import ProviderError
 
 _PROFILE_ENV = (
@@ -180,12 +184,21 @@ def test_profiles_api_copies_acp_from_server_without_requiring_model_text(
     )
     response = asyncio.run(profile_routes.create_profile(request))
 
-    assert response["command"] == list(source.command)
-    assert response["cwd"] == source.cwd
-    assert response["workspace"] == source.workspace
-    assert response["pass_env"] == list(source.pass_env)
+    assert response["acp_adapter"] == "claude-agent-acp"
     assert response["env_keys"] == ["CLAUDE_CONFIG_DIR"]
+    assert "command" not in response
+    assert "cwd" not in response
+    assert "workspace" not in response
+    assert "pass_env" not in response
     assert "env" not in response
+    copied = manager.get_profile("claude-code-custom-copy")
+    assert copied is not None
+    assert copied.command == source.command
+    assert copied.cwd == source.cwd
+    assert copied.workspace == source.workspace
+    assert copied.pass_env == source.pass_env
+    assert copied.env == source.env
+    assert copied.install_guidance == source.install_guidance
 
 
 def test_profiles_api_rejects_new_acp_profile_without_command(
@@ -501,3 +514,417 @@ def test_ui_copy_reports_environment_credential_requirements(
     assert exc.value.status_code == 422
     assert "KOLLAB_ANTHROPIC_COPY_265_API_KEY" in exc.value.detail
     assert manager.get_profile("anthropic-copy-265") is None
+
+
+def _api_secret_acp_profile_data(tmp_path: Path) -> dict:
+    return {
+        **_acp_profile_data(tmp_path),
+        "base_url": (
+            "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
+            "?token=URL_QUERY_SENTINEL#URL_FRAGMENT_SENTINEL"
+        ),
+        "api_key": "PROFILE_API_KEY_SENTINEL",
+        "extra_headers": {
+            "Authorization": "Bearer HEADER_AUTH_SENTINEL",
+            "x-private": "HEADER_VALUE_SENTINEL",
+        },
+        "cwd": str(tmp_path / "CWD_PATH_SENTINEL"),
+        "workspace": str(tmp_path / "WORKSPACE_PATH_SENTINEL"),
+        "pass_env": ["CLAUDE_TOKEN_SENTINEL"],
+        "env": {"CLAUDE_TOKEN_SENTINEL": "ENV_VALUE_SENTINEL"},
+        "command": [
+            "npx",
+            "--yes",
+            "--prefix",
+            str(tmp_path / "ACP_COMMAND_PATH_SENTINEL"),
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.89.0",
+            "--token=COMMAND_ARG_SENTINEL",
+        ],
+        "install_guidance": "INSTALL_GUIDANCE_SENTINEL",
+    }
+
+
+def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
+    isolated_profile_manager, tmp_path, monkeypatch
+):
+    from kollabor_ai import profile_manager as profile_manager_module
+
+    manager, _home = isolated_profile_manager
+    source = LLMProfile.from_dict(
+        "redaction-acp", _api_secret_acp_profile_data(tmp_path)
+    )
+    assert source.get_display_endpoint() == "https://api.example.test/v1"
+    assert manager.add_profile(source)
+    summary = manager.get_profile_summary("redaction-acp")
+    assert "URL_USER_SENTINEL" not in summary
+    assert "URL_QUERY_SENTINEL" not in summary
+    monkeypatch.setattr(profile_manager_module, "_keyring_set", lambda *_args: True)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
+
+    async def get_responses():
+        listed = await profile_routes.list_profiles()
+        fetched = await profile_routes.get_profile("redaction-acp")
+        updated = await profile_routes.update_profile(
+            "redaction-acp",
+            profile_routes.UpdateProfileRequest(description="safe update"),
+        )
+        copied = await profile_routes.create_profile(
+            profile_routes.CreateProfileRequest(
+                name="redaction-acp-copy", copy_from="redaction-acp"
+            )
+        )
+        created = await profile_routes.create_profile(
+            profile_routes.CreateProfileRequest(
+                name="redaction-native",
+                provider="anthropic",
+                model="claude-safe-test",
+                base_url=_api_secret_acp_profile_data(tmp_path)["base_url"],
+                extra_headers={
+                    "Authorization": "Bearer HEADER_AUTH_SENTINEL",
+                    "x-private": "HEADER_VALUE_SENTINEL",
+                },
+            )
+        )
+        return listed, fetched, updated, copied, created
+
+    responses = asyncio.run(get_responses())
+    serialized = json.dumps(responses)
+    for secret in (
+        "URL_USER_SENTINEL",
+        "URL_PASSWORD_SENTINEL",
+        "URL_QUERY_SENTINEL",
+        "URL_FRAGMENT_SENTINEL",
+        "PROFILE_API_KEY_SENTINEL",
+        "HEADER_AUTH_SENTINEL",
+        "HEADER_VALUE_SENTINEL",
+        "CWD_PATH_SENTINEL",
+        "WORKSPACE_PATH_SENTINEL",
+        "ENV_VALUE_SENTINEL",
+        "COMMAND_ARG_SENTINEL",
+        "ACP_COMMAND_PATH_SENTINEL",
+        "INSTALL_GUIDANCE_SENTINEL",
+    ):
+        assert secret not in serialized
+
+    listed, fetched, updated, copied, created = responses
+    listed_profile = next(
+        item for item in listed["profiles"] if item["name"] == "redaction-acp"
+    )
+    for public_profile in (listed_profile, fetched, updated, copied):
+        assert public_profile["base_url"] == "https://api.example.test/v1"
+        assert public_profile["base_url_has_hidden_data"] is True
+        assert public_profile["extra_header_names"] == ["Authorization", "x-private"]
+        assert public_profile["acp_adapter"] == "claude-agent-acp"
+        for private_field in (
+            "api_key",
+            "extra_headers",
+            "command",
+            "cwd",
+            "workspace",
+            "pass_env",
+            "env",
+            "install_guidance",
+        ):
+            assert private_field not in public_profile
+
+    assert created["base_url"] == "https://api.example.test/v1"
+    assert created["base_url_has_hidden_data"] is True
+    assert created["extra_header_names"] == ["Authorization", "x-private"]
+    updated_source = manager.get_profile("redaction-acp")
+    assert updated_source is not None
+    assert updated_source.base_url == source.base_url
+    assert updated_source.extra_headers == source.extra_headers
+    copy_profile = manager.get_profile("redaction-acp-copy")
+    assert copy_profile is not None
+    assert copy_profile.command == source.command
+    assert copy_profile.env == source.env
+    assert copy_profile.extra_headers == source.extra_headers
+    assert copy_profile.base_url == source.base_url
+
+
+def test_invalid_profile_diagnostics_redact_embedded_secret_values(
+    isolated_profile_manager, tmp_path, monkeypatch, caplog
+):
+    manager, home = isolated_profile_manager
+    data = _api_secret_acp_profile_data(tmp_path)
+    _write_config(home, {"profiles": {"bad-secret-profile": data}})
+    original_from_dict = LLMProfile.from_dict.__func__
+
+    def failing_from_dict(cls, name, profile_data):
+        if name == "bad-secret-profile":
+            raise ValueError(f"invalid profile source: {profile_data!r}")
+        return original_from_dict(cls, name, profile_data)
+
+    monkeypatch.setattr(LLMProfile, "from_dict", classmethod(failing_from_dict))
+    with caplog.at_level(logging.WARNING, logger="kollabor_ai.profile_manager"):
+        manager = ProfileManager()
+
+    diagnostics = manager.get_invalid_profiles()
+    serialized = json.dumps(diagnostics) + caplog.text
+    for secret in (
+        "URL_USER_SENTINEL",
+        "URL_PASSWORD_SENTINEL",
+        "URL_QUERY_SENTINEL",
+        "HEADER_AUTH_SENTINEL",
+        "HEADER_VALUE_SENTINEL",
+        "ENV_VALUE_SENTINEL",
+        "COMMAND_ARG_SENTINEL",
+        "PROFILE_API_KEY_SENTINEL",
+        "INSTALL_GUIDANCE_SENTINEL",
+    ):
+        assert secret not in serialized
+    assert "bad-secret-profile" in diagnostics
+
+
+def test_profile_api_can_explicitly_replace_a_redacted_endpoint(
+    isolated_profile_manager, tmp_path, monkeypatch
+):
+    manager, _home = isolated_profile_manager
+    profile = LLMProfile.from_dict(
+        "redacted-endpoint",
+        {
+            "provider": "anthropic",
+            "model": "claude-test",
+            "base_url": (
+                "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
+                "?token=URL_QUERY_SENTINEL"
+            ),
+        },
+    )
+    assert manager.add_profile(profile)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
+    replacement = "https://api.example.test/v2"
+
+    response = asyncio.run(
+        profile_routes.update_profile(
+            profile.name,
+            profile_routes.UpdateProfileRequest(base_url=replacement),
+        )
+    )
+
+    assert response["base_url"] == replacement
+    assert response["base_url_has_hidden_data"] is False
+    assert manager.get_profile(profile.name).base_url == replacement
+
+
+def test_profile_test_connection_errors_do_not_echo_private_values(
+    isolated_profile_manager, monkeypatch
+):
+    manager, _home = isolated_profile_manager
+    profile = LLMProfile.from_dict(
+        "connection-secret-profile",
+        {
+            "provider": "openai",
+            "model": "test-model",
+            "api_key": "API_KEY_SENTINEL_265",
+            "base_url": (
+                "https://URL_USER_SENTINEL_265:URL_PASSWORD_SENTINEL_265@"
+                "api.example.test/v1?token=URL_QUERY_SENTINEL_265"
+            ),
+            "extra_headers": {
+                "Authorization": "Bearer HEADER_SENTINEL_265"
+            },
+        },
+    )
+    assert manager.add_profile(profile)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
+
+    class FailingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, headers=None):
+            raise profile_routes.httpx.ConnectError(
+                f"failed url={url} headers={headers}",
+                request=profile_routes.httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(profile_routes.httpx, "AsyncClient", FailingClient)
+    response = asyncio.run(profile_routes.test_profile(profile.name))
+    serialized = json.dumps(response)
+
+    assert response["success"] is False
+    for secret in (
+        "API_KEY_SENTINEL_265",
+        "URL_USER_SENTINEL_265",
+        "URL_PASSWORD_SENTINEL_265",
+        "URL_QUERY_SENTINEL_265",
+        "HEADER_SENTINEL_265",
+    ):
+        assert secret not in serialized
+
+
+def test_profile_test_provider_error_does_not_echo_safe_message_secrets(
+    isolated_profile_manager, monkeypatch
+):
+    manager, _home = isolated_profile_manager
+    profile = LLMProfile.from_dict(
+        "provider-error-secret",
+        {
+            "provider": "anthropic",
+            "model": "test-model",
+            "api_key": "API_KEY_SENTINEL_266",
+            "base_url": "https://api.example.test/v1?token=URL_SECRET_266",
+        },
+    )
+    assert manager.add_profile(profile)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
+
+    class FailingAPIService:
+        def __init__(self, **_kwargs):
+            self._provider_error = None
+
+        async def initialize(self):
+            return True
+
+        async def call_llm(self, **_kwargs):
+            raise ProviderError(
+                "provider failure",
+                provider="anthropic",
+                safe_message=(
+                    "provider failure at https://api.example.test/v1"
+                    "?token=URL_SECRET_266 with API_KEY_SENTINEL_266"
+                ),
+            )
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(
+        profile_routes, "APICommunicationService", FailingAPIService
+    )
+    response = asyncio.run(profile_routes.test_profile(profile.name))
+
+    assert response["success"] is False
+    assert "URL_SECRET_266" not in json.dumps(response)
+    assert "API_KEY_SENTINEL_266" not in json.dumps(response)
+    assert "Verify the profile's endpoint" in response["message"]
+
+
+def test_profile_diagnostic_suppresses_short_secret_values():
+    diagnostic = _safe_profile_load_diagnostic(
+        {"env": {"TOKEN": "xy"}}, ValueError("invalid value xy")
+    )
+
+    assert "xy" not in diagnostic
+    assert "configured values were suppressed" in diagnostic
+
+
+def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
+    profile = LLMProfile.from_dict(
+        "snapshot-profile",
+        {
+            "provider": "anthropic",
+            "model": "claude-test",
+            "base_url": (
+                "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
+                "?token=URL_QUERY_SENTINEL#URL_FRAGMENT_SENTINEL"
+            ),
+        },
+    )
+    state_service = object.__new__(LocalStateService)
+
+    snapshot = state_service._profile_to_snapshot(profile, is_active=True)
+    response = snapshot.to_dict()
+
+    assert response["endpoint"] == "https://api.example.test/v1"
+    serialized = json.dumps(response)
+    for secret in (
+        "URL_USER_SENTINEL",
+        "URL_PASSWORD_SENTINEL",
+        "URL_QUERY_SENTINEL",
+        "URL_FRAGMENT_SENTINEL",
+    ):
+        assert secret not in serialized
+
+
+def test_model_switch_message_never_shows_url_credentials_or_query(
+    isolated_profile_manager, tmp_path
+):
+    manager, _home = isolated_profile_manager
+    secret_url = (
+        "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
+        "?token=URL_QUERY_SENTINEL"
+    )
+    profile = LLMProfile.from_dict(
+        "zai-private",
+        {
+            "provider": "anthropic",
+            "model": "glm-test",
+            "base_url": secret_url,
+        },
+    )
+    assert manager.add_profile(profile)
+
+    class SwitchingService:
+        def __init__(self):
+            self.api_service = Mock()
+            self.switch_profile = AsyncMock(side_effect=self.switch)
+
+        async def switch(self, name):
+            assert manager.set_active_profile(name, persist=False)
+            return True
+
+    class EventBus:
+        def __init__(self, service):
+            self.service = service
+
+        def get_service(self, name):
+            return self.service if name == "llm_service" else None
+
+    handler = ModelCommandHandler(
+        command_registry=None,
+        event_bus=EventBus(SwitchingService()),
+        profile_manager=manager,
+    )
+    result = asyncio.run(handler._switch_profile(profile.name))
+
+    assert result.success
+    assert "Target: https://api.example.test/v1" in result.message
+    for secret in ("URL_USER_SENTINEL", "URL_PASSWORD_SENTINEL", "URL_QUERY_SENTINEL"):
+        assert secret not in result.message
+
+
+def test_model_switch_error_does_not_echo_profile_secrets(
+    isolated_profile_manager, tmp_path
+):
+    manager, _home = isolated_profile_manager
+    profile = LLMProfile.from_dict(
+        "zai-private",
+        {
+            "provider": "anthropic",
+            "model": "glm-test",
+            "base_url": (
+                "https://user:URL_SECRET@api.example.test/v1?token=URL_SECRET"
+            ),
+        },
+    )
+    assert manager.add_profile(profile)
+
+    class FailingService:
+        api_service = Mock()
+
+        async def switch_profile(self, _name):
+            raise RuntimeError("connection to URL_SECRET failed")
+
+    class EventBus:
+        def get_service(self, name):
+            return FailingService() if name == "llm_service" else None
+
+    handler = ModelCommandHandler(
+        command_registry=None,
+        event_bus=EventBus(),
+        profile_manager=manager,
+    )
+    result = asyncio.run(handler._switch_profile(profile.name))
+
+    assert result.success is False
+    assert "URL_SECRET" not in result.message
+    assert "application logs" in result.message

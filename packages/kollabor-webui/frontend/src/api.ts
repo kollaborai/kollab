@@ -145,7 +145,9 @@ export type Profile = {
   model?: string;
   description?: string;
   base_url?: string;
-  command?: string[];
+  base_url_has_hidden_data?: boolean;
+  acp_adapter?: string;
+  extra_header_names?: string[];
   temperature?: number;
   streaming?: boolean;
   supports_tools?: boolean;

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
 - Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.
+- Profile API responses, state snapshots, and CLI summaries omit URL userinfo/query/fragment, header values, ACP command arguments, and local runtime paths; unchanged redacted endpoint edits preserve server-side configuration.
 
 ## [0.17.0] - 2026-10-19
 
