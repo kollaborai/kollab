@@ -19,3 +19,11 @@ test("other settings and network actions retain their routing", () => {
   assert.deepEqual(panelCommandRequest("/connect code", []), { tab: "network", intent: "new_code" });
   assert.equal(panelCommandRequest("/model effort high", []), null);
 });
+
+test("the System Prompts settings tab opens directly", () => {
+  const promptsTab = SETTINGS_TABS.find((tab) => tab.id === "prompts");
+  assert.deepEqual(panelCommandRequest("/prompts", []), { tab: "prompts" });
+  assert.equal(PANEL_NAME.prompts, "prompts");
+  assert.equal(promptsTab?.label, "Prompts");
+  assert.ok(promptsTab?.scope.includes("~/.kollab/prompt-overrides"));
+});
