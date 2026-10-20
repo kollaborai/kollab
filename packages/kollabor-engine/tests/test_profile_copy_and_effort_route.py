@@ -202,6 +202,86 @@ async def test_copy_with_a_typed_key_uses_it(client, manager):
 
 
 @pytest.mark.asyncio
+async def test_copy_rejects_unknown_effort_with_422(client, manager):
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "invalid-copy",
+            "provider": "anthropic",
+            "model": "claude-y",
+            "effort": "turbo",
+            "copy_from": "pinned",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "effort must be one of" in response.text
+    assert manager.get_profile("invalid-copy") is None
+
+
+@pytest.mark.parametrize(
+    ("source_effort", "overrides"),
+    [("max", {"effort": "turbo"}), ("turbo", {})],
+)
+def test_duplicate_profile_rejects_unsupported_effort(
+    manager, source_effort, overrides
+):
+    manager.get_profile("pinned").effort = source_effort
+
+    with pytest.raises(ValueError, match="unsupported reasoning effort"):
+        manager.duplicate_profile(
+            "pinned", "invalid-copy", overrides=overrides, save_to_config=True
+        )
+
+    assert manager.get_profile("invalid-copy") is None
+    assert "invalid-copy" not in manager.persisted_profiles
+
+
+def test_duplicate_profile_normalizes_valid_effort_override(manager):
+    copy = manager.duplicate_profile(
+        "pinned", "normalized-copy", overrides={"effort": " HIGH "}, save_to_config=False
+    )
+
+    assert copy.effort == "high"
+    assert copy.get_effort() == "high"
+
+
+@pytest.mark.asyncio
+async def test_copy_does_not_inherit_source_specific_effort_env(
+    client, manager, monkeypatch
+):
+    manager.add_profile(
+        LLMProfile(
+            name="anthropic",
+            provider="anthropic",
+            model="claude-x",
+            effort="medium",
+        )
+    )
+    monkeypatch.setenv("KOLLAB_ANTHROPIC_EFFORT", "high")
+    monkeypatch.delenv("KOLLAB_TEAM_ANTHRO_EFFORT", raising=False)
+    monkeypatch.delenv("KOLLAB_EFFORT", raising=False)
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "team-anthro",
+            "provider": "anthropic",
+            "model": "claude-y",
+            "effort": "low",
+            "copy_from": "anthropic",
+        },
+    )
+
+    assert response.status_code == 201
+    source = manager.get_profile("anthropic")
+    copied = manager.get_profile("team-anthro")
+    assert source.get_effort() == "high"
+    assert copied.effort == "low"
+    assert copied.get_effort() == "low"
+
+
+@pytest.mark.asyncio
 async def test_copy_of_a_missing_profile_is_404(client):
     response = await client.post(
         "/profiles",

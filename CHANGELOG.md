@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: add a product-ready checklist and PR template requiring evidence or a
   reasoned N/A for every change.
 - Web: Profiles has a Reasoning Effort picker; effort appears in each row and
-  Model Default clears it. Unsupported values are rejected. Copy uses the
+  Model Default clears it. Unsupported values are rejected before a copied
+  profile is saved. Copy uses the
   stored source profile server-side, preserving saved credentials and hidden
   settings (including ACP runtime fields). Environment-backed keys are not
   copied; set the target profile's key variable or `KOLLAB_API_KEY` before

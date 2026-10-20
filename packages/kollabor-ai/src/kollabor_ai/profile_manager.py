@@ -2258,6 +2258,27 @@ class ProfileManager:
                 raise ValueError(f"Profile field {field_name!r} cannot be overridden")
             setattr(profile, field_name, value)
 
+        # Copy is a persistence boundary, not just an in-memory clone. Reject
+        # malformed stored/overridden effort here instead of letting
+        # get_effort() silently drop it when the next request is made.
+        effort = profile.effort
+        if effort is None:
+            profile.effort = ""
+        elif not isinstance(effort, str):
+            raise ValueError(
+                f"Profile {source_name!r} has invalid reasoning effort; choose one of: "
+                f"{', '.join(EFFORT_LEVELS)} (or empty for model default)"
+            )
+        else:
+            normalized_effort = effort.strip().lower()
+            if normalized_effort and normalized_effort not in EFFORT_LEVELS:
+                raise ValueError(
+                    f"Profile {source_name!r} has unsupported reasoning effort "
+                    f"{normalized_effort!r}; choose one of: {', '.join(EFFORT_LEVELS)} "
+                    "(or empty for model default)"
+                )
+            profile.effort = normalized_effort
+
         if profile.provider == "acp" and not profile.command:
             raise ValueError(
                 f"ACP profile {source_name!r} has no command to copy; restore its "
