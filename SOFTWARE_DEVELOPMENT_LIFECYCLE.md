@@ -90,7 +90,10 @@ also requires the branch to be up to date with `main` and all PR
 conversations resolved.
 
 Desktop Mac/Linux builds (the `binaries` and `desktop` workflows) run only on
-release tags. They are never PR checks and never merge requirements.
+release tags. They are never PR checks and never merge requirements. The one
+exception: `ci/binary-smoke` runs one quick Linux binary smoke build on every
+PR and main push (about 49 seconds, no artifacts). It proves the build works
+early; it is not a required merge check.
 
 ## Review and merge
 
@@ -104,7 +107,9 @@ Full mechanics: `docs/release-process.md`. Summary:
 
 - Releases are tagged whenever Marco decides, and agents may create a release
   tag ONLY when Marco explicitly instructs them to.
-- Desktop Mac/Linux builds run from the release tag.
+- Desktop Mac/Linux builds run from the release tag. Full four-platform binary
+  builds and all desktop builds remain tag-only; the only PR-time build is the
+  `ci/binary-smoke` Linux smoke build (not a required check, no artifacts).
 - Before tagging, check all machines for unpushed work.
 - Releases are built from the shared `main` checkout, never from worktrees or
   scratch clones.

@@ -145,7 +145,9 @@ scripts/docker-runtime.sh smoke
    artifact download directory. Checksums contain basenames, not build paths.
    The Binaries workflow builds and checks this set only for a `v*` tag
    (publish.yml calls it) or a manual run; pull requests and branch pushes
-   build no packages. To catch a packaging failure before tagging, run it on
+   build no packages. The only PR-time binary build is the `ci/binary-smoke`
+   CI job (one quick Linux smoke build, no artifacts, not a required merge
+   check); full four-platform binaries and all desktop builds remain tag-only. To catch a packaging failure before tagging, run it on
    the release branch: `gh workflow run binaries.yml --ref release/X.Y.Z`.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
