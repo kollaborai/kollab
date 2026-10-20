@@ -14,6 +14,7 @@ from kollabor_agent.queue_processor import (
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 
 
@@ -177,6 +178,43 @@ class TestQueueProcessor(unittest.TestCase):
         self.message_display_service.display_error_message.assert_called_once_with(
             "LLM provider not available"
         )
+        event_types = [call.args[0] for call in self.event_bus.emit_with_hooks.await_args_list]
+        self.assertIn(EventType.LLM_REQUEST_ERROR, event_types)
+        self.streaming_handler.call_llm.assert_awaited_once()
+
+    def test_context_window_failure_emits_typed_error_without_retry(self):
+        class ContextWindowExceeded(RuntimeError):
+            error_code = "context_window_exceeded"
+
+        self.streaming_handler.call_llm.side_effect = ContextWindowExceeded(
+            "model context window exceeded"
+        )
+
+        self.api_service._provider = SimpleNamespace(
+            config=SimpleNamespace(context_window=272_000)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="overflow",
+            )
+        )
+
+        error_call = next(
+            call
+            for call in self.event_bus.emit_with_hooks.await_args_list
+            if call.args[0] is EventType.LLM_REQUEST_ERROR
+        )
+        error_data = error_call.args[1]
+        self.assertEqual(error_data["error_code"], "context_window_exceeded")
+        self.assertTrue(error_data["context_window_exceeded"])
+        self.streaming_handler.call_llm.assert_awaited_once()
+        tap = self.renderer.get_service.return_value
+        self.assertNotIn(
+            "usage_update",
+            [call.args[0]["type"] for call in tap.publish.call_args_list],
+        )
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]
