@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import kollabor_config.loader as loader_module
 from kollabor_config.loader import (
     CONFIG_VERSION,
     VERSION_KEY,
@@ -665,3 +666,13 @@ class TestBackwardCompatibility:
 
             assert migrated["kollabor"]["llm"]["provider"] == "anthropic"
             assert migrated[VERSION_KEY] == 2
+
+
+def test_version_parse_failure_is_logged(monkeypatch, caplog):
+    def raise_read_text(self, *args, **kwargs):
+        raise OSError("unreadable pyproject")
+
+    monkeypatch.setattr(loader_module.Path, "read_text", raise_read_text)
+    with caplog.at_level("WARNING", logger="kollabor_config.loader"):
+        assert loader_module._get_version_from_pyproject() is None
+    assert "Unable to read package version" in caplog.text

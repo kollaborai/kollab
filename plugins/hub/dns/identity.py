@@ -209,8 +209,12 @@ class IdentityManager:
                 vk = VerifyKey(bytes.fromhex(pub_hex))
                 self._verify_keys[designation] = vk
                 return pub_hex
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Invalid persisted public key for designation %s: %s",
+                    designation,
+                    exc,
+                )
         return None
 
     def _get_coordinator_public_key_hex(self) -> Optional[str]:
@@ -220,8 +224,8 @@ class IdentityManager:
             try:
                 VerifyKey(bytes.fromhex(coord_pub))
                 return coord_pub
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Invalid persisted coordinator public key: %s", exc)
         return None
 
     @staticmethod

@@ -180,19 +180,21 @@ def mask_api_key(api_key: Optional[str]) -> str:
     return f"{api_key[:4]}...{api_key[-4:]}"
 
 
-def _get_version_from_pyproject() -> str:
+def _get_version_from_pyproject() -> Optional[str]:
     """Read version from pyproject.toml for development mode."""
+    pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
     try:
-        pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
         if pyproject_path.exists():
             content = pyproject_path.read_text()
             for line in content.splitlines():
                 if line.startswith("version ="):
                     # Extract version from: version = "0.4.10"
-                    return line.split("=")[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return None  # type: ignore[return-value]
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Unable to read package version from %s: %s", pyproject_path, exc
+        )
+    return None
 
 
 def _is_running_from_source() -> bool:
