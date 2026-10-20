@@ -1,7 +1,7 @@
 ---
 title: "Documentation"
 created: 2026-02-24
-modified: 2026-09-26
+modified: 2026-10-20
 status: active
 ---
 # Documentation
@@ -34,6 +34,7 @@ status: active
 - [Theming](features/theming.md) - Color modes, design system, terminal compatibility
 - [Kollaborate](features/kollaborate.md) - Multi-agent parallel development framework
 - [Config Hooks](features/config-hooks.md) - JSON-based hooks (no Python needed)
+- [Web Settings Panels](features/web-settings-panels.md) - Browser settings tabs, including per-user prompt overrides
 - [Dynamic System Prompts](features/dynamic-system-prompts.md) - Runtime prompt rendering
 
 ## Plugins
