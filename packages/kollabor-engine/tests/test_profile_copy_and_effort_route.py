@@ -8,8 +8,6 @@ that a stored profile's effort reaches the provider config on switch. A copy
 sees its key or the settings the form has no field for.
 """
 
-from dataclasses import replace
-
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -19,7 +17,7 @@ from kollabor_ai.providers.registry import create_config_from_profile
 
 
 class _Manager(ProfileManager):
-    """Real create/update logic, no config file."""
+    """Real create/update/copy logic with an observable config-save stub."""
 
     def __init__(self):
         self._profiles = {
@@ -29,18 +27,27 @@ class _Manager(ProfileManager):
                 provider="anthropic",
                 model="claude-x",
                 api_key="test-key",
+                auth_type="api_key",
                 effort="max",
+                timeout=600,
+                extra_headers={"x-team": "a"},
             ),
         }
+        self._invalid_profile_errors = {}
         self._active_profile_name = "other"
+        self.persisted_profiles = set()
 
     def save_profile_values_to_config(self, profile, *args, **kwargs):
+        self.persisted_profiles.add(profile.name)
         return True
 
-    def add_profile(self, profile, persist=False):
+    def add_profile(self, profile, save_to_config=False):
+        if profile.name in self._profiles:
+            return False
         self._profiles[profile.name] = profile
-
-    def save_to_config(self, *args, **kwargs):
+        if save_to_config and not self.save_profile_values_to_config(profile):
+            self._profiles.pop(profile.name, None)
+            return False
         return True
 
 
@@ -149,16 +156,7 @@ async def test_profile_effort_reaches_provider_config_on_switch(manager):
 
 
 @pytest.mark.asyncio
-async def test_copy_keeps_the_key_sign_in_and_unshown_settings(client, manager):
-    manager.add_profile(
-        replace(
-            manager.get_profile("pinned"),
-            timeout=600,
-            extra_headers={"x-team": "a"},
-            auth_type="oauth",
-        )
-    )
-
+async def test_copy_keeps_saved_key_and_unshown_settings(client, manager):
     response = await client.post(
         "/profiles",
         json={
@@ -172,11 +170,13 @@ async def test_copy_keeps_the_key_sign_in_and_unshown_settings(client, manager):
 
     assert response.status_code == 201
     assert "api_key" not in response.json()
+    assert "test-key" not in response.text
     copy = manager.get_profile("pinned-copy")
     assert copy.api_key == "test-key"
-    assert copy.auth_type == "oauth"
+    assert copy.auth_type == "api_key"
     assert (copy.timeout, copy.extra_headers) == (600, {"x-team": "a"})
     assert (copy.model, copy.effort) == ("claude-y", "")
+    assert "pinned-copy" in manager.persisted_profiles
     assert manager.get_profile("pinned").model == "claude-x"
 
 
@@ -189,12 +189,16 @@ async def test_copy_with_a_typed_key_uses_it(client, manager):
             "provider": "anthropic",
             "model": "claude-x",
             "api_key": "new-key",
+            "effort": "high",
             "copy_from": "pinned",
         },
     )
 
     assert response.status_code == 201
-    assert manager.get_profile("pinned-2").api_key == "new-key"
+    copy = manager.get_profile("pinned-2")
+    assert copy.api_key == "new-key"
+    assert copy.effort == "high"
+    assert "pinned-2" in manager.persisted_profiles
 
 
 @pytest.mark.asyncio
@@ -208,17 +212,53 @@ async def test_copy_of_a_missing_profile_is_404(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("flag", ["is_provisioned", "api_key_from_env"])
-async def test_copy_never_moves_an_enrolled_or_environment_key(client, manager, flag):
+@pytest.mark.parametrize("auth_type,is_provisioned", [("oauth", False), ("api_key", True)])
+async def test_copy_rejects_oauth_and_provisioned_credentials(
+    client, manager, auth_type, is_provisioned
+):
     manager.add_profile(
         LLMProfile(
             name="held",
             provider="openai",
             model="gpt-4",
             api_key="held-secret",
-            **{flag: True},
+            auth_type=auth_type,
+            is_provisioned=is_provisioned,
         )
     )
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "held-copy",
+            "provider": "openai",
+            "model": "gpt-4",
+            "copy_from": "held",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "cannot be copied" in response.text or "instead of copying" in response.text
+    assert manager.get_profile("held-copy") is None
+
+
+@pytest.mark.asyncio
+async def test_copy_of_env_key_uses_target_env_and_does_not_copy_secret(
+    client, manager, monkeypatch
+):
+    manager.add_profile(
+        LLMProfile(
+            name="held",
+            provider="openai",
+            model="gpt-4",
+            api_key="held-secret",
+            api_key_from_env=True,
+        )
+    )
+    target = LLMProfile(name="held-copy", provider="openai", model="gpt-4")
+    target_env = target._get_env_key("API_KEY")
+    monkeypatch.setenv(target_env, "target-secret")
+    monkeypatch.delenv("KOLLAB_API_KEY", raising=False)
 
     response = await client.post(
         "/profiles",
@@ -233,4 +273,38 @@ async def test_copy_never_moves_an_enrolled_or_environment_key(client, manager, 
     assert response.status_code == 201
     copy = manager.get_profile("held-copy")
     assert copy.api_key == ""
-    assert not copy.is_provisioned and not copy.api_key_from_env
+    assert copy.api_key_from_env
+    assert copy.get_api_key() == "target-secret"
+    assert "held-secret" not in response.text
+    assert "held-copy" in manager.persisted_profiles
+
+
+@pytest.mark.asyncio
+async def test_copy_of_env_key_requires_target_env(client, manager, monkeypatch):
+    manager.add_profile(
+        LLMProfile(
+            name="held",
+            provider="openai",
+            model="gpt-4",
+            api_key="held-secret",
+            api_key_from_env=True,
+        )
+    )
+    target = LLMProfile(name="held-copy", provider="openai", model="gpt-4")
+    target_env = target._get_env_key("API_KEY")
+    monkeypatch.delenv(target_env, raising=False)
+    monkeypatch.delenv("KOLLAB_API_KEY", raising=False)
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "held-copy",
+            "provider": "openai",
+            "model": "gpt-4",
+            "copy_from": "held",
+        },
+    )
+
+    assert response.status_code == 422
+    assert target_env in response.text
+    assert manager.get_profile("held-copy") is None

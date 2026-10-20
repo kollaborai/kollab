@@ -27,7 +27,7 @@ const screenshotDir = path.resolve(
   process.env.PROFILE_COPY_SCREENSHOT_DIR ?? path.join(repoRoot, "docs/media"),
 );
 const disclosure =
-  "Eligible profiles copy saved credentials and hidden settings, including ACP runtime fields, server-side. Environment-backed API keys stay with the source; configure the new profile's API-key environment variable before copying. System-keyring references remain shared when used. OAuth and provisioned profiles cannot be copied. You can change the name and reasoning effort here.";
+  "Eligible profiles copy stored credentials and hidden settings, including ACP runtime fields, server-side. Environment-backed API keys are not copied. Set the target profile's key environment variable or KOLLAB_API_KEY before copying. System-keyring references remain shared when used. OAuth and provisioned profiles cannot be copied. You can change the name and reasoning effort here.";
 const widths = [390, 820, 1280];
 const browserErrors = [];
 const externalRequests = [];
@@ -70,13 +70,16 @@ try {
   await page.getByRole("button", { name: "Copy demo-work" }).click();
   await page.getByRole("heading", { name: "Copy: demo-work" }).waitFor();
   await page.getByText(disclosure, { exact: true }).waitFor({ state: "visible" });
+  const effort = page.getByRole("combobox", { name: "Reasoning Effort" });
+  await effort.click();
+  await page.getByRole("option", { name: "ultra", exact: true }).click();
   assert.equal(await page.locator("#profile-api-key").inputValue(), "");
-  const createButton = page.getByRole("button", { name: "Create", exact: true });
+  const createButton = page.getByRole("button", { name: "Copy Profile", exact: true });
   await createButton.waitFor({ state: "visible" });
   assert.equal(
     await page.evaluate(() => window.profileCopyCreateCalls),
     0,
-    "opening Copy must not create a profile before the user confirms with Create",
+    "opening Copy must not create a profile before the user confirms with Copy Profile",
   );
 
   for (const width of widths) {
@@ -111,6 +114,7 @@ try {
   const submitted = await page.evaluate(() => window.profileCopyLastCreate);
   assert.equal(submitted.copy_from, "demo-work");
   assert.equal(submitted.name, "demo-work-copy");
+  assert.equal(submitted.effort, "ultra");
   assert.equal(Object.hasOwn(submitted, "api_key"), false);
   await page.getByRole("heading", { name: "New Profile" }).waitFor();
 
@@ -119,7 +123,7 @@ try {
   });
   await page.getByRole("button", { name: "Copy demo-work" }).click();
   await page.getByRole("heading", { name: "Copy: demo-work" }).waitFor();
-  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByRole("button", { name: "Copy Profile", exact: true }).click();
   await page
     .getByText("Fixture create failed; check the profile and retry.", { exact: true })
     .waitFor({ state: "visible" });
@@ -128,7 +132,7 @@ try {
   assert.deepEqual(browserErrors, [], "browser reported a page or console error");
 
   console.log(
-    `PASS profile copy disclosure + explicit Create; widths ${widths.join(", ")}px; mocked API; ${capture ? `screenshots: ${screenshotDir}` : "screenshots not captured"}`,
+    `PASS profile copy disclosure + explicit Copy Profile; widths ${widths.join(", ")}px; mocked API; ${capture ? `screenshots: ${screenshotDir}` : "screenshots not captured"}`,
   );
 } finally {
   await browser?.close();

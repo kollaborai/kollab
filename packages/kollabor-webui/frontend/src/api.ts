@@ -171,6 +171,7 @@ export type ProfileWrite = {
   name: string;
   provider?: string;
   model?: string;
+  /** Copy an eligible stored profile by name; hidden fields remain server-side. */
   copy_from?: string;
   api_key?: string;
   base_url?: string;
@@ -184,8 +185,6 @@ export type ProfileWrite = {
   streaming?: boolean;
   supports_tools?: boolean;
   extra_headers?: Record<string, string>;
-  /** Copy this stored profile: its key and every field left out come along. */
-  copy_from?: string;
 };
 
 export type ProfileUpdate = Partial<Omit<ProfileWrite, "name" | "copy_from">> & {
