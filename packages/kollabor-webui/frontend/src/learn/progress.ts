@@ -3,15 +3,19 @@ import { isLearnTopicId, LEARN_TOPICS, type LearnTopicId } from "./catalog.ts";
 export const LEARN_PROGRESS_STORAGE_KEY = "kollab.learn.progress.v1";
 
 export type LearnStorage = Pick<Storage, "getItem" | "setItem">;
+export type LearnProgressRetryOperation = "read" | "write" | null;
 
 export type LearnProgressState = {
   completed: LearnTopicId[];
   warning: string | null;
   canRetry: boolean;
+  retryOperation: LearnProgressRetryOperation;
 };
 
-const STORAGE_WARNING =
-  "Lesson progress cannot be read or saved in this browser. Enable site storage to persist completion; you can keep learning without it.";
+const STORAGE_READ_WARNING =
+  "Saved lesson progress could not be read. Enable site storage or continue without prior progress.";
+const STORAGE_WRITE_WARNING =
+  "Lesson progress could not be saved. Enable site storage or keep learning without persistence.";
 const CORRUPT_WARNING =
   "Saved lesson progress was unreadable and has been ignored. Completing a topic will save a fresh progress list.";
 const UNKNOWN_TOPIC_WARNING =
@@ -43,17 +47,24 @@ export function readLearnProgress(storage?: LearnStorage): LearnProgressState {
   try {
     raw = getStorage(storage).getItem(LEARN_PROGRESS_STORAGE_KEY);
   } catch {
-    return { completed: [], warning: STORAGE_WARNING, canRetry: true };
+    return {
+      completed: [],
+      warning: STORAGE_READ_WARNING,
+      canRetry: true,
+      retryOperation: "read",
+    };
   }
-  if (!raw) return { completed: [], warning: null, canRetry: false };
+  if (!raw) return { completed: [], warning: null, canRetry: false, retryOperation: null };
 
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    return { completed: [], warning: CORRUPT_WARNING, canRetry: false };
+    return { completed: [], warning: CORRUPT_WARNING, canRetry: false, retryOperation: null };
   }
-  if (!Array.isArray(value)) return { completed: [], warning: CORRUPT_WARNING, canRetry: false };
+  if (!Array.isArray(value)) {
+    return { completed: [], warning: CORRUPT_WARNING, canRetry: false, retryOperation: null };
+  }
 
   const completed = normalizeLearnProgress(value);
   const hasUnknownTopic = value.some((id) => !isLearnTopicId(id));
@@ -61,6 +72,7 @@ export function readLearnProgress(storage?: LearnStorage): LearnProgressState {
     completed,
     warning: hasUnknownTopic ? UNKNOWN_TOPIC_WARNING : null,
     canRetry: false,
+    retryOperation: null,
   };
 }
 
@@ -73,7 +85,7 @@ export function writeLearnProgress(
     getStorage(storage).setItem(LEARN_PROGRESS_STORAGE_KEY, JSON.stringify(stableOrder));
     return null;
   } catch {
-    return STORAGE_WARNING;
+    return STORAGE_WRITE_WARNING;
   }
 }
 

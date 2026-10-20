@@ -71,6 +71,14 @@ in a prompt or Hub message.
 Example: keep one profile for quick everyday questions and a second profile with
 higher reasoning effort for a difficult code review.
 
+
+When a Copy control is available, review the provider and base URL/endpoint shown
+in the form. The copy operation retains stored fields that the form does not show,
+including an ACP `command` and keyring/sign-in references. Environment-sourced and
+provisioned API keys are not transferred to the copied profile; configure its own
+`KOLLAB_<PROFILE>_API_KEY` or sign in separately. A profile name is a label, so
+verify the endpoint before starting a session.
+
 ## Koordinator
 
 The koordinator organizes shared work: it tracks assignments, asks agents for
@@ -117,6 +125,11 @@ Example: add a short “verify before reporting” section and include it with
 WireGuard phone access joins a phone to an administrator-prepared private VPN so
 it can open the Web UI at a private address. It does not publish the Web UI.
 
+
+The phone-management panel is a separate feature from Learn and may not be present
+in a build until that feature is integrated. This lesson documents prerequisites;
+it does not provision or modify a phone peer.
+
 1. Ask the host administrator to prepare a reachable WireGuard server, its public
    key and endpoint, and a private tunnel address for the phone.
 2. The network owner configures any required router/firewall UDP forwarding, DNS,
@@ -127,9 +140,10 @@ it can open the Web UI at a private address. It does not publish the Web UI.
    `KOLLAB_PHONE_ACCESS_APPLY_COMMAND` to a reviewed peer-reconciliation helper;
    this helper is not editable from the phone API. Without it, add/revoke controls
    remain disabled.
-4. In Phone Access, add the phone and scan its one-time QR code with the official
-   WireGuard app. The QR contains the phone's private key; keep it secret and do
-   not save it in screenshots or share it.
+4. In a build that includes the Phone Access panel, add the phone and scan its
+   one-time QR code with the official WireGuard app. If the panel is absent, Learn
+   cannot provision a peer. The QR contains the phone's private key; keep it secret
+   and do not save it in screenshots or share it.
 5. Activate the VPN on the phone, then open the Web UI through its private
    address (for example, `http://<private-host>:8080`).
 

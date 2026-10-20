@@ -70,16 +70,16 @@ export const LEARN_TOPICS = [
     id: "profiles",
     title: "Provider profiles",
     summary:
-      "A profile chooses the provider, model, and reasoning effort for a session. It is separate from the agent's role and instructions.",
+      "A profile chooses the provider, base URL/endpoint, model, and reasoning effort for a session. The name is only a label; the endpoint is where requests go. A profile is separate from the agent's role and instructions.",
     howTo: [
-      "Choose a saved profile from the profile selector.",
-      "Open profile settings to create or copy a profile and choose its provider/model options.",
-      "Select the profile before starting a session; the session uses that choice.",
-      "Keep credentials in the supported sign-in or environment flow, not in a shared prompt.",
+      "Choose a saved profile; review its provider, base URL/endpoint, model, and reasoning effort before starting a session.",
+      "When copying a profile, check the provider and endpoint shown in the copy form. Stored fields the form does not show, including an ACP command, are preserved.",
+      "Keyring-backed credentials and sign-in profiles remain stored, but environment-sourced or provisioned keys do not move to the copy. Set its KOLLAB_<PROFILE>_API_KEY or sign in separately.",
+      "Select the profile before starting a session. It does not change the chosen agent.",
     ],
     example:
-      "Use one profile for a fast everyday model and another with a higher reasoning effort for a difficult code review.",
-    note: "Changing a profile does not change which agent you selected.",
+      "Copy an ACP-backed profile and confirm its command remains available. If its source key came from KOLLAB_<PROFILE>_API_KEY or KOLLAB_API_KEY, set a profile-specific key for the copy or authenticate again.",
+    note: "Profile names do not guarantee the provider endpoint. Verify the base URL, and never paste key values into prompts or Hub messages."
   },
   {
     id: "koordinator",
@@ -145,18 +145,18 @@ export const LEARN_TOPICS = [
     id: "phone-access",
     title: "WireGuard phone access",
     summary:
-      "Phone Access can create a WireGuard peer for a phone and show its one-time QR setup. It uses your private VPN and does not make the Kollab Web UI public.",
+      "The Phone Access feature can create a WireGuard peer and one-time QR for a phone. Its management panel is delivered separately from this Learn page and is available only in builds that include Phone Access.",
     howTo: [
       "Ask the host administrator for the WireGuard server's public key, reachable endpoint, private tunnel subnet, and a reviewed peer-apply helper.",
       "Have the network owner configure any needed router/firewall UDP forwarding, DNS, and trusted HTTPS certificate outside Kollab.",
       "On the host, allow its private LAN address in KOLLAB_WEBUI_HOSTS and set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to the reviewed helper.",
-      "In Settings > Phone Access, enter the server endpoint/key, subnet, routes, DNS, and private portal address, then add a phone.",
+      "In Settings > Phone Access, when that separate panel is included in your build, enter the server endpoint/key, subnet, routes, DNS, and private portal address, then add a phone.",
       "Scan the one-time QR in the official WireGuard app, activate the VPN, and open the private portal from the phone.",
     ],
     example:
       "On a trusted host, allow only its LAN address with KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui. After the VPN connects, open http://192.168.1.20:8080; do not expose the Web UI publicly.",
     note:
-      "Kollab does not install WireGuard, configure router UDP forwarding, firewall rules, or DNS. The host must set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to a reviewed peer-reconciliation helper; without it add/revoke stays disabled. The QR contains a private key: never share or screenshot it.",
+      "Kollab does not install WireGuard, configure router UDP forwarding, firewall rules, or DNS. The separate Phone Access panel may not be present until its feature is integrated. The host must set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to a reviewed peer-reconciliation helper; without it add/revoke stays disabled. The QR contains a private key: never share or screenshot it.",
   },
 ] as const satisfies readonly LearnTopicDefinition[];
 

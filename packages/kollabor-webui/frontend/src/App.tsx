@@ -306,6 +306,7 @@ function RuntimeShell({
 
 export default function App() {
   const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
+  const previousLearnRouteRef = useRef(learnRoute);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
@@ -351,6 +352,14 @@ export default function App() {
     window.addEventListener("popstate", syncLearnRoute);
     return () => window.removeEventListener("popstate", syncLearnRoute);
   }, []);
+
+  useEffect(() => {
+    const leavingLearn = previousLearnRouteRef.current !== null && learnRoute === null;
+    previousLearnRouteRef.current = learnRoute;
+    if (leavingLearn) {
+      window.requestAnimationFrame(() => document.getElementById("app-main-pane")?.focus());
+    }
+  }, [learnRoute]);
 
   const returnToChat = useCallback(() => {
     if (!readLearnRoute(window.location)) return;
@@ -1114,7 +1123,11 @@ export default function App() {
             onSessionUpdated={handleSessionUpdated}
           />
         ) : null}
-        <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
+        <SidebarInset
+          id="app-main-pane"
+          tabIndex={-1}
+          className="h-svh max-h-svh min-h-svh overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
           {learnRoute ? (
             <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
           ) : null}

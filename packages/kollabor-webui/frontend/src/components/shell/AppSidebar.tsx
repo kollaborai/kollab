@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
@@ -235,6 +235,10 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
+
+  useEffect(() => {
+    if (learnActive) setOptionsOpen(false);
+  }, [learnActive]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one

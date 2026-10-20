@@ -28,18 +28,21 @@ test("progress toggles, reads, and persists only known topics", () => {
   assert.deepEqual(next, ["networks", "voice"]);
   assert.equal(writeLearnProgress(next, storage), null);
   assert.equal(values.get(LEARN_PROGRESS_STORAGE_KEY), '["networks","voice"]');
-  assert.deepEqual(readLearnProgress(storage), { completed: next, warning: null, canRetry: false });
+  assert.deepEqual(readLearnProgress(storage), {
+    completed: next,
+    warning: null,
+    canRetry: false,
+    retryOperation: null,
+  });
   assert.deepEqual(toggleLearnProgress(next, "voice"), ["networks"]);
 });
 
 test("corrupt or stale browser progress is surfaced without discarding valid topics", () => {
-  const corrupt = readLearnProgress({
-    getItem: () => "not-json",
-    setItem: () => {},
-  });
+  const corrupt = readLearnProgress({ getItem: () => "not-json", setItem: () => {} });
   assert.deepEqual(corrupt.completed, []);
   assert.match(corrupt.warning ?? "", /unreadable/);
   assert.equal(corrupt.canRetry, false);
+  assert.equal(corrupt.retryOperation, null);
 
   const stale = readLearnProgress({
     getItem: () => '["agents","removed-topic"]',
@@ -48,9 +51,10 @@ test("corrupt or stale browser progress is surfaced without discarding valid top
   assert.deepEqual(stale.completed, ["agents"]);
   assert.match(stale.warning ?? "", /no longer available/);
   assert.equal(stale.canRetry, false);
+  assert.equal(stale.retryOperation, null);
 });
 
-test("storage failures stay visible and do not prevent lessons from loading", () => {
+test("read and write storage failures are surfaced with the appropriate retry", () => {
   const denied = {
     getItem: () => {
       throw new Error("storage denied");
@@ -63,5 +67,6 @@ test("storage failures stay visible and do not prevent lessons from loading", ()
   assert.deepEqual(read.completed, []);
   assert.match(read.warning ?? "", /Enable site storage/);
   assert.equal(read.canRetry, true);
+  assert.equal(read.retryOperation, "read");
   assert.match(writeLearnProgress(["agents"], denied) ?? "", /Enable site storage/);
 });

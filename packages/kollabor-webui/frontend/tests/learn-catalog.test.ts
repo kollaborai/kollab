@@ -30,6 +30,12 @@ test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
     assert.ok(topic.example.length > 15, `${topic.id} needs an example`);
   }
   assert.match(getLearnTopic("phone-access").title, /WireGuard/i);
+
+  const profile = getLearnTopic("profiles");
+  const profileGuidance = [profile.summary, ...profile.howTo, profile.example, profile.note].join(" ");
+  assert.match(profileGuidance, /endpoint/i);
+  assert.match(profileGuidance, /ACP command/i);
+  assert.match(profileGuidance, /KOLLAB_<PROFILE>_API_KEY/);
 });
 
 test("Learn URLs round-trip and invalid topic IDs give an actionable route state", () => {

@@ -65,7 +65,12 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
   const toggleComplete = (topicId: LearnTopicId) => {
     const completedTopics = toggleLearnProgress(progress.completed, topicId);
     const warning = writeLearnProgress(completedTopics);
-    setProgress({ completed: completedTopics, warning, canRetry: Boolean(warning) });
+    setProgress({
+      completed: completedTopics,
+      warning,
+      canRetry: Boolean(warning),
+      retryOperation: warning ? "write" : null,
+    });
   };
 
   const retryUpdates = () => window.location.reload();
@@ -126,8 +131,14 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
               variant="outline"
               size="sm"
               onClick={() => setProgress((current) => {
+                if (current.retryOperation === "read") return readLearnProgress();
                 const warning = writeLearnProgress(current.completed);
-                return { ...current, warning, canRetry: Boolean(warning) };
+                return {
+                  ...current,
+                  warning,
+                  canRetry: Boolean(warning),
+                  retryOperation: warning ? "write" : null,
+                };
               })}
             >
               Try again
@@ -259,7 +270,15 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                       {completed.has(topic.id) ? <Check className="size-4" aria-hidden="true" /> : <Gem className="size-4" aria-hidden="true" />}
                       {completed.has(topic.id) ? "Mark incomplete" : "Mark complete"}
                     </Button>
-                    <span className="text-xs text-muted-foreground">Your progress is saved in this browser.</span>
+                    <span className="text-xs text-muted-foreground" aria-live="polite">
+                      {progress.warning
+                        ? progress.canRetry
+                          ? "Progress cannot be saved in this browser yet."
+                          : "Saved progress needs attention; completing a topic will save a clean list."
+                        : progress.completed.length > 0
+                          ? "Progress is saved in this browser."
+                          : "Progress will be saved in this browser as you complete lessons."}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
@@ -310,7 +329,7 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
             <div
               key={index}
               aria-hidden={index === 1}
-              className="min-h-32 rounded-xl border border-border/70 bg-background/60 p-3"
+              className="min-h-48 rounded-xl border border-border/70 bg-background/60 p-3"
             >
               {index === 0 ? (
                 <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -338,18 +357,21 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
       ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           {result.sections.map((section) => (
-            <div key={`${section.version}-${section.date ?? ""}`} className="min-w-0 rounded-xl border border-border/70 bg-background/60 p-3">
+            <div key={`${section.version}-${section.date ?? ""}`} className="min-h-48 min-w-0 rounded-xl border border-border/70 bg-background/60 p-3">
               <p className="text-xs font-semibold text-primary">
                 {section.version === "Unreleased" ? "Unreleased" : `Kollab ${section.version}`}
                 {section.date ? <span className="ml-1 font-normal text-muted-foreground">· {section.date}</span> : null}
               </p>
               <ul className="mt-2 space-y-2">
-                {section.groups.flatMap((group) => group.items.slice(0, 3).map((item) => (
-                  <li key={`${group.category}-${item}`} className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
-                    <span className="mt-1 size-1.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
-                    <span><span className="font-medium text-foreground">{group.category}: </span>{item}</span>
-                  </li>
-                )))}
+                {section.groups
+                  .flatMap((group) => group.items.map((item) => ({ category: group.category, item })))
+                  .slice(0, 3)
+                  .map(({ category, item }) => (
+                    <li key={`${category}-${item}`} className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
+                      <span className="line-clamp-2"><span className="font-medium text-foreground">{category}: </span>{item}</span>
+                    </li>
+                  ))}
               </ul>
             </div>
           ))}
