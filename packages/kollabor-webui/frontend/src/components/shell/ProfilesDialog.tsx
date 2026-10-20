@@ -387,7 +387,7 @@ export function ProfilesDialog({
               className="mb-3 text-muted-foreground text-xs leading-relaxed"
               role="note"
             >
-              Eligible profiles copy saved credentials and hidden settings,
+              Eligible profiles copy stored credentials and hidden settings,
               including ACP runtime fields, server-side. Environment-backed API
               keys stay with the source; configure the new profile's API-key
               environment variable before copying. System-keyring references
