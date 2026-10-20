@@ -5,6 +5,7 @@ export type Session = {
   acp_usage?: { used?: number; size?: number; cost?: { amount?: string | number; currency?: string } };
   acp_plan?: { entries?: Array<{ content: string; priority?: string; status?: string }> };
   session_id: string;
+  conversation_id?: string;
   name?: string;
   profile?: string;
   model?: string;

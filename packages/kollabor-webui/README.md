@@ -69,7 +69,8 @@ if Node/npm is unavailable.
 
   Local live and offline rows group by workspace folder. Network agents stay
   under their network and device, then group by workspace. Move Up and Move Down
-  in an agent row's menu set its order within that workspace. The engine stores
+  in an agent row's menu set its order within that workspace, including separate
+  sessions of the same agent. The engine stores
   this order in `~/.kollab/hub/sidebar-order.json`, shared across browser
   clients and durable across page, web UI, and engine restarts; it is not
   browser-local storage. Revision checks reject stale-window writes rather

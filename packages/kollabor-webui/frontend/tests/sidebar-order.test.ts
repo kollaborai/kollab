@@ -1,7 +1,16 @@
 // Run: node --test tests/sidebar-order.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupByFolder, moveWithinFolder, orderKey, workspaceName } from "../src/components/shell/sidebar-order.ts";
+import {
+  buildLocalOrderRows,
+  groupByFolder,
+  localConversationOrderKey,
+  localOfflineOrderKey,
+  localSessionOrderKey,
+  moveWithinFolder,
+  orderKey,
+  workspaceName,
+} from "../src/components/shell/sidebar-order.ts";
 import { createSidebarOrderController, type SidebarOrderSnapshot } from "../src/components/shell/sidebar-order-controller.ts";
 
 const row = (folder: string, name: string) => ({ key: orderKey(folder, name), folder });
@@ -160,4 +169,43 @@ test("unreadable-store failures refresh and expose the preserved-file warning", 
   assert.deepEqual(controller.snapshot().order, []);
   assert.equal(controller.snapshot().warning, damaged.warning);
   assert.match(controller.snapshot().error || "", /unreadable/i);
+});
+
+
+test("duplicate local sessions use stable session keys with persona/offline anchors", () => {
+  const folder = "/workspace/alpha";
+  const identity = "Lapis";
+  const personaKey = orderKey(folder, identity);
+  const sessionA = localSessionOrderKey(folder, identity, "session-a");
+  const sessionB = localSessionOrderKey(folder, identity, "session-b");
+  const conversationB = localConversationOrderKey(folder, identity, "conversation-b");
+  const offline = localOfflineOrderKey(folder, identity);
+  const sessions = [
+    { session_id: "session-a", conversation_id: "conversation-a", identity, workspace: folder },
+    { session_id: "session-b", conversation_id: "conversation-b", identity, workspace: folder },
+  ];
+  const offlineAgents = [{ identity, workspace: folder }];
+  const rows = buildLocalOrderRows(sessions, offlineAgents, []);
+  assert.deepEqual(rows.map((row) => row.key), [sessionA, sessionB, offline]);
+  assert.equal(new Set(rows.map((row) => row.key)).size, rows.length);
+
+  const moved = moveWithinFolder(groupByFolder(rows, []), sessionB, -1, []);
+  assert.deepEqual(moved, [sessionB, conversationB, personaKey, sessionA, localConversationOrderKey(folder, identity, "conversation-a"), offline]);
+  assert.equal(moved?.filter((key) => key === personaKey).length, 1);
+
+  // A new process/session id can reuse the durable conversation id and find
+  // the prior row order; offline-only and legacy single-session views keep the
+  // persona anchor rather than inheriting a process id.
+  const restarted = buildLocalOrderRows(
+    [{ session_id: "session-b-restarted", conversation_id: "conversation-b", identity, workspace: folder }],
+    [],
+    moved || [],
+  );
+  assert.deepEqual(restarted[0].fallbackKeys, [conversationB, personaKey]);
+  const offlineOnly = buildLocalOrderRows([], offlineAgents, moved || []);
+  assert.equal(offlineOnly[0].key, offline);
+  const legacyOffline = buildLocalOrderRows([], offlineAgents, [personaKey]);
+  assert.equal(legacyOffline[0].key, personaKey);
+  const legacySingle = buildLocalOrderRows([sessions[0]], [], [personaKey]);
+  assert.equal(legacySingle[0].key, personaKey);
 });

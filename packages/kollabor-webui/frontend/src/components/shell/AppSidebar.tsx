@@ -15,7 +15,7 @@ import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
-import { groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
+import { buildLocalOrderRows, groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
@@ -298,10 +298,12 @@ export function AppSidebar({
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
   // This computer's rows grouped by folder, in the order the engine saved.
-  const folderGroups = groupByFolder<LocalRow>([
-    ...visibleSessions.map((session) => ({ key: orderKey(session.workspace, session.identity || session.agent || session.session_id), folder: session.workspace || "", session })),
-    ...visibleOffline.map((agent) => ({ key: orderKey(agent.workspace, agent.identity), folder: agent.workspace || "", offline: agent })),
-  ], sidebarOrder.order);
+  // Duplicate live sessions have distinct session/conversation keys; persona
+  // anchors keep order stable when a session becomes offline or its id rotates.
+  const folderGroups = useMemo(
+    () => groupByFolder<LocalRow>(buildLocalOrderRows(visibleSessions, visibleOffline, sidebarOrder.order), sidebarOrder.order),
+    [visibleSessions, visibleOffline, sidebarOrder.order],
+  );
   const moveRow = (key: string, by: -1 | 1) => {
     const next = moveWithinFolder(folderGroups, key, by, sidebarOrder.order);
     if (next) void sidebarOrder.save(next);

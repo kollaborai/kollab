@@ -879,6 +879,7 @@ class EngineSession:
             "acp_usage": self.acp_usage,
             "acp_plan": self.acp_plan,
             "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
             "name": self.display_name or session_display_name(self.session_id),
             "external": self.external,
             "profile": getattr(self.profile, "name", str(self.profile or "")),
