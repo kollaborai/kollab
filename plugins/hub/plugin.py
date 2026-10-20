@@ -905,7 +905,7 @@ class HubPlugin(BasePlugin):
                     "type": "text_input",
                     "label": "Dream Model",
                     "config_path": "plugins.hub.dreaming_model",
-                    "help": "Cheap model id for dreaming; blank falls back to kollabor.llm.fast_model, then the session model",
+                    "help": "Cheap model for dreaming; blank uses kollabor.llm.fast_model, then session model",
                 },
                 # --- Notification Channel ---
                 {
