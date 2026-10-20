@@ -298,13 +298,17 @@ async def update_profile(name: str, body: UpdateProfileRequest):
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
 
     target_provider = body.provider or profile.provider
+    target_model = body.model if body.model is not None else profile.model
     if target_provider == "acp" and not profile.command:
         raise HTTPException(
             status_code=422,
             detail="ACP profiles require a non-empty command; configure the command first",
         )
-    if target_provider != "acp" and body.model is not None and not body.model.strip():
-        raise HTTPException(status_code=422, detail="Model is required")
+    if target_provider != "acp" and not str(target_model or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="A model is required for non-ACP profiles",
+        )
 
     # Build kwargs for fields that were provided
     kwargs: Dict[str, Any] = {}

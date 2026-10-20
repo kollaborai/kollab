@@ -520,8 +520,9 @@ def _api_secret_acp_profile_data(tmp_path: Path) -> dict:
     return {
         **_acp_profile_data(tmp_path),
         "base_url": (
-            "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
-            "?token=URL_QUERY_SENTINEL#URL_FRAGMENT_SENTINEL"
+            "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1/"
+            "credential/PATH_CREDENTIAL_SENTINEL?token=URL_QUERY_SENTINEL"
+            "#URL_FRAGMENT_SENTINEL"
         ),
         "api_key": "PROFILE_API_KEY_SENTINEL",
         "extra_headers": {
@@ -554,7 +555,7 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
     source = LLMProfile.from_dict(
         "redaction-acp", _api_secret_acp_profile_data(tmp_path)
     )
-    assert source.get_display_endpoint() == "https://api.example.test/v1"
+    assert source.get_display_endpoint() == "https://api.example.test/v1/credential/[redacted]"
     assert manager.add_profile(source)
     summary = manager.get_profile_summary("redaction-acp")
     assert "URL_USER_SENTINEL" not in summary
@@ -595,6 +596,7 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
         "URL_PASSWORD_SENTINEL",
         "URL_QUERY_SENTINEL",
         "URL_FRAGMENT_SENTINEL",
+        "PATH_CREDENTIAL_SENTINEL",
         "PROFILE_API_KEY_SENTINEL",
         "HEADER_AUTH_SENTINEL",
         "HEADER_VALUE_SENTINEL",
@@ -612,7 +614,7 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
         item for item in listed["profiles"] if item["name"] == "redaction-acp"
     )
     for public_profile in (listed_profile, fetched, updated, copied):
-        assert public_profile["base_url"] == "https://api.example.test/v1"
+        assert public_profile["base_url"] == "https://api.example.test/v1/credential/[redacted]"
         assert public_profile["base_url_has_hidden_data"] is True
         assert public_profile["extra_header_names"] == ["Authorization", "x-private"]
         assert public_profile["acp_adapter"] == "claude-agent-acp"
@@ -628,7 +630,7 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
         ):
             assert private_field not in public_profile
 
-    assert created["base_url"] == "https://api.example.test/v1"
+    assert created["base_url"] == "https://api.example.test/v1/credential/[redacted]"
     assert created["base_url_has_hidden_data"] is True
     assert created["extra_header_names"] == ["Authorization", "x-private"]
     updated_source = manager.get_profile("redaction-acp")
@@ -824,8 +826,9 @@ def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
             "provider": "anthropic",
             "model": "claude-test",
             "base_url": (
-                "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1"
-                "?token=URL_QUERY_SENTINEL#URL_FRAGMENT_SENTINEL"
+                "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1/"
+                "credential/PATH_CREDENTIAL_SENTINEL?token=URL_QUERY_SENTINEL"
+                "#URL_FRAGMENT_SENTINEL"
             ),
         },
     )
@@ -834,13 +837,14 @@ def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
     snapshot = state_service._profile_to_snapshot(profile, is_active=True)
     response = snapshot.to_dict()
 
-    assert response["endpoint"] == "https://api.example.test/v1"
+    assert response["endpoint"] == "https://api.example.test/v1/credential/[redacted]"
     serialized = json.dumps(response)
     for secret in (
         "URL_USER_SENTINEL",
         "URL_PASSWORD_SENTINEL",
         "URL_QUERY_SENTINEL",
         "URL_FRAGMENT_SENTINEL",
+        "PATH_CREDENTIAL_SENTINEL",
     ):
         assert secret not in serialized
 
@@ -928,3 +932,29 @@ def test_model_switch_error_does_not_echo_profile_secrets(
     assert result.success is False
     assert "URL_SECRET" not in result.message
     assert "application logs" in result.message
+
+
+def test_provider_only_update_cannot_turn_model_less_acp_profile_native(
+    isolated_profile_manager, tmp_path, monkeypatch
+):
+    manager, _home = isolated_profile_manager
+    source = LLMProfile.from_dict(
+        "model-less-acp", _acp_profile_data(tmp_path)
+    )
+    assert manager.add_profile(source)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            profile_routes.update_profile(
+                source.name,
+                profile_routes.UpdateProfileRequest(provider="anthropic"),
+            )
+        )
+
+    assert exc.value.status_code == 422
+    assert "model" in exc.value.detail.lower()
+    unchanged = manager.get_profile(source.name)
+    assert unchanged is not None
+    assert unchanged.provider == "acp"
+    assert unchanged.model == ""

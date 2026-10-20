@@ -98,8 +98,8 @@ then switch with `/model set <new-name>`. The Web UI Profiles panel also has a
 Copy action. Copies retain ACP adapter commands and other settings stored only
 on the engine. The UI shows the provider and sanitized endpoint/ACP adapter.
 Profile API responses, state snapshots, and CLI summaries omit URL
-credentials/query/fragment, header values, ACP command arguments, and local
-runtime paths. Copies still preserve those settings server-side. If an endpoint
+userinfo, query/fragment, credential-like path segments, header values, ACP
+command arguments, and local runtime paths. Copies still preserve those settings server-side. If an endpoint
 is redacted in the edit form, saving other fields
 preserves it; a separate control explicitly replaces it with the visible URL.
 Environment-backed API keys are not copied: set

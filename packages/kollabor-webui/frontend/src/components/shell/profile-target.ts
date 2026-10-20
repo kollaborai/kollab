@@ -16,7 +16,9 @@ export function profileTargetLabel(profile: ProfileTarget): string | null {
   if (baseUrl) {
     try {
       const url = new URL(baseUrl);
-      const path = url.pathname.replace(/\/+$/, "");
+      const path = url.pathname
+        .replace(/%5Bredacted%5D/gi, "[redacted]")
+        .replace(/\/+$/, "");
       return `Endpoint: ${url.host}${path}`;
     } catch {
       const safeUrl = baseUrl

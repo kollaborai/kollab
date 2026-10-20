@@ -184,6 +184,89 @@ class EnvVarHint:
     is_set: bool  # True if env var exists and is non-empty
 
 
+def _redact_endpoint_path(path: str) -> tuple[str, bool]:
+    """Redact token-like path segments while keeping useful endpoint labels."""
+    from urllib.parse import unquote
+
+    sensitive_markers = (
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "signature",
+        "api_key",
+        "api-key",
+        "api_keys",
+        "api-keys",
+        "apikey",
+        "access_token",
+        "access-token",
+        "access_key",
+        "access-key",
+        "auth",
+    )
+    path_labels = {
+        "token",
+        "tokens",
+        "key",
+        "keys",
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "credential",
+        "credentials",
+        "signature",
+        "signatures",
+        "api_key",
+        "api-key",
+        "api_keys",
+        "api-keys",
+        "apikey",
+        "access_token",
+        "access-token",
+    }
+    safe_segments: list[str] = []
+    hide_next = False
+    hidden = False
+
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        lower = decoded.lower()
+        if hide_next:
+            safe_segments.append("[redacted]")
+            hide_next = False
+            hidden = True
+            continue
+        if "=" in decoded:
+            key, _value = decoded.split("=", 1)
+            if any(marker in key.lower() for marker in sensitive_markers):
+                safe_segments.append(
+                    f"{key}=[redacted]" if key.lower() in path_labels else "[redacted]"
+                )
+                hidden = True
+                continue
+        if lower in path_labels:
+            safe_segments.append(segment)
+            hide_next = True
+            hidden = True
+            continue
+        if any(marker in lower for marker in sensitive_markers):
+            safe_segments.append("[redacted]")
+            hidden = True
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_-]{32,}", decoded):
+            safe_segments.append("[redacted]")
+            hidden = True
+            continue
+        safe_segments.append(segment)
+
+    if hide_next:
+        safe_segments.append("[redacted]")
+        hidden = True
+    return "/".join(safe_segments), hidden
+
+
 def redact_profile_endpoint(value: Any) -> tuple[Any, bool]:
     """Return a display-safe endpoint and whether URL data was hidden."""
     if value is None or value == "":
@@ -202,11 +285,16 @@ def redact_profile_endpoint(value: Any) -> tuple[Any, bool]:
             hostname = f"[{hostname}]"
         if parsed.port is not None:
             hostname = f"{hostname}:{parsed.port}"
+        safe_path, path_hidden = _redact_endpoint_path(parsed.path)
         safe_value = urlunsplit(
-            (parsed.scheme, hostname, parsed.path, "", "")
+            (parsed.scheme, hostname, safe_path, "", "")
         )
         hidden = bool(
-            parsed.username or parsed.password or parsed.query or parsed.fragment
+            parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or path_hidden
         )
         return safe_value, hidden
     except ValueError:
@@ -216,7 +304,18 @@ def redact_profile_endpoint(value: Any) -> tuple[Any, bool]:
         safe_value = re.sub(r"[?#].*$", "", safe_value)
         if "@" in safe_value:
             safe_value = safe_value.rsplit("@", 1)[-1]
-        return safe_value or "[configured endpoint]", safe_value != value
+        try:
+            fallback = urlsplit(safe_value)
+            if fallback.scheme and fallback.netloc:
+                safe_path, path_hidden = _redact_endpoint_path(fallback.path)
+                safe_value = urlunsplit(
+                    (fallback.scheme, fallback.netloc, safe_path, "", "")
+                )
+            else:
+                safe_value, path_hidden = _redact_endpoint_path(safe_value)
+        except ValueError:
+            safe_value, path_hidden = _redact_endpoint_path(safe_value)
+        return safe_value or "[configured endpoint]", safe_value != value or path_hidden
 
 
 @dataclass

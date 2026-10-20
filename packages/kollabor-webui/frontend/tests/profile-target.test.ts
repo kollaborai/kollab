@@ -65,3 +65,14 @@ test("unchanged redacted endpoints are omitted from profile updates", () => {
     true,
   );
 });
+
+
+test("profile target preserves a server-redacted path marker", () => {
+  assert.equal(
+    profileTargetLabel({
+      provider: "anthropic",
+      base_url: "https://api.example.test/v1/credential/[redacted]",
+    }),
+    "Endpoint: api.example.test/v1/credential/[redacted]",
+  );
+});

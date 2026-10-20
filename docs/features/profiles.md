@@ -495,8 +495,9 @@ Each provider has unique configuration options. See [providers.md](../providers.
   break the profile list. The Web UI displays the skipped names and diagnostics.
   Restore the reported setting (for example an ACP `command`) before copying.
 - Profile cards and API responses show the provider and a sanitized endpoint
-  or ACP adapter label. URL credentials, query parameters, fragments, header
-  values, ACP command arguments, and local runtime paths are omitted; header and
+  or ACP adapter label. URL credentials, query parameters, fragments,
+  credential-like path segments, header values, ACP command arguments, and local
+  runtime paths are omitted; header and
   environment variable names may be shown without their values. State snapshots
   and CLI summaries use the same safe endpoint label. Profile copies still
   preserve all stored runtime settings server-side.
