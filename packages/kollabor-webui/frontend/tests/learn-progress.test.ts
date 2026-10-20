@@ -39,6 +39,27 @@ test("progress toggles, reads, and persists only known topics", () => {
   assert.deepEqual(toggleLearnProgress(next, "voice"), ["networks"]);
 });
 
+test("a failed read followed by a toggle performs zero writes and preserves storage", () => {
+  const writes: string[] = [];
+  const storage = {
+    getItem: () => {
+      throw new Error("storage denied");
+    },
+    setItem: (_key: string, value: string) => {
+      writes.push(value);
+    },
+  };
+
+  const failedRead = readLearnProgress(storage);
+  assert.deepEqual(failedRead.completed, []);
+  assert.equal(failedRead.canPersist, false);
+  assert.equal(failedRead.retryOperation, "read");
+
+  const blocked = applyToggleLearnProgress(failedRead, "agents", storage);
+  assert.equal(blocked, failedRead);
+  assert.deepEqual(writes, []);
+});
+
 test("a guarded state blocks writes and keeps the stored entry untouched", () => {
   const values = new Map<string, string>();
   const storage = {
