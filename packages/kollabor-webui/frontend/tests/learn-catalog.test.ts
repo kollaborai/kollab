@@ -38,6 +38,41 @@ test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
   assert.match(profileGuidance, /KOLLAB_<PROFILE>_API_KEY/);
 });
 
+test("voice lesson documents the Dream Model control without overstating voice impact", () => {
+  const voice = getLearnTopic("voice");
+  const guidance = [voice.summary, ...voice.howTo, voice.example, voice.note].join(" ");
+
+  // Where the control lives and what it accepts.
+  assert.match(guidance, /\/config > Hub > Dream Model/);
+  assert.match(guidance, /model ID/);
+  assert.match(guidance, /active provider/);
+
+  // Blank-value fallback chain, in order.
+  assert.match(guidance, /kollabor\.llm\.fast_model/);
+  assert.match(guidance, /active session model/);
+
+  // Credential reuse, not new auth.
+  assert.match(guidance, /endpoint and credentials/);
+
+  // Scope truth: dreaming only; voice replies are NOT affected.
+  assert.match(guidance, /dreaming only/);
+  assert.match(guidance, /voice-responder call path is not wired/);
+  assert.match(guidance, /does not change voice replies/);
+
+  // Guard against invented integration claims.
+  assert.doesNotMatch(guidance, /voice (?:replies|responses) (?:now )?use/);
+  assert.doesNotMatch(guidance, /fast model for (?:your )?voice/i);
+});
+
+test("voice lesson keeps its microphone lifecycle steps intact", () => {
+  const voice = getLearnTopic("voice");
+  const guidance = [voice.summary, ...voice.howTo].join(" ");
+  assert.match(guidance, /\/voice status/);
+  assert.match(guidance, /\/voice on/);
+  assert.match(guidance, /\/voice off/);
+  assert.match(voice.note, /never turns on the microphone/);
+});
+
 test("Learn URLs round-trip and invalid topic IDs give an actionable route state", () => {
   assert.equal(learnHref(), "/learn");
   assert.equal(learnHref("phone-access"), "/learn?topic=phone-access");
