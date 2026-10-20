@@ -521,7 +521,8 @@ def _api_secret_acp_profile_data(tmp_path: Path) -> dict:
         **_acp_profile_data(tmp_path),
         "base_url": (
             "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1/"
-            "credential/PATH_CREDENTIAL_SENTINEL?token=URL_QUERY_SENTINEL"
+            "credential/PATH_CREDENTIAL_SENTINEL/a17e9c4f26bd"
+            "?token=URL_QUERY_SENTINEL"
             "#URL_FRAGMENT_SENTINEL"
         ),
         "api_key": "PROFILE_API_KEY_SENTINEL",
@@ -555,7 +556,10 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
     source = LLMProfile.from_dict(
         "redaction-acp", _api_secret_acp_profile_data(tmp_path)
     )
-    assert source.get_display_endpoint() == "https://api.example.test/v1/credential/[redacted]"
+    assert (
+        source.get_display_endpoint()
+        == "https://api.example.test/v1/credential/[redacted]/[redacted]"
+    )
     assert manager.add_profile(source)
     summary = manager.get_profile_summary("redaction-acp")
     assert "URL_USER_SENTINEL" not in summary
@@ -614,7 +618,10 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
         item for item in listed["profiles"] if item["name"] == "redaction-acp"
     )
     for public_profile in (listed_profile, fetched, updated, copied):
-        assert public_profile["base_url"] == "https://api.example.test/v1/credential/[redacted]"
+        assert (
+            public_profile["base_url"]
+            == "https://api.example.test/v1/credential/[redacted]/[redacted]"
+        )
         assert public_profile["base_url_has_hidden_data"] is True
         assert public_profile["extra_header_names"] == ["Authorization", "x-private"]
         assert public_profile["acp_adapter"] == "claude-agent-acp"
@@ -630,7 +637,10 @@ def test_profile_api_redacts_credentials_from_list_get_create_update_and_copy(
         ):
             assert private_field not in public_profile
 
-    assert created["base_url"] == "https://api.example.test/v1/credential/[redacted]"
+    assert (
+        created["base_url"]
+        == "https://api.example.test/v1/credential/[redacted]/[redacted]"
+    )
     assert created["base_url_has_hidden_data"] is True
     assert created["extra_header_names"] == ["Authorization", "x-private"]
     updated_source = manager.get_profile("redaction-acp")
@@ -827,7 +837,8 @@ def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
             "model": "claude-test",
             "base_url": (
                 "https://URL_USER_SENTINEL:URL_PASSWORD_SENTINEL@api.example.test/v1/"
-                "credential/PATH_CREDENTIAL_SENTINEL?token=URL_QUERY_SENTINEL"
+                "credential/PATH_CREDENTIAL_SENTINEL/a17e9c4f26bd"
+                "?token=URL_QUERY_SENTINEL"
                 "#URL_FRAGMENT_SENTINEL"
             ),
         },
@@ -837,7 +848,10 @@ def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
     snapshot = state_service._profile_to_snapshot(profile, is_active=True)
     response = snapshot.to_dict()
 
-    assert response["endpoint"] == "https://api.example.test/v1/credential/[redacted]"
+    assert (
+        response["endpoint"]
+        == "https://api.example.test/v1/credential/[redacted]/[redacted]"
+    )
     serialized = json.dumps(response)
     for secret in (
         "URL_USER_SENTINEL",
@@ -845,6 +859,7 @@ def test_state_profile_snapshot_redacts_endpoint_credentials(tmp_path):
         "URL_QUERY_SENTINEL",
         "URL_FRAGMENT_SENTINEL",
         "PATH_CREDENTIAL_SENTINEL",
+        "a17e9c4f26bd",
     ):
         assert secret not in serialized
 

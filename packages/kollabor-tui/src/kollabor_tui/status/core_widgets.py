@@ -344,12 +344,25 @@ def render_endpoint(width: int, ctx: Optional[WidgetContext]) -> str:
             profile = ctx.profile_manager.get_active_profile()
             if profile:
                 display_endpoint = getattr(profile, "get_display_endpoint", None)
-                api_url = (
-                    display_endpoint()
-                    if callable(display_endpoint)
-                    else profile.get_endpoint() or ""
-                )
+                if callable(display_endpoint):
+                    try:
+                        api_url = display_endpoint()
+                    except Exception as e:
+                        logger.debug(
+                            "get_display_endpoint failed (%s)", type(e).__name__
+                        )
+                if not isinstance(api_url, str) or not api_url:
+                    # Display accessor missing, raising, or non-string: fall
+                    # back to the raw endpoint. Only the parsed hostname is
+                    # ever displayed, so credentials/paths/query stay hidden.
+                    api_url = profile.get_endpoint() or ""
                 provider = getattr(profile, "provider", "") or ""
+
+        if api_url and not isinstance(api_url, str):
+            logger.warning(
+                "Ignoring non-string endpoint state (%s)", type(api_url).__name__
+            )
+            api_url = ""
 
         if api_url:
             try:
