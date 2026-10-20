@@ -1,7 +1,7 @@
 ---
 title: "Kollab Environment Variables"
 created: 2026-04-21
-modified: 2026-04-21
+modified: 2026-10-20
 status: active
 ---
 # Kollab Environment Variables
@@ -215,6 +215,24 @@ Check `docs/providers/` for each provider's full env var list.
 ## Security-sensitive
 
 Read these carefully. Setting them wrong weakens your security posture.
+
+### KOLLAB_PHONE_ACCESS_APPLY_COMMAND
+
+Trusted host-admin executable and fixed arguments used after a phone peer is
+added or revoked. The engine invokes it without a shell, appends the generated
+`peers.conf` path as its final argument, and also sets
+`KOLLAB_PHONE_ACCESS_PEERS_FILE`. The helper must reconcile only the managed
+phone peers, disconnect removed peers, preserve other server peers, and return
+zero only after the running WireGuard server has accepted the complete peer set.
+
+This variable is deliberately not editable through the WebUI/API. Only configure
+it locally for a reviewed, operator-owned helper. If unset or invalid, adding and
+revoking peers is disabled. A failed apply returns an error and restores the
+previous local peer file; inspect the server if a helper failed after a partial
+remote change.
+
+Default: unset (phone peer changes disabled)
+
 
 ### KOLLAB_ALLOW_PLAINTEXT_KEYS
 

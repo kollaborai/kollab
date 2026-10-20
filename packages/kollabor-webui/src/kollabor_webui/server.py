@@ -171,7 +171,13 @@ def create_app(
         upstream = engine.build_request(
             request.method,
             f"/{path}{query}",
-            headers=[(k, v) for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP],
+            headers=[
+                (k, v)
+                for k, v in request.headers.items()
+                if k.lower() not in _HOP_BY_HOP and k.lower() != "x-kollab-client-ip"
+            ]
+            # The engine sees this server as its client; it needs the real one.
+            + [("x-kollab-client-ip", request.client.host if request.client else "")],
             content=await request.body(),
         )
         try:

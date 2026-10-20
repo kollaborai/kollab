@@ -1,3 +1,25 @@
+export type PhonePeer = {
+  id: string;
+  name: string;
+  address: string;
+  public_key: string;
+  created: number;
+};
+export type PhoneSettings = {
+  endpoint: string;
+  server_public_key: string;
+  subnet: string;
+  allowed_ips: string;
+  dns: string;
+  portal_url: string;
+};
+export type PhoneState = {
+  settings: PhoneSettings;
+  peers: PhonePeer[];
+  apply_configured: boolean;
+  can_create: boolean;
+};
+
 export type Session = {
   harness?: string;
   provider?: string;
@@ -873,6 +895,34 @@ export class EngineApi {
       order_revision?: number;
       order_warning?: string | null;
     }>("/sessions");
+  }
+
+  phoneState() {
+    return this.json<PhoneState>("/phone", { cache: "no-store" });
+  }
+
+  savePhoneSettings(settings: Partial<PhoneSettings>) {
+    return this.json<PhoneState>("/phone/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+      cache: "no-store",
+    });
+  }
+
+  /** The QR in the answer is the only delivery of the phone's private key. */
+  addPhone(name: string) {
+    return this.json<{ peer: PhonePeer; qr_svg: string; applied: boolean }>("/phone/peers", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+      cache: "no-store",
+    });
+  }
+
+  revokePhone(id: string) {
+    return this.json<{ peers: PhonePeer[]; applied: boolean }>(
+      `/phone/peers/${encodeURIComponent(id)}`,
+      { method: "DELETE", cache: "no-store" },
+    );
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
