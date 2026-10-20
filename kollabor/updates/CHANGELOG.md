@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section overrides, and preview the assembled prompt.
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
+- Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
 
 ### Changed
 - ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and
@@ -40,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Profile API responses, state snapshots, and CLI summaries omit URL userinfo/query/fragment, credential-like path segments, header values, ACP command arguments, and local runtime paths; unchanged redacted endpoint edits preserve server-side configuration.
 - Updating a model-less ACP profile to a native provider now requires a native model; invalid combinations return an actionable validation error without mutating the profile.
 - Web: a long profile name or model no longer widens the Profiles dialog past a phone screen and hides its buttons.
+- Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
 
 ## [0.17.0] - 2026-10-19
 

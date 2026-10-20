@@ -66,6 +66,18 @@ if Node/npm is unavailable.
   computer's trust allows: under `open` (the default) every computer of your
   network, under `agents` only the agents it lets this one message, under
   `manual` none.
+
+  Local live and offline rows group by workspace folder. Network agents stay
+  under their network and device, then group by workspace. Move Up and Move Down
+  in an agent row's menu set its order within that workspace, including separate
+  sessions of the same agent. The engine stores
+  this order in `~/.kollab/hub/sidebar-order.json`, shared across browser
+  clients and durable across page, web UI, and engine restarts; it is not
+  browser-local storage. Revision checks reject stale-window writes rather
+  than overwrite newer moves. If the stored JSON is unreadable, the engine
+  preserves it and shows a recovery warning; a missing first-run file is normal.
+  The sidebar's Learn links open the Agents and Workspaces lessons for plain-language
+  guidance about agent roles, project folders, and how the sidebar order is saved.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list

@@ -54,6 +54,7 @@ import {
 } from "./runtime";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
+import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
 
@@ -312,6 +313,7 @@ export default function App() {
   const [network, setNetwork] = useState<AgentNetwork>({ device: "", remote: [] });
   const [offline, setOffline] = useState<OfflineAgent[]>([]);
   const hiddenAgents = useHiddenAgents(api);
+  const sidebarOrder = useSidebarOrder(api);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [selectedIdentity, setSelectedIdentity] = useState("");
@@ -407,14 +409,21 @@ export default function App() {
   useEffect(() => abortRecovery, [abortRecovery]);
 
   const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
+  const { stamp: stampOrder, sync: syncOrder } = sidebarOrder;
   const loadSessions = useCallback(async () => {
     const hiddenStamp = stampHidden();
+    const orderStamp = stampOrder();
     const result = await api.listSessions();
     const next = result.sessions || [];
     setSessions(next);
     setNetwork(result.network ?? { device: "", remote: [] });
     setOffline(result.offline ?? []);
     syncHidden(hiddenStamp, result.hidden);
+    syncOrder(orderStamp, {
+      order: result.order ?? [],
+      revision: result.order_revision ?? 0,
+      warning: result.order_warning ?? null,
+    });
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api
@@ -422,7 +431,7 @@ export default function App() {
       .then((p) => setProfiles(p.profiles || []))
       .catch(() => {});
     return next;
-  }, [stampHidden, syncHidden]);
+  }, [stampHidden, syncHidden, stampOrder, syncOrder]);
 
   const applyLaunchPool = useCallback((next: AgentPoolEntry[]) => {
     setLaunchPool((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
@@ -973,6 +982,7 @@ export default function App() {
           network={network}
           offline={offline}
           hiddenAgents={hiddenAgents}
+          sidebarOrder={sidebarOrder}
           bundles={bundles}
           selectedProfile={selectedProfile}
           selectedIdentity={selectedIdentity}

@@ -48,11 +48,13 @@ def test_engine_session_keeps_opaque_id_but_serializes_friendly_name():
         session_id=session_id,
         profile=SimpleNamespace(name="default", model="test-model"),
     )
+    session.conversation_id = "conversation-stable"
 
     first = session.to_dict()
     second = session.to_dict()
 
     assert first["session_id"] == session_id
+    assert first["conversation_id"] == "conversation-stable"
     assert first["name"] != session_id
     assert first["name"] == second["name"]
 

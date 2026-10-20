@@ -14,6 +14,8 @@ import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
+import type { SidebarOrder } from "@/hooks/use-sidebar-order";
+import { buildLocalOrderRows, groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
@@ -73,6 +75,9 @@ function OpenError({ text }: { text: string }) {
   return <span className="text-destructive text-[0.6875rem] leading-snug break-words whitespace-normal">{text}</span>;
 }
 
+type Move = { up?: () => void; down?: () => void };
+type LocalRow = { key: string; folder: string; session?: Session; offline?: OfflineAgent };
+
 const FOLDED_KEY = "kollab.sidebar.folded";
 
 /** A sidebar group its label folds away; the count stays in view while it is folded. */
@@ -123,6 +128,7 @@ export function AppSidebar({
   network,
   offline,
   hiddenAgents,
+  sidebarOrder,
   bundles,
   selectedProfile,
   selectedIdentity,
@@ -167,6 +173,8 @@ export function AppSidebar({
   offline: OfflineAgent[];
   /** The rows hidden for every window of this engine, and how to change that. */
   hiddenAgents: HiddenAgents;
+  /** The saved order of this computer's agents, kept by the engine. */
+  sidebarOrder: SidebarOrder;
   bundles: AgentBundleEntry[];
   selectedProfile: string;
   selectedIdentity: string;
@@ -234,13 +242,28 @@ export function AppSidebar({
     ...net,
     devices: net.devices.map((dev) => ({
       ...dev,
-      workspaces: dev.workspaces.map((ws) => ({
-        ...ws,
-        agents: ws.agents.filter((agent) => !hiddenKeys.has(sidebarAgentKey({
+      workspaces: dev.workspaces.map((ws) => {
+        const agents = ws.agents.filter((agent) => !hiddenKeys.has(sidebarAgentKey({
           name: agent.name, device: agent.device || dev.device,
           workspace: agent.workspace || ws.label, network: agent.network || net.id,
-        }))),
-      })).filter((ws) => ws.agents.length),
+        })));
+        const folder = JSON.stringify(["remote", net.id, dev.device, ws.label || ""]);
+        const rows = agents.map((agent) => ({
+          key: orderKey(
+            agent.workspace || ws.label,
+            agent.handle || `${agent.name}@${agent.device || dev.device}`,
+            ["remote", net.id, dev.device],
+          ),
+          folder,
+          agent,
+        }));
+        const orderRows = groupByFolder(rows, sidebarOrder.order);
+        return {
+          ...ws,
+          agents: orderRows.flatMap((group) => group.rows.map((row) => row.agent)),
+          orderRows,
+        };
+      }).filter((ws) => ws.agents.length),
     })).filter((dev) => dev.workspaces.length),
   }));
   // Groups the viewer folded away, remembered in this browser only.
@@ -274,6 +297,17 @@ export function AppSidebar({
   const remoteName = (name: string) => agentName(name, poolByName.get(name)?.display_name);
   const visibleSessions = localSessions.filter((session) => !hiddenKeys.has(sessionKey(session)));
   const visibleOffline = offline.filter((agent) => !hiddenKeys.has(offlineKey(agent)));
+  // This computer's rows grouped by folder, in the order the engine saved.
+  // Duplicate live sessions have distinct session/conversation keys; persona
+  // anchors keep order stable when a session becomes offline or its id rotates.
+  const folderGroups = useMemo(
+    () => groupByFolder<LocalRow>(buildLocalOrderRows(visibleSessions, visibleOffline, sidebarOrder.order), sidebarOrder.order),
+    [visibleSessions, visibleOffline, sidebarOrder.order],
+  );
+  const moveRow = (key: string, by: -1 | 1) => {
+    const next = moveWithinFolder(folderGroups, key, by, sidebarOrder.order);
+    if (next) void sidebarOrder.save(next);
+  };
   const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
   const identityLabel = pickedAgent ? choiceLabel(pickedAgent) : "Next Free Agent";
   const modelLabel =
@@ -289,6 +323,142 @@ export function AppSidebar({
       setOptionsOpen(true);
     }
   };
+
+  const renderSession = (session: Session, move: Move) => {
+                  const gem = session.identity || session.agent || "";
+                  // Hub presence when this very agent is live; otherwise the engine's
+                  // own word on whether a daemon backs the session. Gem names repeat
+                  // across folders (a koordinator per project), so presence is read
+                  // by the row's instance and the pool only dresses the gem.
+                  const agent = liveAgentOf(session, liveAgents);
+                  const look = poolByName.get(session.identity || "");
+                  const hubLive = Boolean(agent);
+                  const live = hubLive || session.active !== false;
+                  const task = agent?.state === "working" ? agent.current_task.trim() : "";
+                  const folder = sessionFolder(session);
+                  const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
+                  const harness = cliHarness(session);
+                  const note = opening?.id === session.session_id ? opening : null;
+                  const openProperties = (tab?: "chat") => {
+                    setOpenMobile(false);
+                    onProperties(session.session_id, tab);
+                  };
+                  return (
+                  <AgentSidebarRow
+                    key={session.session_id}
+                    name={heading}
+                    onHide={() => hide({ key: sessionKey(session), label: heading, detail: session.workspace || workspacePath, instance: instanceOf(session) })}
+                    onProperties={session.identity ? () => openProperties("chat") : undefined}
+                    onDelete={session.external ? undefined : () => setPendingDelete(session)}
+                    onMoveUp={move.up}
+                    onMoveDown={move.down}
+                    busy={busy}
+                  >
+                        <SidebarMenuButton
+                          isActive={session.session_id === activeId}
+                          onClick={async () => {
+                            // On a phone the menu stays open until the chat does, so
+                            // the row's Opening… and any reason it failed stay in view.
+                            if (await onSelectSession(session.session_id)) setOpenMobile(false);
+                          }}
+                          title={[heading, formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
+                          // overflow-visible: the gem canvas overhangs its box for hats and props.
+                          className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                        >
+                          <span
+                            className="contents"
+                            onDoubleClick={session.identity ? () => openProperties() : undefined}
+                          >
+                            <Avatar
+                              gem={gem}
+                              avatar={look?.avatar}
+                              displayName={look?.display_name}
+                              folder={session.device ? undefined : session.workspace}
+                              where={session.device || session.workspace}
+                              caste={look?.caste}
+                              color={look?.color}
+                              state={agent ? agent.state : live ? "idle" : "offline"}
+                              live={live}
+                              activity={session.session_id === activeId ? activeActivity : presenceActivity(agent?.current_tool)}
+                              season="auto"
+                              follow
+                              size={56}
+                            />
+                          </span>
+                          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                            <span className="truncate text-[0.8125rem] leading-tight font-semibold">
+                              {heading}
+                            </span>
+                            <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
+                              {note && !note.error ? (
+                                "Opening…"
+                              ) : harness ? (
+                                <CliBadge harness={harness} />
+                              ) : task ? (
+                                task
+                              ) : (
+                                sessionSubtitle(session, Boolean(agent?.solo))
+                              )}
+                            </span>
+                            {task && harness ? (
+                              <span className="text-muted-foreground truncate text-[0.6875rem]" title={task}>{task}</span>
+                            ) : null}
+                            {session.acp_waiting && (
+                              <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
+                            )}
+                            {harness && (agent?.solo || folder) ? (
+                              <span className="text-muted-foreground truncate text-[0.6875rem]">
+                                {[agent?.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
+                              </span>
+                            ) : null}
+                            {note?.error ? <OpenError text={note.error} /> : null}
+                          </div>
+                        </SidebarMenuButton>
+                  </AgentSidebarRow>
+                  );
+                };
+  const renderOffline = (agent: OfflineAgent, move: Move) => (
+                  <AgentSidebarRow
+                    key={`offline:${agent.workspace}:${agent.identity}`}
+                    name={offlineName(agent)}
+                    onMoveUp={move.up}
+                    onMoveDown={move.down}
+                    onHide={() => hide({ key: offlineKey(agent), label: offlineName(agent), detail: agent.workspace })}
+                  >
+                    <SidebarMenuButton
+                      disabled={busy}
+                      onClick={async () => {
+                        if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
+                      }}
+                      title={`Start ${offlineName(agent)} in ${agent.workspace}`}
+                      className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                      data-testid={`offline-${agent.identity}`}
+                    >
+                      <Avatar
+                        gem={agent.identity}
+                        avatar={offlineLook(agent)?.avatar}
+                        displayName={offlineLook(agent)?.display_name}
+                        folder={agent.workspace}
+                        where={agent.workspace}
+                        caste={offlineLook(agent)?.caste}
+                        color={offlineLook(agent)?.color}
+                        state="offline"
+                        live={false}
+                        season="auto"
+                        follow
+                        size={56}
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
+                          {offlineName(agent)}
+                        </span>
+                        <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
+                          Offline · {lastRanLabel(agent.last_ran)}
+                        </span>
+                      </div>
+                    </SidebarMenuButton>
+                  </AgentSidebarRow>
+                );
 
   return (
     <Sidebar variant="floating" {...props}>
@@ -455,142 +625,42 @@ export function AppSidebar({
               ) : null}
             </>
           }
-          count={visibleSessions.length}
+          count={visibleSessions.length + visibleOffline.length}
           open={!folded.local}
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
+            <div className="flex flex-wrap gap-x-4 px-2 pb-1 text-xs">
+              <a
+                href="/learn?topic=agents"
+                onClick={() => setOpenMobile(false)}
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+              >
+                Learn about agents
+              </a>
+              <a
+                href="/learn?topic=workspaces"
+                onClick={() => setOpenMobile(false)}
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+              >
+                Learn about workspaces
+              </a>
+            </div>
             <SidebarMenu>
-              {visibleSessions.map((session) => {
-                const gem = session.identity || session.agent || "";
-                // Hub presence when this very agent is live; otherwise the engine's
-                // own word on whether a daemon backs the session. Gem names repeat
-                // across folders (a koordinator per project), so presence is read
-                // by the row's instance and the pool only dresses the gem.
-                const agent = liveAgentOf(session, liveAgents);
-                const look = poolByName.get(session.identity || "");
-                const hubLive = Boolean(agent);
-                const live = hubLive || session.active !== false;
-                const task = agent?.state === "working" ? agent.current_task.trim() : "";
-                const folder = sessionFolder(session);
-                const heading = sessionHeading(session, poolByName.get(session.identity || "")?.display_name);
-                const harness = cliHarness(session);
-                const note = opening?.id === session.session_id ? opening : null;
-                const openProperties = (tab?: "chat") => {
-                  setOpenMobile(false);
-                  onProperties(session.session_id, tab);
-                };
-                return (
-                <AgentSidebarRow
-                  key={session.session_id}
-                  name={heading}
-                  onHide={() => hide({ key: sessionKey(session), label: heading, detail: session.workspace || workspacePath, instance: instanceOf(session) })}
-                  onProperties={session.identity ? () => openProperties("chat") : undefined}
-                  onDelete={session.external ? undefined : () => setPendingDelete(session)}
-                  busy={busy}
-                >
-                      <SidebarMenuButton
-                        isActive={session.session_id === activeId}
-                        onClick={async () => {
-                          // On a phone the menu stays open until the chat does, so
-                          // the row's Opening… and any reason it failed stay in view.
-                          if (await onSelectSession(session.session_id)) setOpenMobile(false);
-                        }}
-                        title={[heading, formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
-                        // overflow-visible: the gem canvas overhangs its box for hats and props.
-                        className="h-auto gap-3 overflow-visible py-2 pl-2.5"
-                      >
-                        <span
-                          className="contents"
-                          onDoubleClick={session.identity ? () => openProperties() : undefined}
-                        >
-                          <Avatar
-                            gem={gem}
-                            avatar={look?.avatar}
-                            displayName={look?.display_name}
-                            folder={session.device ? undefined : session.workspace}
-                            where={session.device || session.workspace}
-                            caste={look?.caste}
-                            color={look?.color}
-                            state={agent ? agent.state : live ? "idle" : "offline"}
-                            live={live}
-                            activity={session.session_id === activeId ? activeActivity : presenceActivity(agent?.current_tool)}
-                            season="auto"
-                            follow
-                            size={56}
-                          />
-                        </span>
-                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="truncate text-[0.8125rem] leading-tight font-semibold">
-                            {heading}
-                          </span>
-                          <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
-                            {note && !note.error ? (
-                              "Opening…"
-                            ) : harness ? (
-                              <CliBadge harness={harness} />
-                            ) : task ? (
-                              task
-                            ) : (
-                              sessionSubtitle(session, Boolean(agent?.solo))
-                            )}
-                          </span>
-                          {task && harness ? (
-                            <span className="text-muted-foreground truncate text-[0.6875rem]" title={task}>{task}</span>
-                          ) : null}
-                          {session.acp_waiting && (
-                            <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
-                          )}
-                          {harness && (agent?.solo || folder) ? (
-                            <span className="text-muted-foreground truncate text-[0.6875rem]">
-                              {[agent?.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
-                            </span>
-                          ) : null}
-                          {note?.error ? <OpenError text={note.error} /> : null}
-                        </div>
-                      </SidebarMenuButton>
-                </AgentSidebarRow>
-                );
-              })}
-              {visibleOffline.map((agent) => (
-                <AgentSidebarRow
-                  key={`offline:${agent.workspace}:${agent.identity}`}
-                  name={offlineName(agent)}
-                  onHide={() => hide({ key: offlineKey(agent), label: offlineName(agent), detail: agent.workspace })}
-                >
-                  <SidebarMenuButton
-                    disabled={busy}
-                    onClick={async () => {
-                      if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
-                    }}
-                    title={`Start ${offlineName(agent)} in ${agent.workspace}`}
-                    className="h-auto gap-3 overflow-visible py-2 pl-2.5"
-                    data-testid={`offline-${agent.identity}`}
-                  >
-                    <Avatar
-                      gem={agent.identity}
-                      avatar={offlineLook(agent)?.avatar}
-                      displayName={offlineLook(agent)?.display_name}
-                      folder={agent.workspace}
-                      where={agent.workspace}
-                      caste={offlineLook(agent)?.caste}
-                      color={offlineLook(agent)?.color}
-                      state="offline"
-                      live={false}
-                      season="auto"
-                      follow
-                      size={56}
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
-                        {offlineName(agent)}
-                      </span>
-                      <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
-                        Offline · {lastRanLabel(agent.last_ran)}
-                      </span>
-                    </div>
-                  </SidebarMenuButton>
-                </AgentSidebarRow>
+              {folderGroups.map((group) => (
+                <Fragment key={group.folder || "-"}>
+                  <div className="text-muted-foreground flex h-6 items-center gap-2 px-2 text-xs" title={group.folder}>
+                    <span className="min-w-0 truncate">{workspaceName(group.folder)}</span>
+                    <span className="ml-auto shrink-0 text-[0.625rem] tabular-nums">{group.rows.length}</span>
+                  </div>
+                  {group.rows.map((row, at) => {
+                    const move: Move = {
+                      up: at > 0 ? () => moveRow(row.key, -1) : undefined,
+                      down: at < group.rows.length - 1 ? () => moveRow(row.key, 1) : undefined,
+                    };
+                    return row.session ? renderSession(row.session, move) : renderOffline(row.offline!, move);
+                  })}
+                </Fragment>
               ))}
               {!visibleSessions.length && !visibleOffline.length ? (
                 <p className="text-muted-foreground px-2 py-1 text-xs">
@@ -631,21 +701,29 @@ export function AppSidebar({
                         <p className="text-muted-foreground truncate px-2 text-[0.6875rem]">{ws.label}</p>
                       ) : null}
                       <SidebarMenu>
-                        {ws.agents.map((agent) => {
+                        {ws.orderRows.flatMap((group) => group.rows).map((row, at) => {
+                          const agent = row.agent;
                           // Opens through the network once that computer allows this one.
                           const id = agent.handle || "";
                           const note = id && opening?.id === id ? opening : null;
                           // Not up, or unknown: no agent here is on the network to say (a click starts one).
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
+
+                          const move = (by: -1 | 1) => {
+                            const next = moveWithinFolder(ws.orderRows, row.key, by, sidebarOrder.order);
+                            if (next) void sidebarOrder.save(next);
+                          };
                           return (
                           <AgentSidebarRow
-                            key={id || `${agent.name}@${agent.device}`}
+                            key={row.key}
                             name={`${remoteName(agent.name)} on ${agent.device}`}
                             onHide={() => hide({
                               key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
                               label: remoteName(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
                             })}
+                            onMoveUp={at > 0 ? () => move(-1) : undefined}
+                            onMoveDown={at < ws.agents.length - 1 ? () => move(1) : undefined}
                           >
                             <SidebarMenuButton
                               disabled={!id}
@@ -748,6 +826,17 @@ export function AppSidebar({
       <SidebarFooter className="p-2">
         {hiddenError ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
+        ) : null}
+
+        {sidebarOrder.warning ? (
+          <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
+            Sidebar order needs recovery: {sidebarOrder.warning}
+          </p>
+        ) : null}
+        {sidebarOrder.error ? (
+          <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
+            Could not save sidebar order: {sidebarOrder.error}
+          </p>
         ) : null}
         {/* One row of icons; each name shows on hover and to screen readers. */}
         <div className="flex items-center justify-around">

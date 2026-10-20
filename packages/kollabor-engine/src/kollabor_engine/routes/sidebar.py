@@ -1,11 +1,11 @@
-"""The sidebar rows the user hid, for every client of this engine (hidden_agents.py)."""
+"""Engine-owned hidden rows and ordering for the web UI sidebar."""
 
 import logging
 from typing import Any, Dict, Set
 
 from fastapi import APIRouter, Body, HTTPException  # type: ignore[import-not-found]
 
-from .. import hidden_agents
+from .. import hidden_agents, sidebar_order
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 
@@ -56,3 +56,35 @@ async def unhide_agent(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if isinstance(key, str) and key and body.get("all") is None:
         return _changed(lambda: hidden_agents.show(key))
     raise HTTPException(status_code=400, detail="send either a key or all: true")
+
+
+@router.get("/order")
+async def get_order() -> Dict[str, Any]:
+    """Return the engine-owned order, its revision, and any recovery warning."""
+    return sidebar_order.read_order_state().to_dict()
+
+
+@router.post("/order")
+async def set_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Save an order only when its expected revision is still current."""
+    keys = sidebar_order.parse_order(body.get("order"))
+    if keys is None:
+        raise HTTPException(status_code=400, detail="order must be a list of bounded text keys")
+    revision = body.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise HTTPException(status_code=400, detail="revision must be a non-negative integer")
+    try:
+        return sidebar_order.write_order(keys, revision).to_dict()
+    except sidebar_order.SidebarOrderConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Sidebar order changed in another client; the current order was refreshed. Retry your move.",
+        ) from exc
+    except sidebar_order.SidebarOrderUnreadable as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Sidebar order storage is unreadable and was preserved; check the recovery warning before retrying.",
+        ) from exc
+    except OSError as exc:
+        logger.warning("Could not save sidebar order: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Could not save sidebar order: {exc}") from exc
