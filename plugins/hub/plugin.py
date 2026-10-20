@@ -560,6 +560,8 @@ class HubPlugin(BasePlugin):
         # Core components
         self._identity: Optional[AgentRuntime] = None
         self._presence: Optional[PresenceManager] = None
+        # tool_id -> the running tool presence shows (see _follow_tool).
+        self._running_tools: Dict[str, Dict[str, str]] = {}
         self._election: Optional[CoordinatorElection] = None
         self._socket_server: Optional[AgentSocketServer] = None
         self._endpoint_uri: str = ""  # advertised off-box A2A URI (if enabled)
@@ -1138,7 +1140,7 @@ class HubPlugin(BasePlugin):
         # Create display tap for live attach streaming
         from kollabor_tui.display_tap import DisplayTap
 
-        self._display_tap = DisplayTap(history_size=200)
+        self._display_tap = DisplayTap(history_size=200, on_event=self._follow_tool)
         if self.event_bus:
             self.event_bus.register_service("display_tap", self._display_tap)
 
@@ -9158,6 +9160,9 @@ class HubPlugin(BasePlugin):
                 return
 
             identity.state = AgentState.IDLE.value
+            # A tool whose result never came (cancelled) ends with the turn.
+            self._running_tools.clear()
+            identity.current_tool = {}
             self._last_activity_at = time.time()
             if self._presence:
                 self._presence.publish()
@@ -9170,6 +9175,41 @@ class HubPlugin(BasePlugin):
         """A response may still need tools or continuation; retain its work owner."""
         self._publish_idle_if_settled()
         return context
+
+    def _follow_tool(self, event: Dict[str, Any]) -> None:
+        """Keep the running tool in presence, from the display tap's events.
+
+        A sidebar gem whose chat is not open reads it to act the tool out, the
+        way the open chat's gem reads these same events. Native and harness
+        tools both publish them. Only the bare name and type go in: a command
+        line or path stays out of the presence file. The newest running tool
+        wins, as in the open chat.
+        """
+        kind = event.get("type")
+        tool_id = str(event.get("tool_id") or "")
+        if kind == "tool_start":
+            name = str(event.get("tool_name") or "")
+            tool_type = str(event.get("tool_type") or "")
+            # "terminal: ls" -> "terminal"; a harness call's title is display
+            # text ("Read /path"), so its ACP kind stands in for the name.
+            if event.get("acp_passthrough"):
+                name = tool_type
+            elif bare := re.match(r"([\w-]+):(?:\s|$)", name):
+                name = bare.group(1)
+            self._running_tools.pop(tool_id, None)
+            self._running_tools[tool_id] = {"name": name[:64], "type": tool_type[:64]}
+        elif kind == "tool_result":
+            self._running_tools.pop(tool_id, None)
+        elif kind in ("turn_complete", "error"):
+            self._running_tools.clear()
+        else:
+            return
+        tool = next(reversed(self._running_tools.values()), {})
+        identity = self._identity
+        if identity is not None and identity.current_tool != tool:
+            identity.current_tool = tool
+            if self._presence:
+                self._presence.publish()
 
     async def _broadcast_user_input(self, data, event=None):
         """Broadcast user input to all peers so they see what the human said."""

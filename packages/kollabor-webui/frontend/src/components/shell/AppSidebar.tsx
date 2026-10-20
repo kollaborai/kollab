@@ -4,6 +4,7 @@ import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAge
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
+import { presenceActivity } from "@/components/gems/activity";
 import type { Activity } from "@/components/gems/gem-face";
 import { agentStatus, bundleName, titleCase } from "@/components/panels/panel-model";
 import { groupNetworkTree } from "@/components/shell/agent-network";
@@ -172,7 +173,7 @@ export function AppSidebar({
   selectedBundle: string;
   workspacePath: string;
   activeId: string | null;
-  /** The open session's live action, read from its thread. */
+  /** The open session's live action, read from its thread; other rows act out their presence's tool. */
   activeActivity?: Activity | null;
   /** The row being opened, and why it could not be. */
   opening?: { id: string; error?: string } | null;
@@ -513,7 +514,7 @@ export function AppSidebar({
                             color={look?.color}
                             state={agent ? agent.state : live ? "idle" : "offline"}
                             live={live}
-                            activity={session.session_id === activeId ? activeActivity : null}
+                            activity={session.session_id === activeId ? activeActivity : presenceActivity(agent?.current_tool)}
                             season="auto"
                             follow
                             size={56}

@@ -224,6 +224,7 @@ Peer-to-peer agent mesh with persistent identity.
 
 **Key concepts:**
 - Agents auto-discover via presence files in `~/.kollab/hub/presence/`
+- Presence carries the running tool (`current_tool`: bare name and type, never its arguments), kept from the display tap's `tool_start`/`tool_result`/`turn_complete` (`HubPlugin._follow_tool`, the tap's `on_event`) and dropped at idle. The engine's `GET /agents` `live` rows pass it on, so every web UI sidebar gem acts out its agent's tool with no chat open; the open chat's gem reads its session's event stream instead
 - First agent becomes coordinator via `flock()` on `hub.lock`
 - Designations come from the folder's roster (`plugins.hub.roster`, default `gems`: lapis, peridot, ruby with color castes); a persona is a name, look, agent bundle, role and prompt, and `kollab --as [roster/]name` takes one from any roster. Teams are reporting chains of personas; the engine serves `GET /rosters`, `GET /teams`, `POST /teams/{name}/launch`
 - Open channel: all agents see all messages (like Slack)

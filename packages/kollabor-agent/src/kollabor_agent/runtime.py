@@ -219,6 +219,11 @@ class AgentRuntime:
     Short description shown in hub roster, feed, mobile app.
     Empty when idle."""
 
+    current_tool: Dict[str, str] = field(default_factory=dict)
+    """The tool running now, {"name", "type"}: its bare name ("terminal",
+    "file_read", an MCP tool's name) and type, never its arguments.
+    Empty between tools. The web UI's sidebar gems act it out."""
+
     started_at: float = field(default_factory=time.time)
     """Unix timestamp when this process started.
     Used for uptime display and session tracking."""
@@ -638,6 +643,7 @@ class AgentRuntime:
             "is_coordinator": self.is_coordinator,
             "solo": self.solo,
             "current_task": self.current_task,
+            "current_tool": self.current_tool,
             "capabilities": self.capabilities,
             # new fields (ignored by old readers)
             "org_name": self.org_name,
@@ -678,6 +684,7 @@ class AgentRuntime:
             "is_coordinator",
             "solo",
             "current_task",
+            "current_tool",
             "capabilities",
             "org_name",
             "org_role",

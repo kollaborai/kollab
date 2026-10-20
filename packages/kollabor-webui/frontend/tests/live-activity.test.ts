@@ -5,6 +5,7 @@ import {
   liveActivity,
   nextLiveActivity,
   NO_LIVE_ACTIVITY,
+  presenceActivity,
   toolActivity,
 } from "../src/components/gems/activity.ts";
 
@@ -47,4 +48,19 @@ test("a harness call reads its ACP kind, not its title", () => {
     liveActivity(fold({ type: "tool_start", tool_id: "t1", tool_name: "Read README.md", tool_type: "read", acp_passthrough: true })),
     "reading",
   );
+});
+
+test("a row whose chat is not open acts out the tool its presence carries", () => {
+  assert.equal(presenceActivity({ name: "terminal", type: "terminal" }), "typing");
+  assert.equal(presenceActivity({ name: "file_read", type: "file_read" }), "reading");
+  assert.equal(presenceActivity({ name: "web-search", type: "web_search" }), "searching");
+  assert.equal(presenceActivity({ name: "hub_msg", type: "hub_msg" }), "messaging");
+  assert.equal(presenceActivity({ name: "task_create", type: "task_create" }), "tasking");
+  // A harness call's presence names its ACP kind.
+  assert.equal(presenceActivity({ name: "read", type: "read" }), "reading");
+  assert.equal(presenceActivity({ name: "execute", type: "execute" }), "typing");
+  // Between tools the gem falls back to presence state.
+  assert.equal(presenceActivity(null), null);
+  assert.equal(presenceActivity(undefined), null);
+  assert.equal(presenceActivity({ name: "", type: "" }), null);
 });

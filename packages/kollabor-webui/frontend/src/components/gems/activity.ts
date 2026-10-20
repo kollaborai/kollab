@@ -33,6 +33,14 @@ export function toolActivity(name: string, kind?: string): Activity {
   return TOOL_ACTIVITY[key] ?? (key.startsWith("task_") ? "tasking" : "typing");
 }
 
+/**
+ * What a sidebar gem whose chat is not open acts out: the tool its presence
+ * says it runs. Null between tools, so the gem falls back to presence state.
+ */
+export function presenceActivity(tool?: { name: string; type: string } | null): Activity | null {
+  return tool?.name ? toolActivity(tool.name, tool.type) : null;
+}
+
 /** The ACP kind on a harness card's result (`metadata.acp.kind`), if any. */
 function harnessKind(result: unknown): string | undefined {
   const acp = (result as { metadata?: { acp?: { kind?: unknown } } } | undefined)?.metadata?.acp;

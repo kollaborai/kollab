@@ -288,6 +288,8 @@ export type LiveAgent = {
   agent_id: string;
   state: string;
   current_task: string;
+  /** The tool it runs now (bare name and type, no arguments); null between tools. */
+  current_tool?: { name: string; type: string } | null;
   /** Live but off the hub mesh: peers do not see it. */
   solo: boolean;
   /** The folder it runs in. */

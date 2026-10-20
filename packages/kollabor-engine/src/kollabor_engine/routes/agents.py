@@ -106,12 +106,22 @@ def _pool_entry(
 
 
 def _live_row(agent: Dict[str, Any]) -> Dict[str, Any]:
-    """One running hub agent: a name can run in several folders at once, so only its ``agent_id`` tells two apart."""
+    """One running hub agent: a name can run in several folders at once, so only its ``agent_id`` tells two apart.
+
+    ``current_tool`` is the tool it runs now ({name, type}; None between
+    tools), so its sidebar gem acts the tool out with no chat open.
+    """
+    tool = agent.get("current_tool")
     return {
         "name": str(agent["identity"]),
         "agent_id": str(agent.get("agent_id") or ""),
         "state": str(agent.get("state") or ""),
         "current_task": str(agent.get("current_task") or ""),
+        "current_tool": (
+            {"name": str(tool.get("name") or ""), "type": str(tool.get("type") or "")}
+            if isinstance(tool, dict) and tool.get("name")
+            else None
+        ),
         "solo": bool(agent.get("solo")),
         "project": str(agent.get("project") or ""),
     }
