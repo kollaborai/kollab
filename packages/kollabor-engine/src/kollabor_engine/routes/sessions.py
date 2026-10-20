@@ -626,6 +626,7 @@ async def list_sessions():
     ]
     rows = sessions + discovered
     hidden_agents.stamp_instances(rows, found)
+    order_state = sidebar_order.read_order_state()
     return {
         "sessions": rows,
         "discovered": discovered,
@@ -633,7 +634,9 @@ async def list_sessions():
         "offline": _offline_agents(found, registry),
         # The rows the user hid, for every client of this engine (hidden_agents.py).
         "hidden": hidden_agents.visible({row["instance"] for row in rows}),
-        "order": sidebar_order.read_order(),
+        "order": order_state.order,
+        "order_revision": order_state.revision,
+        "order_warning": order_state.warning,
         "network": merge_view_and_memberships(
             _network_view(await _network_snapshot(registry))
         ),

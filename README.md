@@ -300,7 +300,12 @@ the engine it started) and starts both again, e.g. after an update. For separate
 development loops, see the [engine README](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-engine/README.md)
 and [web UI README](https://github.com/kollaborai/kollab/blob/main/packages/kollabor-webui/README.md).
 
-The sidebar lists every agent on this computer and on the other computers of your network. Claude Code and Codex agents open like any other, with their tool calls and file changes as tool and diff cards. New Session has a folder picker, and the layout fits a phone.
+The sidebar groups local agents by workspace; remote agents remain nested by
+network and computer, then workspace. Move Up and Move Down in an agent row's
+menu set its order within that workspace, and the engine shares it across clients
+and restarts. Claude Code and Codex agents open like any other, with their tool
+calls and file changes as tool and diff cards. New Session has a folder picker,
+and the layout fits a phone.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-roster-dark.webp" alt="The Kollab sidebar: four agents on one computer (Koordinator, Claude Code, Codex, Lapis) with harness labels." width="53%">

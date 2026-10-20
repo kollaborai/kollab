@@ -810,6 +810,11 @@ export function AppSidebar({
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
         ) : null}
 
+        {sidebarOrder.warning ? (
+          <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
+            Sidebar order needs recovery: {sidebarOrder.warning}
+          </p>
+        ) : null}
         {sidebarOrder.error ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
             Could not save sidebar order: {sidebarOrder.error}

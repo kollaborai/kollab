@@ -419,7 +419,11 @@ export default function App() {
     setNetwork(result.network ?? { device: "", remote: [] });
     setOffline(result.offline ?? []);
     syncHidden(hiddenStamp, result.hidden);
-    syncOrder(orderStamp, result.order);
+    syncOrder(orderStamp, {
+      order: result.order ?? [],
+      revision: result.order_revision ?? 0,
+      warning: result.order_warning ?? null,
+    });
     // keep the profile pickers (sidebar + new-session form + this dialog)
     // in sync after any CRUD operation
     api

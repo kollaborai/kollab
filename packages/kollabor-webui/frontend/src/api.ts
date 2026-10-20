@@ -863,7 +863,15 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork; hidden?: HiddenAgent[]; order?: string[] }>("/sessions");
+    return this.json<{
+      sessions: Session[];
+      offline?: OfflineAgent[];
+      network?: AgentNetwork;
+      hidden?: HiddenAgent[];
+      order?: string[];
+      order_revision?: number;
+      order_warning?: string | null;
+    }>("/sessions");
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
@@ -871,9 +879,17 @@ export class EngineApi {
     return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
   }
 
-  /** Save the order of the sidebar's agents for every client of this engine. */
-  saveSidebarOrder(order: string[]) {
-    return this.json<{ order: string[] }>("/sidebar/order", { method: "POST", body: JSON.stringify({ order }) });
+  /** Read the engine-owned sidebar order and any recovery warning. */
+  getSidebarOrder() {
+    return this.json<{ order: string[]; revision: number; warning: string | null }>("/sidebar/order");
+  }
+
+  /** Save an order only when the engine revision still matches this client. */
+  saveSidebarOrder(order: string[], revision: number) {
+    return this.json<{ order: string[]; revision: number; warning: string | null }>("/sidebar/order", {
+      method: "POST",
+      body: JSON.stringify({ order, revision }),
+    });
   }
 
   /** Show a hidden row again. */

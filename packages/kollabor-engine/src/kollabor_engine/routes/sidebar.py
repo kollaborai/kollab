@@ -60,19 +60,31 @@ async def unhide_agent(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 @router.get("/order")
 async def get_order() -> Dict[str, Any]:
-    """The saved order of all sidebar agent rows."""
-    return {"order": sidebar_order.read_order()}
+    """Return the engine-owned order, its revision, and any recovery warning."""
+    return sidebar_order.read_order_state().to_dict()
 
 
 @router.post("/order")
 async def set_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    """Save the order: ``{order: [key, ...]}``, first row first."""
+    """Save an order only when its expected revision is still current."""
     keys = sidebar_order.parse_order(body.get("order"))
     if keys is None:
         raise HTTPException(status_code=400, detail="order must be a list of bounded text keys")
+    revision = body.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise HTTPException(status_code=400, detail="revision must be a non-negative integer")
     try:
-        sidebar_order.write_order(keys)
+        return sidebar_order.write_order(keys, revision).to_dict()
+    except sidebar_order.SidebarOrderConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Sidebar order changed in another client; the current order was refreshed. Retry your move.",
+        ) from exc
+    except sidebar_order.SidebarOrderUnreadable as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Sidebar order storage is unreadable and was preserved; check the recovery warning before retrying.",
+        ) from exc
     except OSError as exc:
         logger.warning("Could not save sidebar order: %s", exc)
         raise HTTPException(status_code=500, detail=f"Could not save sidebar order: {exc}") from exc
-    return {"order": keys}
