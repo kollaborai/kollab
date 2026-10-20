@@ -163,6 +163,17 @@ For an editable checkout without installed console scripts:
 python -c "from kollabor_webui import main; main()"
 ```
 
+## Phone Access
+
+The session settings panel can provision one WireGuard peer per phone and show
+its one-time QR code. The feature is restricted to authenticated clients on
+exact private subnets and requires direct private WebUI binding plus a host-admin
+apply helper; forwarded client chains and reverse proxies are not supported. See
+[`docs/features/phone-access.md`](../../docs/features/phone-access.md) for the
+server, UDP forwarding, DNS, private LAN, and revocation prerequisites. Kollab
+never configures a router or exposes the helper command in the WebUI.
+
+
 ## Frontend development
 
 ```bash

@@ -662,14 +662,18 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const config = await api.loadConfig();
-      if (!mounted) return;
-      const bundle = __APP_VERSION__;
-      const engine = (config?.engine_version || "").trim();
-      if (!engine || !bundle || engine === bundle) return;
-      setVersionMismatch(
-        `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
-      );
+      try {
+        const config = await api.loadConfig();
+        if (!mounted) return;
+        const bundle = __APP_VERSION__;
+        const engine = (config?.engine_version || "").trim();
+        if (!engine || !bundle || engine === bundle) return;
+        setVersionMismatch(
+          `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
+        );
+      } catch {
+        // The session bootstrap effect surfaces WebUI host/origin denials.
+      }
     })();
     return () => {
       mounted = false;

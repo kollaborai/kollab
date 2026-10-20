@@ -11,7 +11,11 @@ def test_update_check_reports_a_newer_release(monkeypatch):
         return {"tag_name": "v99.0.0", "name": "Kollab 99", "html_url": "https://example.invalid/v99"}
 
     monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
-    with TestClient(server.create_app()) as client:
+    with TestClient(
+        server.create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345),
+    ) as client:
         response = client.get("/api/update/check")
     assert response.status_code == 200
     body = response.json()
