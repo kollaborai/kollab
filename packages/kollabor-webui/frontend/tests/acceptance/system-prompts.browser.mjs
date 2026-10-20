@@ -119,7 +119,7 @@ try {
       assert.equal(layout.panels["prompts-sections"].y, layout.panels["prompts-sidebar"].y);
       assert.equal(layout.panels["prompts-editor"].y, layout.panels["prompts-sidebar"].y);
     }
-    const screenshot = join(artifactDir, `system-prompts-${width}.png`);
+    const screenshot = join(artifactDir, `system-prompts-mocked-${width}.png`);
     await page.screenshot({ path: screenshot, fullPage: true });
     layouts.push({ ...layout, screenshot });
   }
@@ -132,23 +132,91 @@ try {
   );
   await page.getByRole("button", { name: "Back to section" }).click();
 
-  const editor = page.getByTestId("section-content");
-  await editor.fill("Saved by the retained browser acceptance test.");
-  await page.getByRole("button", { name: "Save override" }).click();
-  await page.getByText("Override saved.", { exact: true }).waitFor();
-  assert.equal(await editor.inputValue(), "Saved by the retained browser acceptance test.");
+  const bundleRows = page.locator('[data-testid="prompt-row"]');
+  assert.ok(
+    (await bundleRows.count()) > 1,
+    "fixture should include multiple prompt bundles",
+  );
+  const lastBundleRow = bundleRows.last();
+  await lastBundleRow.focus();
+  await page.keyboard.press("Shift+Tab");
+  const focusedBundleRow = page.locator(":focus");
+  assert.equal(await focusedBundleRow.getAttribute("data-testid"), "prompt-row");
   assert.equal(
-    await page.evaluate(() => window.__systemPromptsFixture.saved["coder/identity"]),
+    await focusedBundleRow.evaluate((element) => element.matches(":focus-visible")),
+    true,
+  );
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  const focusedSectionRow = page.locator(":focus");
+  assert.equal(await focusedSectionRow.getAttribute("data-testid"), "section-row");
+  assert.equal(
+    await focusedSectionRow.evaluate((element) => element.matches(":focus-visible")),
+    true,
+  );
+  const editor = page.getByRole("textbox", { name: "Identity" });
+  await editor.waitFor();
+  await page.locator('[data-testid="section-row"]').last().focus();
+  for (let tab = 0; tab < 5; tab += 1) {
+    if (await editor.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press("Tab");
+  }
+  assert.equal(
+    await editor.evaluate((element) => element === document.activeElement),
+    true,
+    "Keyboard tab order should reach the labeled prompt editor",
+  );
+  assert.equal(
+    await editor.evaluate((element) => element.matches(":focus-visible")),
+    true,
+  );
+  assert.equal(await editor.getAttribute("aria-labelledby"), "prompt-editor-title");
+
+  const mutationPage = await openHarness(browser, "?delay-save=1&delay-remove=1");
+  const mutationEditor = mutationPage.getByRole("textbox", { name: "Identity" });
+  const mutationStatus = mutationPage.getByTestId("status-message");
+  await mutationEditor.waitFor();
+  await mutationEditor.fill("Saved by the retained browser acceptance test.");
+  await mutationPage.getByRole("button", { name: "Save override" }).click();
+  await mutationStatus.filter({ hasText: "Saving override…" }).waitFor();
+  await mutationPage.getByText("Override saved.", { exact: true }).waitFor();
+  assert.equal(await mutationEditor.inputValue(), "Saved by the retained browser acceptance test.");
+  assert.equal(
+    await mutationPage.evaluate(() => window.__systemPromptsFixture.saved["coder/identity"]),
     "Saved by the retained browser acceptance test.",
   );
 
-  await page.getByRole("button", { name: "Remove override" }).click();
-  await page.getByText(
+  await mutationEditor.fill("Unsaved draft that should require confirmation.");
+  await mutationPage.getByTestId("delete-override").click();
+  const cancelDialog = mutationPage.getByRole("alertdialog");
+  await cancelDialog
+    .getByRole("heading", { name: "Remove this prompt override?" })
+    .waitFor();
+  await cancelDialog.getByText(/Your saved override and any unsaved edits/).waitFor();
+  await cancelDialog.getByRole("button", { name: "Cancel" }).click();
+  assert.deepEqual(
+    await mutationPage.evaluate(() => window.__systemPromptsFixture.deleted),
+    [],
+  );
+  assert.equal(
+    await mutationPage.evaluate(() => window.__systemPromptsFixture.saved["coder/identity"]),
+    "Saved by the retained browser acceptance test.",
+  );
+  assert.equal(
+    await mutationEditor.inputValue(),
+    "Unsaved draft that should require confirmation.",
+  );
+
+  await mutationPage.getByTestId("delete-override").click();
+  const confirmDialog = mutationPage.getByRole("alertdialog");
+  await confirmDialog.getByRole("button", { name: "Remove override" }).click();
+  await mutationStatus.filter({ hasText: "Removing override…" }).waitFor();
+  await mutationPage.getByText(
     "Override removed; the shipped section shows through.",
     { exact: true },
   ).waitFor();
-  assert.match(await editor.inputValue(), /You are Coder/);
-  const removalState = await page.evaluate(() => ({
+  assert.match(await mutationEditor.inputValue(), /You are Coder/);
+  const removalState = await mutationPage.evaluate(() => ({
     saved: window.__systemPromptsFixture.saved["coder/identity"],
     deleted: window.__systemPromptsFixture.deleted,
   }));
@@ -161,7 +229,11 @@ try {
   await failureEditor.fill("Keep this override when delete fails.");
   await failurePage.getByRole("button", { name: "Save override" }).click();
   await failurePage.getByText("Override saved.", { exact: true }).waitFor();
-  await failurePage.getByRole("button", { name: "Remove override" }).click();
+  await failurePage.getByTestId("delete-override").click();
+  await failurePage
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Remove override" })
+    .click();
   const failureStatus = failurePage.getByTestId("status-message");
   await failureStatus.filter({ hasText: "Simulated DELETE failure: permission denied" }).waitFor();
   assert.ok((await failureStatus.getAttribute("class")).includes("text-destructive"));
@@ -231,7 +303,11 @@ try {
   await removeRefreshEditor.fill("Override is removed before refresh fails.");
   await removeRefreshPage.getByRole("button", { name: "Save override" }).click();
   await removeRefreshPage.getByText("Override saved.", { exact: true }).waitFor();
-  await removeRefreshPage.getByRole("button", { name: "Remove override" }).click();
+  await removeRefreshPage.getByTestId("delete-override").click();
+  await removeRefreshPage
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Remove override" })
+    .click();
   const removeRefreshStatus = removeRefreshPage.getByTestId("status-message");
   await removeRefreshStatus.filter({ hasText: "Override removed, but refresh failed:" }).waitFor();
   assert.equal(await removeRefreshPage.getByTestId("delete-override").count(), 0);

@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText } from "@/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/components/trajectory/trajectory-format";
@@ -142,7 +153,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
     const value = draft;
     const request = selectionRequest.current;
     setBusy(true);
-    setMessage(null);
+    setMessage({ ok: true, text: "Saving override…" });
     try {
       try {
         await api.saveSection(targetBundle, key, value);
@@ -198,7 +209,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
     const key = selected;
     const request = selectionRequest.current;
     setBusy(true);
-    setMessage(null);
+    setMessage({ ok: true, text: "Removing override…" });
     try {
       try {
         await api.deleteOverride(targetBundle, key);
@@ -342,6 +353,8 @@ export function PromptsView({
   const dirty = isDirty(draft, content?.content ?? null);
   const provenance = section ? provenanceNote(section) : null;
 
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+
   return (
     <div
       className="flex min-h-0 flex-1 flex-col overflow-y-auto md:flex-row md:overflow-visible"
@@ -373,7 +386,7 @@ export function PromptsView({
                   aria-current={prompt.bundle === bundle ? "true" : undefined}
                   onClick={() => onSelectBundle(prompt.bundle)}
                   className={cn(
-                    "hover:bg-accent flex w-full items-center px-3 py-1.5 text-left text-sm",
+                    "hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-inset outline-none flex w-full items-center px-3 py-1.5 text-left text-sm",
                     prompt.bundle === bundle && "bg-accent font-medium",
                   )}
                 >
@@ -413,7 +426,7 @@ export function PromptsView({
               aria-current={row.key === selected ? "true" : undefined}
               onClick={() => onSelectSection(row.key)}
               className={cn(
-                "hover:bg-accent flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
+                "hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-inset outline-none flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
                 row.key === selected && "bg-accent font-medium",
               )}
             >
@@ -449,7 +462,7 @@ export function PromptsView({
         className="flex min-h-96 min-w-0 flex-1 flex-col md:min-h-0"
       >
         <header className="flex items-center gap-2 border-b px-3 py-2">
-          <h3 data-testid="editor-title" className="min-w-0 truncate text-sm font-semibold">
+          <h3 id="prompt-editor-title" data-testid="editor-title" className="min-w-0 truncate text-sm font-semibold">
             {section?.title ?? "No section selected"}
           </h3>
           <span
@@ -500,6 +513,7 @@ export function PromptsView({
               </p>
             )}
             <textarea
+              aria-labelledby="prompt-editor-title"
               data-testid="section-content"
               value={draft}
               readOnly={!editable || !content || busy}
@@ -510,7 +524,7 @@ export function PromptsView({
               }
               onChange={(event) => onDraftChange(event.target.value)}
               spellCheck={false}
-              className="bg-transparent p-3 font-mono text-xs outline-none placeholder:text-muted-foreground min-h-0 flex-1 resize-none"
+              className="bg-transparent p-3 font-mono text-xs outline-none placeholder:text-muted-foreground min-h-0 flex-1 resize-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
             />
             <footer className="flex items-center gap-2 border-t px-3 py-2">
               {editable && (
@@ -531,7 +545,7 @@ export function PromptsView({
                   variant="destructive"
                   data-testid="delete-override"
                   disabled={busy}
-                  onClick={onDeleteOverride}
+                  onClick={() => setRemoveConfirmOpen(true)}
                 >
                   Remove override
                 </Button>
@@ -552,6 +566,30 @@ export function PromptsView({
           </>
         )}
       </section>
+      <AlertDialog
+        open={removeConfirmOpen}
+        onOpenChange={setRemoveConfirmOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove this prompt override?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your saved override and any unsaved edits for this section will be
+              deleted. The shipped section will be used instead. This cannot be
+              undone from the editor.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={onDeleteOverride}
+            >
+              Remove override
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

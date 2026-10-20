@@ -19,6 +19,14 @@ api.getSection = async (bundle, key) => {
   return originalGetSection(bundle, key);
 };
 const originalPreview = api.preview.bind(api);
+
+const originalSaveSection = api.saveSection.bind(api);
+api.saveSection = async (bundle, key, content) => {
+  if (parameters.get("delay-save") === "1") {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return originalSaveSection(bundle, key, content);
+};
 api.preview = async (bundle) => {
   if (parameters.get("fail-preview") === "1") {
     throw new Error("Simulated preview failure: engine unavailable");
@@ -36,11 +44,16 @@ api.listSections = async (bundle) => {
   }
   return originalListSections(bundle);
 };
-if (parameters.get("fail-delete") === "1") {
-  api.deleteOverride = async () => {
+const originalDeleteOverride = api.deleteOverride.bind(api);
+api.deleteOverride = async (bundle, key) => {
+  if (parameters.get("delay-remove") === "1") {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  if (parameters.get("fail-delete") === "1") {
     throw new Error("Simulated DELETE failure: permission denied");
-  };
-}
+  }
+  return originalDeleteOverride(bundle, key);
+};
 document.documentElement.classList.add("dark");
 createRoot(document.getElementById("root")!).render(
   <div className="flex h-screen min-h-0 flex-col">

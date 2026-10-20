@@ -199,6 +199,12 @@ System prompts also resolve via environment variables:
 - `KOLLAB_SYSTEM_PROMPT` - Direct string content
 - `KOLLAB_SYSTEM_PROMPT_FILE` - Path to custom file
 
+In the web UI, open **Settings > Prompts** or type `/prompts` in the chat to
+browse the default prompt and agent bundles. Select a section, edit sections
+marked editable, and use **Preview** to inspect the assembled prompt. Saved
+overrides live under `~/.kollab/prompt-overrides/<bundle>/<section>.md`; bundled
+prompt files stay untouched. Generated and runtime sections are read-only.
+
 ## CLI Flags
 
 Common flags:

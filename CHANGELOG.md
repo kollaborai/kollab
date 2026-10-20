@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copied; set the target profile's key variable or `KOLLAB_API_KEY` before
   copying. System-keyring references remain shared. OAuth and provisioned
   profiles cannot be copied; the form explains these rules before Create.
+- Web: Add a System Prompts settings tab to browse prompt bundles, edit per-user
+  section overrides, and preview the assembled prompt.
+- Web: Confirm before removing an override and show progress while saving or
+  removing it.
 
 ### Changed
 - ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and

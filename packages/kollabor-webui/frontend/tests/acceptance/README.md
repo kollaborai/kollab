@@ -15,6 +15,8 @@ the package manifest or lockfile, then install its Chromium browser:
 The runner starts and stops its own Vite server on `127.0.0.1:4174`. It checks
 responsive layout at 390, 820, and 1280 pixels, stale section-request ordering,
 section/preview errors, save/remove refresh failures, read-only override removal,
-and visible mutation error states. Screenshots are saved
-under the OS temp directory at `system-prompts-browser`; set
-`PROMPTS_ARTIFACT_DIR` to choose another output directory.
+visible mutation error states, accessible keyboard focus, removal confirmation
+(cancellation and confirmation), and visible save/remove progress. Screenshots
+are saved under the OS temp directory at `system-prompts-browser`; set
+`PROMPTS_ARTIFACT_DIR` to choose another output directory. All browser API calls
+use `fixtureTransport`; no engine or user override store is contacted.

@@ -307,7 +307,10 @@ The sidebar lists every agent on this computer and on the other computers of you
   <img src="https://raw.githubusercontent.com/kollaborai/kollab/main/docs/media/shot-mobile-dark.webp" alt="Kollab on a phone: the koordinator chat showing the diff review and the final test result." width="39%">
 </p>
 
-The web UI's Settings dialog (Session, Configuration, Loadouts, Model, Setup, Network) does what the terminal's `/config`, `/llm`, `/model`, `/setup` and `/connect` screens do; see [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
+The web UI's Settings dialog has eight tabs: Session, Configuration, Loadouts,
+Model, Setup, Network, Voice and Prompts. Most map to the terminal's `/config`,
+`/llm`, `/model`, `/setup`, `/connect` and `/voice config` screens; Prompts is
+browser-only (type `/prompts` in web chat to open it). See [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
 
 ## Apps
 
