@@ -355,7 +355,7 @@ class TaskLedger:
         try:
             return TaskCard.from_dict(self._load_json_object(path))
         except Exception as e:
-            logger.debug(f"Failed to load task {task_id}: {e}")
+            logger.warning("Failed to load task %s from %s: %s", task_id, path, e)
             return None
 
     def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
@@ -692,6 +692,10 @@ class TaskLedger:
         now = time.time() if now is None else now
         stalled = []
         for card in self.get_all(status="active"):
+            # Snoozed cards explicitly opt out of reminder and stall handling
+            # until the caller's clock reaches their expiry.
+            if card.snoozed_until > now:
+                continue
             ref = card.last_activity_at or card.updated_at
             if ref > 0 and (now - ref) > threshold_seconds:
                 stalled.append(card)
@@ -727,17 +731,6 @@ class TaskLedger:
                 reason or "stall timeout",
             )
         return card
-
-    def touch_activity(self, task_id: str) -> bool:
-        """Record worker liveness on a card without adding a checkpoint."""
-
-        def _touch(card: TaskCard):
-            if card.status in self.TERMINAL_STATUSES:
-                return None
-            card.last_activity_at = time.time()
-            return True
-
-        return self._mutate_locked(task_id, _touch) is not None
 
     def checkpoint(self, task_id: str, note: str, data: Optional[Dict] = None) -> bool:
         card = self._load_mutable(task_id, "checkpoint")

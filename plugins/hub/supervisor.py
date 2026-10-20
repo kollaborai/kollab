@@ -29,6 +29,9 @@ DEFAULT_STALL_THRESHOLD = 900.0
 DEFAULT_WAKE_COOLDOWN = 120.0
 """Minimum seconds between coordinator wakes, so one poll pass per burst."""
 
+DEFAULT_NUDGE_GRACE = 300.0
+"""Seconds a worker has to respond after a stall nudge before requeue."""
+
 DEFAULT_MAX_REASSIGNMENTS = 3
 """A card requeued this many times is reported as blocked, not requeued."""
 
@@ -103,6 +106,7 @@ def evaluate(
     *,
     stall_threshold: float = DEFAULT_STALL_THRESHOLD,
     wake_cooldown: float = DEFAULT_WAKE_COOLDOWN,
+    nudge_grace: float = DEFAULT_NUDGE_GRACE,
     max_reassignments: int = DEFAULT_MAX_REASSIGNMENTS,
     state: Optional[SupervisorState] = None,
 ) -> Tuple[List[SupervisorDecision], SupervisorState]:
@@ -111,10 +115,11 @@ def evaluate(
     Decisions in order:
       nudge_worker      — first stall of an active card whose worker is
                           online; one nudge per stall window.
-      requeue_stalled   — card still stalled after its nudge (or worker
-                          offline): back to the open queue, unassigned.
-                          Done on the ledger here so the wake text below
-                          reflects it; the plugin only logs this decision.
+      requeue_stalled   — card still stalled after its nudge grace (or
+                          worker offline): back to the open queue,
+                          unassigned. Done on the ledger here so the wake
+                          text below reflects it; the plugin only logs this
+                          decision.
       wake_coordinator  — open or stalled work exists and the coordinator
                           is idle, throttled by ``wake_cooldown``.
 
@@ -136,9 +141,22 @@ def evaluate(
 
     for card in stalled_cards:
         worker = str(card.assignee or "").strip()
-        worker_online = any(a.get("identity") == worker for a in _online(roster))
-        nudged_at = nudges.get(card.id, 0.0)
-        if worker and worker_online and nudged_at == 0.0:
+        worker_presence = next(
+            (a for a in _online(roster) if a.get("identity") == worker), None
+        )
+        worker_online = worker_presence is not None
+        worker_working = (
+            worker_presence is not None
+            and str(worker_presence.get("state", "")).lower() == "working"
+        )
+        ref = card.last_activity_at or card.updated_at
+        # A working worker may be in a long turn. Give it up to four stall
+        # windows before treating the card as abandoned.
+        if worker_working and now - ref <= 4 * stall_threshold:
+            continue
+
+        nudged_at = nudges.get(card.id)
+        if worker and worker_online and nudged_at is None:
             # First stall: give the worker one nudge before taking the
             # card back. The nudge itself re-invokes the worker.
             minutes = max(1, int(stall_threshold / 60))
@@ -160,6 +178,15 @@ def evaluate(
                 )
             )
             nudges[card.id] = now
+        elif (
+            worker
+            and worker_online
+            and nudged_at is not None
+            and now - nudged_at < nudge_grace
+        ):
+            # The worker has a real grace window to receive and answer the
+            # nudge; a later poll must not churn the assignment.
+            continue
         elif card.reassignments < max_reassignments:
             fresh = ledger.requeue_stalled(
                 card.id,

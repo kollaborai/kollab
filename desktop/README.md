@@ -49,9 +49,10 @@ CLI binaries and are named `kollab-desktop-macos-<arch>-<version>.*`.
 
 macOS and Linux CI use the same verified sidecar staging helper. It checks the
 downloaded CLI's SHA-256 and reported version, restores executable permissions,
-and generates the ignored `tauri.release.json` overlay. Pull requests and manual
-builds derive the release version from `pyproject.toml`; a supplied release tag
-must match it. The committed base Tauri config is not rewritten during builds.
+and generates the ignored `tauri.release.json` overlay. CI builds the apps only
+for a `v*` release tag or a manual run. A manual build derives the release
+version from `pyproject.toml`; a release tag must match it. The committed base
+Tauri config is not rewritten during builds.
 The packaged macOS CLI and app metadata must report that version before the
 `.app.zip` and `.dmg` archives are collected.
 

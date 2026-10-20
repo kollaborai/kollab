@@ -89,7 +89,7 @@ def test_stalled_claim_is_nudged_then_requeued_and_wakes_coordinator(tasks_dir):
     ledger.claim(card.id, "lapis")
     start = time.time()
 
-    events, _ = _run_passes(ledger, _roster("working"), start, 1800, SupervisorState())
+    events, _ = _run_passes(ledger, _roster("idle"), start, 1800, SupervisorState())
 
     nudges = [t for t, d in events if d.kind == "nudge_worker"]
     requeues = [t for t, d in events if d.kind == "requeue_stalled"]
@@ -128,7 +128,8 @@ def test_restart_recovers_open_and_stalled_work(tasks_dir):
         restarted, _roster("working"), now=now, state=SupervisorState()
     )
     kinds = [d.kind for d in decisions]
-    assert "nudge_worker" in kinds
+    # A worker still marked working gets four stall windows before a nudge.
+    assert "nudge_worker" not in kinds
     wakes = [d for d in decisions if d.kind == "wake_coordinator"]
     assert len(wakes) == 1
     assert open_card.id in wakes[0].text

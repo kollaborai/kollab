@@ -1016,8 +1016,11 @@ class RelayAgentBridge:
                 self.store.recover(
                     {a.agent_id for a in local}, before=int(time.time()) - 120
                 )
-            await self._rpc_directory({"peer": ""})
+            # Links first: a restarted device must redeclare its strangers even
+            # when the directory fails, or it never reaches them again (a
+            # stranger's rows need the link the declaration restores).
             await self.sync_links()
+            await self._rpc_directory({"peer": ""})
         except (RelayError, OSError, ValueError):
             logger.debug("relay directory refresh unavailable")
 
@@ -3097,7 +3100,11 @@ class RelayAgentBridge:
 
     def _acp_return_message(self, record):
         payload = record["payload"]
-        device = self._state().state.peer_devices.get(record["peer"]) or payload.get("from_device") or key_label(record["peer"])
+        device = (
+            self._state().state.peer_devices.get(record["peer"])
+            or payload.get("from_device")
+            or key_label(record["peer"])
+        )
         metadata = {"network": {"from": payload["from"], "from_device": device}}
         if payload.get("waiting"):
             metadata["acp_waiting"] = True

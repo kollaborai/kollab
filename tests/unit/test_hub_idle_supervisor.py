@@ -16,6 +16,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from plugins.hub.supervisor import (
     DEFAULT_MAX_REASSIGNMENTS,
+    DEFAULT_NUDGE_GRACE,
     SupervisorState,
     evaluate,
 )
@@ -142,7 +143,7 @@ def test_stalled_active_card_gets_one_nudge_first(ledger):
     )
     decisions, state = evaluate(
         ledger,
-        _roster(_coord(), _worker("lapis", "working")),
+        _roster(_coord(), _worker("lapis", "idle")),
         now=now,
     )
     nudges = [d for d in decisions if d.kind == "nudge_worker"]
@@ -161,19 +162,43 @@ def test_stalled_card_requeued_after_nudge_grace(ledger):
     ledger._mutate_locked(
         card.id, lambda c: setattr(c, "last_activity_at", now - 1000) or True
     )
-    _, state = evaluate(ledger, _roster(_coord(), _worker("lapis", "working")), now=now)
+    _, state = evaluate(ledger, _roster(_coord(), _worker("lapis", "idle")), now=now)
 
-    # Same window: nudge already recorded, still stalled -> requeue now.
+    # The nudge grace must elapse before the card is requeued.
     decisions, state = evaluate(
         ledger,
-        _roster(_coord(), _worker("lapis", "working")),
-        now=now + 5,
+        _roster(_coord(), _worker("lapis", "idle")),
+        now=now + DEFAULT_NUDGE_GRACE + 1,
         state=state,
     )
     assert any(d.kind == "requeue_stalled" for d in decisions)
     fresh = ledger.get(card.id)
     assert fresh.status == "open"
     assert fresh.assignee == ""
+
+
+def test_working_worker_gets_four_stall_windows_before_nudge(ledger):
+    card = ledger.enqueue(assigner="peridot", directive="long worker turn")
+    ledger.claim(card.id, "lapis")
+    now = time.time()
+    ledger._mutate_locked(
+        card.id, lambda c: setattr(c, "last_activity_at", now - 1000) or True
+    )
+
+    decisions, _ = evaluate(
+        ledger,
+        _roster(_coord(), _worker("lapis", "working")),
+        now=now,
+    )
+    assert not any(d.kind == "nudge_worker" for d in decisions)
+
+    decisions, _ = evaluate(
+        ledger,
+        _roster(_coord(), _worker("lapis", "working")),
+        now=now + 4 * 900 + 1,
+    )
+    assert any(d.kind == "nudge_worker" for d in decisions)
+
 
 
 def test_offline_worker_skips_nudge_and_requeues_immediately(ledger):
@@ -197,7 +222,7 @@ def test_checkpoint_resets_stall_and_clears_nudge_record(ledger):
     ledger._mutate_locked(
         card.id, lambda c: setattr(c, "last_activity_at", now - 1000) or True
     )
-    _, state = evaluate(ledger, _roster(_coord(), _worker("lapis", "working")), now=now)
+    _, state = evaluate(ledger, _roster(_coord(), _worker("lapis", "idle")), now=now)
     assert card.id in state.nudges  # nudge recorded
 
     # Worker checks in: freshness resets, nudge record cleared.
