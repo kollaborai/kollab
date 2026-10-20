@@ -25,6 +25,9 @@ api.saveSection = async (bundle, key, content) => {
   if (parameters.get("delay-save") === "1") {
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
+  if (parameters.get("fail-save") === "1") {
+    throw new Error("Simulated PUT failure: permission denied");
+  }
   return originalSaveSection(bundle, key, content);
 };
 api.preview = async (bundle) => {

@@ -223,27 +223,76 @@ try {
   assert.equal(removalState.saved, undefined);
   assert.deepEqual(removalState.deleted, ["coder/identity"]);
 
-  const failurePage = await openHarness(browser, "?fail-delete=1");
+  const saveFailurePage = await openHarness(browser, "?delay-save=1&fail-save=1");
+  const saveFailureEditor = saveFailurePage.getByTestId("section-content");
+  await saveFailureEditor.waitFor();
+  await saveFailureEditor.fill("Draft retained after delayed save failure.");
+  await saveFailurePage.getByRole("button", { name: "Save override" }).click();
+  const saveFailureStatus = saveFailurePage.getByTestId("status-message");
+  await saveFailureStatus.filter({ hasText: "Saving override…" }).waitFor();
+  const pendingSaveSection = saveFailurePage.locator(
+    '[data-testid="section-row"][data-key="skills"]',
+  );
+  const pendingSaveBundle = saveFailurePage.locator('[data-testid="prompt-row"]').nth(1);
+  assert.equal(await pendingSaveSection.isDisabled(), true);
+  assert.equal(await pendingSaveBundle.isDisabled(), true);
+  await pendingSaveSection.dispatchEvent("click");
+  await pendingSaveBundle.dispatchEvent("click");
+  assert.equal(
+    await saveFailurePage.locator('[data-testid="section-row"][data-key="identity"]').getAttribute("aria-current"),
+    "true",
+  );
+  assert.equal(
+    await saveFailurePage.locator('[data-testid="prompt-row"][data-bundle="coder"]').getAttribute("aria-current"),
+    "true",
+  );
+  await saveFailureStatus.filter({
+    hasText: "Simulated PUT failure: permission denied",
+  }).waitFor();
+  assert.ok((await saveFailureStatus.getAttribute("class")).includes("text-destructive"));
+  assert.equal(await saveFailureEditor.inputValue(), "Draft retained after delayed save failure.");
+  const saveFailureState = await saveFailurePage.evaluate(() => ({
+    saved: window.__systemPromptsFixture.saved["coder/identity"],
+  }));
+  assert.deepEqual(saveFailureState, { saved: undefined });
+
+  const failurePage = await openHarness(browser, "?fail-delete=1&delay-remove=1");
   const failureEditor = failurePage.getByTestId("section-content");
   await failureEditor.waitFor();
-  await failureEditor.fill("Keep this override when delete fails.");
+  await failureEditor.fill("Saved override for delayed delete failure.");
   await failurePage.getByRole("button", { name: "Save override" }).click();
   await failurePage.getByText("Override saved.", { exact: true }).waitFor();
+  await failureEditor.fill("Draft retained after delayed delete failure.");
   await failurePage.getByTestId("delete-override").click();
-  await failurePage
-    .getByRole("alertdialog")
-    .getByRole("button", { name: "Remove override" })
-    .click();
+  const failureDialog = failurePage.getByRole("alertdialog");
+  await failureDialog.getByRole("button", { name: "Remove override" }).click();
   const failureStatus = failurePage.getByTestId("status-message");
+  await failureStatus.filter({ hasText: "Removing override…" }).waitFor();
+  const pendingDeleteSection = failurePage.locator(
+    '[data-testid="section-row"][data-key="skills"]',
+  );
+  const pendingDeleteBundle = failurePage.locator('[data-testid="prompt-row"]').nth(1);
+  assert.equal(await pendingDeleteSection.isDisabled(), true);
+  assert.equal(await pendingDeleteBundle.isDisabled(), true);
+  await pendingDeleteSection.dispatchEvent("click");
+  await pendingDeleteBundle.dispatchEvent("click");
+  assert.equal(
+    await failurePage.locator('[data-testid="section-row"][data-key="identity"]').getAttribute("aria-current"),
+    "true",
+  );
+  assert.equal(
+    await failurePage.locator('[data-testid="prompt-row"][data-bundle="coder"]').getAttribute("aria-current"),
+    "true",
+  );
   await failureStatus.filter({ hasText: "Simulated DELETE failure: permission denied" }).waitFor();
   assert.ok((await failureStatus.getAttribute("class")).includes("text-destructive"));
-  assert.equal(await failureEditor.inputValue(), "Keep this override when delete fails.");
+  assert.equal(await failureEditor.inputValue(), "Draft retained after delayed delete failure.");
   const failureState = await failurePage.evaluate(() => ({
     saved: window.__systemPromptsFixture.saved["coder/identity"],
     deleted: window.__systemPromptsFixture.deleted,
   }));
   assert.deepEqual(failureState, {
-    saved: "Keep this override when delete fails.",
+    saved: "Saved override for delayed delete failure.",
     deleted: [],
   });
 
@@ -326,6 +375,7 @@ try {
     api: "fixtureTransport mock; no engine contacted",
     layouts,
     successfulSaveAndRemove: removalState,
+    saveFailure: saveFailureState,
     deleteFailure: failureState,
     errorAndRaceScenarios: "passed",
     pageErrors,

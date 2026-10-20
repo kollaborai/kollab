@@ -57,6 +57,8 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   const sectionRequest = useRef(0);
   const previewRequest = useRef(0);
 
+  const mutationPending = useRef(false);
+
   const loadSection = useCallback(
     async (targetBundle: string, key: string, request: number) => {
       const sectionRequestId = ++sectionRequest.current;
@@ -85,6 +87,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
 
   const selectBundle = useCallback(
     async (next: string) => {
+      if (mutationPending.current) return;
       const request = ++selectionRequest.current;
       ++sectionRequest.current;
       ++previewRequest.current;
@@ -116,7 +119,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
 
   const selectSection = useCallback(
     (key: string) => {
-      if (!bundle) return;
+      if (mutationPending.current || !bundle) return;
       const request = ++selectionRequest.current;
       ++previewRequest.current;
       setSelected(key);
@@ -147,11 +150,12 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   }, [api, selectBundle]);
 
   const save = async () => {
-    if (!bundle || !selected || !content) return;
+    if (!bundle || !selected || !content || mutationPending.current) return;
     const targetBundle = bundle;
     const key = selected;
     const value = draft;
     const request = selectionRequest.current;
+    mutationPending.current = true;
     setBusy(true);
     setMessage({ ok: true, text: "Saving override…" });
     try {
@@ -193,6 +197,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
         }
       }
     } finally {
+      mutationPending.current = false;
       setBusy(false);
     }
   };
@@ -200,6 +205,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   const removeOverride = async () => {
     const sectionKind = sections?.find((section) => section.key === selected)?.kind;
     if (
+      mutationPending.current ||
       !bundle ||
       !selected ||
       !content?.overridden ||
@@ -208,6 +214,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
     const targetBundle = bundle;
     const key = selected;
     const request = selectionRequest.current;
+    mutationPending.current = true;
     setBusy(true);
     setMessage({ ok: true, text: "Removing override…" });
     try {
@@ -254,6 +261,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
         }
       }
     } finally {
+      mutationPending.current = false;
       setBusy(false);
     }
   };
@@ -383,6 +391,7 @@ export function PromptsView({
                   type="button"
                   data-testid="prompt-row"
                   data-bundle={prompt.bundle}
+                  disabled={busy}
                   aria-current={prompt.bundle === bundle ? "true" : undefined}
                   onClick={() => onSelectBundle(prompt.bundle)}
                   className={cn(
@@ -423,6 +432,7 @@ export function PromptsView({
               type="button"
               data-testid="section-row"
               data-key={row.key}
+              disabled={busy}
               aria-current={row.key === selected ? "true" : undefined}
               onClick={() => onSelectSection(row.key)}
               className={cn(
@@ -485,6 +495,7 @@ export function PromptsView({
               size="xs"
               variant={previewing ? "outline" : "default"}
               onClick={onTogglePreview}
+              disabled={busy}
             >
               {previewing ? "Back to section" : "Preview"}
             </Button>
