@@ -66,7 +66,10 @@ class ACPProfile:
     LOGIN_GUIDANCE: ClassVar[dict[str, str]] = {
         "claude-code": "Run claude and /login on this device.",
         "codex-cli": "Run codex login on this device.",
-        "gemini-cli": "Run gemini and sign in on this device.",
+        "gemini-cli": (
+            "Google retired consumer Gemini sign-in; set GEMINI_API_KEY, or configure Vertex AI "
+            "(GOOGLE_GENAI_USE_VERTEXAI with a project and credentials), then restart."
+        ),
     }
 
     @classmethod
@@ -590,7 +593,8 @@ class ACPRunner:
         auth_hints = (
             "authenticate", "authentication", "oauth", "session expired", "not logged in",
             "please log in", "please sign in", "invalid credentials", "unauthorized",
-            "unauthenticated", "invalid api key", "credentials missing", "requires login",
+            "unauthenticated", "invalid api key", "api key is missing", "credentials missing",
+            "requires login",
         )
         refusal_hints = (
             "weekly limit", "daily limit", "monthly limit", "rate limit", "usage limit",
