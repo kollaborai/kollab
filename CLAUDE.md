@@ -858,6 +858,11 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 - Branch: `issue-123-description` or `feature/issue-123-description`
 - Commit: `fixes #123`, `closes #123`, `resolves #123`, or `#123`
 - Main branch protected - no direct pushes
+- PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
+  repo, opened by a person with write access, merges with a merge commit once the three
+  required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
+  `gh pr merge <n> --disable-auto` stops one already armed. Such a merge starts no
+  push-to-main CI run.
 
 ```bash
 gh issue create --title "Fix version display"
@@ -891,8 +896,9 @@ not rely on CI to repair it):
    - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
      `kollabor/updates/CHANGELOG.md` (keep them **byte-identical** — `cmp` them;
      the in-app update UI reads the packaged copy)
-2. `git push origin "HEAD:refs/heads/release/X.Y.Z"`, open the PR, merge it with a
-   merge commit (never squash), then `git pull --ff-only origin main`.
+2. `git push origin "HEAD:refs/heads/release/X.Y.Z"` and open the PR; it merges itself
+   with a merge commit once the checks pass (never squash). Then
+   `git pull --ff-only origin main`.
 3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
    then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
 4. Once publishing is green: `uv sync --all-extras` and

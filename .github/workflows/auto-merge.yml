@@ -1,0 +1,56 @@
+name: Auto-merge
+
+# Arms GitHub auto-merge (merge commit) on a PR into main, so it merges itself
+# once the three required checks (ci/tests, ci/standards-check,
+# ci/security-scan) pass. Branch protection enforces those checks for everyone;
+# auto-merge never skips them.
+#
+# Guards:
+# - pull_request, never pull_request_target: a fork's run gets a read-only
+#   token and no secrets, and the job skips forks anyway.
+# - Only this repository's own branches, opened by a person (no bots) who has
+#   write access here, checked against the API at run time. Anything else does
+#   not arm.
+# - Drafts never arm. Open a PR as a draft to hold it and mark it ready to arm
+#   it; `gh pr merge <n> --disable-auto` disarms one, and a later push does not
+#   re-arm it.
+# - No checkout and no third-party actions: the job runs two gh commands, and
+#   every PR value reaches the shell through env, never inline.
+#
+# A merge made through the workflow token starts no push-to-main CI run
+# (GitHub starts no workflows from GITHUB_TOKEN events); the PR's own required
+# checks gate every merge.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  arm:
+    name: auto-merge
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft == false
+      && github.event.pull_request.user.type == 'User'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Arm auto-merge for a writer's PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          permission=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
+          case "$permission" in
+            admin|write) ;;
+            *) echo "$AUTHOR has $permission access here: not arming auto-merge"; exit 0 ;;
+          esac
+          gh pr merge "$PR_URL" --auto --merge

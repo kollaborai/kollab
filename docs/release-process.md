@@ -48,8 +48,9 @@ merge then fast-forwards it, so `main` ends clean and level by construction.
 3. Everything committed on `main` ships: review `git log origin/main..HEAD`,
    then push it and open the PR with
    `git push origin "HEAD:refs/heads/release/X.Y.Z"`.
-4. Merge the PR with a merge commit, never squash or rebase, so local `main`
-   stays a parent of the merge.
+4. Wait for the PR to merge: auto-merge (`.github/workflows/auto-merge.yml`)
+   merges it with a merge commit once the required checks pass. Never squash or
+   rebase it, so local `main` stays a parent of the merge.
 5. Bring `main` level and tag the merge:
 
    ```bash

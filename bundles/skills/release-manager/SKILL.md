@@ -188,9 +188,9 @@ tag a partially validated build.
 
 Only after the pre-tag gates pass:
 
-1. Push `HEAD` to `release/X.Y.Z`, merge its PR with a merge commit (never squash) once
-   checks pass, and `git pull --ff-only origin main`. Then create an annotated tag on that
-   merge commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+1. Push `HEAD` to `release/X.Y.Z` and open its PR; auto-merge merges it with a merge
+   commit (never squash) once checks pass. Then `git pull --ff-only origin main` and create
+   an annotated tag on that merge commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
 2. Verify the tag resolves to the recorded release commit and that the tag name matches all
    metadata before pushing it.
 3. Push the exact tag intentionally. Do not push `--tags` broadly.
