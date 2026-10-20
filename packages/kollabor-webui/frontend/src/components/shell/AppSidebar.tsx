@@ -664,9 +664,9 @@ export function AppSidebar({
                                 where={agent.device}
                                 caste={poolByName.get(agent.name)?.caste}
                                 color={poolByName.get(agent.name)?.color}
-                                state={up ? "idle" : "offline"}
+                                state={up ? agent.state || "idle" : "offline"}
                                 live={up}
-                                activity={id && id === activeId ? activeActivity : null}
+                                activity={id && id === activeId ? activeActivity : up ? presenceActivity(agent.current_tool) : null}
                                 season="auto"
                                 follow
                                 size={56}

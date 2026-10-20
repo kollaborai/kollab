@@ -323,6 +323,8 @@ export type NetworkAgent = {
   is_coordinator?: boolean;
   harness?: string;
   acp_waiting?: boolean;
+  /** The tool it runs now (bare name and type, no arguments), from its device's directory; null between tools. */
+  current_tool?: { name: string; type: string } | null;
   /** The workspace (folder label) the agent runs in, once memberships carry it (#158). */
   workspace?: string;
   /** The network the agent runs on, once memberships carry it (#158). */

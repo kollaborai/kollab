@@ -71,6 +71,9 @@ DIRECTORY_STALE_SECONDS = 45
 # A read that asks the peers reuses an answer at most this old. It was the 15 s beat, so a
 # reply to an agent that came online just after a refresh failed as unknown for up to 15 s.
 DIRECTORY_REFETCH_SECONDS = 2
+# A peer whose agents are at work is read this often, so a tool a few seconds
+# long shows on this computer; a quiet one waits for the 15 s beat.
+BUSY_DIRECTORY_SECONDS = 3
 TASK_TIMEOUT = 600
 ARRIVAL_POLL_SECONDS = 3.0
 # The directory forgets a device's consent after a day; repeating it well inside that.
@@ -193,6 +196,7 @@ class RelayAgentBridge:
         self._turn = remote_task_id
         self._directory_task = None
         self._next_directory = 0.0
+        self._next_busy_directory = 0.0
         self._next_outbox = 0.0
         self._next_event_wake = 0.0
         self._outbox_lock = asyncio.Lock()
@@ -554,11 +558,34 @@ class RelayAgentBridge:
                         "workspace_id": row["workspace_id"],
                         "harness": row.get("harness") or "",
                         "acp_waiting": bool(row.get("acp_waiting")),
+                        # {name, type} while it runs a tool, else None (the gem acts it out).
+                        "current_tool": row.get("current_tool") or None,
                     }
                 )
             except (KeyError, TypeError):
                 continue
         return rows
+
+    def _busy_peers(self) -> list[str]:
+        """Peers whose last roster shows an agent at work: a tool, or working/thinking."""
+        return sorted(
+            {
+                peer_key
+                for (_session, peer_key, _peer_session), (_read, rows) in self._cache.items()
+                if any(
+                    row.get("current_tool") or row.get("state") in ("working", "thinking")
+                    for row in rows
+                )
+            }
+        )
+
+    async def _refresh_busy_peers(self, peers: list[str]) -> None:
+        """Read the busy peers' directories again, between the 15 s full reads."""
+        for peer_key in peers:
+            try:
+                await self._rpc_directory({"peer": peer_key})
+            except (RelayError, OSError, ValueError):
+                logger.debug("busy peer directory refresh unavailable")
 
     async def device_unknown(self, name: str) -> bool:
         """Whether the relay is reachable and no approved device can be `name`.
@@ -629,6 +656,13 @@ class RelayAgentBridge:
         if self.network_attach is None:
             raise RelayError("opening agents from the network is unavailable")
         address = RelayAddress.parse(await self.resolve_handle(handle))
+        if address.key in self._state().state.links:
+            # A contact (accepted from a knock) never opens across rooms; its
+            # device would refuse, and the refusal arrives as a transport error.
+            return {
+                "refused": f"{self._peer_name(address.key)} is a contact, not on "
+                "this network: message its agents, opening them needs a join code"
+            }
         try:
             path = await self.network_attach.open(address.key, address.agent_id, parsed[0])
         except AttachRefused as refusal:
@@ -970,6 +1004,13 @@ class RelayAgentBridge:
                             self._refresh_directory()
                         )
                         self._next_directory = time.monotonic() + 15
+                if self.commands and time.monotonic() >= self._next_busy_directory:
+                    self._next_busy_directory = time.monotonic() + BUSY_DIRECTORY_SECONDS
+                    busy = self._busy_peers()
+                    if busy and (self._directory_task is None or self._directory_task.done()):
+                        self._directory_task = asyncio.create_task(
+                            self._refresh_busy_peers(busy)
+                        )
                 if self.commands and time.monotonic() >= self._next_arrivals:
                     if self._arrivals_task is None or self._arrivals_task.done():
                         self._arrivals_task = asyncio.create_task(
@@ -1016,8 +1057,11 @@ class RelayAgentBridge:
                 self.store.recover(
                     {a.agent_id for a in local}, before=int(time.time()) - 120
                 )
-            await self._rpc_directory({"peer": ""})
+            # Links first: a restarted device must redeclare its strangers even
+            # when the directory fails, or it never reaches them again (a
+            # stranger's rows need the link the declaration restores).
             await self.sync_links()
+            await self._rpc_directory({"peer": ""})
         except (RelayError, OSError, ValueError):
             logger.debug("relay directory refresh unavailable")
 
@@ -2565,7 +2609,7 @@ class RelayAgentBridge:
                         # A peer on this version always sends "device" too; an
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
-                        optional_fields = {"device", "harness", "acp_waiting"}
+                        optional_fields = {"device", "harness", "acp_waiting", "current_tool"}
                         if (
                             not isinstance(row, dict)
                             or not fields <= set(row)
@@ -2592,6 +2636,17 @@ class RelayAgentBridge:
                             raise RelayError("invalid remote harness descriptor")
                         if "acp_waiting" in row and type(row["acp_waiting"]) is not bool:
                             raise RelayError("invalid remote harness waiting state")
+                        tool = row.get("current_tool")
+                        if "current_tool" in row and (
+                            not isinstance(tool, dict)
+                            or set(tool) != {"name", "type"}
+                            or not all(
+                                isinstance(value, str) and len(value) <= 64 and value.isprintable()
+                                for value in tool.values()
+                            )
+                            or not tool["name"]
+                        ):
+                            raise RelayError("invalid remote tool descriptor")
                         if device is not None and (
                             not isinstance(device, str) or not NAME_RE.fullmatch(device)
                         ):
@@ -2630,7 +2685,13 @@ class RelayAgentBridge:
             for peer_key, peer_session in peer_sessions
             if peer_key in client.state.approvals
         }
-        self._cache = {k: v for k, v in self._cache.items() if k in valid_keys}
+        # A one-peer read prunes only that peer: the other peers' rosters stay,
+        # or every device but it would read offline until the next full read.
+        self._cache = {
+            k: v
+            for k, v in self._cache.items()
+            if k in valid_keys or (requested and k[1] != requested)
+        }
         return {
             "agents": rows[:MAX_DIRECTORY],
             "truncated": len(rows) > MAX_DIRECTORY
@@ -3097,7 +3158,11 @@ class RelayAgentBridge:
 
     def _acp_return_message(self, record):
         payload = record["payload"]
-        device = self._state().state.peer_devices.get(record["peer"]) or payload.get("from_device") or key_label(record["peer"])
+        device = (
+            self._state().state.peer_devices.get(record["peer"])
+            or payload.get("from_device")
+            or key_label(record["peer"])
+        )
         metadata = {"network": {"from": payload["from"], "from_device": device}}
         if payload.get("waiting"):
             metadata["acp_waiting"] = True

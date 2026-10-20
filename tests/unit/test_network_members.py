@@ -16,13 +16,13 @@ import pytest_asyncio
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
-from plugins.hub import network_members, relay_client
+from plugins.hub import network_members, relay_agent, relay_client
 from plugins.hub.device_names import NAME_RE
 from plugins.hub.network_members import METHOD, MembershipSync, seal_members
 from plugins.hub.relay_client import RelayClient
 from plugins.hub.relay_state import RelayError, validate_public_key
 
-from .test_mesh_network import deliver_locator, make_node
+from .test_mesh_network import approve_all, deliver_locator, make_node
 from .test_peer_transport import RelayWire, _mint_tls_cert
 
 pytestmark = pytest.mark.usefixtures("unthrottled_relay")
@@ -578,3 +578,34 @@ async def test_a_refusal_that_is_not_about_the_version_costs_one_more_send_and_a
     assert sent == [2, 1]  # both offered, neither taken
     assert not a.bridge.membership_sync._delivered and not a.bridge.membership_sync._v1_only
     assert a.bridge.membership_sync._failures == {b.key: 1}
+
+
+@pytest.mark.asyncio
+async def test_a_busy_device_is_read_again_and_the_others_stay_listed(tmp_path, monkeypatch):
+    """A device whose agent works is read between the 15 s beats, so its tool
+    shows here; that one-device read leaves every other device's agents listed."""
+    monkeypatch.setattr(relay_agent, "DIRECTORY_REFETCH_SECONDS", 0)
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c")
+    a, b, c = nodes
+    approve_all(*nodes)
+    tool = {"name": "terminal", "type": "terminal"}
+    original = type(b.bridge.directory).publishable_agents
+
+    def working(self, workspace, workspace_id, device_name=None):
+        rows = original(self, workspace, workspace_id, device_name)
+        return [{**row, "state": "working", "current_tool": tool} for row in rows]
+
+    b.bridge.directory.publishable_agents = working.__get__(b.bridge.directory)
+    try:
+        await a.bridge._rpc_directory({"peer": ""})
+        assert a.bridge._busy_peers() == [b.key]  # c's agent is not at work
+
+        tool = {"name": "web_search", "type": "mcp"}
+        await a.bridge._refresh_busy_peers(a.bridge._busy_peers())
+
+        rows = {row["device"]: row for row in await a.bridge.remote_agents()}
+        assert rows["srv-b"]["current_tool"] == {"name": "web_search", "type": "mcp"}
+        assert rows["srv-b"]["state"] == "working"
+        assert "srv-c" in rows and rows["srv-c"]["current_tool"] is None
+    finally:
+        await close_net(wire, nodes)

@@ -346,6 +346,7 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
         "workspace_id": right.commands.client.state.workspace_id,
         "harness": "",
         "acp_waiting": False,
+        "current_tool": None,
     }
 
     # An older peer sends no "device" field at all; the caller falls back to
@@ -365,6 +366,54 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
     rows = await left.remote_agents()
     assert len(rows) == 1
     assert rows[0]["device"] == key_label(right.commands.client.public_key)
+
+
+def publish_tool(bridge, tool):
+    """The bridge's directory publishes its agent running `tool` (a row field)."""
+    original = Directory.publishable_agents
+
+    def with_tool(self, workspace, workspace_id, device_name=None):
+        return [
+            {**row, "current_tool": tool}
+            for row in original(self, workspace, workspace_id, device_name)
+        ]
+
+    bridge.directory.publishable_agents = with_tool.__get__(bridge.directory)
+
+
+@pytest.mark.asyncio
+async def test_a_remote_agent_row_carries_the_tool_it_runs(bridges):
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    publish_tool(right, {"name": "terminal", "type": "terminal"})
+    await warm_directory(left)
+
+    [row] = await left.remote_agents()
+
+    assert row["current_tool"] == {"name": "terminal", "type": "terminal"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"name": "terminal", "type": "terminal", "command": "rm -rf /"},
+        {"name": "terminal"},
+        {"name": "", "type": "terminal"},
+        {"name": "t" * 65, "type": "terminal"},
+        {"name": "term\ninal", "type": "terminal"},
+        {"name": 7, "type": "terminal"},
+        "terminal",
+    ],
+)
+async def test_a_malformed_remote_tool_rejects_that_peers_directory(bridges, tool):
+    """Only a bare name and type cross: a command line or anything else fails closed."""
+    members, _ = bridges
+    (left, *_), (right, *_) = members
+    publish_tool(right, tool)
+    await warm_directory(left)
+
+    assert await left.remote_agents() == []
 
 
 @pytest.mark.asyncio

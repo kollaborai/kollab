@@ -106,6 +106,17 @@ async def test_an_accepted_stranger_cannot_open_agents(devices):
 
 
 @pytest.mark.asyncio
+async def test_opening_a_contacts_agent_is_refused_here_in_words(devices):
+    left, right, _ = devices
+    named = await handle(left, right)
+    right.set_peer_link(left.commands.client.public_key)
+    left.set_peer_link(right.commands.client.public_key)
+    reply = await left._rpc_attach({"handle": named})
+    assert "is a contact, not on this network" in reply["refused"]
+    assert not right.network_attach._channels
+
+
+@pytest.mark.asyncio
 async def test_a_connect_command_that_withdraws_an_open_agent_closes_it(devices, monkeypatch):
     monkeypatch.setattr(network_attach, "IDLE_SECONDS", 60.0)  # only the command's own recheck
     left, right, notices = devices

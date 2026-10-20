@@ -377,3 +377,26 @@ def test_a_network_no_agent_here_carries_shows_its_last_roster(tmp_path):
     assert block["live"] is False and block["folder"] == "/w/lab"
     [agent] = block["devices"][0]["workspaces"][0]["agents"]
     assert agent["state"] == "offline" and agent["last_seen"] == 900.0
+
+
+def test_a_network_row_keeps_its_harness_and_the_tool_it_runs(tmp_path):
+    """The sidebar's network rows show a harness badge, its approval wait and
+    act out the running tool, so the aggregate must not drop them."""
+    _memberships(tmp_path, links=[])
+    codex = {
+        "name": "codex", "device": "server-box", "handle": "codex@server-box", "state": "working",
+        "harness": "Codex over ACP", "acp_waiting": True,
+        "current_tool": {"name": "terminal", "type": "terminal"},
+    }
+    lapis = {"name": "lapis", "device": "server-box", "handle": "lapis@server-box", "state": "idle",
+             "harness": "", "acp_waiting": False, "current_tool": None}
+
+    aggregate = aggregate_network_snapshot(
+        home=tmp_path, workspace=WORKSPACE, live={"device": "zircon-box", "remote": [codex, lapis]}
+    )
+
+    agents = {row["name"]: row for row in aggregate["networks"][0]["devices"][0]["workspaces"][0]["agents"]}
+    assert agents["codex"]["harness"] == "Codex over ACP" and agents["codex"]["acp_waiting"] is True
+    assert agents["codex"]["current_tool"] == {"name": "terminal", "type": "terminal"}
+    assert agents["codex"]["state"] == "working"
+    assert agents["lapis"] == {"name": "lapis", "device": "server-box", "handle": "lapis@server-box", "state": "idle"}

@@ -483,7 +483,15 @@ def _network_view(live: Dict[str, Any], now: Optional[float] = None) -> Dict[str
                 field: answer[field]
                 for field in ("network", "device", "trust", "folder")
             },
-            "agents": {**kept, **current},
+            "agents": {
+                **kept,
+                # A running tool is live-only: the saved roster never keeps one, so
+                # a tool change does not rewrite it and an offline row shows none.
+                **{
+                    handle: {k: v for k, v in row.items() if k != "current_tool"}
+                    for handle, row in current.items()
+                },
+            },
             "remote": list(current.values()) + by_last_seen(kept.values()),
             "live": True,
         }

@@ -126,6 +126,29 @@ def test_export_uses_explicit_device_name_over_the_derived_default(directory):
     assert rows[0]["device"] == "laptop-kollab"
 
 
+@pytest.mark.parametrize(
+    ("presence", "exported"),
+    [
+        ({"name": "terminal", "type": "terminal"}, {"name": "terminal", "type": "terminal"}),
+        # Only the bare name and type leave this computer, cut to 64 characters.
+        ({"name": "t" * 80, "type": "mcp", "command": "rm -rf /"}, {"name": "t" * 64, "type": "mcp"}),
+        ({"name": "file_read"}, {"name": "file_read", "type": ""}),
+        # Between tools, and anything malformed, exports no tool.
+        ({}, None),
+        ({"name": "", "type": "terminal"}, None),
+        ({"name": "term\ninal", "type": "terminal"}, None),
+        ({"name": 7, "type": "terminal"}, None),
+        ("terminal", None),
+    ],
+)
+def test_export_carries_the_running_tool_never_its_arguments(directory, presence, exported):
+    view, publish = directory
+    _, _, workspace = publish("one", current_tool=presence)
+    [row] = view.publishable_agents(workspace, "b" * 32)
+    assert row.get("current_tool") == exported
+    assert "rm -rf" not in json.dumps(row)
+
+
 def test_existing_relay_workspace_identity_used_without_key_read(directory):
     import hashlib
 

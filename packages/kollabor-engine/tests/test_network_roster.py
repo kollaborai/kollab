@@ -140,3 +140,20 @@ def test_an_offline_persona_keeps_its_look(tmp_path, monkeypatch):
     assert offline["maya"]["avatar"] == {"kind": "emoji", "value": "\U0001f3af"}
     assert offline["maya"]["color"] == [90, 140, 220] and "caste" not in offline["maya"]
     assert set(offline["koordinator"]) == {"identity", "workspace", "last_ran"}
+
+
+def test_a_running_tool_shows_live_and_is_never_saved(no_real_network_roster):
+    busy = {**RUBY, "current_tool": {"name": "terminal", "type": "terminal"}}
+
+    network = sessions_route._network_view(live(home(busy)), now=1000.0)
+
+    assert network["remote"][0]["current_tool"] == {"name": "terminal", "type": "terminal"}
+    assert "current_tool" not in no_real_network_roster.read_text()
+    # A tool change alone leaves the saved roster as it was.
+    stamp = no_real_network_roster.stat().st_mtime_ns
+    searching = {**RUBY, "current_tool": {"name": "web_search", "type": "mcp"}}
+    sessions_route._network_view(live(home(searching)), now=1010.0)
+    assert no_real_network_roster.stat().st_mtime_ns == stamp
+    # Once it left the network, its row is offline with no tool.
+    gone = sessions_route._network_view(live(home()), now=1020.0)
+    assert gone["remote"][0]["state"] == "offline" and "current_tool" not in gone["remote"][0]

@@ -8,8 +8,10 @@ not deleted from another session's state. No second agent registry is created.
 ``publishable_agents(workspace, workspace_id)`` is the only remote export: it
 requires an explicit workspace, filters before export, and strips local paths,
 socket routes, PIDs, task text, logs, and profile configuration. A short harness
-label and its approval-waiting state may accompany an ACP agent. A caller still
-must authorize the peer before transmitting that roster or accepting messages.
+label and its approval-waiting state may accompany an ACP agent, and the bare
+name and type of the tool an agent runs now (never its arguments) may accompany
+any. A caller still must authorize the peer before transmitting that roster or
+accepting messages.
 """
 
 from __future__ import annotations
@@ -104,6 +106,19 @@ def _json_file(parent: int, name: str) -> dict:
     return value
 
 
+def _running_tool(value) -> tuple[str, str]:
+    """A presence record's ``current_tool`` as (bare name, type); ("", "") between tools."""
+    if not isinstance(value, dict):
+        return "", ""
+    name, kind = value.get("name"), value.get("type", "")
+    if not isinstance(name, str) or not isinstance(kind, str):
+        return "", ""
+    name, kind = name[:64], kind[:64]
+    if not name or not name.isprintable() or not kind.isprintable():
+        return "", ""
+    return name, kind
+
+
 @dataclass(frozen=True)
 class LocalAgent:
     machine_id: str
@@ -119,6 +134,8 @@ class LocalAgent:
     last_heartbeat: float
     harness: str = ""
     acp_waiting: bool = False
+    tool_name: str = ""
+    tool_type: str = ""
 
     @property
     def global_id(self) -> str:
@@ -356,6 +373,7 @@ class LocalAgentDirectory:
             or type(data.get("is_coordinator")) is not bool
         ):
             return None
+        tool_name, tool_type = _running_tool(data.get("current_tool"))
         return LocalAgent(
             self.machine_id,
             self._workspace_id(root, actual_workspace),
@@ -372,6 +390,8 @@ class LocalAgentDirectory:
                      if isinstance(data.get("tags"), dict) else ""),
             acp_waiting=bool((data.get("tags") or {}).get("acp_waiting"))
                         if isinstance(data.get("tags"), dict) else False,
+            tool_name=tool_name,
+            tool_type=tool_type,
         )
 
     def agents(self, workspace: Path | None = None) -> list[LocalAgent]:
@@ -429,6 +449,12 @@ class LocalAgentDirectory:
                 "is_coordinator": item.is_coordinator,
                 "state": item.state,
                 **({"harness": item.harness, "acp_waiting": item.acp_waiting} if item.harness else {}),
+                # The gem on other computers acts it out (presence's current_tool).
+                **(
+                    {"current_tool": {"name": item.tool_name, "type": item.tool_type}}
+                    if item.tool_name
+                    else {}
+                ),
                 "device": device,
             }
             for item in self.agents(workspace)
