@@ -29,6 +29,7 @@ from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
+from kollabor_ai.profile_manager import redact_profile_endpoint
 
 from .context import ContextListSnapshot, ConversationContext
 from .context_registry import ContextRegistry
@@ -617,14 +618,21 @@ class LocalStateService(StateService):
         except Exception:
             model = getattr(profile, "model", "")
 
-        # endpoint (base_url)
+        # Endpoint snapshots may cross the state RPC boundary; never serialize
+        # URL credentials, query parameters, or fragments.
         try:
-            if hasattr(profile, "get_endpoint"):
-                endpoint = profile.get_endpoint()
+            if hasattr(profile, "get_display_endpoint"):
+                endpoint = profile.get_display_endpoint()
+            elif hasattr(profile, "get_endpoint"):
+                endpoint = redact_profile_endpoint(profile.get_endpoint())[0]
             else:
-                endpoint = getattr(profile, "base_url", "")
+                endpoint = redact_profile_endpoint(
+                    getattr(profile, "base_url", "")
+                )[0]
         except Exception:
-            endpoint = getattr(profile, "base_url", "")
+            endpoint = redact_profile_endpoint(
+                getattr(profile, "base_url", "")
+            )[0]
 
         # provider
         try:
@@ -1287,8 +1295,15 @@ class LocalStateService(StateService):
                 await orchestrator.start(target_profile)
                 ok = bool(self._profile_manager.set_active_profile(name))
             except Exception as exc:
-                logger.exception("ACP profile activation failed for %r", name)
-                raise ValueError(f"ACP profile activation failed: {exc}") from exc
+                logger.error(
+                    "ACP profile activation failed for %r (%s)",
+                    name,
+                    type(exc).__name__,
+                )
+                raise ValueError(
+                    f"ACP profile {name!r} could not be activated; verify its "
+                    "adapter command and profile settings."
+                ) from None
         else:
             if str(current_provider).lower() == "acp" and orchestrator is not None:
                 await orchestrator.close()
@@ -1333,7 +1348,11 @@ class LocalStateService(StateService):
                         "failed to apply overrides to profile %r: %s", name, overrides
                     )
             except Exception as e:
-                logger.warning("failed to apply overrides to profile %r: %s", name, e)
+                logger.warning(
+                    "Failed to apply overrides to profile %r (%s)",
+                    name,
+                    type(e).__name__,
+                )
 
         profile = self._profile_manager.get_active_profile()
 
@@ -1359,7 +1378,9 @@ class LocalStateService(StateService):
                         f"Saved profile {name!r} to config (local={persist_local})"
                     )
             except Exception as e:
-                logger.warning(f"failed to persist profile {name!r}: {e}")
+                logger.warning(
+                    "Failed to persist profile %r (%s)", name, type(e).__name__
+                )
 
         # Mirror the legacy profile-switch path: reinitialize the provider
         # synchronously so a chat turn sent immediately after the RPC cannot
@@ -1373,7 +1394,11 @@ class LocalStateService(StateService):
                 if callable(reinitialize):
                     await reinitialize(profile)
             except Exception as e:
-                logger.warning(f"reinitialize_provider error for {name!r}: {e}")
+                logger.warning(
+                    "Provider reinitialization failed for profile %r (%s)",
+                    name,
+                    type(e).__name__,
+                )
             if hasattr(llm, "_load_native_tools") and hasattr(
                 llm, "create_background_task"
             ):

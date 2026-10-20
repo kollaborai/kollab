@@ -32,6 +32,102 @@ from kollabor_config.config_utils import (
 logger = logging.getLogger(__name__)
 _NO_API_KEY_UPDATE = object()
 
+
+def _safe_profile_load_diagnostic(profile_data: Any, error: Exception) -> str:
+    """Keep profile-load errors actionable without echoing configured secrets."""
+    message = str(error) or type(error).__name__
+    sensitive_values: set[str] = set()
+    short_sensitive_value_found = False
+    sensitive_markers = (
+        "api_key",
+        "api_token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "secret",
+        "password",
+        "authorization",
+        "cookie",
+        "credential",
+        "token",
+    )
+
+    def add_value(value: Any) -> None:
+        nonlocal short_sensitive_value_found
+        if isinstance(value, str) and value:
+            if len(value) < 3:
+                short_sensitive_value_found = True
+            else:
+                sensitive_values.add(value)
+
+    def collect_values(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                collect_values(nested)
+        elif isinstance(value, (list, tuple, set)):
+            for nested in value:
+                collect_values(nested)
+        else:
+            add_value(value)
+
+    def collect(value: Any) -> None:
+        if not isinstance(value, dict):
+            collect_values(value)
+            return
+        for key, nested in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized == "base_url":
+                if isinstance(nested, str):
+                    add_value(nested)
+                    try:
+                        from urllib.parse import parse_qsl, urlsplit
+
+                        parsed = urlsplit(nested)
+                        add_value(parsed.username)
+                        add_value(parsed.password)
+                        add_value(parsed.fragment)
+                        _safe_path, _hidden, path_values = _redact_endpoint_path(
+                            parsed.path
+                        )
+                        for path_value in path_values:
+                            add_value(path_value)
+                        for _name, query_value in parse_qsl(
+                            parsed.query, keep_blank_values=True
+                        ):
+                            add_value(query_value)
+                    except ValueError:
+                        pass
+                else:
+                    collect_values(nested)
+            elif normalized in {
+                "env",
+                "extra_headers",
+                "headers",
+                "command",
+                "cwd",
+                "workspace",
+                "install_guidance",
+            } or any(marker in normalized for marker in sensitive_markers):
+                collect_values(nested)
+            elif isinstance(nested, (dict, list, tuple, set)):
+                collect(nested)
+
+    collect(profile_data)
+    if short_sensitive_value_found:
+        return (
+            f"Invalid profile configuration ({type(error).__name__}); "
+            "configured values were suppressed"
+        )
+    for sensitive_value in sorted(sensitive_values, key=len, reverse=True):
+        message = message.replace(sensitive_value, "[redacted]")
+    message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
+    message = re.sub(
+        r"(?i)([?&](?:token|access_token|api_key|key|secret|password)=)[^&#\s]+",
+        r"\1[redacted]",
+        message,
+    )
+    return message[:500] or type(error).__name__
+
 # Sentinel prefix for keys stored in OS keyring
 KEYRING_SENTINEL_PREFIX = "secret:keyring:"
 
@@ -91,6 +187,212 @@ class EnvVarHint:
 
     name: str  # e.g., "KOLLAB_CLAUDE_TOKEN"
     is_set: bool  # True if env var exists and is non-empty
+
+
+def _redact_endpoint_path(path: str) -> tuple[str, bool, tuple[str, ...]]:
+    """Redact token-like path segments while keeping useful endpoint labels."""
+    from urllib.parse import unquote
+
+    sensitive_markers = (
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "signature",
+        "api_key",
+        "api-key",
+        "api_keys",
+        "api-keys",
+        "apikey",
+        "access_token",
+        "access-token",
+        "access_key",
+        "access-key",
+        "auth",
+    )
+    path_labels = {
+        "token",
+        "tokens",
+        "key",
+        "keys",
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "credential",
+        "credentials",
+        "signature",
+        "signatures",
+        "api_key",
+        "api-key",
+        "api_keys",
+        "api-keys",
+        "apikey",
+        "access_token",
+        "access-token",
+        "access_key",
+        "access-key",
+        "auth",
+        "authorization",
+        "oauth",
+        "tenant",
+        "tenants",
+        "organization",
+        "organizations",
+        "project",
+        "projects",
+        "deployment",
+        "deployments",
+    }
+    safe_path_segments = {
+        "api",
+        "v1",
+        "v2",
+        "v3",
+        "v1beta",
+        "v1beta1",
+        "v1beta2",
+        "v1alpha",
+        "v1alpha1",
+        "anthropic",
+        "openai",
+        "openrouter",
+        "claude",
+        "models",
+        "model",
+        "chat",
+        "completions",
+        "completion",
+        "messages",
+        "embeddings",
+        "responses",
+        "generate",
+        "generatecontent",
+        "streamgeneratecontent",
+        "contents",
+        "files",
+        "audio",
+        "images",
+        "batches",
+        "batch",
+        "moderations",
+        "rerank",
+        "search",
+        "health",
+        "status",
+        "compatible",
+        "version",
+        "default",
+        "redacted",
+    }
+    safe_segments: list[str] = []
+    redacted_values: list[str] = []
+    hide_next = False
+    hidden = False
+
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        lower = decoded.lower()
+        if not decoded or lower == "[redacted]":
+            safe_segments.append(segment)
+            continue
+        if hide_next:
+            safe_segments.append("[redacted]")
+            redacted_values.extend((segment, decoded))
+            hide_next = False
+            hidden = True
+            continue
+        if "=" in decoded:
+            key, value = decoded.split("=", 1)
+            key_lower = key.lower()
+            if any(marker in key_lower for marker in sensitive_markers):
+                safe_segments.append(
+                    f"{key}=[redacted]" if key_lower in path_labels else "[redacted]"
+                )
+                redacted_values.extend((segment, value))
+                hidden = True
+                continue
+        if lower in path_labels:
+            safe_segments.append(segment)
+            hide_next = True
+            hidden = True
+            continue
+        if (
+            lower in safe_path_segments
+            or re.fullmatch(r"v\d+(?:beta\d*|alpha\d*|preview\d*)?", lower)
+        ):
+            safe_segments.append(segment)
+            continue
+        # Unknown endpoint path components can be opaque tokens or tenant IDs.
+        # Preserve only known API route labels so short/random path credentials
+        # do not escape when they lack a marker word.
+        safe_segments.append("[redacted]")
+        redacted_values.extend((segment, decoded))
+        hidden = True
+
+    if hide_next:
+        safe_segments.append("[redacted]")
+        hidden = True
+    return "/".join(safe_segments), hidden, tuple(redacted_values)
+
+
+def redact_profile_endpoint(value: Any) -> tuple[Any, bool]:
+    """Return a display-safe endpoint and whether URL data was hidden."""
+    if value is None or value == "":
+        return value, False
+    if not isinstance(value, str):
+        return "[configured endpoint]", True
+
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(value)
+        if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+            raise ValueError("not an absolute endpoint")
+        hostname = parsed.hostname
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        if parsed.port is not None:
+            hostname = f"{hostname}:{parsed.port}"
+        safe_path, path_hidden, _redacted_path_values = _redact_endpoint_path(
+            parsed.path
+        )
+        safe_value = urlunsplit(
+            (parsed.scheme, hostname, safe_path, "", "")
+        )
+        hidden = bool(
+            parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or path_hidden
+        )
+        return safe_value, hidden
+    except ValueError:
+        safe_value = re.sub(
+            r"(?i)^([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1", value
+        )
+        safe_value = re.sub(r"[?#].*$", "", safe_value)
+        if "@" in safe_value:
+            safe_value = safe_value.rsplit("@", 1)[-1]
+        try:
+            fallback = urlsplit(safe_value)
+            if fallback.scheme and fallback.netloc:
+                safe_path, path_hidden, _redacted_path_values = _redact_endpoint_path(
+                    fallback.path
+                )
+                safe_value = urlunsplit(
+                    (fallback.scheme, fallback.netloc, safe_path, "", "")
+                )
+            else:
+                safe_value, path_hidden, _redacted_path_values = _redact_endpoint_path(
+                    safe_value
+                )
+        except ValueError:
+            safe_value, path_hidden, _redacted_path_values = _redact_endpoint_path(
+                safe_value
+            )
+        return safe_value or "[configured endpoint]", safe_value != value or path_hidden
 
 
 @dataclass
@@ -307,7 +609,7 @@ class LLMProfile:
         return value
 
     def get_endpoint(self) -> str:
-        """Get endpoint URL, checking env var first. OPTIONAL field."""
+        """Get the configured endpoint for provider requests."""
         env_val = self._get_env_value("BASE_URL")
         if env_val:
             return env_val
@@ -315,6 +617,11 @@ class LLMProfile:
         if global_val:
             return global_val
         return self.base_url or ""
+
+    def get_display_endpoint(self) -> str:
+        """Get a safe endpoint label without URL credentials or query data."""
+        endpoint, _hidden = redact_profile_endpoint(self.get_endpoint())
+        return str(endpoint or "")
 
     def get_api_key(self) -> str:
         """Get API key with tiered resolution.
@@ -749,19 +1056,31 @@ class ProfileManager:
             "provider": "acp",
             "command": ["claude-agent-acp"],
             "description": "Claude Code over ACP",
-            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0",
+            "install_guidance": (
+                "Install with: npm install --prefix "
+                "~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save "
+                "@agentclientprotocol/claude-agent-acp@0.89.0"
+            ),
         },
         "codex-cli": {
             "provider": "acp",
             "command": ["codex-acp"],
             "description": "Codex over ACP",
-            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
+            "install_guidance": (
+                "Install with: npm install --prefix "
+                "~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save "
+                "@agentclientprotocol/codex-acp@2.1.1"
+            ),
         },
         "gemini-cli": {
             "provider": "acp",
             "command": ["gemini", "--acp"],
             "description": "Gemini CLI over ACP",
-            "install_guidance": "Install with: npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
+            "install_guidance": (
+                "Install with: npm install --prefix "
+                "~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save "
+                "@google/gemini-cli@0.63.0"
+            ),
         },
     }
 
@@ -776,6 +1095,7 @@ class ProfileManager:
         """
         self.config = config
         self._profiles: Dict[str, LLMProfile] = {}
+        self._invalid_profile_errors: Dict[str, str] = {}
         self._active_profile_name: str = "default"
         # Treat a CLI --llm selection as "explicitly set" so the
         # oauth auto-activation path below won't override it. The actual
@@ -1124,11 +1444,38 @@ class ProfileManager:
         # This ensures we get the latest saved values after save_profile_values_to_config
         user_profiles, active_profile, default_profile = self._read_profiles_from_file()
 
-        if user_profiles:
-            for name, data in user_profiles.items():
-                if isinstance(data, dict):
-                    self._profiles[name] = LLMProfile.from_dict(name, data)
-                    logger.debug(f"Loaded user profile: {name}")
+        self._invalid_profile_errors = {}
+        if user_profiles is not None and not isinstance(user_profiles, dict):
+            reason = "profile configuration must be an object"
+            self._invalid_profile_errors["<profiles>"] = reason
+            logger.warning("Skipping invalid LLM profiles: %s", reason)
+            user_profiles = {}
+
+        for name, data in (user_profiles or {}).items():
+            if not isinstance(name, str) or not name.strip():
+                invalid_name = (
+                    name if isinstance(name, str) and name.strip() else "<blank-name>"
+                )
+                reason = "profile name must be a non-empty string"
+                self._invalid_profile_errors[str(invalid_name)] = reason
+                logger.warning("Skipping invalid LLM profile: %s", reason)
+                continue
+            if not isinstance(data, dict):
+                reason = "profile configuration must be an object"
+                self._invalid_profile_errors[name] = reason
+                logger.warning("Skipping invalid LLM profile %r: %s", name, reason)
+                continue
+            try:
+                profile = LLMProfile.from_dict(name, data)
+            except Exception as exc:
+                reason = _safe_profile_load_diagnostic(data, exc)
+                self._invalid_profile_errors[name] = reason
+                logger.warning("Skipping invalid LLM profile %r: %s", name, reason)
+                continue
+
+            self._profiles[name] = profile
+            self._invalid_profile_errors.pop(name, None)
+            logger.debug(f"Loaded user profile: {name}")
 
         # Heal persisted auto-profiles: if a user-saved profile shares a
         # name with an auto-profile entry (e.g. "openrouter-auto") and the
@@ -1185,23 +1532,29 @@ class ProfileManager:
         active = getattr(self, "_pending_active_profile", None)
         default = getattr(self, "_pending_default_profile", None)
 
-        if active and active in self._profiles:
+        active_found = bool(active and active in self._profiles)
+        default_found = bool(
+            default and default != "default" and default in self._profiles
+        )
+
+        if active and not active_found:
+            logger.warning(
+                "Persisted active profile %r not found in registry", active
+            )
+        if default and default != "default" and not default_found:
+            logger.warning(
+                "Persisted default profile %r not found in registry", default
+            )
+
+        if active_found:
             self._active_profile_name = active
             if active != "default":
                 self._profile_explicitly_set = True
             logger.info(f"Activated persisted profile: {active}")
-        elif default and default != "default" and default in self._profiles:
+        elif default_found:
             self._active_profile_name = default
             self._profile_explicitly_set = True
             logger.info(f"Activated persisted default profile: {default}")
-        elif active:
-            # The persisted active profile wasn't found -- log so users
-            # know why their selection was dropped.
-            logger.warning(
-                f"Persisted active profile {active!r} not found in "
-                f"registry; falling back to current active "
-                f"{self._active_profile_name!r}"
-            )
 
     def _read_profiles_from_file(self) -> tuple:
         """Read profiles from global and local config files.
@@ -1686,6 +2039,8 @@ class ProfileManager:
                 resolved_key = profile.get_api_key()
                 if getattr(profile, "auth_type", None) == "oauth":
                     pass  # OAuth tokens refreshed from token storage
+                elif profile.api_key_from_env:
+                    pass  # Environment-backed credentials stay in the environment
                 elif auto_info:
                     # Auto-profile from a provider env var -- never persist the key.
                     # The provider env var stays the source of truth.
@@ -1734,6 +2089,18 @@ class ProfileManager:
                         profile_dict[field_name] = value
                 if getattr(profile, "auth_type", None):
                     profile_dict["auth_type"] = profile.auth_type
+                if profile.provider == "acp":
+                    profile_dict["command"] = list(profile.command or ())
+                    if profile.cwd is not None:
+                        profile_dict["cwd"] = profile.cwd
+                    if profile.workspace is not None:
+                        profile_dict["workspace"] = profile.workspace
+                    if profile.pass_env:
+                        profile_dict["pass_env"] = list(profile.pass_env)
+                    if profile.env:
+                        profile_dict["env"] = dict(profile.env)
+                    if profile.install_guidance:
+                        profile_dict["install_guidance"] = profile.install_guidance
                 return profile_dict
 
             def _write_profile_config(config_path: Path, location: str) -> bool:
@@ -1790,6 +2157,10 @@ class ProfileManager:
             logger.error(f"Failed to save profile to config: {e}")
             return False
 
+    def get_invalid_profiles(self) -> Dict[str, str]:
+        """Return profile names skipped during loading and their diagnostics."""
+        return dict(self._invalid_profile_errors)
+
     def list_profiles(self) -> List[LLMProfile]:
         """
         List all available profiles.
@@ -1808,23 +2179,99 @@ class ProfileManager:
         """
         return list(self._profiles.keys())
 
-    def add_profile(self, profile: LLMProfile) -> bool:
-        """
-        Add a new profile.
-
-        Args:
-            profile: LLMProfile to add
-
-        Returns:
-            True if added, False if name already exists
-        """
+    def add_profile(
+        self, profile: LLMProfile, save_to_config: bool = False
+    ) -> bool:
+        """Add a profile, optionally persisting it as one atomic operation."""
         if profile.name in self._profiles:
             logger.warning(f"Profile already exists: {profile.name}")
             return False
 
+        previous_error = self._invalid_profile_errors.pop(profile.name, None)
         self._profiles[profile.name] = profile
+        if save_to_config and not self.save_profile_values_to_config(profile):
+            self._profiles.pop(profile.name, None)
+            if previous_error:
+                self._invalid_profile_errors[profile.name] = previous_error
+            logger.error("Failed to persist profile: %s", profile.name)
+            return False
+
         logger.info(f"Added profile: {profile.name}")
         return True
+
+    def duplicate_profile(
+        self,
+        source_name: str,
+        new_name: str,
+        overrides: Optional[Dict[str, Any]] = None,
+        save_to_config: bool = True,
+    ) -> LLMProfile:
+        """Create an independent copy of a registered profile.
+
+        ACP runtime fields (command, cwd, workspace, environment and install
+        guidance) are copied with the profile instead of being reconstructed
+        from UI-visible fields.
+        """
+        source_name = source_name.strip() if isinstance(source_name, str) else ""
+        new_name = new_name.strip() if isinstance(new_name, str) else ""
+        if not source_name:
+            raise ValueError("A source profile name is required")
+        if not new_name:
+            raise ValueError("A new profile name is required")
+        if new_name in self._profiles:
+            raise ValueError(f"Profile {new_name!r} already exists")
+
+        source = self._profiles.get(source_name)
+        if source is None:
+            invalid_reason = self._invalid_profile_errors.get(source_name)
+            if invalid_reason:
+                raise ValueError(
+                    f"Cannot copy invalid profile {source_name!r}: {invalid_reason}"
+                )
+            raise ValueError(f"Profile {source_name!r} was not found")
+        if source.is_provisioned:
+            raise ValueError(
+                f"Profile {source_name!r} is externally provisioned and cannot be copied"
+            )
+        if source.auth_type == "oauth":
+            raise ValueError(
+                f"Profile {source_name!r} uses OAuth credentials; sign in to a new "
+                "profile instead of copying an access token"
+            )
+
+        profile = copy.deepcopy(source)
+        profile.name = new_name
+        if profile.api_key_from_env:
+            target_key_env = profile._get_env_key("API_KEY")
+            target_key = profile._get_env_value("API_KEY") or profile._get_global_env_value(
+                "API_KEY"
+            )
+            if not target_key:
+                raise ValueError(
+                    f"Profile {source_name!r} uses an environment-backed API key, "
+                    "which is not copied for security. Set "
+                    f"{target_key_env} or KOLLAB_API_KEY before copying."
+                )
+            profile.api_key = ""
+        for field_name, value in (overrides or {}).items():
+            if field_name == "name" or field_name not in profile.__dataclass_fields__:
+                raise ValueError(f"Profile field {field_name!r} cannot be overridden")
+            setattr(profile, field_name, value)
+
+        if profile.provider == "acp" and not profile.command:
+            raise ValueError(
+                f"ACP profile {source_name!r} has no command to copy; restore its "
+                "ACP command before duplicating it"
+            )
+        if profile.provider != "acp" and not profile.model:
+            raise ValueError(
+                f"Profile {source_name!r} has no model to copy; configure a model first"
+            )
+        if not self.add_profile(profile, save_to_config=save_to_config):
+            if new_name in self._profiles:
+                raise ValueError(f"Profile {new_name!r} already exists")
+            raise RuntimeError(f"Could not save copied profile {new_name!r} to config")
+        return profile
 
     def create_profile(
         self,
@@ -2200,19 +2647,24 @@ class ProfileManager:
             return f"Profile '{name}' not found"
 
         hints = profile.get_env_var_hints()
-        token_status = "[set]" if hints["token"].is_set else "[not set]"
-
+        token_hint = hints.get("token")
         tool_mode = "native" if profile.get_supports_tools() else "xml"
         lines = [
             f"Profile: {profile.name}",
-            f"  Endpoint: {profile.get_endpoint() or '(not configured)'}",
+            f"  Endpoint: {profile.get_display_endpoint() or '(not configured)'}",
             f"  Model: {profile.get_model() or '(not configured)'}",
-            f"  Token: {hints['token'].name} {token_status}",
-            f"  Temperature: {profile.get_temperature()}",
-            f"  Max Tokens: {profile.get_max_tokens() or '(API default)'}",
-            f"  Timeout: {profile.get_timeout()}s",
-            f"  Tool Calling: {tool_mode}",
         ]
+        if token_hint is not None:
+            token_status = "[set]" if token_hint.is_set else "[not set]"
+            lines.append(f"  Token: {token_hint.name} {token_status}")
+        lines.extend(
+            [
+                f"  Temperature: {profile.get_temperature()}",
+                f"  Max Tokens: {profile.get_max_tokens() or '(API default)'}",
+                f"  Timeout: {profile.get_timeout()}s",
+                f"  Tool Calling: {tool_mode}",
+            ]
+        )
         if profile.description:
             lines.append(f"  Description: {profile.description}")
 
