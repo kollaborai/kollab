@@ -99,6 +99,22 @@ def test_terminal_constructor_uses_isolated_profile_fixture(tmp_path, monkeypatc
     assert app.profile_manager.get_active_profile().model == ""
 
 
+def test_hub_scope_config_read_failure_is_logged(monkeypatch, tmp_path, caplog):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{not-json")
+    monkeypatch.delenv("KOLLAB_HUB_PROJECT_SCOPED", raising=False)
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_existing_global_config_path",
+        lambda: config_path,
+    )
+
+    with caplog.at_level("WARNING", logger="kollabor.application"):
+        application_module.TerminalLLMChat._apply_hub_project_scope_from_config()
+
+    assert "Unable to read global config for hub project scope" in caplog.text
+
+
+
 @pytest.mark.asyncio
 async def test_hub_readiness_barrier_waits_for_delayed_socket(tmp_path):
     services = {}
@@ -120,7 +136,7 @@ async def test_hub_readiness_barrier_waits_for_delayed_socket(tmp_path):
     assert socket_path.exists()
     plugin._socket_server._server.close()
     await plugin._socket_server._server.wait_closed()
-    socket_path.unlink()
+    socket_path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
