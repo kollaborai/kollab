@@ -56,6 +56,7 @@ class ACPProfile:
         "gemini-cli": {
             "command": ["gemini", "--acp"],
             "managed_dir": "gemini-0.63.0",
+            "pass_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
         },
     }

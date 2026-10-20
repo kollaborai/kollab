@@ -57,11 +57,16 @@ kollab --attach claude
 Consumer sign-in for Gemini CLI is retired. For API-key authentication:
 
 1. Set `GEMINI_API_KEY` in the environment that launches Kollab.
-2. Add a named ACP profile under `kollabor.llm.profiles` in
-   `.kollab/config.json`, and allowlist the key name in `pass_env`:
+2. Restart Kollab and launch with `kollab --llm gemini-cli`.
 
-   The built-in profile currently has no `pass_env` allowlist, so the API-key
-   route needs this named profile.
+   The built-in `gemini-cli` profile allowlists `GEMINI_API_KEY` and
+   `GOOGLE_API_KEY`, so the key reaches the Gemini CLI child without extra
+   configuration. Kollab still filters all other provider-key variables
+   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`) from the child
+   environment. To name additional variables, add a named ACP profile under
+   `kollabor.llm.profiles` in `.kollab/config.json` and list the variable
+   names in `pass_env` (variable names only; never put key values in the
+   config):
    ```json
    {
      "kollabor": {
@@ -79,11 +84,11 @@ Consumer sign-in for Gemini CLI is retired. For API-key authentication:
    ```
    Kollab filters provider-key variables from child environments unless they
    are allowlisted. See [ACP profile setup](profiles.md).
-3. Restart Kollab and launch with `kollab --llm gemini-api`.
 
 For Vertex AI, enable `GOOGLE_GENAI_USE_VERTEXAI` and make the project and
-credentials available to the Gemini CLI child. If using `GOOGLE_API_KEY`, add
-it to `pass_env` too. Restart Kollab before retrying.
+credentials available to the Gemini CLI child. `GOOGLE_API_KEY` already
+passes to the built-in `gemini-cli` child; for other variables, name them in
+a named profile's `pass_env`. Restart Kollab before retrying.
 
 The related in-app overview is **Learn > Provider profiles** (topic ID
 `profiles`; route `/learn?topic=profiles`). This general profile guidance does
