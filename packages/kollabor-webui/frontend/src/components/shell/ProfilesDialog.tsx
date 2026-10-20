@@ -389,9 +389,9 @@ export function ProfilesDialog({
             >
               Eligible profiles copy stored credentials and hidden settings,
               including ACP runtime fields, server-side. Environment-backed API
-              keys stay with the source; configure the new profile's API-key
-              environment variable before copying. System-keyring references
-              remain shared when used. OAuth and provisioned profiles cannot be
+              keys are not copied. Set the target profile's key environment
+              variable or KOLLAB_API_KEY before copying. System-keyring
+              references remain shared when used. OAuth and provisioned profiles cannot be
               copied. You can change the name and reasoning effort here.
             </p>
           )}

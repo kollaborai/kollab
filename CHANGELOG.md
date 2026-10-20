@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Profiles has a Reasoning Effort picker; effort appears in each row and
   Model Default clears it. Unsupported values are rejected. Copy uses the
   stored source profile server-side, preserving saved credentials and hidden
-  settings (including ACP runtime fields). Environment-backed keys stay with
-  their source; system-keyring references remain shared. OAuth and provisioned
+  settings (including ACP runtime fields). Environment-backed keys are not
+  copied; set the target profile's key variable or `KOLLAB_API_KEY` before
+  copying. System-keyring references remain shared. OAuth and provisioned
   profiles cannot be copied; the form explains these rules before Create.
 
 ### Fixed
