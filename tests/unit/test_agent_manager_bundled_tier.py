@@ -149,8 +149,7 @@ def test_the_skill_library_and_new_agents_follow_the_given_folder(machine, tmp_p
 
 @pytest.fixture
 def hub_protocol(machine, monkeypatch):
-    """The coder agent, a renderer that returns the doc as is, and the hub switched on."""
-    monkeypatch.setenv("KOLLAB_HUB_ENABLED", "1")
+    """The coder agent, a renderer that returns the bundled doc as is."""
     for key in ("KOLLAB_HUB_SOLO", "KOLLAB_HUB_DISABLED", "KOLLAB_NO_HUB"):
         monkeypatch.delenv(key, raising=False)
     folder, tier = AgentManager().find_agent_dir("coder")
@@ -192,7 +191,10 @@ def test_the_hub_protocol_local_beats_global_beats_bundled(
     assert hub_protocol.load(bare) == "global doc"
 
 
-def test_the_hub_protocol_stays_off_without_the_hub(machine, hub_protocol, monkeypatch):
-    monkeypatch.delenv("KOLLAB_HUB_ENABLED")
+def test_the_hub_protocol_is_on_without_opt_in(machine, hub_protocol, monkeypatch):
+    monkeypatch.delenv("KOLLAB_HUB_ENABLED", raising=False)
 
+    assert hub_protocol.load() == hub_protocol.bundled
+
+    monkeypatch.setenv("KOLLAB_HUB_SOLO", "1")
     assert hub_protocol.load() == ""

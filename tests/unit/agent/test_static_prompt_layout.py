@@ -63,20 +63,21 @@ class TestFullSystemPromptLayout(unittest.TestCase):
         prompt = self._render()
         self.assertTrue(prompt.startswith("kollabor system prompt v0.4"))
 
-    def test_no_hub_docs_without_hub_env(self):
-        """Without hub env there is no hub protocol at all."""
+    def test_bundled_hub_docs_are_on_without_opt_in(self):
+        """The bundled hub protocol is enabled unless explicitly disabled."""
         env = {
-            k: ""
-            for k in (
-                "KOLLAB_HUB_ENABLED",
-                "KOLLAB_HUB_SOLO",
-                "KOLLAB_HUB_DISABLED",
-                "KOLLAB_NO_HUB",
-            )
+            "KOLLAB_HUB_ENABLED": "",
+            "KOLLAB_HUB_SOLO": "",
+            "KOLLAB_HUB_DISABLED": "",
+            "KOLLAB_NO_HUB": "",
         }
-        with patch.dict(os.environ, env, clear=False):
+        bundled_system = Path(__file__).resolve().parents[3] / "bundles" / "agents" / "system"
+        with patch(
+            "kollabor_config.config_utils.get_global_agents_dir",
+            return_value=bundled_system.parent,
+        ), patch.dict(os.environ, env, clear=False):
             prompt = self._render()
-        self.assertNotIn("hub", prompt.lower())
+        self.assertIn("kollabor hub", prompt.lower())
 
     def test_hub_protocol_appended_only_when_hub_on(self):
         """KOLLAB_HUB_ENABLED=1 appends the hub protocol at the tail."""
