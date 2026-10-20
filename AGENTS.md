@@ -18,16 +18,32 @@ state. Temporary rollback artifacts require an explicit retention/cleanup condit
 
 ## releases and the shared checkout
 
-For every release, read `docs/release-process.md`. Agents share one checkout on
-`main`: never create a worktree, stash, reset, clean, restore, or switch branches
-in it, and never build a release from uncommitted files or a scratch clone.
-Commit the release on local `main` by explicit paths (other people's edits stay
-uncommitted and out of it), push `HEAD` to `release/X.Y.Z`, merge with a merge
-commit, then `git pull --ff-only origin main` and tag the merge. Once it is
-published, run `uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`
-(the release binary in `~/.local/bin`). The release is not done until
-`main` matches `origin/main`, `git status` lists none of the release's files,
-and `kollab --version` reports the new version.
+We follow Trunk-Based Development (short-lived feature branches, one worktree
+per task) with Conventional Commits and SemVer; see
+SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
+
+Feature work happens in git worktrees. For each task, create a worktree at
+`../kollab-wt/issue-<N>-<slug>` with branch `issue-<N>-<slug>` branched off
+`origin/main`:
+
+    git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/main
+
+Edit, test, and commit inside the worktree; remove the worktree and branch
+after the PR merges. The shared checkout on `main` is a coordination and
+release surface, not an editing surface: never stash, reset, clean, restore,
+or switch branches in it, and never build a release from uncommitted files or
+a scratch clone.
+
+For every release, read `docs/release-process.md`. Releases are tagged
+whenever Marco decides, and agents may create a release tag ONLY when Marco
+explicitly instructs them to. Commit the release on local `main` by explicit
+paths (other people's edits stay uncommitted and out of it), push `HEAD` to
+`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only
+origin main` and tag the merge. Once it is published, run
+`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the
+release binary in `~/.local/bin`). The release is not done until `main`
+matches `origin/main`, `git status` lists none of the release's files, and
+`kollab --version` reports the new version.
 
 ## project snapshot
 

@@ -19,7 +19,9 @@ Each release should have one release owner. The owner is responsible for:
 - deciding the version
 - running the validation gates
 - checking the public repo surface
-- tagging and publishing deliberately
+- tagging and publishing deliberately (releases are tagged whenever Marco
+  decides, and agents may create a release tag ONLY when Marco explicitly
+  instructs them to)
 - recording follow-up issues for deferred work
 
 ## Versioning
@@ -34,11 +36,13 @@ Use a `vX.Y.Z` Git tag for public releases.
 
 ## Release From Main, in Place
 
-Agents share one checkout on `main`. Never create a worktree, stash, reset,
-clean, restore, or switch branches in it, and never build a release from
-uncommitted files or a scratch clone: the checkout stays behind, dirty with
-work that already shipped. Commit the release on local `main` instead; the
-merge then fast-forwards it, so `main` ends clean and level by construction.
+Releases run from the shared `main` checkout; feature work happens in git
+worktrees per `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` (`../kollab-wt/issue-<N>-<slug>`,
+branched off `origin/main`). In the shared checkout, never stash, reset, clean,
+restore, or switch branches, and never build a release from uncommitted files
+or a scratch clone: the checkout stays behind, dirty with work that already
+shipped. Commit the release on local `main` instead; the merge then
+fast-forwards it, so `main` ends clean and level by construction.
 
 1. Commit the release's work on `main` by explicit paths
    (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'
@@ -78,6 +82,7 @@ before restarting any.
 ## Pre-Release Checklist
 
 - [ ] `git status --short --branch` is reviewed.
+- [ ] All machines used for this repo are checked for unpushed work.
 - [ ] Release scope is summarized in `CHANGELOG.md` under the target version.
 - [ ] `README.md`, `CONTRIBUTING.md`, `SUPPORT.md`, `SECURITY.md`, and docs links are current.
 - [ ] No local runtime state, generated logs, raw transcripts, scratch files, or
@@ -140,7 +145,9 @@ scripts/docker-runtime.sh smoke
    artifact download directory. Checksums contain basenames, not build paths.
    The Binaries workflow builds and checks this set only for a `v*` tag
    (publish.yml calls it) or a manual run; pull requests and branch pushes
-   build no packages. To catch a packaging failure before tagging, run it on
+   build no packages. The only PR-time binary build is the `ci/binary-smoke`
+   CI job (one quick Linux smoke build, no artifacts, not a required merge
+   check); full four-platform binaries and all desktop builds remain tag-only. To catch a packaging failure before tagging, run it on
    the release branch: `gh workflow run binaries.yml --ref release/X.Y.Z`.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a

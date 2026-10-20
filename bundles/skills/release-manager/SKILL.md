@@ -41,9 +41,11 @@ release source of truth.
   `git clean`, or tag deletion/rewriting to make a release appear clean.
 - A dirty checkout is a release blocker until every dirty path is classified. Do not
   assume generated files, documentation, or index artifacts are safe to ignore.
-- Agents share one checkout on `main`. Never create a worktree, stash, reset, clean, or
-  switch branches in it, and never build a release from uncommitted files or a scratch
-  clone. Commit the release on local `main` by explicit paths, push `HEAD` to
+- Releases run from the shared `main` checkout; feature work happens in git worktrees
+  per `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` (`../kollab-wt/issue-<N>-<slug>`, branched off
+  `origin/main`). Never stash, reset, clean, or switch branches in the shared checkout,
+  and never build a release from uncommitted files or a scratch clone. Commit the release
+  on local `main` by explicit paths, push `HEAD` to
   `release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
   (`docs/release-process.md`). Do not move, stash, or copy another person's work without
   explicit authorization.
@@ -186,7 +188,9 @@ tag a partially validated build.
 
 ## 4. Tag and publish
 
-Only after the pre-tag gates pass:
+Only after the pre-tag gates pass, and only on Marco's explicit instruction
+(releases are tagged whenever Marco decides, and agents may create a release
+tag ONLY when Marco explicitly instructs them to):
 
 1. Push `HEAD` to `release/X.Y.Z` and open its PR; auto-merge merges it with a merge
    commit (never squash) once checks pass. Then `git pull --ff-only origin main` and create

@@ -855,9 +855,15 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 ### Git Workflow
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, `tests/` MUST reference GitHub issue
-- Branch: `issue-123-description` or `feature/issue-123-description`
-- Commit: `fixes #123`, `closes #123`, `resolves #123`, or `#123`
+- Worktree per task (trunk-based development, see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
+  `git worktree add ../kollab-wt/issue-123-slug -b issue-123-slug origin/main`;
+  remove the worktree and branch after the PR merges
+- Branch: `issue-123-description`, one branch per worktree, branched off `origin/main`
+- Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
+  `fixes #123`, `closes #123`, `resolves #123`, or `#123`
 - Main branch protected - no direct pushes
+- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco marks a PR
+  ready or approves it; auto-merge then merges it once checks pass.
 - PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
   repo, opened by a person with write access, merges with a merge commit once the three
   required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
@@ -869,7 +875,7 @@ gh issue create --title "Fix version display"
 git switch -c issue-8-version-display-fix
 git commit -m "Fix version display fixes #8"
 git push -u kollaborai issue-8-version-display-fix
-gh pr create --title "Fix version display" --body "Fixes #8"
+gh pr create --draft --title "Fix version display" --body "Fixes #8"
 ```
 
 ### Version Management
@@ -886,7 +892,7 @@ To update: Only modify `pyproject.toml`.
 `main` is branch-protected: **no direct pushes**, every change lands via PR + 3
 required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
 
-**Correct order — prep PR BEFORE the tag** (source must already match the tag; do
+**Correct order: prep PR BEFORE the tag** (source must already match the tag; do
 not rely on CI to repair it):
 
 1. Prep commit on local `main` (`git commit -- <paths>`; never a worktree, branch
@@ -894,13 +900,17 @@ not rely on CI to repair it):
    - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
    - inter-package `kollabor-*>=` constraints, then `uv lock`
    - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
-     `kollabor/updates/CHANGELOG.md` (keep them **byte-identical** — `cmp` them;
+     `kollabor/updates/CHANGELOG.md` (keep them **byte-identical**, `cmp` them;
      the in-app update UI reads the packaged copy)
 2. `git push origin "HEAD:refs/heads/release/X.Y.Z"` and open the PR; it merges itself
    with a merge commit once the checks pass (never squash). Then
    `git pull --ff-only origin main`.
 3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
    then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).
+   Releases are tagged whenever Marco decides, and agents may create a release
+   tag ONLY when Marco explicitly instructs them to. Desktop Mac/Linux builds
+   run only from the release tag; they are never PR checks or merge
+   requirements.
 4. Once publishing is green: `uv sync --all-extras` and
    `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
    `~/.local/bin`). Done = `main` matches
@@ -910,11 +920,11 @@ not rely on CI to repair it):
 The tag triggers `.github/workflows/publish.yml` → the four platform binaries
 (`binaries.yml`, built and checked before anything publishes) → PyPI + Homebrew
 tap → GitHub Release with the binaries attached. Its first step, **Verify release consistency**, fails the publish
-if the tagged commit's versions/changelog don't already agree with the tag — so
+if the tagged commit's versions/changelog don't already agree with the tag, so
 a tag cut without a prep PR fails fast instead of publishing silently.
 
 Canonical checklist: `docs/release-process.md`. Full agent playbook (not
-invocable from Claude Code — read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
+invocable from Claude Code; read + follow by hand): `bundles/skills/release-manager/SKILL.md`.
 
 ### Release Binaries
 
