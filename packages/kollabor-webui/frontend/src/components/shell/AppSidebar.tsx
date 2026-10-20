@@ -634,14 +634,14 @@ export function AppSidebar({
               <a
                 href="/learn?topic=agents"
                 onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
               >
                 Learn about agents
               </a>
               <a
                 href="/learn?topic=workspaces"
                 onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
               >
                 Learn about workspaces
               </a>
