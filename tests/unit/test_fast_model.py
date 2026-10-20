@@ -1,0 +1,67 @@
+"""Fast model routing (#260): selection, fallback, summary-only snapshot."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/kollabor-voice/src"))
+
+from kollabor_voice.responder import RESPONDER_KEY, activity_snapshot, responder_model
+
+from kollabor_ai.fast_model import SHARED_KEY, resolve_fast_model, with_model
+
+
+class Cfg:
+    def __init__(self, **d):
+        self.d = d
+
+    def get(self, key, default=None):
+        return self.d.get(key, default)
+
+
+class Conf:
+    def __init__(self, model):
+        self.model = model
+
+    def model_copy(self, update):
+        return Conf(update["model"])
+
+
+class Prov:
+    def __init__(self):
+        self.model = "big"
+        self.config = Conf("big")
+
+
+def test_unset_falls_back_to_none_and_same_provider():
+    assert resolve_fast_model(Cfg(), "plugins.hub.dreaming_model") is None
+    assert resolve_fast_model(None, "x") is None
+    p = Prov()
+    assert with_model(p, None) is p
+    assert with_model(p, "big") is p
+
+
+def test_specific_beats_shared_beats_none():
+    cfg = Cfg(**{SHARED_KEY: "haiku", "plugins.hub.dreaming_model": " mini "})
+    assert resolve_fast_model(cfg, "plugins.hub.dreaming_model") == "mini"
+    assert resolve_fast_model(cfg, "other") == "haiku"
+    assert responder_model(Cfg(**{RESPONDER_KEY: "flash"})) == "flash"
+
+
+def test_with_model_copies_not_mutates():
+    p = Prov()
+    q = with_model(p, "haiku")
+    assert q is not p and q.model == "haiku" and q.config.model == "haiku"
+    assert p.model == "big" and p.config.model == "big"
+
+
+def test_snapshot_is_summary_only():
+    snap = activity_snapshot(
+        [
+            {"tool": "Bash", "command": "curl -H 'Authorization: sekrit' x", "status": "ok"},
+            {"tool": "Edit", "target": "/src/secret/foo.py", "output": "RAWOUT"},
+        ]
+    )
+    assert "Bash" in snap and "foo.py" in snap
+    for leak in ("curl", "sekrit", "RAWOUT", "/src/secret"):
+        assert leak not in snap
+    assert activity_snapshot([]) == "- idle"

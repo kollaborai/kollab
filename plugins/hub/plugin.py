@@ -712,6 +712,7 @@ class HubPlugin(BasePlugin):
                     "dreaming_idle_threshold": 300,
                     "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
+                    "dreaming_model": "",
                     "supervisor_enabled": True,
                     "supervisor_poll_interval": 10,
                     "supervisor_stall_threshold": 900,
@@ -899,6 +900,12 @@ class HubPlugin(BasePlugin):
                     "max_value": 500,
                     "step": 10,
                     "help": "Number of stream entries to review when dreaming",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Dream Model",
+                    "config_path": "plugins.hub.dreaming_model",
+                    "help": "Fast, cheap model id for dreaming (blank uses kollabor.llm.fast_model, else the session model)",
                 },
                 # --- Notification Channel ---
                 {
@@ -6937,6 +6944,15 @@ class HubPlugin(BasePlugin):
             provider = getattr(api_service, "_provider", None)
             if not provider:
                 return None
+
+            # plugins.hub.dreaming_model (else kollabor.llm.fast_model) runs
+            # this on a cheaper model; unset keeps the session model.
+            from kollabor_ai.fast_model import resolve_fast_model, with_model
+
+            provider = with_model(
+                provider,
+                resolve_fast_model(self.config, "plugins.hub.dreaming_model"),
+            )
 
             # Make a simple one-shot call using the provider directly.
             # This bypasses APICommunicationService state (cancel flags,
