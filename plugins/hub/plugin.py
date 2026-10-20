@@ -905,7 +905,7 @@ class HubPlugin(BasePlugin):
                     "type": "text_input",
                     "label": "Dream Model",
                     "config_path": "plugins.hub.dreaming_model",
-                    "help": "Fast, cheap model id for dreaming (blank uses kollabor.llm.fast_model, else the session model)",
+                    "help": "Cheap model id for dreaming; blank falls back to kollabor.llm.fast_model, then the session model",
                 },
                 # --- Notification Channel ---
                 {
@@ -6951,7 +6951,9 @@ class HubPlugin(BasePlugin):
 
             provider = with_model(
                 provider,
-                resolve_fast_model(self.config, "plugins.hub.dreaming_model"),
+                resolve_fast_model(
+                    getattr(self, "config", None), "plugins.hub.dreaming_model"
+                ),
             )
 
             # Make a simple one-shot call using the provider directly.
