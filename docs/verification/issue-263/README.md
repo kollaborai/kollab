@@ -45,15 +45,17 @@ Accessibility and layout checks on the rendered Learn links:
 - No horizontal overflow at the three viewport sizes; initial layout shift was
   0.000014 and no JavaScript/console errors were observed.
 
-Combined Learn route verification used a temporary tree pinned to Learn PR #278
-at `f47f3de376c4a11195ffa504306889183fc51889`. Only the two exact anchor blocks
-from #272 commit `65cb9f23` were applied to that temporary copy; this was a route
-integration check, not a branch merge. Agents opened `/learn?topic=agents` and
-Workspaces opened `/learn?topic=workspaces`, rendering the corresponding lesson
-headings. The `learnHref`/`readLearnRoute` contract tests passed 2/2, and the
-combined frontend typecheck/build passed. No files were changed on PR #278.
-Its current topic content does not yet describe the new Move Up/Move Down
-ordering control; that Learn-content item remains open.
+Combined Learn route verification used an isolated temporary tree pinned to
+Learn PR #278 at `511436aaaa95a96ab971e9f4a10f38ac23919585`. Only the two exact
+anchor blocks from #272 head `b7e3bd05` were added to that temporary copy; this
+was a route integration check, not a branch merge. A temporary-only extension
+to `learn-browser-acceptance.mjs` asserted the exact `href` values and clicked
+both links; `/learn?topic=agents` rendered `Agents`, and
+`/learn?topic=workspaces` rendered `Workspaces`. The Learn catalog tests passed
+2/2, and the combined frontend typecheck/build passed. The browser run reported
+188 mocked API requests and no live engine access. No files were changed on PR
+#278. Its current Agents lesson does not yet describe workspace grouping or the
+Move Up/Move Down controls; that Learn-content item remains open.
 
 This is responsive UI, menu, and combined-route evidence only, not a live
 browser-to-engine end-to-end run. Engine persistence and stale-client behavior
