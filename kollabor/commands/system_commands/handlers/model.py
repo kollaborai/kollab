@@ -6,6 +6,7 @@ Handles /model command - quick model selector.
 import logging
 from typing import Any, Dict
 
+from kollabor_ai.profile_manager import redact_profile_endpoint
 from kollabor_events.models import (
     CommandCategory,
     CommandDefinition,
@@ -102,11 +103,18 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
         service = self._acp_service()
+        label = "model" if category == "model" else "reasoning effort"
         try:
             await service.set_config_option(str(option["id"]), value)
         except Exception as exc:
-            return CommandResult(success=False, message=str(exc), display_type="error")
-        label = "model" if category == "model" else "reasoning effort"
+            logger.warning(
+                "ACP %s option update failed (%s)", label, type(exc).__name__
+            )
+            return CommandResult(
+                success=False,
+                message=f"Could not update ACP {label}; check the adapter settings and logs.",
+                display_type="error",
+            )
         return CommandResult(success=True, message=f"ACP {label} set to {value}.", display_type="success")
 
     async def _announce_hub_model_switch(
@@ -145,6 +153,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 SubcommandInfo("search", "<query>", "Search provider model catalog"),
                 SubcommandInfo(
                     "set", "<name>", "Switch to profile with specified model"
+                ),
+                SubcommandInfo(
+                    "copy", "<source-profile> <new-name>",
+                    "Copy a profile, including ACP command settings",
                 ),
                 SubcommandInfo(
                     "effort", "[level]", "Show or set reasoning effort (low..max)"
@@ -186,6 +198,29 @@ class ModelCommandHandler(BaseCommandHandler):
             if not args:
                 # Open the fullscreen model picker for the active provider
                 return await self._show_model_picker()
+            elif args[0] in ("copy", "duplicate"):
+                if len(args) != 3:
+                    return CommandResult(
+                        success=False,
+                        message="Usage: /model copy <source-profile> <new-name>",
+                        display_type="error",
+                    )
+                try:
+                    copied = profile_manager.duplicate_profile(args[1], args[2])
+                except (ValueError, RuntimeError) as exc:
+                    return CommandResult(
+                        success=False,
+                        message=f"Could not copy profile: {exc}",
+                        display_type="error",
+                    )
+                return CommandResult(
+                    success=True,
+                    message=(
+                        f"Copied profile {args[1]!r} to {copied.name!r}; "
+                        f"provider={copied.get_provider()}, model={copied.get_model() or '(ACP)'}"
+                    ),
+                    display_type="success",
+                )
             elif args[0] in ("list", "ls"):
                 if len(args) >= 2 and args[1].lower() in ("all", "*"):
                     active_profile = profile_manager.get_active_profile()
@@ -211,10 +246,13 @@ class ModelCommandHandler(BaseCommandHandler):
                 return await self._switch_to_model(model_name)
 
         except Exception as e:
-            self.logger.error(f"Error in model command: {e}")
+            self.logger.error("Model command failed (%s)", type(e).__name__)
             return CommandResult(
                 success=False,
-                message=f"Error selecting model: {str(e)}",
+                message=(
+                    "Could not complete the model command. Check the selected "
+                    "profile and application logs."
+                ),
                 display_type="error",
             )
 
@@ -397,7 +435,9 @@ class ModelCommandHandler(BaseCommandHandler):
             model_info = OpenRouterModelInfo()
             models = await model_info.list_models()
         except Exception as e:
-            self.logger.warning(f"Unable to fetch OpenRouter models: {e}")
+            self.logger.warning(
+                "Unable to fetch OpenRouter models (%s)", type(e).__name__
+            )
             return []
 
         commands: list[Dict[str, Any]] = []
@@ -796,7 +836,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 )
                 return
             except Exception as exc:
-                self.logger.warning("state-service activation failed: %s", exc)
+                self.logger.warning(
+                    "State-service profile activation failed (%s)",
+                    type(exc).__name__,
+                )
 
         llm_service = self.llm_service
         if llm_service and hasattr(llm_service, "api_service"):
@@ -922,7 +965,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 )
                 synced = True
             except Exception as exc:
-                self.logger.warning("state-service model activation failed: %s", exc)
+                self.logger.warning(
+                    "State-service model activation failed (%s)",
+                    type(exc).__name__,
+                )
 
         if not synced and llm_service and hasattr(llm_service, "api_service"):
             await llm_service.api_service.reinitialize_provider(profile)
@@ -960,37 +1006,139 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
-        previous_profile = profile_manager.get_active_profile()
-        previous_model = (
-            previous_profile.get_model() if previous_profile is not None else None
-        )
-        if profile_manager.set_active_profile(profile_name):
-            profile = profile_manager.get_active_profile()
-            # Reinitialize the provider with new profile settings
-            if llm_service and hasattr(llm_service, "api_service"):
-                await llm_service.api_service.reinitialize_provider(profile)
-                # Reload native tools (profile may have different supports_tools setting)
-                await llm_service._load_native_tools()
-            await self._announce_hub_model_switch(profile, previous_model)
-            tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
-            return CommandResult(
-                success=True,
-                message=(
-                    f"Switched to profile: {profile_name}\n"
-                    f"  Base URL: {profile.get_endpoint()}\n"
-                    f"  Model: {profile.get_model()}\n"
-                    f"  Provider: {profile.get_provider()}\n"
-                    f"  Tools: {tools_mode}"
-                ),
-                display_type="success",
-            )
-        else:
+        profile = profile_manager.get_profile(profile_name)
+        if profile is None:
             available_list = "\n  ".join(profile_manager.get_profile_names())
             return CommandResult(
                 success=False,
                 message=f"Profile not found: {profile_name}\nAvailable:\n  {available_list}",
                 display_type="error",
             )
+
+        previous_profile = profile_manager.get_active_profile()
+        previous_model = (
+            previous_profile.get_model() if previous_profile is not None else None
+        )
+        service_handled_switch = False
+        if llm_service and callable(getattr(llm_service, "switch_profile", None)):
+            try:
+                switched = await llm_service.switch_profile(profile_name)
+            except Exception as exc:
+                self.logger.warning(
+                    "Profile switch failed for %r (%s)",
+                    profile_name,
+                    type(exc).__name__,
+                )
+                return CommandResult(
+                    success=False,
+                    message=(
+                        f"Could not switch to profile {profile_name!r}. "
+                        "Check the profile configuration and application logs."
+                    ),
+                    display_type="error",
+                )
+            if not switched:
+                return CommandResult(
+                    success=False,
+                    message=f"Could not switch to profile {profile_name!r}; see the log for details.",
+                    display_type="error",
+                )
+            profile = profile_manager.get_active_profile()
+            service_handled_switch = True
+        elif str(profile.get_provider() or "").lower() == "acp":
+            acp_service = self._acp_service()
+            if acp_service is None:
+                return CommandResult(
+                    success=False,
+                    message=(
+                        f"Cannot switch to ACP profile {profile_name!r}: "
+                        "the ACP harness is not running."
+                    ),
+                    display_type="error",
+                )
+            try:
+                started = await acp_service.start(profile)
+                if started is False:
+                    return CommandResult(
+                        success=False,
+                        message=f"Could not start ACP profile {profile_name!r}",
+                        display_type="error",
+                    )
+                if not profile_manager.set_active_profile(profile_name):
+                    await acp_service.close()
+                    raise RuntimeError("profile is no longer registered")
+            except Exception as exc:
+                self.logger.warning(
+                    "ACP profile start failed for %r (%s)",
+                    profile_name,
+                    type(exc).__name__,
+                )
+                return CommandResult(
+                    success=False,
+                    message=(
+                        f"Could not start ACP profile {profile_name!r}. "
+                        "Check its adapter command and application logs."
+                    ),
+                    display_type="error",
+                )
+        else:
+            if llm_service and hasattr(llm_service, "api_service"):
+                reinitialized = await llm_service.api_service.reinitialize_provider(
+                    profile
+                )
+                if reinitialized is False:
+                    return CommandResult(
+                        success=False,
+                        message=f"Provider for profile {profile_name!r} could not be initialized.",
+                        display_type="error",
+                    )
+                if hasattr(llm_service, "_load_native_tools"):
+                    await llm_service._load_native_tools()
+            if not profile_manager.set_active_profile(profile_name):
+                return CommandResult(
+                    success=False,
+                    message=f"Profile not found: {profile_name}",
+                    display_type="error",
+                )
+
+        if profile is None:
+            profile = profile_manager.get_active_profile()
+        if profile is None:
+            return CommandResult(
+                success=False,
+                message=f"Profile {profile_name!r} is no longer active",
+                display_type="error",
+            )
+        if not service_handled_switch:
+            await self._announce_hub_model_switch(profile, previous_model)
+        tools_mode = "enabled" if profile.get_supports_tools() else "disabled"
+        provider = profile.get_provider() or "unknown provider"
+        if provider.lower() == "acp":
+            command = getattr(profile, "command", ()) or ()
+            target = (
+                f"ACP adapter: {str(command[0]).replace(chr(92), '/').rsplit('/', 1)[-1]}"
+                if command
+                else "ACP command missing"
+            )
+        else:
+            endpoint_getter = getattr(profile, "get_display_endpoint", None)
+            endpoint = (
+                endpoint_getter()
+                if callable(endpoint_getter)
+                else redact_profile_endpoint(profile.get_endpoint())[0]
+            )
+            target = endpoint or f"{provider} default endpoint"
+        return CommandResult(
+            success=True,
+            message=(
+                f"Switched to profile: {profile_name}\n"
+                f"  Provider: {provider}\n"
+                f"  Model: {profile.get_model()}\n"
+                f"  Target: {target}\n"
+                f"  Tools: {tools_mode}"
+            ),
+            display_type="success",
+        )
 
     async def handle_modal_action(self, action: str, data: Dict) -> Dict:
         """Handle model modal actions. MUTATE data in-place."""
@@ -1034,45 +1182,12 @@ class ModelCommandHandler(BaseCommandHandler):
                     ]
                 return data
             if profile_name and self.profile_manager:
-                previous_profile = self.profile_manager.get_active_profile()
-                previous_model = (
-                    previous_profile.get_model()
-                    if previous_profile is not None
-                    else None
-                )
-                if self.profile_manager.set_active_profile(profile_name):
-                    profile = self.profile_manager.get_active_profile()
-                    # Reinitialize the provider with new profile settings
-                    llm_service = self.llm_service
-                    if llm_service and hasattr(llm_service, "api_service"):
-                        llm_service.create_background_task(
-                            lambda: llm_service.api_service.reinitialize_provider(
-                                profile
-                            ),
-                            name="reinitialize_provider",
-                        )
-                        llm_service.create_background_task(
-                            lambda: llm_service._load_native_tools(),
-                            name="reload_native_tools",
-                        )
-                    await self._announce_hub_model_switch(profile, previous_model)
-                    tools_mode = (
-                        "enabled" if profile.get_supports_tools() else "disabled"
-                    )
-                    data["display_messages"] = [
-                        (
-                            "system",
-                            (
-                                f"[ok] Switched to model: {model_name}\n"
-                                f"  Profile: {profile_name}\n"
-                                f"  Provider: {profile.get_provider()}\n"
-                                f"  Tools: {tools_mode}"
-                            ),
-                            {},
-                        ),
-                    ]
-                else:
-                    data["display_messages"] = [
-                        ("error", f"[err] Profile not found: {profile_name}", {}),
-                    ]
+                result = await self._switch_profile(profile_name)
+                data["display_messages"] = [
+                    (
+                        "system" if result.success else "error",
+                        f"[ok] {result.message}" if result.success else f"[err] {result.message}",
+                        {"display_type": result.display_type},
+                    ),
+                ]
         return data
