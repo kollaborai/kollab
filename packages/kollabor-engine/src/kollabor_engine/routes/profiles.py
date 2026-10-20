@@ -3,14 +3,14 @@
 import logging
 import time
 from dataclasses import replace
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException  # type: ignore
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
-from kollabor_ai.profile_manager import redact_profile_endpoint
+from kollabor_ai.profile_manager import EFFORT_LEVELS, redact_profile_endpoint
 from kollabor_ai.providers import (
     AuthenticationError,
     ProviderError,
@@ -22,6 +22,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
 
+def _normalize_effort(value: Optional[str]) -> Optional[str]:
+    """Strip/lower effort; reject unknown non-empty values with a 422.
+
+    Empty string means "model default" (the request omits effort entirely).
+    Unknown values are rejected here because LLMProfile.get_effort() would
+    silently drop them at request time anyway -- failing at write time makes
+    the typo visible in the UI instead of a profile that never applies.
+    """
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value and value not in EFFORT_LEVELS:
+        raise ValueError(
+            f"effort must be one of: {', '.join(EFFORT_LEVELS)} (or empty for model default)"
+        )
+    return value
+
+
+# Validated in the request models so a bad value never reaches persistence.
+EffortField = Annotated[Optional[str], AfterValidator(_normalize_effort)]
+
+
 # Request/Response Models
 class CreateProfileRequest(BaseModel):
     name: str = Field(min_length=1, description="Profile name")
@@ -30,7 +52,9 @@ class CreateProfileRequest(BaseModel):
     )
     model: Optional[str] = Field(default=None, description="Model name")
     copy_from: Optional[str] = Field(
-        default=None, min_length=1, description="Copy all settings from an existing profile"
+        default=None,
+        min_length=1,
+        description="Copy an eligible stored profile; hidden fields are copied server-side.",
     )
     api_key: str = Field(default="", description="API key (optional, can use env vars)")
     base_url: str = Field(default="", description="Custom endpoint URL")
@@ -46,6 +70,14 @@ class CreateProfileRequest(BaseModel):
     )
     top_p: Optional[float] = Field(
         default=None, ge=0.0, le=1.0, description="Nucleus sampling"
+    )
+    effort: EffortField = Field(
+        default=None,
+        description=(
+            "Reasoning effort: low, medium, high, xhigh, max, ultra — or "
+            "empty/None for the model default. Sent as Anthropic "
+            "output_config.effort / OpenAI reasoning_effort."
+        ),
     )
     streaming: bool = Field(default=True, description="Enable streaming responses")
     supports_tools: bool = Field(
@@ -69,6 +101,7 @@ class UpdateProfileRequest(BaseModel):
     description: Optional[str] = None
     timeout: Optional[int] = Field(default=None, ge=0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    effort: EffortField = None
     streaming: Optional[bool] = None
     supports_tools: Optional[bool] = None
     extra_headers: Optional[Dict[str, str]] = None
@@ -267,6 +300,7 @@ async def create_profile(body: CreateProfileRequest):
             description=body.description,
             timeout=body.timeout,
             top_p=body.top_p,
+            effort=body.effort or "",
             streaming=body.streaming,
             supports_tools=body.supports_tools,
             extra_headers=body.extra_headers,
@@ -332,6 +366,10 @@ async def update_profile(name: str, body: UpdateProfileRequest):
         kwargs["timeout"] = body.timeout
     if body.top_p is not None:
         kwargs["top_p"] = body.top_p
+    if body.effort is not None:
+        # "" clears the stored effort (back to model default) -- mirrors
+        # ProfileManager.update_profile's documented ""-clears contract.
+        kwargs["effort"] = body.effort
     if body.streaming is not None:
         kwargs["streaming"] = body.streaming
     if body.extra_headers is not None:

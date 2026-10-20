@@ -25,15 +25,17 @@ async def client(monkeypatch):
     import kollabor_engine.routes.profiles as profile_routes
     from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
-    monkeypatch.setattr(profile_routes, "_get_profile_manager", _Manager)
+    manager = _Manager()
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: manager)
     async with AsyncClient(
         transport=ASGITransport(app=create_app()), base_url="http://test"
     ) as ac:
-        yield ac
+        yield ac, manager
 
 
 @pytest.mark.asyncio
-async def test_update_applies_streaming_tools_and_the_other_body_fields(client):
+async def test_update_applies_streaming_tools_and_redacts_header_values(client):
+    client, manager = client
     response = await client.put(
         "/profiles/edit-me",
         json={
@@ -41,7 +43,7 @@ async def test_update_applies_streaming_tools_and_the_other_body_fields(client):
             "supports_tools": False,
             "timeout": 30,
             "top_p": 0.5,
-            "extra_headers": {"x-probe": "1"},
+            "extra_headers": {"x-probe": "header-secret-value"},
             "temperature": 1.2,
         },
     )
@@ -50,4 +52,9 @@ async def test_update_applies_streaming_tools_and_the_other_body_fields(client):
     body = response.json()
     assert (body["streaming"], body["supports_tools"]) == (False, False)
     assert (body["timeout"], body["top_p"], body["temperature"]) == (30, 0.5, 1.2)
-    assert body["extra_headers"] == {"x-probe": "1"}
+    assert body["extra_header_names"] == ["x-probe"]
+    assert "extra_headers" not in body
+    assert "header-secret-value" not in response.text
+    assert manager.get_profile("edit-me").extra_headers == {
+        "x-probe": "header-secret-value"
+    }
