@@ -218,6 +218,10 @@ A task-specific **Dream Model** value takes precedence over that shared value.
 This setting affects dreaming only. The fast voice-responder call path is not
 wired yet, so this change does not alter voice replies.
 
+For existing voice controls, open the Web UI Learn page and choose **Voice**
+(topic ID `voice`; route `/learn?topic=voice`). This is general voice guidance;
+it does not mean the Dream Model option affects voice replies.
+
 ## Set Up Telegram Bridge
 
 Talk to your agents from your phone:
