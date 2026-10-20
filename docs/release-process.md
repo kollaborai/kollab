@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-09
+modified: 2026-10-19
 status: active
 ---
 # Release Process
@@ -137,8 +137,11 @@ scripts/docker-runtime.sh smoke
    and the install path after publication. `scripts/desktop_release.py` enforces
    the exact 20-file manifest and verifies every payload from the flattened
    artifact download directory. Checksums contain basenames, not build paths.
-   The Binaries workflow checks this same combined set on pull requests and
-   manual runs. Each platform stages a hash/version-checked native CLI from
+   The Binaries workflow builds and checks this set only for a `v*` tag
+   (publish.yml calls it) or a manual run; pull requests and branch pushes
+   build no packages. To catch a packaging failure before tagging, run it on
+   the release branch: `gh workflow run binaries.yml --ref release/X.Y.Z`.
+   Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
    supplied tag must match it. macOS and Linux desktop asset names therefore
    use the same source version in every workflow context.

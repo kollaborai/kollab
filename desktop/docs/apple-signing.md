@@ -145,8 +145,8 @@ Python 3.9+, Bash, OpenSSL and the macOS/Xcode command-line tools must be availa
 ## Connect the existing macOS packaging job
 
 The macOS packaging job is in `binaries.yml`. To opt in, add an explicit manual
-input to that workflow. Tag, push and reusable-workflow runs with no input
-continue to resolve to unsigned. No secret
+input to that workflow. Tag runs (publish.yml's reusable-workflow call) have no
+input and continue to resolve to unsigned. No secret
 should enable signing merely by existing in repository settings.
 
 ```yaml
