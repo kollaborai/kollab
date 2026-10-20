@@ -1,12 +1,8 @@
 import { useEffect, useState } from "react";
 import { Copy, Pencil, Plus, Trash2, Zap } from "lucide-react";
 
-import {
-  EFFORT_LEVELS,
-  type Profile,
-  type ProfileUpdate,
-  type ProfileWrite,
-} from "@/api";
+import { EFFORT_LEVELS } from "@/api";
+import type { Profile, ProfileUpdate, ProfileWrite } from "@/api";
 import {
   profileLoadWarningLines,
   profileTargetLabel,
@@ -387,12 +383,16 @@ export function ProfilesDialog({
             )}
           </div>
           {copyingFrom && (
-            <p className="mb-3 text-muted-foreground text-xs">
-              Eligible profiles copy stored credentials and hidden settings,
+            <p
+              className="mb-3 text-muted-foreground text-xs leading-relaxed"
+              role="note"
+            >
+              Eligible profiles copy saved credentials and hidden settings,
               including ACP runtime fields, server-side. Environment-backed API
-              keys are not copied; configure the new profile's API-key environment
-              variable first. OAuth and provisioned profiles cannot be copied.
-              You can change the name and reasoning effort here.
+              keys stay with the source; configure the new profile's API-key
+              environment variable before copying. System-keyring references
+              remain shared when used. OAuth and provisioned profiles cannot be
+              copied. You can change the name and reasoning effort here.
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2">

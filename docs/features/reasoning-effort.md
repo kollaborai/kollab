@@ -44,8 +44,13 @@ Resolution order matches every other profile field:
 `KOLLAB_{PROFILE}_EFFORT` → `KOLLAB_EFFORT` → profile config → unset.
 
 In the web UI, Session Options → Manage Profiles sets it per profile
-(Reasoning Effort; Model Default clears it). Copy makes a variant of a profile,
-key included, so one model can run at two efforts under two names.
+(Reasoning Effort; Model Default clears it). Copy creates a variant from the
+stored source profile, preserving saved credentials and settings not shown in
+the form. Environment-provided credentials stay with the original profile, and
+system-keyring references remain shared when used. OAuth and provisioned
+profiles cannot be copied. The Copy form lets you change the name and effort;
+to replace a saved API key, create the copy and edit its API Key field. A model
+can then run at two efforts under two names.
 
 ## Wire format per provider
 

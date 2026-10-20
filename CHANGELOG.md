@@ -12,8 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
 - Docs: add a product-ready checklist and PR template requiring evidence or a
   reasoned N/A for every change.
-- Web: Profiles has a Reasoning Effort picker. Effort is stored per profile, shown in the profile row, and Model Default clears it; unsupported effort values are rejected.
-- Copies start from the stored server-side profile, preserving hidden fields including ACP runtime settings. Environment-backed API keys require target-profile or global environment configuration; OAuth and provisioned profiles cannot be copied.
+- Web: Profiles has a Reasoning Effort picker; effort appears in each row and
+  Model Default clears it. Unsupported values are rejected. Copy uses the
+  stored source profile server-side, preserving saved credentials and hidden
+  settings (including ACP runtime fields). Environment-backed keys stay with
+  their source; system-keyring references remain shared. OAuth and provisioned
+  profiles cannot be copied; the form explains these rules before Create.
 
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
