@@ -18,7 +18,8 @@
 
 ## Validation evidence
 
-<!-- List exact commands, results, required CI checks, and any screenshots attached. -->
+<!-- List exact commands, results, required CI checks, and screenshots. For
+     public-facing changes, note secret/personal-data review. -->
 
 ```text
 
@@ -36,9 +37,10 @@ in `docs/product-ready-checklist.md`.
 
 - [ ] The requested behavior is complete and was checked manually end to end,
   not only through tests.
-- [ ] Tests cover the new behavior and relevant failure paths; if no behavior
-  changed, give a specific N/A reason.
-- [ ] All required CI checks for this PR are green.
+- [ ] Tests cover the new behavior and relevant failure paths, and all required
+  CI checks for this PR are green. If no behavior changed, give a specific N/A
+  reason for the tests; do not claim CI passes until every required check is
+  green.
 - [ ] Failures are visible and actionable: the message explains what happened
   and what the user can do next; no silent failure paths were added.
 - [ ] Existing startup, hub connection, agent launch, and profile-switch flows
@@ -96,7 +98,9 @@ in `docs/product-ready-checklist.md`.
 
 ## Public surface
 
-<!-- Mention changed commands, config, docs, package metadata, APIs, or security posture. -->
+<!-- Mention changed commands, config, docs, package metadata, APIs, and
+     security posture. For public-facing changes, note secret/personal-data
+     review. -->
 
 ## Linked issues
 

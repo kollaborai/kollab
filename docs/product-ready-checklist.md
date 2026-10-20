@@ -16,9 +16,10 @@ Keep the PR draft while any required evidence or work is outstanding.
 
 - [ ] The requested behavior is complete and was checked manually end to end,
   not only through tests.
-- [ ] Tests cover the new behavior and relevant failure paths; if no behavior
-  changed, give a specific N/A reason.
-- [ ] All required CI checks for this PR are green.
+- [ ] Tests cover the new behavior and relevant failure paths, and all required
+  CI checks for this PR are green. If no behavior changed, give a specific N/A
+  reason for the tests; do not claim CI passes until every required check is
+  green.
 - [ ] Failures are visible and actionable: the message explains what happened
   and what the user can do next; no silent failure paths were added.
 - [ ] Existing startup, hub connection, agent launch, and profile-switch flows
@@ -75,4 +76,5 @@ Attach screenshots to the PR itself. For tests, list the exact command and
 result. For browser tests, state the browser, viewport sizes, and whether the
 API was mocked. For external services, state whether a real service or a safe
 simulation was used. A screenshot or a green test is evidence only for the
-behavior it actually covers.
+behavior it actually covers. For public-facing changes, also record whether
+secrets and personal data were reviewed.
