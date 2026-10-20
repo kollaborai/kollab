@@ -76,6 +76,8 @@ if Node/npm is unavailable.
   browser-local storage. Revision checks reject stale-window writes rather
   than overwrite newer moves. If the stored JSON is unreadable, the engine
   preserves it and shows a recovery warning; a missing first-run file is normal.
+  The sidebar's Learn links open the Agents and Workspaces lessons for plain-language
+  guidance about agent roles, project folders, and how the sidebar order is saved.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list

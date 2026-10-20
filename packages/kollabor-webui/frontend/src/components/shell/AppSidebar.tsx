@@ -630,6 +630,22 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
+            <div className="flex flex-wrap gap-x-4 px-2 pb-1 text-xs">
+              <a
+                href="/learn?topic=agents"
+                onClick={() => setOpenMobile(false)}
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                Learn about agents
+              </a>
+              <a
+                href="/learn?topic=workspaces"
+                onClick={() => setOpenMobile(false)}
+                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                Learn about workspaces
+              </a>
+            </div>
             <SidebarMenu>
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
