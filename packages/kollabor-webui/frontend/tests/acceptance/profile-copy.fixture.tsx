@@ -6,6 +6,8 @@ import "../../src/styles.css";
 declare global {
   interface Window {
     profileCopyCreateCalls: number;
+    profileCopyCreateResolved: boolean;
+    profileCopyFailNextCreate: boolean;
     profileCopyLastCreate?: unknown;
   }
 }
@@ -13,6 +15,8 @@ declare global {
 // This fixture is intentionally synthetic: it never starts or contacts an engine.
 document.documentElement.classList.add("dark");
 window.profileCopyCreateCalls = 0;
+window.profileCopyCreateResolved = false;
+window.profileCopyFailNextCreate = false;
 
 const sourceProfile: Profile = {
   name: "demo-work",
@@ -30,6 +34,13 @@ const fixtureApi = {
   createProfile: async (body) => {
     window.profileCopyCreateCalls += 1;
     window.profileCopyLastCreate = body;
+    window.profileCopyCreateResolved = false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    window.profileCopyCreateResolved = true;
+    if (window.profileCopyFailNextCreate) {
+      window.profileCopyFailNextCreate = false;
+      throw new Error("Fixture create failed; check the profile and retry.");
+    }
     return { created: true };
   },
   updateProfile: async () => ({ updated: true }),

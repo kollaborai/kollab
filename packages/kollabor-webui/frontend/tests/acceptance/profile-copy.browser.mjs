@@ -104,11 +104,26 @@ try {
   }
 
   await createButton.click();
-  await page.waitForFunction(() => window.profileCopyCreateCalls === 1);
+  const savingButton = page.getByRole("button", { name: "Saving…", exact: true });
+  await savingButton.waitFor({ state: "visible" });
+  assert.equal(await savingButton.isDisabled(), true, "slow create must disable repeat submits");
+  await page.waitForFunction(() => window.profileCopyCreateResolved);
   const submitted = await page.evaluate(() => window.profileCopyLastCreate);
   assert.equal(submitted.copy_from, "demo-work");
   assert.equal(submitted.name, "demo-work-copy");
   assert.equal(Object.hasOwn(submitted, "api_key"), false);
+  await page.getByRole("heading", { name: "New Profile" }).waitFor();
+
+  await page.evaluate(() => {
+    window.profileCopyFailNextCreate = true;
+  });
+  await page.getByRole("button", { name: "Copy demo-work" }).click();
+  await page.getByRole("heading", { name: "Copy: demo-work" }).waitFor();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page
+    .getByText("Fixture create failed; check the profile and retry.", { exact: true })
+    .waitFor({ state: "visible" });
+  assert.equal(await page.locator("#profile-name").inputValue(), "demo-work-copy");
   assert.deepEqual(externalRequests, [], "fixture attempted an external request");
   assert.deepEqual(browserErrors, [], "browser reported a page or console error");
 
