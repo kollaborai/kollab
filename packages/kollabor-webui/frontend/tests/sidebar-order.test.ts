@@ -209,3 +209,110 @@ test("duplicate local sessions use stable session keys with persona/offline anch
   const legacySingle = buildLocalOrderRows([sessions[0]], [], [personaKey]);
   assert.equal(legacySingle[0].key, personaKey);
 });
+
+
+test("conversation fallbacks preserve exact interleaving when session IDs rotate", () => {
+  const folder = "/workspace/alpha";
+  const lapis = "lapis";
+  const persona = orderKey(folder, lapis);
+  const initial = buildLocalOrderRows([
+    { session_id: "b-live", conversation_id: "conv-b", identity: lapis, workspace: folder },
+    { session_id: "a-live", conversation_id: "conv-a", identity: lapis, workspace: folder },
+    { session_id: "c-live", conversation_id: "conv-c", identity: "sapphire", workspace: folder },
+  ], [], []);
+  const sessionA = localSessionOrderKey(folder, lapis, "a-live");
+  const groups = groupByFolder(initial, []);
+  assert.deepEqual(groups[0].rows.map((row) => row.session?.conversation_id), ["conv-b", "conv-a", "conv-c"]);
+
+  const saved = moveWithinFolder(groups, sessionA, 1, []);
+  const expectedB = localSessionOrderKey(folder, lapis, "b-live");
+  const expectedC = orderKey(folder, "sapphire");
+  assert.deepEqual(saved, [
+    expectedB,
+    localConversationOrderKey(folder, lapis, "conv-b"),
+    persona,
+    expectedC,
+    sessionA,
+    localConversationOrderKey(folder, lapis, "conv-a"),
+  ]);
+
+  const afterRestart = buildLocalOrderRows([
+    { session_id: "b-new-process", conversation_id: "conv-b", identity: lapis, workspace: folder },
+    { session_id: "a-new-process", conversation_id: "conv-a", identity: lapis, workspace: folder },
+    { session_id: "c-new-process", conversation_id: "conv-c", identity: "sapphire", workspace: folder },
+  ], [], saved || []);
+  const restored = groupByFolder(afterRestart, saved || []);
+  assert.deepEqual(restored[0].rows.map((row) => row.session?.conversation_id), ["conv-b", "conv-c", "conv-a"]);
+});
+
+test("same-conversation duplicate rows remain individually movable without key collisions", () => {
+  const folder = "/workspace/alpha";
+  const identity = "lapis";
+  const rows = buildLocalOrderRows([
+    { session_id: "session-left", conversation_id: "same-conversation", identity, workspace: folder },
+    { session_id: "session-right", conversation_id: "same-conversation", identity, workspace: folder },
+  ], [], []);
+  assert.equal(new Set(rows.map((row) => row.key)).size, 2);
+  const groups = groupByFolder(rows, []);
+  const moved = moveWithinFolder(groups, rows[1].key, -1, []);
+  assert.deepEqual(moved?.slice(0, 2), [rows[1].key, localConversationOrderKey(folder, identity, "same-conversation")]);
+});
+
+
+test("specific conversation ranks preserve interleaving when session IDs rotate", () => {
+  const folder = "/workspace/alpha";
+  const lapis = "lapis";
+  const personaKey = orderKey(folder, lapis);
+  const initial = buildLocalOrderRows([
+    { session_id: "b-live", conversation_id: "conv-b", identity: lapis, workspace: folder },
+    { session_id: "a-live", conversation_id: "conv-a", identity: lapis, workspace: folder },
+    { session_id: "c-live", conversation_id: "conv-c", identity: "sapphire", workspace: folder },
+  ], [], []);
+  const sessionA = localSessionOrderKey(folder, lapis, "a-live");
+  const groups = groupByFolder(initial, []);
+  const saved = moveWithinFolder(groups, sessionA, 1, []);
+  const sessionB = localSessionOrderKey(folder, lapis, "b-live");
+  const personaSapphire = orderKey(folder, "sapphire");
+  assert.deepEqual(saved, [
+    sessionB,
+    localConversationOrderKey(folder, lapis, "conv-b"),
+    personaKey,
+    personaSapphire,
+    sessionA,
+    localConversationOrderKey(folder, lapis, "conv-a"),
+  ]);
+
+  const afterRestart = buildLocalOrderRows([
+    { session_id: "b-new-process", conversation_id: "conv-b", identity: lapis, workspace: folder },
+    { session_id: "a-new-process", conversation_id: "conv-a", identity: lapis, workspace: folder },
+    { session_id: "c-new-process", conversation_id: "conv-c", identity: "sapphire", workspace: folder },
+  ], [], saved || []);
+  const restored = groupByFolder(afterRestart, saved || []);
+  assert.deepEqual(restored[0].rows.map((row) => row.session?.conversation_id), ["conv-b", "conv-c", "conv-a"]);
+});
+
+test("two rows sharing a conversation stay unique and movable", () => {
+  const folder = "/workspace/alpha";
+  const identity = "lapis";
+  const sessions = [
+    { session_id: "left-session", conversation_id: "shared-conversation", identity, workspace: folder },
+    { session_id: "right-session", conversation_id: "shared-conversation", identity, workspace: folder },
+  ];
+  const rows = buildLocalOrderRows(sessions, [], []);
+  assert.equal(new Set(rows.map((row) => row.key)).size, 2);
+  const moved = moveWithinFolder(groupByFolder(rows, []), rows[1].key, -1, []);
+  assert.deepEqual(moved?.slice(0, 3), [
+    rows[1].key,
+    localConversationOrderKey(folder, identity, "shared-conversation"),
+    orderKey(folder, identity),
+  ]);
+  const afterRestart = buildLocalOrderRows([
+    { session_id: "left-new", conversation_id: "shared-conversation", identity, workspace: folder },
+    { session_id: "right-new", conversation_id: "shared-conversation", identity, workspace: folder },
+  ], [], moved || []);
+  assert.equal(new Set(afterRestart.map((row) => row.key)).size, 2);
+  assert.deepEqual(groupByFolder(afterRestart, moved || [])[0].rows.map((row) => row.session?.conversation_id), [
+    "shared-conversation",
+    "shared-conversation",
+  ]);
+});

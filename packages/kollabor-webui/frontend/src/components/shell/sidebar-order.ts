@@ -132,10 +132,11 @@ export function groupByFolder<T extends OrderRow>(rows: T[], order: string[]): F
   const at = (row: T) => {
     const exact = rank.get(row.key);
     if (exact !== undefined) return exact;
-    const fallbackRanks = (row.fallbackKeys ?? [])
-      .map((key) => rank.get(key))
-      .filter((value): value is number => value !== undefined);
-    return fallbackRanks.length ? Math.min(...fallbackRanks) : Number.MAX_SAFE_INTEGER;
+    for (const fallbackKey of row.fallbackKeys ?? []) {
+      const fallbackRank = rank.get(fallbackKey);
+      if (fallbackRank !== undefined) return fallbackRank;
+    }
+    return Number.MAX_SAFE_INTEGER;
   };
   const sorted = rows
     .map((row, index) => ({ row, index }))
