@@ -72,3 +72,12 @@ async def test_application_routes_only_active_tui_diagnostics_to_file_log(tmp_pa
     assert "Controlled startup diagnostic" in caplog.text
     assert output.getvalue() == (b"" if mode == TerminalMode.RAW and not pipe_mode
                                  else b"[acp] Controlled startup diagnostic\n")
+
+
+def test_gemini_missing_api_key_gets_supported_auth_guidance(tmp_path):
+    import acp
+
+    runner = ACPRunner(ACPProfile("gemini-cli", (sys.executable,), cwd=str(tmp_path)))
+    err = runner._request_error(acp.RequestError(-32000, "Gemini API key is missing or not configured."))
+    assert "GEMINI_API_KEY" in str(err) and "Vertex" in str(err)
+    assert "sign in on this device" not in str(err)

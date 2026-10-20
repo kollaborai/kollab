@@ -56,6 +56,7 @@ class ACPProfile:
         "gemini-cli": {
             "command": ["gemini", "--acp"],
             "managed_dir": "gemini-0.63.0",
+            "pass_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
         },
     }
@@ -66,7 +67,10 @@ class ACPProfile:
     LOGIN_GUIDANCE: ClassVar[dict[str, str]] = {
         "claude-code": "Run claude and /login on this device.",
         "codex-cli": "Run codex login on this device.",
-        "gemini-cli": "Run gemini and sign in on this device.",
+        "gemini-cli": (
+            "Google retired consumer Gemini sign-in; set GEMINI_API_KEY, or configure Vertex AI "
+            "(GOOGLE_GENAI_USE_VERTEXAI with a project and credentials), then restart."
+        ),
     }
 
     @classmethod
@@ -590,7 +594,8 @@ class ACPRunner:
         auth_hints = (
             "authenticate", "authentication", "oauth", "session expired", "not logged in",
             "please log in", "please sign in", "invalid credentials", "unauthorized",
-            "unauthenticated", "invalid api key", "credentials missing", "requires login",
+            "unauthenticated", "invalid api key", "api key is missing", "credentials missing",
+            "requires login",
         )
         refusal_hints = (
             "weekly limit", "daily limit", "monthly limit", "rate limit", "usage limit",

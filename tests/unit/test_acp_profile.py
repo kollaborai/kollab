@@ -67,3 +67,15 @@ def test_model_env_cannot_replace_builtin_acp_profile(monkeypatch):
     active = manager.get_active_profile()
     assert active.provider == "acp"
     assert active.command == ("claude-agent-acp",)
+
+
+def test_builtin_gemini_profile_declares_supported_auth_pass_env():
+    """Default gemini-cli allowlists exactly the two documented supported keys."""
+    from kollabor_ai.profile_manager import ProfileManager
+
+    gemini = LLMProfile.from_dict("gemini-cli", ProfileManager.DEFAULT_PROFILES["gemini-cli"])
+    assert gemini.provider == "acp"
+    assert gemini.pass_env == ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    for name in ("claude-code", "codex-cli"):
+        other = LLMProfile.from_dict(name, ProfileManager.DEFAULT_PROFILES[name])
+        assert other.pass_env == (), name

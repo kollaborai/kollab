@@ -998,6 +998,99 @@ def test_builtin_resolves_managed_adapter_without_path_and_preserves_args(tmp_pa
     assert cwd == str(tmp_path)
 
 
+def _managed_gemini_shims(tmp_path, monkeypatch):
+    """Stand up the managed gemini adapter + node shims so resolve() succeeds offline."""
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: "")
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda command: None)
+    profile = ACPProfile.builtin("gemini-cli", cwd=str(tmp_path))
+    adapter = bridge_mod.Path(profile._managed_adapter_path())
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("#!/usr/bin/env node\n")
+    adapter.chmod(0o755)
+    node = tmp_path / "node" / "node"
+    node.parent.mkdir()
+    node.write_text("#!/bin/sh\n")
+    node.chmod(0o755)
+    monkeypatch.setattr(ACPProfile, "_login_shell_node", lambda self: str(node))
+    return profile
+
+
+def test_builtin_gemini_forwards_supported_auth_keys(tmp_path, monkeypatch):
+    """Both documented supported auth variables reach the gemini-cli child."""
+    profile = _managed_gemini_shims(tmp_path, monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-key-e2e")
+    monkeypatch.setenv("GOOGLE_API_KEY", "gcloud-key-e2e")
+    _, env, _ = profile.resolve()
+    assert env["GEMINI_API_KEY"] == "gem-key-e2e"
+    assert env["GOOGLE_API_KEY"] == "gcloud-key-e2e"
+
+
+def test_builtin_gemini_strips_unrelated_provider_keys(tmp_path, monkeypatch):
+    """Denylisted non-Gemini provider secrets stay out of the gemini child."""
+    profile = _managed_gemini_shims(tmp_path, monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-pass")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-pass")
+    monkeypatch.setenv("CODEX_API_KEY", "must-not-pass")
+    _, env, _ = profile.resolve()
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY"):
+        assert key not in env
+
+
+def test_other_builtin_acp_profiles_do_not_gain_gemini_keys(tmp_path, monkeypatch):
+    """claude-code and codex-cli builtins keep Gemini/Google keys stripped."""
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ACPProfile, "_login_shell_path", lambda self: "")
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda command: None)
+    node = tmp_path / "node" / "node"
+    node.parent.mkdir()
+    node.write_text("#!/bin/sh\n")
+    node.chmod(0o755)
+    monkeypatch.setattr(ACPProfile, "_login_shell_node", lambda self: str(node))
+    monkeypatch.setenv("GEMINI_API_KEY", "scoped-only")
+    monkeypatch.setenv("GOOGLE_API_KEY", "scoped-only")
+    for name in ("claude-code", "codex-cli"):
+        profile = ACPProfile.builtin(name, cwd=str(tmp_path))
+        adapter = bridge_mod.Path(profile._managed_adapter_path())
+        adapter.parent.mkdir(parents=True)
+        adapter.write_text("#!/usr/bin/env node\n")
+        adapter.chmod(0o755)
+        _, env, _ = profile.resolve()
+        assert "GEMINI_API_KEY" not in env, name
+        assert "GOOGLE_API_KEY" not in env, name
+
+
+def test_gemini_explicit_empty_pass_env_strips_builtin_allowlist(tmp_path, monkeypatch):
+    """A user copy with explicit pass_env: [] removes the inherited default."""
+    profile = _managed_gemini_shims(tmp_path, monkeypatch)
+    profile = ACPProfile.builtin("gemini-cli", cwd=str(tmp_path), pass_env=[])
+    monkeypatch.setenv("GEMINI_API_KEY", "blocked-by-override")
+    monkeypatch.setenv("GOOGLE_API_KEY", "blocked-by-override")
+    _, env, _ = profile.resolve()
+    assert "GEMINI_API_KEY" not in env
+    assert "GOOGLE_API_KEY" not in env
+
+
+def test_gemini_env_map_cannot_inject_denylisted_keys(tmp_path, monkeypatch):
+    """The profile env: map cannot smuggle a denylisted provider key."""
+    profile = _managed_gemini_shims(tmp_path, monkeypatch)
+    profile = ACPProfile.builtin(
+        "gemini-cli", cwd=str(tmp_path), env={"OPENAI_API_KEY": "smuggled"}
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "exported-but-denylisted")
+    _, env, _ = profile.resolve()
+    assert "OPENAI_API_KEY" not in env
+
+
+def test_gemini_pass_env_declared_on_builtin_only():
+    """The allowlist lives on the gemini-cli builtin; other builtins declare none."""
+    assert ACPProfile.builtin("gemini-cli").pass_env == ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    assert ACPProfile.builtin("claude-code").pass_env == ()
+    assert ACPProfile.builtin("codex-cli").pass_env == ()
+
+
 def test_managed_adapter_never_replaces_custom_builtin_command(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
