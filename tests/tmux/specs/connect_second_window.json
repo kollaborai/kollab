@@ -17,7 +17,7 @@
     {
       "action": "shell",
       "description": "start the first window of each workspace (they own the relay) and wait until both hold it",
-      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; S=kollab-spec-second-window; tmux -L $S kill-server 2>/dev/null; for w in ws ws2; do tmux -L $S new-session -d -s owner-$w -x 80 -y 30 && tmux -L $S send-keys -t owner-$w -l \"cd $H/$w && env HOME=$H KOLLAB_NO_KEYRING=1 PYTHONPATH=$R $R/.venv/bin/python $R/main.py --no-daemon\" && tmux -L $S send-keys -t owner-$w Enter; done; for i in $(seq 1 80); do [ $(find \"$H/.kollab/network\" -name relay-owner.json 2>/dev/null | wc -l) -ge 2 ] && break; sleep 0.5; done; [ $(find \"$H/.kollab/network\" -name relay-owner.json | wc -l) -ge 2 ]"
+      "command": "R=$(pwd); H=\"${TMPDIR:-/tmp}/kollab-spec-connect-second-window\"; S=kollab-spec-second-window; tmux -L $S kill-server 2>/dev/null; for w in ws ws2; do tmux -L $S new-session -d -s owner-$w -x 80 -y 30 && tmux -L $S send-keys -t owner-$w -l \"cd $H/$w && env HOME=$H KOLLAB_NO_KEYRING=1 PYTHONPATH=$R $R/.venv/bin/python $R/main.py --no-daemon\" && tmux -L $S send-keys -t owner-$w Enter; done; for i in $(seq 1 80); do [ $(find \"$H/.kollab\" -name relay-owner.json 2>/dev/null | wc -l) -ge 2 ] && break; sleep 0.5; done; [ $(find \"$H/.kollab\" -name relay-owner.json | wc -l) -ge 2 ]"
     }
   ],
   "steps": [

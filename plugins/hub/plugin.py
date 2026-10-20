@@ -5027,6 +5027,7 @@ class HubPlugin(BasePlugin):
                 on_network_status=self._handle_network_status_request,
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
+                on_connect_proxy=self._handle_connect_proxy,
                 on_acp_hub_status=self._handle_acp_hub_status,
                 on_acp_hub_call=self._handle_acp_hub_call,
                 socket_name=self._identity.identity,
@@ -10540,6 +10541,41 @@ class HubPlugin(BasePlugin):
         """True in a window attached to a daemon, which owns the relay."""
         return bool(getattr(getattr(self, "_cli_args", None), "attach", None))
 
+    def _connect_owner_socket(self) -> str:
+        """Hub socket of another process that owns this workspace's relay, else ""."""
+        if self._relay_commands is not None:
+            return ""
+        try:
+            owner = self._relay_agent.owner.owner()
+        except Exception:
+            return ""
+        if not owner or owner.get("pid") == os.getpid():
+            return ""
+        return str(owner.get("socket_path") or "")
+
+    async def _connect_via_owner(self, op: str, args: dict) -> tuple[bool, Any]:
+        """Run one /connect operation in the relay owner: (True, result), or
+        (False, None) when this process owns the relay or the owner is unreachable."""
+        path = self._connect_owner_socket()
+        if not path:
+            return False, None
+        try:
+            return True, await AgentMessenger.request_connect_proxy(path, op, args)
+        except Exception:
+            return False, None
+
+    async def _handle_connect_proxy(self, op: str, args: dict) -> Any:
+        """Owner side of `_connect_via_owner`; the reply may hold a join code."""
+        if op == "snapshot":
+            return (await self._connect_snapshot()).to_wire()
+        if op == "decide":
+            return await self._decide_join_request(
+                str(args.get("enrollment_id", "")), str(args.get("decision", ""))
+            )
+        if op == "offer":
+            return await self._run_connect_enrollment_offer(str(args.get("domain", "")))
+        raise ValueError("unknown connect operation")
+
     def _relay_owned_elsewhere(self) -> bool:
         """True in a process whose workspace relay another window owns."""
         if self._attached() or self._relay_commands is not None:
@@ -10571,11 +10607,15 @@ class HubPlugin(BasePlugin):
         relay behind the knock count) means the daemon runs the relay.
         """
         if not self._attached():
-            return (
-                self._shared_state_snapshot(domain)
-                if self._relay_owned_elsewhere()
-                else None
-            )
+            if not self._relay_owned_elsewhere():
+                return None
+            # The owner answers for this window, so nothing here is read-only
+            # unless the owner cannot be reached.
+            try:
+                snapshot = await self._connect_snapshot()
+            except Exception:
+                snapshot = None
+            return snapshot if snapshot is not None and snapshot.read_only else None
         snapshot = fetched
         if snapshot is None:
             try:
@@ -11079,6 +11119,11 @@ class HubPlugin(BasePlugin):
         what the shared state knows, marked read-only, so the window attached
         to it shows the same one line a second window does.
         """
+        from .relay_commands import ConnectSnapshot
+
+        ok, wire = await self._connect_via_owner("snapshot", {})
+        if ok:
+            return ConnectSnapshot.from_wire(wire)
         commands = self._relay_commands
         if commands is None:
             if self._relay_owned_elsewhere():
@@ -11090,6 +11135,11 @@ class HubPlugin(BasePlugin):
         """Accept or reject one join request; "" when decided, else the reason."""
         from .relay_state import RelayError
 
+        ok, reason = await self._connect_via_owner(
+            "decide", {"enrollment_id": enrollment_id, "decision": decision}
+        )
+        if ok:
+            return str(reason or "")
         try:
             await self._relay_agent.decide_enrollment_request(
                 enrollment_id,
@@ -11261,6 +11311,9 @@ class HubPlugin(BasePlugin):
 
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""
+        ok, offered = await self._connect_via_owner("offer", {"domain": domain})
+        if ok:
+            return offered if isinstance(offered, dict) else {"error": "connect offer could not be created"}
         if (
             not isinstance(domain, str)
             or not domain

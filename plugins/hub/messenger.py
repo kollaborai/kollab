@@ -365,6 +365,7 @@ class AgentSocketServer:
         on_network_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
+        on_connect_proxy: Optional[Callable] = None,
         on_acp_hub_status: Optional[Callable] = None,
         on_acp_hub_call: Optional[Callable] = None,
         socket_name: Optional[str] = None,
@@ -382,6 +383,8 @@ class AgentSocketServer:
         self._on_network_status = on_network_status
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
+        # /connect from a window that does not own the relay: the owner runs it.
+        self._on_connect_proxy = on_connect_proxy
         self._on_acp_hub_status = on_acp_hub_status
         self._on_acp_hub_call = on_acp_hub_call
         self._identity: Optional[Dict] = None
@@ -1645,6 +1648,25 @@ class AgentSocketServer:
                     writer.write(resp.encode())
                     await writer.drain()
 
+                elif action == "connect_proxy":
+                    # A daemon that lost the workspace lock asks the relay owner
+                    # to run one /connect operation. Local operator only (the
+                    # gate above); the reply can hold a one-time join code, so
+                    # nothing here is logged.
+                    reply: Dict[str, Any] = {"type": "connect_proxy", "error": "unavailable"}
+                    if self._on_connect_proxy:
+                        try:
+                            result = self._on_connect_proxy(
+                                str(msg_data.get("op", "")), msg_data.get("args") or {}
+                            )
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            reply = {"type": "connect_proxy", "result": result}
+                        except Exception:
+                            reply = {"type": "connect_proxy", "error": "failed"}
+                    writer.write((json.dumps(reply, default=str) + "\n").encode())
+                    await writer.drain()
+
                 elif action == "network_send":
                     # docs/specs/agent-network-simple-flow.md, CLI bullet:
                     # `kollab --hub msg agent@device text` delivers through
@@ -2776,6 +2798,36 @@ class AgentMessenger:
         except Exception as exc:
             logger.debug("network_status request failed for %s: %s", socket_path, exc)
             return None
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_connect_proxy(
+        socket_path: str,
+        op: str,
+        args: Optional[Dict[str, Any]] = None,
+        timeout: float = 20.0,
+    ) -> Any:
+        """Run one /connect operation in the daemon that owns the relay.
+
+        Raises on any transport failure so the caller can fall back.
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(socket_path, timeout=timeout)
+            req = json.dumps({"action": "connect_proxy", "op": op, "args": args or {}})
+            writer.write((req + "\n").encode())
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            resp = json.loads(line.decode().strip()) if line else {}
+            if not isinstance(resp, dict) or "result" not in resp:
+                raise RuntimeError("connect proxy failed")
+            return resp["result"]
         finally:
             if writer:
                 writer.close()
