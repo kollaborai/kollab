@@ -77,3 +77,13 @@ def no_real_hidden_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(hidden_agents, "hidden_path", lambda: path)
     monkeypatch.setattr(hidden_agents, "_learned", {})
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_real_sidebar_order(tmp_path, monkeypatch):
+    """The saved sidebar order goes to a temp file."""
+    import kollabor_engine.sidebar_order as sidebar_order  # type: ignore[import-not-found]
+
+    path = tmp_path / ".kollab" / "hub" / "sidebar-order.json"
+    monkeypatch.setattr(sidebar_order, "order_path", lambda: path)
+    return path

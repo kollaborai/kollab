@@ -1,11 +1,11 @@
-"""The sidebar rows the user hid, for every client of this engine (hidden_agents.py)."""
+"""Engine-owned hidden rows and ordering for the web UI sidebar."""
 
 import logging
 from typing import Any, Dict, Set
 
 from fastapi import APIRouter, Body, HTTPException  # type: ignore[import-not-found]
 
-from .. import hidden_agents
+from .. import hidden_agents, sidebar_order
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
 
@@ -56,3 +56,23 @@ async def unhide_agent(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if isinstance(key, str) and key and body.get("all") is None:
         return _changed(lambda: hidden_agents.show(key))
     raise HTTPException(status_code=400, detail="send either a key or all: true")
+
+
+@router.get("/order")
+async def get_order() -> Dict[str, Any]:
+    """The saved order of all sidebar agent rows."""
+    return {"order": sidebar_order.read_order()}
+
+
+@router.post("/order")
+async def set_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Save the order: ``{order: [key, ...]}``, first row first."""
+    keys = sidebar_order.parse_order(body.get("order"))
+    if keys is None:
+        raise HTTPException(status_code=400, detail="order must be a list of bounded text keys")
+    try:
+        sidebar_order.write_order(keys)
+    except OSError as exc:
+        logger.warning("Could not save sidebar order: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Could not save sidebar order: {exc}") from exc
+    return {"order": keys}

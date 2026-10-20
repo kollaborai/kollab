@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from kollabor_ai import LLMProfile
 from kollabor_ai.session_naming import generate_session_name
 
-from .. import hidden_agents
+from .. import hidden_agents, sidebar_order
 from ..daemon_pool import get_daemon_pool
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
@@ -633,6 +633,7 @@ async def list_sessions():
         "offline": _offline_agents(found, registry),
         # The rows the user hid, for every client of this engine (hidden_agents.py).
         "hidden": hidden_agents.visible({row["instance"] for row in rows}),
+        "order": sidebar_order.read_order(),
         "network": merge_view_and_memberships(
             _network_view(await _network_snapshot(registry))
         ),

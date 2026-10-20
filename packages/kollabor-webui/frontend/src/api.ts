@@ -863,12 +863,17 @@ export class EngineApi {
   }
 
   listSessions() {
-    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork; hidden?: HiddenAgent[] }>("/sessions");
+    return this.json<{ sessions: Session[]; offline?: OfflineAgent[]; network?: AgentNetwork; hidden?: HiddenAgent[]; order?: string[] }>("/sessions");
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
   hideAgent(entry: HiddenAgent) {
     return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
+  }
+
+  /** Save the order of the sidebar's agents for every client of this engine. */
+  saveSidebarOrder(order: string[]) {
+    return this.json<{ order: string[] }>("/sidebar/order", { method: "POST", body: JSON.stringify({ order }) });
   }
 
   /** Show a hidden row again. */
