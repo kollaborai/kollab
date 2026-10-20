@@ -119,7 +119,7 @@ Profiles, MCP, and hub routes:
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/profiles` | list configured profiles |
-| `POST` | `/profiles` | create profile; `copy_from` starts from a stored one, keeping saved credentials and unshown settings; environment/provisioned credentials stay with the source, keyring references remain shared; sent fields win |
+| `POST` | `/profiles` | create profile; `copy_from` duplicates eligible stored profiles server-side, including ACP runtime fields; environment-backed keys require target-profile or global env configuration, keyring references remain shared, and OAuth/provisioned profiles are rejected; supplied fields override |
 | `GET` | `/profiles/{name}` | inspect profile |
 | `PUT` | `/profiles/{name}` | update or rename profile |
 | `DELETE` | `/profiles/{name}` | delete profile |
@@ -143,7 +143,6 @@ Profiles, MCP, and hub routes:
 These are current implementation gaps to address before treating the engine as a
 reliable service boundary:
 
-- Profile read/update responses must redact API keys and other secret fields.
 - Session `workspace` is stored but not yet enforced for terminal and file tools.
 - Provider instances are singleton per provider type, which can leak model,
   base URL, headers, or credentials across sessions.
@@ -157,7 +156,6 @@ reliable service boundary:
 
 ### Phase 1: Make the local daemon trustworthy
 
-- Redact profile secrets from all profile API responses.
 - Enforce session workspace for shell, file, and MCP tool execution.
 - Replace provider-type singletons with config-scoped or session-scoped provider
   instances.

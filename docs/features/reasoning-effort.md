@@ -46,12 +46,15 @@ Resolution order matches every other profile field:
 In the web UI, Session Options → Manage Profiles sets it per profile
 (Reasoning Effort; Model Default clears it). Copy creates a variant from the
 stored source profile, preserving saved credentials and settings not shown in
-the form. Environment-backed API keys are not copied; set the target profile's key
-environment variable or `KOLLAB_API_KEY` before copying. System-keyring
-references remain shared when used. OAuth and provisioned profiles cannot be
-copied. The Copy form lets you change the name and effort;
-to replace a saved API key, create the copy and edit its API Key field. A model
-can then run at two efforts under two names.
+the form. Environment-backed API keys are not copied; configure the target
+profile's key variable or global `KOLLAB_API_KEY` in the engine environment
+before copying. For example, a profile named `work-copy` uses
+`KOLLAB_WORK_COPY_API_KEY`; profile-name characters outside letters and digits
+become underscores, and the name is uppercased. Restart an already-running
+engine after changing its environment. System-keyring references remain shared
+when used. OAuth and provisioned profiles cannot be copied. The Copy form lets
+you change the name and effort; to replace a saved API key, create the copy and
+edit its API Key field. One model can then run at two efforts under two names.
 
 ## Wire format per provider
 
