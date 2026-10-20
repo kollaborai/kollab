@@ -949,6 +949,7 @@ def register_script_widgets(
                 def make_activate_fn(
                     widget_id: str,
                     action_script_path: str,
+                    timeout: float,
                     manager: ScriptWidgetManager,
                 ):
                     """Factory to create activation handler with correct closure."""
@@ -966,7 +967,7 @@ def register_script_widgets(
                         result = execute_action_script_sync(
                             script_path=script_path,
                             action_key="activate",  # Default action key
-                            timeout=script_widget.timeout,
+                            timeout=timeout,
                         )
 
                         # Clear widget cache so updated state displays
@@ -987,7 +988,10 @@ def register_script_widgets(
                     return activate_handler
 
                 on_activate_fn = make_activate_fn(
-                    script_widget.id, script_widget.on_activate, script_manager
+                    script_widget.id,
+                    script_widget.on_activate,
+                    script_widget.timeout,
+                    script_manager,
                 )
 
             # Map interaction types
