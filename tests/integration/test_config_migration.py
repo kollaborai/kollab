@@ -266,6 +266,18 @@ class TestKeyringMigration(unittest.TestCase):
         # Should succeed with opt-in
         self.assertTrue(result)
 
+    @patch.dict(os.environ, {"KOLLAB_ALLOW_PLAINTEXT_KEYS": "true"})
+    def test_plaintext_storage_creates_fresh_config_root(self):
+        fresh_root = Path(self.temp_dir) / "new-home" / ".kollab"
+        with patch("kollabor_config.migration.get_global_config_path", return_value=fresh_root / "config.json"):
+            result = self.migrator._try_plaintext_storage("fresh", "sk-fresh-key")
+
+        self.assertTrue(result)
+        self.assertEqual(
+            json.loads((fresh_root / "keys.json").read_text())["fresh"],
+            "sk-fresh-key",
+        )
+
     @patch.dict(os.environ, {}, clear=True)
     def test_plaintext_storage_requires_opt_in(self):
         """Test plaintext storage requires opt-in."""
