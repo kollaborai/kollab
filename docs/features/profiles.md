@@ -490,7 +490,9 @@ Each provider has unique configuration options. See [providers.md](../providers.
   ```
   `KOLLAB_API_KEY` is a global fallback; keyring references remain shared. ACP
   profiles do not need a model string; their adapter command is the required
-  runtime setting.
+  runtime setting. When switching an ACP profile to a native provider, provide
+  a native model; a provider-only update is rejected without changing the ACP
+  profile.
 - Profiles with invalid configuration are skipped individually, not allowed to
   break the profile list. The Web UI displays the skipped names and diagnostics.
   Restore the reported setting (for example an ACP `command`) before copying.
