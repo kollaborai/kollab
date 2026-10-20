@@ -57,6 +57,8 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
+import { LearnPage } from "@/components/learn/LearnPage";
+import { navigateToLearn, readLearnRoute, type LearnRoute } from "@/learn/catalog";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -303,6 +305,7 @@ function RuntimeShell({
 }
 
 export default function App() {
+  const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
@@ -330,6 +333,30 @@ export default function App() {
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    const syncLearnRoute = () => {
+      const nextRoute = readLearnRoute(window.location);
+      setLearnRoute(nextRoute);
+      if (nextRoute) {
+        setStudioOpen(false);
+        setStudioFocus(null);
+        setProfilesOpen(false);
+        setAppsOpen(false);
+        setAgentsOpen(false);
+        setSetupGuideOpen(false);
+        setSettingsOpen(false);
+      }
+    };
+    window.addEventListener("popstate", syncLearnRoute);
+    return () => window.removeEventListener("popstate", syncLearnRoute);
+  }, []);
+
+  const returnToChat = useCallback(() => {
+    if (!readLearnRoute(window.location)) return;
+    window.history.pushState(null, "", "/");
+    setLearnRoute(null);
+  }, []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
   const [settingsIntent, setSettingsIntent] = useState<{
     action: PanelIntent;
@@ -977,6 +1004,7 @@ export default function App() {
       <AvatarImageProvider api={api}>
       <SidebarProvider>
         <AppSidebar
+          learnActive={learnRoute !== null}
           sessions={sessions}
           profiles={profiles}
           api={api}
@@ -1008,15 +1036,28 @@ export default function App() {
           onApps={() => setAppsOpen(true)}
           onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
+          onLearn={() => navigateToLearn()}
           onStudio={() => {
             setStudioFocus(null);
             setStudioOpen(true);
           }}
           onManageProfiles={() => setProfilesOpen(true)}
-          onSelectSession={selectSession}
-          onSelectRemote={selectRemote}
-          onStartOffline={startOffline}
-          onCreate={() => createSession()}
+          onSelectSession={(sessionId) => {
+            returnToChat();
+            return selectSession(sessionId);
+          }}
+          onSelectRemote={(...args) => {
+            returnToChat();
+            return selectRemote(...args);
+          }}
+          onStartOffline={(...args) => {
+            returnToChat();
+            return startOffline(...args);
+          }}
+          onCreate={() => {
+            returnToChat();
+            return createSession();
+          }}
           onDelete={(id) => void deleteSession(id)}
           onProperties={openProperties}
         />
@@ -1074,6 +1115,10 @@ export default function App() {
           />
         ) : null}
         <SidebarInset className="h-svh max-h-svh min-h-svh overflow-hidden">
+          {learnRoute ? (
+            <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
+          ) : null}
+          <div className={learnRoute ? "hidden" : "contents"}>
           {versionMismatch ? (
             <div
               role="status"
@@ -1179,6 +1224,7 @@ export default function App() {
               </div>
             </>
           )}
+          </div>
         </SidebarInset>
       </SidebarProvider>
       </AvatarImageProvider>

@@ -102,6 +102,10 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
+- **Learn**: the sidebar opens a responsive, ten-topic guide at `/learn`; deep
+  links use `/learn?topic=<id>`, and lesson completion is stored in this browser.
+  What's New comes from the canonical changelog. See
+  [`docs/features/learn.md`](../../docs/features/learn.md).
 - **Gem Studio** (sidebar footer): every agent is born with a random look (eyes
   and hat) that sticks; dress any gem over it (eyes, hat, color) and set the
   season for all, previewed live. Random Look rolls a new outfit, Reset goes

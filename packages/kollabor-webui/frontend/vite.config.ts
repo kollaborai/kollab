@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import pkg from "./package.json";
@@ -9,8 +10,27 @@ import pkg from "./package.json";
 // bundle never hardcodes a version that drifts from the engine.
 const __APP_VERSION__ = JSON.stringify(pkg.version);
 
+const KOLLAB_CHANGELOG_MODULE = "virtual:kollab-changelog";
+const RESOLVED_KOLLAB_CHANGELOG_MODULE = `\0${KOLLAB_CHANGELOG_MODULE}`;
+
+function kollabCanonicalChangelogPlugin(): Plugin {
+  const changelogPath = path.resolve(__dirname, "../../../kollabor/updates/CHANGELOG.md");
+  return {
+    name: "kollab-canonical-changelog",
+    resolveId(source) {
+      return source === KOLLAB_CHANGELOG_MODULE ? RESOLVED_KOLLAB_CHANGELOG_MODULE : null;
+    },
+    load(id) {
+      if (id !== RESOLVED_KOLLAB_CHANGELOG_MODULE) return null;
+      this.addWatchFile(changelogPath);
+      const markdown = readFileSync(changelogPath, "utf-8");
+      return `export default ${JSON.stringify(markdown)};`;
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), react(), tailwindcss()],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,

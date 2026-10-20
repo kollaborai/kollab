@@ -336,6 +336,10 @@ base config; only the operator-owned helper applies generated phone peer snippet
 to the running server.
 See [Phone Access setup](docs/features/phone-access.md) before connecting a phone.
 
+The sidebar's **Learn** entry opens a guided tour of networks, devices, workspaces,
+agents, profiles, the koordinator, Hub messaging, voice, system prompts, and
+WireGuard phone access. Lesson progress is saved in this browser; **What's New**
+uses the canonical changelog. See the [Learn feature guide](docs/features/learn.md).
 
 ## Apps
 
