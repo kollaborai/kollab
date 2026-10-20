@@ -85,6 +85,10 @@ For Vertex AI, enable `GOOGLE_GENAI_USE_VERTEXAI` and make the project and
 credentials available to the Gemini CLI child. If using `GOOGLE_API_KEY`, add
 it to `pass_env` too. Restart Kollab before retrying.
 
+The related in-app overview is **Learn > Provider profiles** (topic ID
+`profiles`; route `/learn?topic=profiles`). This general profile guidance does
+not qualify Gemini authentication.
+
 Automated evidence currently covers missing-auth projection only. Positive
 authentication and prompt/tool/permission/cancel/shutdown qualification remain
 open; these instructions are not a live provider test.
