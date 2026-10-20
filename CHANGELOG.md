@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and other ACP profiles are unchanged.
 - ACP: Gemini missing-auth guidance now lists API-key and Vertex AI setup
   routes; live qualification remains open.
+- Hub: Dream Model selects a provider-supported model for dreaming. A blank
+  override uses the shared fast model, then the active session model.
 
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.

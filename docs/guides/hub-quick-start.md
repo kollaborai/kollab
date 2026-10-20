@@ -201,6 +201,23 @@ This happens in the background without interrupting active
 conversations. Agents get smarter over time by reviewing their
 own history.
 
+To use a cheaper model for dreaming, open `/config` and set **Dream Model**
+under **Hub** to a model ID supported by the active provider (for example,
+`your-provider-fast-model-id`). Leave it blank to use `kollabor.llm.fast_model`
+when configured, then the active session model. The override reuses the active
+profile's credentials and endpoint; the model ID must be available from that
+provider.
+
+For a shared fallback, add this to `~/.kollab/config.json`:
+
+```json
+{"kollabor":{"llm":{"fast_model":"your-provider-fast-model-id"}}}
+```
+
+A task-specific **Dream Model** value takes precedence over that shared value.
+This setting affects dreaming only. The fast voice-responder call path is not
+wired yet, so this change does not alter voice replies.
+
 ## Set Up Telegram Bridge
 
 Talk to your agents from your phone:
