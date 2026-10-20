@@ -472,3 +472,40 @@ Each provider has unique configuration options. See [providers.md](../providers.
 - Provider-specific fields (Azure endpoint, OpenRouter headers)
 - OAuth setup
 - Custom endpoint configuration
+
+
+## Copying and diagnosing profiles
+
+- In the terminal, copy a profile with `/model copy <source-profile> <new-name>`.
+  The command creates an independent saved copy and does not switch the active
+  profile. It preserves provider-specific settings, including ACP `command`,
+  working directory, workspace, environment values, and install guidance.
+- In the Web UI, use Copy on a profile and choose a new name. The engine copies
+  the stored settings server-side, so fields not shown in the form are retained.
+  Environment-backed API keys are not copied. For a profile named
+  `team-anthropic`, set `KOLLAB_TEAM_ANTHROPIC_API_KEY` before copying:
+  ```bash
+  export KOLLAB_TEAM_ANTHROPIC_API_KEY="<your-api-key>"
+  /model copy anthropic-auto team-anthropic
+  ```
+  `KOLLAB_API_KEY` is a global fallback; keyring references remain shared. ACP
+  profiles do not need a model string; their adapter command is the required
+  runtime setting. When switching an ACP profile to a native provider, provide
+  a native model; a provider-only update is rejected without changing the ACP
+  profile.
+- Profiles with invalid configuration are skipped individually, not allowed to
+  break the profile list. The Web UI displays the skipped names and diagnostics.
+  Restore the reported setting (for example an ACP `command`) before copying.
+- Profile cards and API responses show the provider and a sanitized endpoint
+  or ACP adapter label. URL credentials, query parameters, fragments,
+  credential-like path segments, header values, ACP command arguments, and local
+  runtime paths are omitted; header and
+  environment variable names may be shown without their values. State snapshots
+  and CLI summaries use the same safe endpoint label. Profile copies still
+  preserve all stored runtime settings server-side.
+- When an endpoint contains hidden URL data, editing it displays the safe URL.
+  Saving other fields without changing the endpoint preserves its stored value.
+  Use the explicit replace control to remove hidden credentials/query/fragment.
+- Missing persisted active/default profiles and unresolved `default_loadout`
+  values emit warnings; startup falls back instead of silently using a different
+  profile.

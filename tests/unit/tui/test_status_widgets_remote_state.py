@@ -187,6 +187,72 @@ class TestRenderEndpointRemoteStatePreference(unittest.TestCase):
         out = _strip_ansi(render_endpoint(40, ctx))
         self.assertIn("api.anthropic.com", out)
 
+    def test_non_string_display_endpoint_falls_back_to_raw_host(self) -> None:
+        """Regression for the redaction-series status widget break.
+
+        A profile-like object whose get_display_endpoint() returns a
+        non-string must not break the widget: hostname is derived from
+        the raw endpoint instead, and credentials/path/query/fragment
+        are never displayed.
+        """
+        ctx = _make_ctx(
+            remote_state={},
+            local_profile_name="claude",
+            local_endpoint=(
+                "https://URL_USER:URL_SECRET@api.anthropic.com/v1/tenant/acme"
+                "?token=QUERY_TOKEN#FRAG_TOKEN"
+            ),
+            local_provider="anthropic",
+        )
+        profile = ctx.profile_manager.get_active_profile.return_value
+        profile.get_display_endpoint.return_value = object()
+        out = _strip_ansi(render_endpoint(40, ctx))
+        self.assertIn("api.anthropic.com", out)
+        self.assertNotIn("URL_USER", out)
+        self.assertNotIn("URL_SECRET", out)
+        self.assertNotIn("QUERY_TOKEN", out)
+        self.assertNotIn("FRAG_TOKEN", out)
+        self.assertNotIn("tenant", out)
+
+    def test_raising_display_endpoint_falls_back_to_raw_host(self) -> None:
+        """A raising get_display_endpoint() must not blank the widget."""
+        ctx = _make_ctx(
+            remote_state={},
+            local_profile_name="claude",
+            local_endpoint="https://api.anthropic.com",
+            local_provider="anthropic",
+        )
+        profile = ctx.profile_manager.get_active_profile.return_value
+        profile.get_display_endpoint.side_effect = RuntimeError("boom")
+        out = _strip_ansi(render_endpoint(40, ctx))
+        self.assertIn("api.anthropic.com", out)
+
+    def test_display_endpoint_preferred_when_string(self) -> None:
+        """When get_display_endpoint() returns a real URL it wins over the
+        raw endpoint (redaction contract: display never leaks secrets)."""
+        ctx = _make_ctx(
+            remote_state={},
+            local_profile_name="claude",
+            local_endpoint="https://user:secret@internal-only.example.com/raw",
+            local_provider="anthropic",
+        )
+        profile = ctx.profile_manager.get_active_profile.return_value
+        profile.get_display_endpoint.return_value = "https://safe.example.com"
+        out = _strip_ansi(render_endpoint(40, ctx))
+        self.assertIn("safe.example.com", out)
+        self.assertNotIn("internal-only.example.com", out)
+        self.assertNotIn("secret", out)
+
+    def test_non_string_remote_endpoint_falls_to_provider_host(self) -> None:
+        """Non-string remote endpoint state is ignored, not parsed."""
+        ctx = _make_ctx(
+            remote_state={"endpoint": object(), "provider": "anthropic"},
+            local_profile_name="claude",
+            local_endpoint="https://api.something-else.com",
+        )
+        out = _strip_ansi(render_endpoint(40, ctx))
+        self.assertIn("api.anthropic.com", out)
+
     def test_shows_local_fallback_when_nothing_set(self) -> None:
         ctx = _make_ctx(remote_state={}, local_profile_name="")
         out = _strip_ansi(render_endpoint(40, ctx))

@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { Pencil, Plus, Trash2, Zap } from "lucide-react";
 
-import type { Profile } from "@/api";
+import {
+  profileLoadWarningLines,
+  profileTargetLabel,
+  shouldSubmitBaseUrlUpdate,
+} from "./profile-target";
+
+import type { Profile, ProfileUpdate, ProfileWrite } from "@/api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,9 +39,12 @@ import {
 import { Switch } from "@/components/ui/switch";
 
 type Api = {
-  listProfiles: () => Promise<{ providers?: string[] }>;
-  createProfile: (body: ProfileWriteBody) => Promise<unknown>;
-  updateProfile: (name: string, body: ProfileUpdateBody) => Promise<unknown>;
+  listProfiles: () => Promise<{
+    providers?: string[];
+    invalid_profiles?: Record<string, string>;
+  }>;
+  createProfile: (body: ProfileWrite) => Promise<unknown>;
+  updateProfile: (name: string, body: ProfileUpdate) => Promise<unknown>;
   deleteProfile: (name: string) => Promise<unknown>;
   testProfile: (
     name: string,
@@ -102,6 +111,12 @@ export function ProfilesDialog({
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [providers, setProviders] = useState<string[]>([]);
+  const [invalidProfiles, setInvalidProfiles] = useState<Record<string, string>>({});
+  const [copyingFrom, setCopyingFrom] = useState<string | null>(null);
+  const [originalBaseUrl, setOriginalBaseUrl] = useState("");
+  const [baseUrlHasHiddenData, setBaseUrlHasHiddenData] = useState(false);
+  const [replaceHiddenBaseUrl, setReplaceHiddenBaseUrl] = useState(false);
+  const loadWarnings = profileLoadWarningLines(invalidProfiles);
 
   // The engine names every provider it can run, so the picker never lags it.
   useEffect(() => {
@@ -109,7 +124,11 @@ export function ProfilesDialog({
     let live = true;
     api
       .listProfiles()
-      .then((result) => live && setProviders(result.providers ?? []))
+      .then((result) => {
+        if (!live) return;
+        setProviders(result.providers ?? []);
+        setInvalidProfiles(result.invalid_profiles ?? {});
+      })
       .catch(() => {});
     return () => {
       live = false;
@@ -123,6 +142,10 @@ export function ProfilesDialog({
 
   const startCreate = () => {
     setEditing(null);
+    setCopyingFrom(null);
+    setOriginalBaseUrl("");
+    setBaseUrlHasHiddenData(false);
+    setReplaceHiddenBaseUrl(false);
     setDraft(EMPTY_DRAFT);
     setError(null);
     setTestResult(null);
@@ -130,9 +153,34 @@ export function ProfilesDialog({
 
   const startEdit = (p: Profile) => {
     setEditing(p.name);
+    setCopyingFrom(null);
+    setOriginalBaseUrl(p.base_url ?? "");
+    setBaseUrlHasHiddenData(Boolean(p.base_url_has_hidden_data));
+    setReplaceHiddenBaseUrl(false);
     setDraft({
       ...EMPTY_DRAFT,
       name: p.name,
+      provider: p.provider || "anthropic",
+      model: p.model || "",
+      description: p.description || "",
+      base_url: p.base_url ?? "",
+      temperature: p.temperature ?? EMPTY_DRAFT.temperature,
+      streaming: p.streaming ?? EMPTY_DRAFT.streaming,
+      supports_tools: p.supports_tools ?? EMPTY_DRAFT.supports_tools,
+    });
+    setError(null);
+    setTestResult(null);
+  };
+
+  const startCopy = (p: Profile) => {
+    setEditing(null);
+    setCopyingFrom(p.name);
+    setOriginalBaseUrl("");
+    setBaseUrlHasHiddenData(false);
+    setReplaceHiddenBaseUrl(false);
+    setDraft({
+      ...EMPTY_DRAFT,
+      name: `${p.name}-copy`,
       provider: p.provider || "anthropic",
       model: p.model || "",
       description: p.description || "",
@@ -149,16 +197,27 @@ export function ProfilesDialog({
     setBusy(true);
     setError(null);
     try {
-      if (editing) {
+      if (copyingFrom) {
+        await api.createProfile({ name: draft.name, copy_from: copyingFrom });
+      } else if (editing) {
         const body: ProfileUpdateBody = {
           provider: draft.provider,
           model: draft.model,
           description: draft.description,
           temperature: draft.temperature,
-          base_url: draft.base_url,
           streaming: draft.streaming,
           supports_tools: draft.supports_tools,
         };
+        if (
+          shouldSubmitBaseUrlUpdate(
+            originalBaseUrl,
+            draft.base_url ?? "",
+            baseUrlHasHiddenData,
+            replaceHiddenBaseUrl,
+          )
+        ) {
+          body.base_url = draft.base_url ?? "";
+        }
         if (draft.api_key) body.api_key = draft.api_key;
         if (draft.name && draft.name !== editing) body.new_name = draft.name;
         await api.updateProfile(editing, body);
@@ -218,6 +277,20 @@ export function ProfilesDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {loadWarnings.length > 0 && (
+          <div
+            role="alert"
+            className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+          >
+            <p className="font-medium">Some profiles were skipped as invalid.</p>
+            <ul className="mt-1 list-inside list-disc text-muted-foreground">
+              {loadWarnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="flex flex-col gap-2">
           {profiles.map((p) => (
             <div
@@ -229,6 +302,11 @@ export function ProfilesDialog({
                 <div className="text-muted-foreground truncate text-xs">
                   {[p.provider, p.model].filter(Boolean).join(" · ")}
                 </div>
+                {profileTargetLabel(p) && (
+                  <div className="truncate text-xs" title={profileTargetLabel(p) ?? undefined}>
+                    {profileTargetLabel(p)}
+                  </div>
+                )}
               </div>
               <Button
                 variant="ghost"
@@ -251,6 +329,16 @@ export function ProfilesDialog({
               <Button
                 variant="ghost"
                 size="sm"
+                onClick={() => startCopy(p)}
+                disabled={busy}
+                title="Copy profile"
+                aria-label={`Copy ${p.name}`}
+              >
+                Copy
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => setPendingDelete(p.name)}
                 disabled={busy}
                 title="Delete"
@@ -268,14 +356,25 @@ export function ProfilesDialog({
         <div className="rounded-md bg-muted/30 p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="text-sm font-semibold">
-              {editing ? `Edit: ${editing}` : "New Profile"}
+              {copyingFrom
+                ? `Copy: ${copyingFrom}`
+                : editing
+                  ? `Edit: ${editing}`
+                  : "New Profile"}
             </h3>
-            {editing && (
+            {(editing || copyingFrom) && (
               <Button variant="ghost" size="sm" onClick={startCreate}>
-                Cancel Edit
+                {copyingFrom ? "Cancel Copy" : "Cancel Edit"}
               </Button>
             )}
           </div>
+          {copyingFrom && (
+            <p className="mb-3 text-muted-foreground text-xs">
+              Stored settings, including ACP command and environment, are copied
+              server-side. Environment-backed API keys are not copied; configure a
+              key for the new profile first. Only the new name can be changed here.
+            </p>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label htmlFor="profile-name">Name</Label>
@@ -293,6 +392,7 @@ export function ProfilesDialog({
               <Select
                 value={draft.provider}
                 onValueChange={(v) => setDraft({ ...draft, provider: v })}
+                disabled={Boolean(copyingFrom)}
               >
                 <SelectTrigger id="profile-provider">
                   <SelectValue />
@@ -311,6 +411,7 @@ export function ProfilesDialog({
               <Input
                 id="profile-model"
                 value={draft.model}
+                disabled={Boolean(copyingFrom)}
                 onChange={(e) =>
                   setDraft({ ...draft, model: e.target.value })
                 }
@@ -322,11 +423,30 @@ export function ProfilesDialog({
               <Input
                 id="profile-base-url"
                 value={draft.base_url || ""}
+                disabled={Boolean(copyingFrom)}
                 onChange={(e) =>
                   setDraft({ ...draft, base_url: e.target.value })
                 }
                 placeholder="https://api.example.com/v1"
               />
+              {editing && baseUrlHasHiddenData && (
+                <div className="space-y-2 text-xs text-amber-600">
+                  <p>
+                    Credentials, query parameters, or fragments are hidden.
+                    Saving without changes preserves the stored URL.
+                  </p>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={replaceHiddenBaseUrl}
+                      onChange={(event) =>
+                        setReplaceHiddenBaseUrl(event.target.checked)
+                      }
+                    />
+                    Replace the stored URL with the visible URL
+                  </label>
+                </div>
+              )}
             </div>
             <div className="grid gap-1.5 sm:col-span-2">
               <Label htmlFor="profile-api-key">
@@ -336,6 +456,7 @@ export function ProfilesDialog({
                 id="profile-api-key"
                 type="password"
                 value={draft.api_key || ""}
+                disabled={Boolean(copyingFrom)}
                 onChange={(e) =>
                   setDraft({ ...draft, api_key: e.target.value })
                 }
@@ -351,6 +472,7 @@ export function ProfilesDialog({
                 min="0"
                 max="2"
                 value={draft.temperature ?? 0.7}
+                disabled={Boolean(copyingFrom)}
                 onChange={(e) =>
                   setDraft({
                     ...draft,
@@ -364,6 +486,7 @@ export function ProfilesDialog({
               <Input
                 id="profile-description"
                 value={draft.description || ""}
+                disabled={Boolean(copyingFrom)}
                 onChange={(e) =>
                   setDraft({ ...draft, description: e.target.value })
                 }
@@ -375,6 +498,7 @@ export function ProfilesDialog({
                 <Switch
                   id="profile-streaming"
                   checked={draft.streaming ?? true}
+                  disabled={Boolean(copyingFrom)}
                   onCheckedChange={(v) => setDraft({ ...draft, streaming: v })}
                 />
                 <Label htmlFor="profile-streaming">Streaming</Label>
@@ -383,6 +507,7 @@ export function ProfilesDialog({
                 <Switch
                   id="profile-tools"
                   checked={draft.supports_tools ?? true}
+                  disabled={Boolean(copyingFrom)}
                   onCheckedChange={(v) =>
                     setDraft({ ...draft, supports_tools: v })
                   }
@@ -404,13 +529,19 @@ export function ProfilesDialog({
             disabled={
               busy ||
               !draft.name.trim() ||
-              !draft.model.trim() ||
-              (!editing && !draft.provider.trim())
+              (!copyingFrom && draft.provider !== "acp" && !draft.model.trim()) ||
+              (!editing && !copyingFrom && !draft.provider.trim())
             }
           >
-            {busy ? "Saving…" : editing ? "Save Changes" : "Create"}
+            {busy
+              ? "Saving…"
+              : copyingFrom
+                ? "Copy Profile"
+                : editing
+                  ? "Save Changes"
+                  : "Create"}
           </Button>
-          {!editing && (
+          {!editing && !copyingFrom && (
             <Button variant="ghost" onClick={startCreate} disabled={busy}>
               <Plus className="mr-1 size-4" /> Reset
             </Button>
