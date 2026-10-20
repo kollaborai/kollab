@@ -1,18 +1,14 @@
 name: Binaries
 
-# The single-file kollab binary for each platform (scripts/build_binary.py).
-# publish.yml calls this for every release tag and attaches the binaries to the
-# GitHub Release, where install.sh and /upgrade download them.
+# The single-file kollab binary for each platform (scripts/build_binary.py) and
+# the desktop apps built around it. publish.yml calls this for every v* release
+# tag and attaches the results to the GitHub Release, where install.sh and
+# /upgrade download them.
 #
-# The full binary/desktop matrix runs only on pushes to main and on release
-# tags, through publish.yml.
-# Pull requests prove the packaging path with the single ci/binary-smoke job in
-# ci.yml instead -- four macOS/Linux binary builds plus two desktop builds per
-# PR was the dominant CI cost and left the required check waiting on runner
-# queues.
+# Packaging runs only for a release tag or by hand (workflow_dispatch, e.g. on
+# release/X.Y.Z before tagging). Pull requests and branch pushes build nothing
+# here: PR CI was waiting on this matrix.
 on:
-  push:
-    branches: [main]
   # No tags trigger: publish.yml calls this for every release tag. A tags trigger
   # here built every binary and desktop app twice per release.
   workflow_call:

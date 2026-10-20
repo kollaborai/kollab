@@ -918,8 +918,9 @@ Every release also ships `kollab` as one executable per platform
 CPython 3.14 and every wheel, so it runs with no Python installed.
 `scripts/build_binary.py` builds and smoke-tests it for the machine it runs on,
 with wheels picked for macOS 11 and glibc 2.28, never for the build host;
-`.github/workflows/binaries.yml` runs it on each platform for every tag and for
-PRs that touch it. `install.sh` installs the binary first, and in a binary
+`.github/workflows/binaries.yml` runs it on each platform only for a `v*` tag
+(publish.yml calls it) or a manual run; PRs and branch pushes build no packages.
+`install.sh` installs the binary first, and in a binary
 `/upgrade` swaps in the latest release's binary after checking its SHA-256 and
 that it starts (`kollabor/updates/auto_update.py:_upgrade_binary`).
 
