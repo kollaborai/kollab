@@ -145,6 +145,7 @@ export type Profile = {
   model?: string;
   description?: string;
   base_url?: string;
+  command?: string[];
   temperature?: number;
   streaming?: boolean;
   supports_tools?: boolean;
@@ -153,8 +154,9 @@ export type Profile = {
 
 export type ProfileWrite = {
   name: string;
-  provider: string;
-  model: string;
+  provider?: string;
+  model?: string;
+  copy_from?: string;
   api_key?: string;
   base_url?: string;
   temperature?: number;
@@ -1099,6 +1101,8 @@ export class EngineApi {
       active?: string;
       /** Every provider the engine can run, for the profile editor. */
       providers?: string[];
+      /** Invalid user profiles skipped while loading; names map to safe diagnostics. */
+      invalid_profiles?: Record<string, string>;
     }>("/profiles");
   }
 

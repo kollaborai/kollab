@@ -82,7 +82,22 @@ class LoadoutManager:
             name = raw.get("name")
         else:
             name = raw
-        return str(name).strip() if name else None
+        if not name:
+            return None
+        name = str(name).strip()
+        if not name:
+            return None
+        if (
+            self.resolve(name)[0] is None
+            and self.profile_manager.get_profile(name) is None
+        ):
+            logger.warning(
+                "Configured default_loadout %r does not match a saved loadout "
+                "or available profile; ignoring it",
+                name,
+            )
+            return None
+        return name
 
     def set_default(self, name: str, level: str = "global") -> bool:
         """Persist a loadout name as the startup default at global/project level."""

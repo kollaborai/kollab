@@ -472,3 +472,26 @@ Each provider has unique configuration options. See [providers.md](../providers.
 - Provider-specific fields (Azure endpoint, OpenRouter headers)
 - OAuth setup
 - Custom endpoint configuration
+
+
+## Copying and diagnosing profiles
+
+- In the terminal, copy a profile with `/model copy <source-profile> <new-name>`.
+  The command creates an independent saved copy and does not switch the active
+  profile. It preserves provider-specific settings, including ACP `command`,
+  working directory, workspace, environment values, and install guidance.
+- In the Web UI, use Copy on a profile and choose a new name. The engine copies
+  the stored settings server-side, so fields not shown in the form are retained.
+  Environment-backed API keys are not copied; configure `KOLLAB_<NEW_NAME>_API_KEY`
+  or `KOLLAB_API_KEY` first. Keyring references remain shared. ACP profiles do
+  not need a model string; their adapter command is the required
+  runtime setting.
+- Profiles with invalid configuration are skipped individually, not allowed to
+  break the profile list. The Web UI displays the skipped names and diagnostics.
+  Restore the reported setting (for example an ACP `command`) before copying.
+- Profile cards show the provider and model plus the actual endpoint or ACP
+  adapter. URL credentials, query parameters, and fragments are omitted from the
+  displayed endpoint.
+- Missing persisted active/default profiles and unresolved `default_loadout`
+  values emit warnings; startup falls back instead of silently using a different
+  profile.

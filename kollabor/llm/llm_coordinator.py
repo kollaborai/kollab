@@ -1437,6 +1437,51 @@ class LLMService:
                     active_profile.get_model() if active_profile is not None else None
                 )
 
+                if str(getattr(profile, "provider", "") or "").lower() == "acp":
+                    event_bus = getattr(self, "event_bus", None)
+                    acp_orchestrator = (
+                        event_bus.get_service("acp_orchestrator")
+                        if event_bus is not None
+                        else None
+                    )
+                    if acp_orchestrator is None:
+                        logger.error(
+                            "Cannot switch to ACP profile %r: ACP orchestrator is unavailable",
+                            profile_name,
+                        )
+                        return False
+                    try:
+                        started = await acp_orchestrator.start(profile)
+                        if started is False:
+                            return False
+                        try:
+                            profile_updated = self.profile_manager.set_active_profile(
+                                profile_name, persist=persist
+                            )
+                            if profile_updated is False:
+                                logger.warning(
+                                    "ACP profile %r is active for this session but "
+                                    "could not be persisted",
+                                    profile_name,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "ACP profile %r is active for this session but "
+                                "could not be persisted: %s",
+                                profile_name,
+                                exc,
+                            )
+                        self._current_provider = None
+                        self.conversation_logger.set_provider(profile.provider)
+                        await LLMService._announce_hub_model_switch(
+                            self, profile, previous_model
+                        )
+                        logger.info("Switched to ACP profile %r", profile_name)
+                        return True
+                    except Exception:
+                        logger.exception("ACP profile switch failed for %r", profile_name)
+                        return False
+
                 # Auto-refresh OAuth tokens and resolve model before switching
                 if profile.auth_type == "oauth":
                     try:
@@ -1501,7 +1546,34 @@ class LLMService:
                     )
                     return False
 
-                self.conversation_logger.set_provider(profile.provider)
+                acp_orchestrator = None
+                if (
+                    active_profile is not None
+                    and str(getattr(active_profile, "provider", "") or "").lower()
+                    == "acp"
+                ):
+                    event_bus = getattr(self, "event_bus", None)
+                    acp_orchestrator = (
+                        event_bus.get_service("acp_orchestrator")
+                        if event_bus is not None
+                        else None
+                    )
+                    if acp_orchestrator is not None:
+                        try:
+                            await acp_orchestrator.close()
+                        except Exception:
+                            logger.exception(
+                                "Could not stop ACP profile %r during native switch",
+                                active_profile.name,
+                            )
+                            try:
+                                await acp_orchestrator.start(active_profile)
+                            except Exception:
+                                logger.exception(
+                                    "Could not restore ACP profile %r after failed switch",
+                                    active_profile.name,
+                                )
+                            return False
 
                 # Keep the coordinator's provider reference in sync with the
                 # API service. ProviderRegistry caches matching configurations,
@@ -1516,13 +1588,35 @@ class LLMService:
                 # e.g. after `/login openai` the status bar and next launch
                 # would still show the old profile.
                 try:
-                    self.profile_manager.set_active_profile(
+                    profile_updated = self.profile_manager.set_active_profile(
                         profile_name, persist=persist
                     )
-                except Exception as e:
+                    if profile_updated is False:
+                        logger.warning(
+                            "Profile %r switched at runtime but could not be persisted",
+                            profile_name,
+                        )
+                        self.profile_manager.set_active_profile(
+                            profile_name, persist=False
+                        )
+                except Exception as exc:
                     logger.warning(
-                        f"Could not sync active profile '{profile_name}': {e}"
+                        "Profile %r switched at runtime but could not be persisted: %s",
+                        profile_name,
+                        exc,
                     )
+                    if persist:
+                        try:
+                            self.profile_manager.set_active_profile(
+                                profile_name, persist=False
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not update active profile %r for this session",
+                                profile_name,
+                            )
+
+                self.conversation_logger.set_provider(profile.provider)
 
                 # Keep this explicit class call compatible with the focused
                 # unbound-method test stand-in used for switch_profile.
