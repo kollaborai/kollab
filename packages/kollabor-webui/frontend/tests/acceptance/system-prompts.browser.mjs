@@ -61,21 +61,28 @@ async function stopVite() {
   await Promise.race([exited, sleep(3000)]);
 }
 
+
+const pageErrors = [];
+const consoleErrors = [];
+
+async function openHarness(browser, query = "", width = 1280) {
+  const page = await browser.newPage({ viewport: { width, height: 900 } });
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.goto(`${harnessUrl}${query}`, { waitUntil: "networkidle" });
+  return page;
+}
+
 await mkdir(artifactDir, { recursive: true });
 let browser;
 try {
   await waitForHarness();
   browser = await chromium.launch({ headless: true });
 
-  const pageErrors = [];
-  const consoleErrors = [];
-  const page = await browser.newPage({ viewport: { width: 390, height: 900 } });
-  page.on("pageerror", (error) => pageErrors.push(error.message));
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("dialog", (dialog) => dialog.accept());
-  await page.goto(harnessUrl, { waitUntil: "networkidle" });
+  const page = await openHarness(browser, "", 390);
   await page.getByTestId("section-content").waitFor();
   await page.getByText("Project", { exact: true }).waitFor();
 
@@ -148,15 +155,7 @@ try {
   assert.equal(removalState.saved, undefined);
   assert.deepEqual(removalState.deleted, ["coder/identity"]);
 
-  const failurePageErrors = [];
-  const failureConsoleErrors = [];
-  const failurePage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-  failurePage.on("pageerror", (error) => failurePageErrors.push(error.message));
-  failurePage.on("console", (message) => {
-    if (message.type() === "error") failureConsoleErrors.push(message.text());
-  });
-  failurePage.on("dialog", (dialog) => dialog.accept());
-  await failurePage.goto(`${harnessUrl}?fail-delete=1`, { waitUntil: "networkidle" });
+  const failurePage = await openHarness(browser, "?fail-delete=1");
   const failureEditor = failurePage.getByTestId("section-content");
   await failureEditor.waitFor();
   await failureEditor.fill("Keep this override when delete fails.");
@@ -176,19 +175,85 @@ try {
     deleted: [],
   });
 
+  const readOnlyPage = await openHarness(browser);
+  await readOnlyPage.locator('[data-testid="section-row"][data-key="hooks"]').click();
+  await readOnlyPage.waitForFunction(
+    () => document.querySelector('[data-testid="section-content"]')?.value.includes("Hook system snapshot"),
+  );
+  assert.equal(await readOnlyPage.getByTestId("delete-override").count(), 0);
+
+  const racePage = await openHarness(browser, "?delay-section=skills&delay-ms=400");
+  const raceEditor = racePage.getByTestId("section-content");
+  await racePage.waitForFunction(
+    () => document.querySelector('[data-testid="section-content"]')?.value.includes("You are Coder"),
+  );
+  await racePage.locator('[data-testid="section-row"][data-key="skills"]').click();
+  await racePage.waitForFunction(
+    () => document.querySelector('[data-key="skills"]')?.getAttribute("aria-current") === "true",
+  );
+  await racePage.locator('[data-testid="section-row"][data-key="output-style"]').click();
+  await racePage.waitForFunction(
+    () => document.querySelector('[data-testid="section-content"]')?.value.includes("Keep each line under"),
+  );
+  await sleep(450);
+  assert.match(await raceEditor.inputValue(), /Keep each line under/);
+
+  const sectionFailurePage = await openHarness(browser, "?fail-section=identity");
+  await sectionFailurePage.getByTestId("section-row").first().waitFor();
+  const sectionFailureStatus = sectionFailurePage.getByTestId("status-message");
+  await sectionFailureStatus.filter({ hasText: "Simulated section load failure: identity" }).waitFor();
+  assert.ok((await sectionFailureStatus.getAttribute("class")).includes("text-destructive"));
+
+  const previewFailurePage = await openHarness(browser, "?fail-preview=1");
+  await previewFailurePage.getByTestId("section-content").waitFor();
+  await previewFailurePage.getByRole("button", { name: "Preview" }).click();
+  const previewFailureStatus = previewFailurePage.getByTestId("status-message");
+  await previewFailureStatus.filter({ hasText: "Simulated preview failure: engine unavailable" }).waitFor();
+  assert.equal(await previewFailurePage.getByTestId("preview-rendered").count(), 0);
+  assert.ok((await previewFailureStatus.getAttribute("class")).includes("text-destructive"));
+
+  const saveRefreshPage = await openHarness(browser, "?fail-refresh=save");
+  const saveRefreshEditor = saveRefreshPage.getByTestId("section-content");
+  await saveRefreshEditor.waitFor();
+  await saveRefreshEditor.fill("Save succeeded before refresh failed.");
+  await saveRefreshPage.getByRole("button", { name: "Save override" }).click();
+  const saveRefreshStatus = saveRefreshPage.getByTestId("status-message");
+  await saveRefreshStatus.filter({ hasText: "Override saved, but refresh failed:" }).waitFor();
+  assert.match(await saveRefreshStatus.innerText(), /Simulated section refresh failure: save/);
+  assert.equal(
+    await saveRefreshPage.evaluate(() => window.__systemPromptsFixture.saved["coder/identity"]),
+    "Save succeeded before refresh failed.",
+  );
+
+  const removeRefreshPage = await openHarness(browser, "?fail-refresh=remove");
+  const removeRefreshEditor = removeRefreshPage.getByTestId("section-content");
+  await removeRefreshEditor.waitFor();
+  await removeRefreshEditor.fill("Override is removed before refresh fails.");
+  await removeRefreshPage.getByRole("button", { name: "Save override" }).click();
+  await removeRefreshPage.getByText("Override saved.", { exact: true }).waitFor();
+  await removeRefreshPage.getByRole("button", { name: "Remove override" }).click();
+  const removeRefreshStatus = removeRefreshPage.getByTestId("status-message");
+  await removeRefreshStatus.filter({ hasText: "Override removed, but refresh failed:" }).waitFor();
+  assert.equal(await removeRefreshPage.getByTestId("delete-override").count(), 0);
+  assert.equal(await removeRefreshEditor.inputValue(), "");
+  const removeRefreshState = await removeRefreshPage.evaluate(() => ({
+    saved: window.__systemPromptsFixture.saved["coder/identity"],
+    deleted: window.__systemPromptsFixture.deleted,
+  }));
+  assert.equal(removeRefreshState.saved, undefined);
+  assert.deepEqual(removeRefreshState.deleted, ["coder/identity"]);
+
+
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(consoleErrors, []);
-  assert.deepEqual(failurePageErrors, []);
-  assert.deepEqual(failureConsoleErrors, []);
   console.log(JSON.stringify({
     api: "fixtureTransport mock; no engine contacted",
     layouts,
     successfulSaveAndRemove: removalState,
     deleteFailure: failureState,
+    errorAndRaceScenarios: "passed",
     pageErrors,
     consoleErrors,
-    failurePageErrors,
-    failureConsoleErrors,
   }, null, 2));
 } finally {
   await browser?.close();

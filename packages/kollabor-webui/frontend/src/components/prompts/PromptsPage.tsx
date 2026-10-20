@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -42,43 +42,79 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
 
-  const selectBundle = useCallback(
-    async (next: string) => {
-      setBundle(next);
-      setSelected(null);
+  const selectionRequest = useRef(0);
+  const sectionRequest = useRef(0);
+  const previewRequest = useRef(0);
+
+  const loadSection = useCallback(
+    async (targetBundle: string, key: string, request: number) => {
+      const sectionRequestId = ++sectionRequest.current;
       setContent(null);
-      setSections(null);
-      setPreviewing(false);
-      setMessage(null);
+      setDraft("");
       try {
-        const result = await api.listSections(next);
-        const ordered = sortSections(result.sections);
-        setSections(ordered);
-        if (ordered.length) setSelected(ordered[0].key);
+        const loaded = await api.getSection(targetBundle, key);
+        if (
+          request !== selectionRequest.current ||
+          sectionRequestId !== sectionRequest.current
+        ) return;
+        setContent(loaded);
+        setDraft(loaded.content);
       } catch (reason) {
+        if (
+          request !== selectionRequest.current ||
+          sectionRequestId !== sectionRequest.current
+        ) return;
+        setContent(null);
+        setDraft("");
         setMessage({ ok: false, text: errorText(reason) });
       }
     },
     [api],
   );
 
-  const selectSection = useCallback(
-    async (key: string) => {
-      setSelected(key);
+  const selectBundle = useCallback(
+    async (next: string) => {
+      const request = ++selectionRequest.current;
+      ++sectionRequest.current;
+      ++previewRequest.current;
+      setBundle(next);
+      setSelected(null);
+      setContent(null);
+      setDraft("");
+      setSections(null);
       setPreviewing(false);
+      setPreview(null);
       setMessage(null);
-      if (!bundle) return;
       try {
-        const loaded = await api.getSection(bundle, key);
-        setContent(loaded);
-        setDraft(loaded.content);
+        const result = await api.listSections(next);
+        if (request !== selectionRequest.current) return;
+        const ordered = sortSections(result.sections);
+        setSections(ordered);
+        if (ordered.length) {
+          setSelected(ordered[0].key);
+          void loadSection(next, ordered[0].key, request);
+        }
       } catch (reason) {
-        setContent(null);
-        setDraft("");
-        setMessage({ ok: false, text: errorText(reason) });
+        if (request === selectionRequest.current) {
+          setMessage({ ok: false, text: errorText(reason) });
+        }
       }
     },
-    [api, bundle],
+    [api, loadSection],
+  );
+
+  const selectSection = useCallback(
+    (key: string) => {
+      if (!bundle) return;
+      const request = ++selectionRequest.current;
+      ++previewRequest.current;
+      setSelected(key);
+      setPreviewing(false);
+      setPreview(null);
+      setMessage(null);
+      void loadSection(bundle, key, request);
+    },
+    [bundle, loadSection],
   );
 
   useEffect(() => {
@@ -99,62 +135,113 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
     };
   }, [api, selectBundle]);
 
-  // The editor tracks the selected section's stored content.
-  useEffect(() => {
-    if (!bundle || !selected) return;
-    let live = true;
-    api
-      .getSection(bundle, selected)
-      .then((loaded) => {
-        if (!live) return;
-        setContent(loaded);
-        setDraft(loaded.content);
-      })
-      .catch(() => {
-        // Row stays selected; the message from the rows load still shows.
-      });
-    return () => {
-      live = false;
-    };
-  }, [api, bundle, selected]);
-
   const save = async () => {
-    if (!bundle || !selected) return;
+    if (!bundle || !selected || !content) return;
+    const targetBundle = bundle;
     const key = selected;
+    const value = draft;
+    const request = selectionRequest.current;
     setBusy(true);
     setMessage(null);
     try {
-      await api.saveSection(bundle, key, draft);
-      const result = await api.listSections(bundle);
-      setSections(sortSections(result.sections));
-      const stored = await api.getSection(bundle, key);
-      setContent(stored);
-      setDraft(stored.content);
+      try {
+        await api.saveSection(targetBundle, key, value);
+      } catch (reason) {
+        if (request === selectionRequest.current) {
+          setMessage({ ok: false, text: errorText(reason) });
+        }
+        return;
+      }
+      if (request !== selectionRequest.current) return;
+
+      setContent((current) =>
+        current ? { ...current, content: value, overridden: true } : current,
+      );
+      setDraft(value);
+      setSections((current) =>
+        current?.map((section) =>
+          section.key === key ? { ...section, overridden: true } : section,
+        ) ?? current,
+      );
       setMessage({ ok: true, text: "Override saved." });
-    } catch (reason) {
-      setMessage({ ok: false, text: errorText(reason) });
+
+      try {
+        const result = await api.listSections(targetBundle);
+        if (request !== selectionRequest.current) return;
+        setSections(sortSections(result.sections));
+        const stored = await api.getSection(targetBundle, key);
+        if (request !== selectionRequest.current) return;
+        setContent(stored);
+        setDraft(stored.content);
+      } catch (reason) {
+        if (request === selectionRequest.current) {
+          setMessage({
+            ok: false,
+            text: `Override saved, but refresh failed: ${errorText(reason)}`,
+          });
+        }
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const removeOverride = async () => {
-    if (!bundle || !selected) return;
+    const sectionKind = sections?.find((section) => section.key === selected)?.kind;
+    if (
+      !bundle ||
+      !selected ||
+      !content?.overridden ||
+      !isEditable(sectionKind ?? "editable")
+    ) return;
+    const targetBundle = bundle;
+    const key = selected;
+    const request = selectionRequest.current;
     setBusy(true);
     setMessage(null);
     try {
-      await api.deleteOverride(bundle, selected);
-      const result = await api.listSections(bundle);
-      setSections(sortSections(result.sections));
-      const stored = await api.getSection(bundle, selected);
-      setContent(stored);
-      setDraft(stored.content);
+      try {
+        await api.deleteOverride(targetBundle, key);
+      } catch (reason) {
+        if (request === selectionRequest.current) {
+          setMessage({ ok: false, text: errorText(reason) });
+        }
+        return;
+      }
+      if (request !== selectionRequest.current) return;
+
+      setSections((current) =>
+        current?.map((section) =>
+          section.key === key ? { ...section, overridden: false } : section,
+        ) ?? current,
+      );
+      setContent(null);
+      setDraft("");
       setMessage({
         ok: true,
-        text: "Override removed; the shipped section shows through.",
+        text: "Override removed; refreshing the shipped section.",
       });
-    } catch (reason) {
-      setMessage({ ok: false, text: errorText(reason) });
+
+      try {
+        const result = await api.listSections(targetBundle);
+        if (request !== selectionRequest.current) return;
+        setSections(sortSections(result.sections));
+        const stored = await api.getSection(targetBundle, key);
+        if (request !== selectionRequest.current) return;
+        setContent(stored);
+        setDraft(stored.content);
+        setMessage({
+          ok: true,
+          text: "Override removed; the shipped section shows through.",
+        });
+      } catch (reason) {
+        if (request === selectionRequest.current) {
+          setMessage({
+            ok: false,
+            text: `Override removed, but refresh failed: ${errorText(reason)}`,
+          });
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -163,13 +250,24 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   const togglePreview = async () => {
     if (!bundle) return;
     if (previewing) {
+      ++previewRequest.current;
       setPreviewing(false);
+      setPreview(null);
       return;
     }
+    const request = ++previewRequest.current;
+    const targetBundle = bundle;
+    setPreview(null);
     setPreviewing(true);
+    setMessage(null);
     try {
-      setPreview(await api.preview(bundle));
+      const loaded = await api.preview(targetBundle);
+      if (request !== previewRequest.current) return;
+      setPreview(loaded);
     } catch (reason) {
+      if (request !== previewRequest.current) return;
+      setPreviewing(false);
+      setPreview(null);
       setMessage({ ok: false, text: errorText(reason) });
     }
   };
@@ -404,7 +502,7 @@ export function PromptsView({
             <textarea
               data-testid="section-content"
               value={draft}
-              readOnly={!editable}
+              readOnly={!editable || !content || busy}
               placeholder={
                 sections === null
                   ? ""
@@ -420,13 +518,13 @@ export function PromptsView({
                   type="button"
                   size="xs"
                   data-testid="save-section"
-                  disabled={!dirty || busy}
+                  disabled={!dirty || !content || busy}
                   onClick={onSave}
                 >
                   Save override
                 </Button>
               )}
-              {overridden && (
+              {overridden && editable && content?.overridden && (
                 <Button
                   type="button"
                   size="xs"

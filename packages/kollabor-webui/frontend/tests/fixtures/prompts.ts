@@ -42,7 +42,7 @@ export const FIXTURE_SECTIONS: PromptSection[] = [
     tokens: 1337,
     kind: "runtime",
     source_path: "runtime: status bar snapshot",
-    overridden: false,
+    overridden: true,
   },
   {
     key: "skills",
@@ -73,7 +73,7 @@ export const FIXTURE_CONTENT: Record<string, PromptSectionContent> = {
   },
   hooks: {
     content: "## Hook system snapshot\n\npre_user_input -> pre_api_request\n",
-    overridden: false,
+    overridden: true,
     tokens: 10,
   },
 };

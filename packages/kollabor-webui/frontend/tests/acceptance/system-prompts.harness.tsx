@@ -6,7 +6,37 @@ import "../../src/styles.css";
 
 const fixture = fixtureTransport();
 const api = new PromptsApi(fixture.transport);
-if (new URLSearchParams(window.location.search).get("fail-delete") === "1") {
+const parameters = new URLSearchParams(window.location.search);
+const originalGetSection = api.getSection.bind(api);
+api.getSection = async (bundle, key) => {
+  if (parameters.get("fail-section") === key) {
+    throw new Error(`Simulated section load failure: ${key}`);
+  }
+  if (parameters.get("delay-section") === key) {
+    const delayMs = Number(parameters.get("delay-ms") ?? 400);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return originalGetSection(bundle, key);
+};
+const originalPreview = api.preview.bind(api);
+api.preview = async (bundle) => {
+  if (parameters.get("fail-preview") === "1") {
+    throw new Error("Simulated preview failure: engine unavailable");
+  }
+  return originalPreview(bundle);
+};
+const originalListSections = api.listSections.bind(api);
+let listSectionsCalls = 0;
+api.listSections = async (bundle) => {
+  listSectionsCalls += 1;
+  const failRefresh = parameters.get("fail-refresh");
+  if ((failRefresh === "save" && listSectionsCalls === 2) ||
+      (failRefresh === "remove" && listSectionsCalls === 3)) {
+    throw new Error(`Simulated section refresh failure: ${failRefresh}`);
+  }
+  return originalListSections(bundle);
+};
+if (parameters.get("fail-delete") === "1") {
   api.deleteOverride = async () => {
     throw new Error("Simulated DELETE failure: permission denied");
   };
