@@ -108,8 +108,13 @@ jobs:
           name: kollab-${{ matrix.binary_platform }}
           path: dist/bin
 
-      - name: Install pinned Tauri CLI
-        run: cargo install tauri-cli --locked --version "2.12.0"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # The npm package ships the prebuilt CLI; `cargo install` compiled it on every run.
+      - name: Check pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.12.0 --version
 
       - name: Unpack the CLI into the app runtime and set the release version
         env:
@@ -118,7 +123,7 @@ jobs:
 
       - name: Build unsigned Kollab.app
         working-directory: desktop
-        run: cargo tauri build --config src-tauri/tauri.release.json --bundles app
+        run: npx --yes @tauri-apps/cli@2.12.0 build --config src-tauri/tauri.release.json --bundles app
 
       - name: Package unsigned desktop assets
         env:
