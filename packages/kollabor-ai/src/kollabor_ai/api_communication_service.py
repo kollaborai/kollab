@@ -588,6 +588,30 @@ class APICommunicationService:
             logger.error(f"Error during API service shutdown: {e}")
             # Don't raise - we want cleanup to complete even if there are errors
 
+    def _provider_unavailable_error(self) -> ProviderError:
+        """Build a safe, profile-specific error for a missing stream provider."""
+        profile = getattr(self, "_profile", None)
+        profile_name = getattr(profile, "name", None) or "active profile"
+        provider = str(
+            profile.get_provider() if profile is not None else "unknown"
+        ).lower()
+        if provider == "acp":
+            message = (
+                f"Profile {profile_name!r} uses ACP and cannot use the native "
+                "provider stream; route this request through the ACP harness."
+            )
+        else:
+            message = (
+                f"Provider for profile {profile_name!r} is unavailable. Check "
+                "the profile configuration and run /setup to reinitialize it."
+            )
+        return ProviderError(
+            message,
+            provider=provider,
+            error_code="provider_unavailable",
+            safe_message=message,
+        )
+
     async def call_llm(
         self,
         conversation_history: List[Dict[str, Any]],
@@ -670,16 +694,8 @@ class APICommunicationService:
         self._provider_kwargs = dict(provider_kwargs)
 
         # Use provider system (always enabled)
-        if not self._provider:
-            # Provide helpful error with the actual configuration issue
-            if self._provider_error:
-                raise RuntimeError(
-                    f"LLM provider not available due to configuration error:\n"
-                    f"{self._provider_error}\n\n"
-                    f"Use /setup to fix the configuration."
-                )
-            else:
-                raise RuntimeError("Provider not initialized. Call initialize() first.")
+        if self._provider is None:
+            raise self._provider_unavailable_error()
 
         has_image_input = any(
             isinstance(message, dict) and contains_image_content(message.get("content"))
@@ -1106,8 +1122,11 @@ class APICommunicationService:
         thinking_parts = []
         deferred_text_parts = []
         image_generation_signaled = False
+        provider = self._provider
+        if provider is None:
+            raise self._provider_unavailable_error()
         defer_text_until_final = bool(
-            getattr(self._provider, "supports_hosted_image_generation", False)
+            getattr(provider, "supports_hosted_image_generation", False)
         )
         final_usage = None
         final_stop_reason = None
@@ -1120,7 +1139,7 @@ class APICommunicationService:
 
         try:
             # Stream provider responses
-            async for streaming_response in self._provider.stream(
+            async for streaming_response in provider.stream(
                 messages=messages,
                 tools=tools,
                 **getattr(self, "_provider_kwargs", {}),
