@@ -7,9 +7,18 @@ status: active
 ---
 # Learn Kollab
 
-The browser UI has a Learn entry in the sidebar for people who are new to Kollab
-or want a quick reminder. Each lesson uses plain language, a short how-to, and an
-example. Topic URLs are stable and use `/learn?topic=<id>`.
+The browser UI has a Learn book icon in the sidebar footer for people who are new
+to Kollab or want a quick reminder. Each lesson uses plain language, a short how-to,
+and an example. Topic URLs are stable and use `/learn?topic=<id>`.
+
+Learn uses borderless tonal surfaces for its navigation, lessons, release notes,
+completion controls, and callouts. Interactive controls retain keyboard focus
+indicators. Titles, body copy, and detail text use the same size scale as the
+Settings and Agents panels across desktop and mobile.
+
+The topic menu uses plain text labels without numbering. Page and section headings
+omit decorative icons, taglines, and lesson counters; completion remains visible
+through the progress bar and completed state.
 
 | Topic ID | Lesson |
 | --- | --- |
@@ -24,10 +33,11 @@ example. Topic URLs are stable and use `/learn?topic=<id>`.
 | `system-prompts` | Agent system prompts |
 | `phone-access` | PhoneLink |
 
-Use a lesson link from a related sidebar, workspace, or agent surface to open the
-matching topic. Progress is saved only in the current browser's local storage; it
-is not an account or cross-device setting. If browser storage is blocked, lessons
-remain usable and the page explains that completion cannot be saved.
+Use the Learn icon to browse lessons, or a lesson link from a related workspace
+or profile control to open the matching topic. Progress is saved only in the current
+browser's local storage; it is not an account or cross-device setting. If browser
+storage is blocked, lessons remain usable and the page explains that completion
+cannot be saved.
 
 ## Kollab networks and devices
 
@@ -46,6 +56,13 @@ A workspace is a project folder. Pick the folder before starting a session so it
 sessions, local agents, and project context stay together. Use the workspace
 picker in the sidebar or New Session controls, choose an available agent, and
 start the session.
+
+Drag an agent row to reorder it within its workspace; the other rows move aside
+before you drop. Keyboard users can pick up a focused row with Space, move it with
+the arrow keys, and press Space to save or Escape to cancel.
+Drag past the sidebar's edge and release on the "Release to hide" cue to hide
+an agent. It shrinks into the Hidden Agents button and can be restored there. Move back inside
+or press Escape to cancel; hiding never deletes or stops an agent.
 
 Example: keep the Kollab repository and a customer repository in separate
 workspaces so their local agents and conversation history do not mix.
