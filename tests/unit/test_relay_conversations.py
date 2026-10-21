@@ -75,6 +75,7 @@ def outbound(number=100, **updates):
 
 def result(number=101, request=None, **updates):
     request = request or outbound()
+    updates.setdefault("expires_at", request["expires_at"])
     return message(
         number,
         kind="result",
@@ -261,15 +262,22 @@ def test_malformed_typed_input_has_safe_error(store, updates):
         admit(store, message(**updates))
 
 
-def test_admission_and_duplicate_survive_reopen(store):
+def test_admission_and_duplicate_survive_reopen(store, monkeypatch):
+    now = int(module.time.time())
+    monkeypatch.setattr(module.time, "time", lambda: now)
     grant(store)
-    first = admit(store)
-    assert first == {"id": message()["id"], "state": "queued", "duplicate": False}
-    assert store.transition(message()["id"], "running")
-    assert store.transition(message()["id"], "completed")
+    original = message()
+    first = admit(store, original)
+    assert first == {"id": original["id"], "state": "queued", "duplicate": False}
+    assert store.transition(original["id"], "running")
+    assert store.transition(original["id"], "completed")
+    # A retransmission keeps its original deadline even across a clock tick.
+    now += 1
     reopened = ConversationStore(store.path.parent, WORKSPACE)
-    second = admit(reopened)
-    assert second == {"id": message()["id"], "state": "completed", "duplicate": True}
+    with pytest.raises(RelayError, match="conflict"):
+        admit(reopened, message())
+    second = admit(reopened, original)
+    assert second == {"id": original["id"], "state": "completed", "duplicate": True}
     assert reopened.queued(LOCAL_AGENT) == []
 
 
@@ -277,18 +285,22 @@ def test_id_cannot_be_rebound_to_other_payload_peer_or_room(store):
     grant(store)
     grant(store, peer=OTHER_PEER)
     grant(store, room=OTHER_ROOM)
-    admit(store)
+    original = message()
+    admit(store, original)
     with pytest.raises(RelayError, match="conflict"):
-        admit(store, message(content="Different instructions"))
+        admit(store, dict(original, content="Different instructions"))
     with pytest.raises(RelayError, match="conflict"):
         admit(
             store,
-            message(**{"from": address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)}),
+            dict(
+                original,
+                **{"from": address(OTHER_PEER, REMOTE_WORKSPACE, REMOTE_AGENT)},
+            ),
             peer=OTHER_PEER,
         )
     with pytest.raises(RelayError, match="conflict"):
-        admit(store, room=OTHER_ROOM)
-    assert store.task(message()["id"])["payload"] == message()
+        admit(store, original, room=OTHER_ROOM)
+    assert store.task(original["id"])["payload"] == original
 
 
 def test_single_exact_expected_result_can_return_without_reverse_grant(store):
@@ -335,8 +347,9 @@ def test_expected_result_is_consumed_once_and_duplicate_remains_idempotent(store
     ],
 )
 def test_reply_expectations_bind_entire_conversation_route(store, change):
-    store.expect(ROOM, outbound())
-    incoming = result()
+    request = outbound()
+    store.expect(ROOM, request)
+    incoming = result(request=request)
     peer, room = PEER, ROOM
     if change == "thread":
         incoming["thread_id"] = "3" * 32
@@ -538,8 +551,9 @@ def test_per_agent_and_global_queue_limits(store, monkeypatch):
     monkeypatch.setattr(module, "MAX_AGENT_ACTIVE", 1)
     monkeypatch.setattr(module, "MAX_ACTIVE", 2)
     grant(store)
-    admit(store)
-    assert admit(store)["duplicate"]  # A retransmit consumes no second slot.
+    original = message()
+    admit(store, original)
+    assert admit(store, original)["duplicate"]  # A retransmit consumes no second slot.
     with pytest.raises(RelayError, match="queue"):
         admit(store, message(2))
     admit(store, message(3, to=address(agent="another-session")))
@@ -572,12 +586,13 @@ def test_grant_capacity_is_bounded_and_idempotent(store, monkeypatch):
 
 def test_expectation_capacity_and_conflicting_ids(store, monkeypatch):
     monkeypatch.setattr(module, "MAX_EXPECTATIONS", 1)
-    store.expect(ROOM, outbound())
-    store.expect(ROOM, outbound())
+    request = outbound()
+    store.expect(ROOM, request)
+    store.expect(ROOM, request)
     with pytest.raises(RelayError, match="capacity"):
         store.expect(ROOM, outbound(200))
     with pytest.raises(RelayError, match="conflict"):
-        store.expect(OTHER_ROOM, outbound())
+        store.expect(OTHER_ROOM, request)
 
 
 def test_expired_expected_result_is_not_authorized(store):
@@ -667,8 +682,9 @@ def test_authorized_rechecks_transport_approval_and_room(store, running):
 def test_consumed_return_authority_is_revoked_for_queued_and_running_results(
     store, running
 ):
-    store.expect(ROOM, outbound())
-    value = result()
+    request = outbound()
+    store.expect(ROOM, request)
+    value = result(request=request)
     admit(store, value)
     if running:
         store.transition(value["id"], "running")
@@ -691,11 +707,13 @@ def test_capacity_rejection_does_not_consume_expected_result(store, monkeypatch)
     monkeypatch.setattr(module, "MAX_AGENT_ACTIVE", 1)
     grant(store)
     admit(store)
-    store.expect(ROOM, outbound())
+    request = outbound()
+    store.expect(ROOM, request)
+    response = result(request=request)
     with pytest.raises(RelayError, match="queue"):
-        admit(store, result())
+        admit(store, response)
     store.transition(message()["id"], "completed")
-    assert admit(store, result())["state"] == "queued"
+    assert admit(store, response)["state"] == "queued"
 
 
 def test_hardlinked_database_is_rejected(store, tmp_path):
@@ -708,9 +726,11 @@ def test_hardlinked_database_is_rejected(store, tmp_path):
 def test_concurrent_grants_and_admission_remain_atomic(store):
     from concurrent.futures import ThreadPoolExecutor
 
+    original = message()
+
     def submit(_):
         grant(store)
-        return admit(store)
+        return admit(store, original)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         replies = list(pool.map(submit, range(16)))
@@ -813,13 +833,16 @@ def test_wire_rejects_invalid_deadlines(store, value):
         admit(store, message(expires_at=value))
 
 
-def test_return_cannot_extend_deadline_even_with_receiver_allowlist(store):
+def test_return_cannot_extend_deadline_even_with_receiver_allowlist(store, monkeypatch):
+    now = int(module.time.time())
+    monkeypatch.setattr(module.time, "time", lambda: now)
     grant(store)
     request = outbound()
     store.expect(ROOM, request)
+    now += 1
     with pytest.raises(RelayError, match="unsolicited"):
-        admit(store, result(expires_at=request["expires_at"] + 1))
-    assert admit(store, result())["state"] == "queued"
+        admit(store, result(request=request, expires_at=request["expires_at"] + 1))
+    assert admit(store, result(request=request))["state"] == "queued"
 
 
 def test_contact_revocation_survives_reopen_and_cancels_queued_result(store):
