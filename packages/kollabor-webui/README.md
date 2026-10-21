@@ -68,13 +68,18 @@ if Node/npm is unavailable.
   `manual` none.
 
   Local live and offline rows group by workspace folder. Network agents stay
-  under their network and device, then group by workspace. Move Up and Move Down
-  in an agent row's menu set its order within that workspace, including separate
-  sessions of the same agent. The engine stores
+  under their network and device, then group by workspace. Drag an agent row to
+  reorder it within that workspace, including separate sessions of the same agent.
+  Rows move aside during mouse or touch dragging; drop to save. With the row focused,
+  Space picks it up, arrow keys move it, Space drops it, and Escape cancels.
+  Ordering cannot move an agent to a different workspace, device, or network.
+  The engine stores
   this order in `~/.kollab/hub/sidebar-order.json`, shared across browser
   clients and durable across page, web UI, and engine restarts; it is not
   browser-local storage. Revision checks reject stale-window writes rather
-  than overwrite newer moves. If the stored JSON is unreadable, the engine
+  than overwrite newer moves. Polling cannot change the ranks during a drag;
+  cancelled and unchanged drops do not write. Failed saves restore the confirmed
+  order and show an error. If the stored JSON is unreadable, the engine
   preserves it and shows a recovery warning; a missing first-run file is normal.
   The Learn book icon in the sidebar footer opens lessons about agent roles,
   project folders, and how the sidebar order is saved.

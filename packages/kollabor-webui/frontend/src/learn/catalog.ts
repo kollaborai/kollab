@@ -61,7 +61,7 @@ export const LEARN_TOPICS = [
       "Open Agents to see the rosters and teams available in the selected workspace.",
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
       "Give the agent a concrete result to produce and how you will verify it.",
-      "To reorder sidebar rows, open an agent or workspace row menu and choose Move Up or Move Down. The order is saved for the whole network and restored on refresh.",
+      "Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.",
       "If another device changed the order at the same time, the sidebar refreshes and asks you to retry; your change is not silently lost.",
       "Review its output and tests before using the result.",
     ],
