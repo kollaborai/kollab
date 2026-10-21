@@ -57,7 +57,7 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
-import { LearnPage } from "@/components/learn/LearnPage";
+import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
@@ -1130,16 +1130,14 @@ export default function App() {
             onSessionUpdated={handleSessionUpdated}
           />
         ) : null}
+        {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
           className="h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)] min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
-          {learnRoute ? (
-            <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
-          ) : null}
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
-          <div className={pageOpen ? "hidden" : "contents"}>
+          <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
             <div
               role="status"

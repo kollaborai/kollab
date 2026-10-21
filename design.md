@@ -17,7 +17,8 @@ content, agent identity, and available actions easy to read.
 - Use plain topic navigation without numbered badges.
 - Remove decorative heading icons, sparkles, uppercase taglines, and lesson counters.
 - Keep Learn as a book icon in the sidebar's bottom action row.
-- Keep Learn focused on topics, with an X in the top right. Remove the title bar,
+- Open Learn in a compact modal like Apps, with an X in the top right and scrolling
+  inside the modal. Keep it focused on topics. Remove the title bar,
   completion controls, progress tracking, and Previous/Next footer.
 - Give What's New its own page and newspaper icon in the bottom action row.
 - Match the main pane's outer corners and inset spacing to the floating sidebar.
@@ -123,6 +124,11 @@ reduced motion.
   or delete its session. Restore the row and show the error if saving fails.
 
 ## Working References
+
+The learning system remains under review. The first reference-browser and task-card
+mockups were rejected. Current prototypes explore a session walkthrough using the
+actual controls, and an interactive model of networks, devices, workspaces, and
+agents. Neither content direction has been selected for implementation.
 
 - [LearnPage.tsx](packages/kollabor-webui/frontend/src/components/learn/LearnPage.tsx):
   compact headings, plain topic navigation, and borderless content groups.
