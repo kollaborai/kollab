@@ -102,6 +102,10 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
+- **Learn**: the sidebar opens a responsive, ten-topic guide at `/learn`; deep
+  links use `/learn?topic=<id>`, and lesson completion is stored in this browser.
+  What's New comes from the canonical changelog. See
+  [`docs/features/learn.md`](../../docs/features/learn.md).
 - **Gem Studio** (sidebar footer): every agent is born with a random look (eyes
   and hat) that sticks; dress any gem over it (eyes, hat, color) and set the
   season for all, previewed live. Random Look rolls a new outfit, Reset goes
@@ -235,6 +239,20 @@ npm run typecheck
 npm run build
 node --test tests/*.test.ts
 ```
+
+## Learn browser acceptance
+
+The retained `frontend/tests/learn-browser-acceptance.mjs` harness starts a local
+Vite server and intercepts all engine API requests; it never starts or contacts a
+live engine, router, or user configuration. Install a browser once with
+`npx playwright-core install chromium`, or set `CHROME_PATH` to an existing
+Chrome/Chromium executable, then run `npm run test:e2e:learn` from `frontend/`.
+The harness checks startup, Hub/network listing, profile selection and agent
+session launch, Learn navigation/focus/progress, storage errors, changelog
+failure/retry, and responsive layouts. It writes the three viewport screenshots
+to the repository's `docs/screenshots/`; set `LEARN_CAPTURE_SCREENSHOTS=0` to
+run the checks without rewriting images.
+
 
 ## License
 

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
 
 type Listing = { path: string; name: string; parent: string | null; dirs: string[] };
 
@@ -200,6 +201,9 @@ export function WorkspacePicker({
             <span className="truncate">Use {listing.name}</span>
           </Button>
         ) : null}
+        <div className="border-t border-border/70 pt-2">
+          <LearnMoreLink topicId="workspaces" className="min-h-7 text-xs" onNavigate={() => setOpen(false)} />
+        </div>
       </PopoverContent>
     </Popover>
   );

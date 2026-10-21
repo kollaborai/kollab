@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
@@ -17,6 +17,7 @@ import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
 import { buildLocalOrderRows, groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
+import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -146,6 +147,8 @@ export function AppSidebar({
   onApps,
   onAgents,
   onSettings,
+  onLearn,
+  learnActive,
   onStudio,
   onManageProfiles,
   // Named `onSelectSession`, not `onSelect`: ComponentProps<typeof Sidebar>
@@ -195,6 +198,8 @@ export function AppSidebar({
   /** Opens the Agents view: every roster and team this folder can start. */
   onAgents: () => void;
   onSettings: () => void;
+  onLearn: () => void;
+  learnActive: boolean;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
   onManageProfiles: () => void;
@@ -230,6 +235,10 @@ export function AppSidebar({
     [agents],
   );
   const [optionsOpen, setOptionsOpen] = useState(false);
+
+  useEffect(() => {
+    if (learnActive) setOptionsOpen(false);
+  }, [learnActive]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -591,18 +600,29 @@ export function AppSidebar({
                   {creationError}
                 </div>
               ) : null}
-              <div className="bg-foreground/[0.04] flex items-center justify-between gap-2 px-3 py-2.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setOptionsOpen(false);
-                    onManageProfiles();
-                  }}
-                >
-                  Manage Profiles
-                </Button>
+              <div className="bg-foreground/[0.04] flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+                <div className="flex min-w-0 flex-col items-start">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setOptionsOpen(false);
+                      onManageProfiles();
+                    }}
+                  >
+                    Manage Profiles
+                  </Button>
+                  <LearnMoreLink
+                    topicId="profiles"
+                    label="Learn about profiles"
+                    className="min-h-7 px-2 text-xs"
+                    onNavigate={() => {
+                      setOptionsOpen(false);
+                      setOpenMobile(false);
+                    }}
+                  />
+                </div>
                 <Button type="button" size="sm" disabled={busy} onClick={create}>
                   <Plus className="size-4" />
                   Start Session
@@ -821,12 +841,53 @@ export function AppSidebar({
             </SidebarGroupContent>
           </FoldGroup>
         ) : null}
+        <div className="space-y-1 border-t border-sidebar-border/70 px-3 py-2">
+          <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-sidebar-foreground/60">
+            Network guides
+          </p>
+          <LearnMoreLink
+            topicId="networks"
+            label="Learn more about networks"
+            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
+            onNavigate={() => setOpenMobile(false)}
+          />
+          <LearnMoreLink
+            topicId="devices"
+            label="Learn more about devices"
+            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
+            onNavigate={() => setOpenMobile(false)}
+          />
+          <LearnMoreLink
+            topicId="phone-access"
+            label="Learn about WireGuard phone access"
+            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
+            onNavigate={() => setOpenMobile(false)}
+          />
+        </div>
+
       </SidebarContent>
 
       <SidebarFooter className="p-2">
         {hiddenError ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
         ) : null}
+        <SidebarMenu className="mb-1">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              type="button"
+              tooltip="Learn"
+              isActive={learnActive}
+              aria-current={learnActive ? "page" : undefined}
+              onClick={() => {
+                setOpenMobile(false);
+                onLearn();
+              }}
+            >
+              <BookOpen className="size-4" />
+              <span>Learn</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
 
         {sidebarOrder.warning ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">

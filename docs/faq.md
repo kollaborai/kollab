@@ -1,7 +1,7 @@
 ---
 title: "FAQ"
 created: 2026-02-24
-modified: 2026-08-06
+modified: 2026-10-20
 status: active
 ---
 # FAQ
@@ -105,6 +105,14 @@ It starts or reuses the local engine on `127.0.0.1:7433` and serves the browser
 UI on `127.0.0.1:8080`. `kollab --web-ui --restart` stops the running UI and the engine it
 started, then starts both again. See the [engine README](../packages/kollabor-engine/README.md)
 and [web UI README](../packages/kollabor-webui/README.md).
+
+### How do I learn the browser UI?
+
+Open **Learn** in the Web UI sidebar. It explains networks, devices, workspaces,
+agents, provider profiles, the koordinator, Hub messaging, voice, system prompts,
+and WireGuard phone access. You can share a lesson link such as
+`/learn?topic=profiles`. See the [Learn feature guide](features/learn.md) for
+examples and external phone-access setup requirements.
 
 ### How do I use pipe mode?
 
