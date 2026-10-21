@@ -11,8 +11,6 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
 const screenshotDir = path.join(repoRoot, "docs/screenshots");
-const setupGuideKey = "kollab.setup-guide.v1";
-const progressKey = "kollab.learn.progress.v1";
 const topics = [
   { id: "networks", title: "Kollab networks" },
   { id: "agents", title: "Agents" },
@@ -198,24 +196,9 @@ async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  await context.addInitScript(({ storageFailure }) => {
+  await context.addInitScript(() => {
     localStorage.setItem("kollab.setup-guide.v1", "dismissed");
-    const key = "kollab.learn.progress.v1";
-    if (storageFailure === "read") {
-      const original = Storage.prototype.getItem;
-      Storage.prototype.getItem = function (name) {
-        if (name === key) throw new DOMException("blocked for acceptance test", "SecurityError");
-        return original.call(this, name);
-      };
-    }
-    if (storageFailure === "write") {
-      const original = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (name, value) {
-        if (name === key) throw new DOMException("blocked for acceptance test", "QuotaExceededError");
-        return original.call(this, name, value);
-      };
-    }
-  }, { storageFailure: options.storageFailure ?? null });
+  });
 
   const page = await context.newPage();
   const pageErrors = [];
@@ -255,8 +238,7 @@ async function openPage(browser, baseUrl, fixtures, options = {}) {
 }
 
 async function waitForLesson(page, title) {
-  await page.getByRole("heading", { level: 2, name: title, exact: true }).waitFor({ state: "visible" });
-  await page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
+  await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor({ state: "visible" });
 }
 
 async function main() {
@@ -285,14 +267,14 @@ async function main() {
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/learn");
     await waitForLesson(shell.page, "Kollab networks");
-    await shell.page.getByRole("button", { name: "Back to chat", exact: true }).click();
+    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
     await shell.page.getByTestId("new-session-options").click();
     await shell.page.getByRole("link", { name: "Learn about profiles", exact: true }).click();
     await shell.page.waitForFunction(() => location.search === "?topic=profiles");
     await waitForLesson(shell.page, "Provider profiles");
-    await shell.page.getByRole("button", { name: "Back to chat", exact: true }).click();
+    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
     await shell.page.getByRole("button", { name: "Agents", exact: true }).first().click();
@@ -325,71 +307,47 @@ async function main() {
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/learn");
     await waitForLesson(shell.page, "Kollab networks");
-    await shell.page.getByRole("button", { name: "Back to chat", exact: true }).click();
+    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
-    // Keyboard topic navigation, lesson progress persistence, browser Back, and invalid-link recovery.
+    // Topic navigation is a reference flow without completion controls.
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/learn");
     const topics = shell.page.getByRole("navigation", { name: "Learn topics" });
     assert.equal(await topics.getByRole("button").count(), 10);
-    const agentsButton = topics.getByRole("button", { name: "Agents", exact: true });
-    await agentsButton.focus();
+    await topics.getByRole("button", { name: "Agents", exact: true }).focus();
     await shell.page.keyboard.press("Enter");
     await shell.page.waitForFunction(() => location.search === "?topic=agents");
     await waitForLesson(shell.page, "Agents");
-    assert.equal(await shell.page.evaluate(() => document.activeElement?.tagName), "H2");
-    await shell.page.getByRole("button", { name: "Mark complete", exact: true }).focus();
-    await shell.page.keyboard.press("Enter");
-    await shell.page.getByRole("button", { name: "Mark incomplete", exact: true }).waitFor({ state: "visible" });
-    assert.equal(await shell.page.evaluate(() => localStorage.getItem("kollab.learn.progress.v1")), '["agents"]');
+    assert.equal(await shell.page.evaluate(() => document.activeElement?.tagName), "H1");
+    assert.equal(await shell.page.getByRole("progressbar").count(), 0);
+    assert.equal(await shell.page.getByRole("button", { name: /Mark complete|Mark incomplete|Previous lesson|Next lesson/ }).count(), 0);
+    assert.equal(await shell.page.getByText("Unreleased", { exact: true }).count(), 0);
     await shell.page.reload({ waitUntil: "domcontentloaded" });
-    await shell.page.getByRole("button", { name: "Mark incomplete", exact: true }).waitFor({ state: "visible" });
+    await waitForLesson(shell.page, "Agents");
     await shell.page.goBack();
     await shell.page.waitForFunction(() => location.pathname === "/learn" && location.search === "");
     await shell.page.goto(`${baseUrl}/learn?topic=not-a-topic`, { waitUntil: "domcontentloaded" });
-    await shell.page.getByRole("heading", { name: "That lesson link is not available" }).waitFor({ state: "visible" });
-    await shell.page.getByRole("button", { name: "Browse lessons" }).click();
+    await shell.page.getByRole("heading", { name: "That topic is not available" }).waitFor({ state: "visible" });
+    await shell.page.getByRole("button", { name: "Browse topics" }).click();
     await shell.page.waitForFunction(() => location.search === "?topic=networks");
 
-    // Both read and write failures must remain visible; the retry button repeats the failing operation.
-    for (const mode of ["read", "write"]) {
-      const failureFixtures = makeFixtures();
-      const failurePage = await openPage(browser, baseUrl, failureFixtures, { storageFailure: mode });
-      await failurePage.page.goto(`${baseUrl}/learn?topic=profiles`, { waitUntil: "domcontentloaded" });
-      if (mode === "write") {
-        await waitForLesson(failurePage.page, "Provider profiles");
-        await failurePage.page.getByRole("button", { name: "Mark complete", exact: true }).click();
-      }
-      await failurePage.page.getByRole("alert").getByText(/progress/i).waitFor({ state: "visible" });
-      await failurePage.page.getByRole("button", { name: "Try again", exact: true }).click();
-      await failurePage.page.getByRole("alert").getByText(/progress/i).waitFor({ state: "visible" });
-      assert.ok(!await failurePage.page.getByText("Progress is saved in this browser.", { exact: true }).count());
-      await failurePage.context.close();
-    }
-
-    // The changelog error state retries by reloading the lesson, then succeeds after a transient failure.
-    const changelogFixtures = makeFixtures();
-    const changelogFailure = await openPage(browser, baseUrl, changelogFixtures, { failChangelogOnce: true });
-    await changelogFailure.page.goto(`${baseUrl}/learn?topic=voice`, { waitUntil: "domcontentloaded" });
-    await changelogFailure.page.getByRole("heading", { level: 2, name: "Voice mode", exact: true }).waitFor();
-    await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).waitFor({ state: "visible" });
+    // Release updates have their own route, close control, and retry path.
+    await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/whats-new");
+    await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
+    await shell.page.getByText("Unreleased", { exact: true }).waitFor();
+    await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
+    const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
+    await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
     await changelogFailure.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
     await changelogFailure.context.close();
 
-    // A delayed changelog chunk shows a stable skeleton while the lesson remains readable.
-    const delayedFixtures = makeFixtures();
-    const delayed = await openPage(browser, baseUrl, delayedFixtures, { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
-    await delayed.page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
-    await delayed.page.getByRole("heading", { level: 2, name: "Kollab networks" }).waitFor();
+    const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
+    await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
     await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
-    const titleBefore = await delayed.page.getByRole("heading", { level: 2, name: "Kollab networks" }).boundingBox();
     await delayed.page.getByText("Unreleased", { exact: true }).waitFor({ state: "visible" });
-    const titleAfter = await delayed.page.getByRole("heading", { level: 2, name: "Kollab networks" }).boundingBox();
-    const layoutShift = Math.abs(titleAfter.y - titleBefore.y);
-    console.log(`Loading layout title shift: ${layoutShift.toFixed(1)}px`);
-    assert.ok(layoutShift <= 3, "loading skeleton should avoid a visible lesson layout jump");
     await delayed.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {

@@ -17,6 +17,10 @@ content, agent identity, and available actions easy to read.
 - Use plain topic navigation without numbered badges.
 - Remove decorative heading icons, sparkles, uppercase taglines, and lesson counters.
 - Keep Learn as a book icon in the sidebar's bottom action row.
+- Keep Learn focused on topics, with an X in the top right. Remove the title bar,
+  completion controls, progress tracking, and Previous/Next footer.
+- Give What's New its own page and newspaper icon in the bottom action row.
+- Match the main pane's outer corners and inset spacing to the floating sidebar.
 - Keep the removed guide links out of the sidebar and Agents modal.
 - Reorder agents by dragging, with neighboring rows moving during the gesture.
 - Hide an agent by dragging it outside the sidebar. On release, shrink it into
@@ -82,8 +86,7 @@ Keep headings plain. The removed gem header badge, sparkles, book heading badges
 "THE KOLLAB FIELD GUIDE" tagline, and "LESSON X OF Y" label should stay removed.
 
 Topic menus use text rows with a subdued selected background. Use numbering for
-instructions whose order matters. Completion indicators and progress counts must
-reflect actual progress.
+instructions whose order matters. Learn has no completion state or progress counter.
 
 Keep the sidebar focused on agents, workspaces, networks, and its bottom utility
 actions. Do not reintroduce the agents/workspaces guide links, the Network guides

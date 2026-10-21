@@ -11,14 +11,14 @@ The browser UI has a Learn book icon in the sidebar footer for people who are ne
 to Kollab or want a quick reminder. Each lesson uses plain language, a short how-to,
 and an example. Topic URLs are stable and use `/learn?topic=<id>`.
 
-Learn uses borderless tonal surfaces for its navigation, lessons, release notes,
-completion controls, and callouts. Interactive controls retain keyboard focus
+Learn uses borderless tonal surfaces for its navigation, topics, and callouts.
+Interactive controls retain keyboard focus
 indicators. Titles, body copy, and detail text use the same size scale as the
 Settings and Agents panels across desktop and mobile.
 
 The topic menu uses plain text labels without numbering. Page and section headings
-omit decorative icons, taglines, and lesson counters; completion remains visible
-through the progress bar and completed state.
+omit decorative icons, taglines, and lesson counters. The page has a close icon
+in its top-right corner and uses the same inset, rounded outer pane as chat.
 
 | Topic ID | Lesson |
 | --- | --- |
@@ -34,10 +34,9 @@ through the progress bar and completed state.
 | `phone-access` | PhoneLink |
 
 Use the Learn icon to browse lessons, or a lesson link from a related workspace
-or profile control to open the matching topic. Progress is saved only in the current
-browser's local storage; it is not an account or cross-device setting. If browser
-storage is blocked, lessons remain usable and the page explains that completion
-cannot be saved.
+or profile control to open the matching topic. Learn is a reference page with no
+completion tracking, progress bar, or Previous/Next footer. Navigate with the
+topic menu. Previously stored browser progress is left untouched.
 
 ## Kollab networks and devices
 
@@ -154,10 +153,11 @@ issuing a QR. Code in a checkout does not establish public deployment.
 Manual WireGuard access remains optional under **Advanced Settings**; its
 operator prerequisites are in [PhoneLink](phone-access.md).
 
-## What's New and progress
+## What's New
 
-The Learn page's What's New card reads `kollabor/updates/CHANGELOG.md` from the
-canonical source when the Web UI bundle is built. It shows Unreleased notes and
-the newest release section; it does not keep a separate copy of release notes.
+What's New is a separate `/whats-new` page, opened with the newspaper icon in the
+sidebar footer. It reads `kollabor/updates/CHANGELOG.md` from the canonical source
+when the Web UI bundle is built. It shows the full Unreleased notes and newest
+release section; it does not keep a separate copy of release notes.
 If notes are empty or cannot load, the page offers the full changelog and a
 retry. Unknown topic IDs show a recovery link to the lesson list.

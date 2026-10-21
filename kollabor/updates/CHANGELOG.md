@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The directory now includes a same-origin browser portal; its deployment is
   checked before the app offers a QR. Manual WireGuard controls are collapsed
   under Advanced Settings.
-- Web: add a responsive Learn page with ten guided topics, contextual links, local progress, and changelog-backed What's New.
+- Web: add ten Learn reference topics with compact typography and plain topic navigation. What's New has its own page and sidebar action.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
 - Docs: add a product-ready checklist and PR template requiring evidence or a
@@ -49,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updating a model-less ACP profile to a native provider now requires a native model; invalid combinations return an actionable validation error without mutating the profile.
 - Web: a long profile name or model no longer widens the Profiles dialog past a phone screen and hides its buttons.
 - Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
-- Web: the Agents lesson now explains sidebar workspace grouping and Move Up/Move Down row ordering, and lesson progress never overwrites a stored entry it could not read. The Voice lesson documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
+- Web: agent guidance covers sidebar workspace grouping and drag ordering. Learn no longer tracks completion or shows a progress counter. The Voice topic documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
+- Web: the main pane shares the sidebar's rounded inset frame; footer actions stay on one row or form two balanced rows. Wrapped changelog entries retain their full text.
 
 ### Security
 - Restrict WebUI token bootstrap and phone APIs to exact private interface/phone-peer subnets; validate Host/Origin, disable forwarded-header trust, and never persist or redisclose client private keys.
