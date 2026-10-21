@@ -8,7 +8,8 @@ status: active
 # Learn Kollab
 
 The browser UI has a Learn book icon in the sidebar footer for people who are new
-to Kollab or want a quick reminder. Each lesson uses plain language, a short how-to,
+to Kollab or want a quick reminder. It opens a compact modal like Apps, with the
+chat preserved behind it. Each topic uses plain language, a short how-to,
 and an example. Topic URLs are stable and use `/learn?topic=<id>`.
 
 Learn uses borderless tonal surfaces for its navigation, topics, and callouts.
@@ -17,8 +18,9 @@ indicators. Titles, body copy, and detail text use the same size scale as the
 Settings and Agents panels across desktop and mobile.
 
 The topic menu uses plain text labels without numbering. Page and section headings
-omit decorative icons, taglines, and lesson counters. The page has a close icon
-in its top-right corner and uses the same inset, rounded outer pane as chat.
+omit decorative icons, taglines, and lesson counters. The modal has a close icon
+in its top-right corner and scrolls internally. Escape also closes it. Topic URLs
+can be bookmarked or opened directly and browser Back/Forward restores navigation.
 
 | Topic ID | Lesson |
 | --- | --- |
@@ -34,7 +36,7 @@ in its top-right corner and uses the same inset, rounded outer pane as chat.
 | `phone-access` | PhoneLink |
 
 Use the Learn icon to browse lessons, or a lesson link from a related workspace
-or profile control to open the matching topic. Learn is a reference page with no
+or profile control to open the matching topic. Learn is a reference with no
 completion tracking, progress bar, or Previous/Next footer. Navigate with the
 topic menu. Previously stored browser progress is left untouched.
 

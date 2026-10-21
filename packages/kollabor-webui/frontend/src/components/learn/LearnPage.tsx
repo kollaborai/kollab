@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { CircleAlert, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { getLearnTopic, LEARN_TOPICS, type LearnRoute, type LearnTopicId } from "@/learn/catalog";
 
@@ -13,9 +12,11 @@ type LearnPageProps = {
 
 export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
   const topicHeadingRef = useRef<HTMLHeadingElement>(null);
+  const topicScrollRef = useRef<HTMLDivElement>(null);
   const topic = route.kind === "topic" ? getLearnTopic(route.topicId) : null;
 
   useEffect(() => {
+    topicScrollRef.current?.scrollTo({ top: 0 });
     topicHeadingRef.current?.focus({ preventScroll: true });
   }, [route]);
 
@@ -25,8 +26,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
         <X className="size-4" aria-hidden="true" />
       </TooltipIconButton>
       <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[15rem_minmax(0,1fr)] md:grid-rows-1">
-        <nav aria-label="Learn topics" className="min-w-0 overflow-hidden bg-muted/20 md:overflow-y-auto">
-          <div className="flex h-12 items-center px-3 md:hidden"><SidebarTrigger /></div>
+        <nav aria-label="Learn topics" className="min-w-0 overflow-hidden bg-muted/20 pt-9 md:overflow-y-auto md:pt-0">
           <div className="flex gap-1 overflow-x-auto p-2 md:flex-col md:gap-1 md:p-3">
             {LEARN_TOPICS.map((item) => (
               <Button
@@ -45,7 +45,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
             ))}
           </div>
         </nav>
-        <div className="min-h-0 min-w-0 overflow-y-auto">
+        <div ref={topicScrollRef} className="min-h-0 min-w-0 overflow-y-auto">
           <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-4 sm:px-6 sm:py-6 md:px-8">
             {route.kind === "invalid" ? (
               <section className="rounded-2xl bg-destructive/5 p-5 sm:p-7" role="alert">
@@ -63,7 +63,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
             ) : (
               <>
                 <section className="rounded-2xl bg-card/70 p-5 sm:p-7">
-                  <h1 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none">{topic.title}</h1>
+                  <h1 ref={topicHeadingRef} tabIndex={-1} className="pr-8 text-lg font-semibold outline-none">{topic.title}</h1>
                   <p className="mt-3 text-sm text-muted-foreground">{topic.summary}</p>
                 </section>
                 <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(15rem,0.8fr)]">
