@@ -187,12 +187,15 @@ function AgentSidebarItem({ name, children, onHide, onProperties, onDelete, drag
           style={style}
           hidden={hiding.has(drag.id)}
           data-dragging={snapshot.isDragging || undefined}
+          data-sidebar-agent-row
           data-hide-preview={snapshot.isDragging && outside || undefined}
           className={snapshot.isDragging ? "rounded-md bg-sidebar-accent shadow-lg" : undefined}
         >
           {cloneElement(children, {
             ...provided.dragHandleProps,
-            className: cn(children.props.className, provided.dragHandleProps && "cursor-grab", snapshot.isDragging && "cursor-grabbing"),
+            // On desktop the hidden menu should not reserve a permanent blank
+            // column. Give it room when hover or keyboard focus reveals it.
+            className: cn(children.props.className, "md:pr-2! md:group-hover/menu-item:pr-8! md:group-focus-within/menu-item:pr-8! md:group-has-data-[state=open]/menu-item:pr-8!", provided.dragHandleProps && "cursor-grab", snapshot.isDragging && "cursor-grabbing"),
           })}
           {snapshot.isDragging && outside ? (
             <span role="status" className="pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
