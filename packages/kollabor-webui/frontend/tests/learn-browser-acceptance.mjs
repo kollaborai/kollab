@@ -281,9 +281,9 @@ async function main() {
     await shell.page.getByText("Remote Coder", { exact: true }).waitFor({ state: "visible" });
 
     // Regress startup, Hub listing, agent launch, and profile selection with explicit API fixtures.
-    // Context links close their source navigation/popover before the Learn route takes focus.
-    await shell.page.getByRole("link", { name: "Learn more about networks", exact: true }).click();
-    await shell.page.waitForFunction(() => location.search === "?topic=networks");
+    // Learn lives with the footer icons; contextual help stays in its related controls.
+    await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/learn");
     await waitForLesson(shell.page, "Kollab networks");
     await shell.page.getByRole("button", { name: "Back to chat", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
@@ -296,11 +296,9 @@ async function main() {
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
     await shell.page.getByRole("button", { name: "Agents", exact: true }).first().click();
-    await shell.page.getByRole("link", { name: /Learn more about agents/ }).click();
-    await shell.page.waitForFunction(() => location.search === "?topic=agents");
-    await waitForLesson(shell.page, "Agents");
-    await shell.page.getByRole("button", { name: "Back to chat", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
+    const agentLibrary = shell.page.getByRole("dialog", { name: "Agents", exact: true });
+    assert.equal(await agentLibrary.getByRole("link", { name: /Learn more about/ }).count(), 0);
+    await agentLibrary.getByRole("button", { name: "Close", exact: true }).click();
 
 
     await shell.page.getByTestId("new-session-options").click();
@@ -335,7 +333,7 @@ async function main() {
     await shell.page.waitForFunction(() => location.pathname === "/learn");
     const topics = shell.page.getByRole("navigation", { name: "Learn topics" });
     assert.equal(await topics.getByRole("button").count(), 10);
-    const agentsButton = topics.getByRole("button", { name: "4. Agents", exact: true });
+    const agentsButton = topics.getByRole("button", { name: "Agents", exact: true });
     await agentsButton.focus();
     await shell.page.keyboard.press("Enter");
     await shell.page.waitForFunction(() => location.search === "?topic=agents");

@@ -2,14 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  BookOpen,
   Check,
   CircleAlert,
   ExternalLink,
-  Gem,
   Loader2,
   RefreshCw,
-  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -73,20 +70,11 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
     : 0;
 
   return (
-    <main className="flex h-full min-h-0 min-w-0 flex-col bg-background text-foreground">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/70 bg-card/70 px-4 py-3 sm:px-6 md:px-8">
+    <main className="flex h-full min-h-0 min-w-0 flex-col bg-background text-sm text-foreground">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 bg-card/70 px-4 py-3 sm:px-6 md:px-8">
         <div className="flex min-w-0 items-center gap-3">
           <SidebarTrigger className="-ml-1 md:hidden" />
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-primary/25 bg-primary/10 text-primary">
-            <Gem className="size-5" aria-hidden="true" />
-          </div>
-          <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-[0.65rem] font-semibold uppercase tracking-[0.16em] text-primary">
-              <Sparkles className="size-3" aria-hidden="true" />
-              The Kollab field guide
-            </p>
-            <h1 className="truncate text-lg font-semibold tracking-tight sm:text-xl">Learn Kollab</h1>
-          </div>
+          <h1 className="truncate text-lg font-semibold">Learn Kollab</h1>
         </div>
         <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           <div className="min-w-28 flex-1 sm:w-44 sm:flex-none">
@@ -115,7 +103,7 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
       </header>
 
       {progress.warning ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm sm:px-6" role="alert">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 bg-destructive/5 px-4 py-2 text-sm sm:px-6" role="alert">
           <CircleAlert className="size-4 shrink-0 text-destructive" aria-hidden="true" />
           <span className="min-w-0 flex-1 text-destructive">{progress.warning}</span>
           {progress.canRetry ? (
@@ -142,29 +130,29 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
       ) : null}
 
       <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[15rem_minmax(0,1fr)] md:grid-rows-1">
-        <nav aria-label="Learn topics" className="min-w-0 border-b border-border/70 bg-muted/20 md:overflow-y-auto md:border-r md:border-b-0">
+        <nav aria-label="Learn topics" className="min-w-0 bg-muted/20 md:overflow-y-auto">
           <div className="flex w-max gap-1.5 overflow-x-auto p-2 md:flex-col md:w-auto md:gap-1 md:p-3">
-            {LEARN_TOPICS.map((item, index) => {
+            {LEARN_TOPICS.map((item) => {
               const selected = topic?.id === item.id;
               const isComplete = completed.has(item.id);
               return (
-                <button
+                <Button
                   key={item.id}
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   aria-current={selected ? "page" : undefined}
-                  aria-label={`${index + 1}. ${item.title}${isComplete ? ", complete" : ""}`}
+                  aria-label={`${item.title}${isComplete ? ", complete" : ""}`}
                   onClick={() => onNavigate(item.id)}
-                  className={`flex min-h-10 shrink-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring md:w-full md:text-sm ${
+                  className={`h-auto min-h-9 justify-between px-3 py-2 text-left font-normal md:w-full ${
                     selected
-                      ? "border-primary/35 bg-primary/10 text-foreground shadow-sm"
-                      : "border-transparent text-muted-foreground hover:border-border hover:bg-accent hover:text-foreground"
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[0.65rem] font-semibold tabular-nums ${selected ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`} aria-hidden="true">
-                    {isComplete ? <Check className="size-3.5" /> : index + 1}
-                  </span>
-                  <span className="whitespace-nowrap md:whitespace-normal">{item.title}</span>
-                </button>
+                  <span className="min-w-0 whitespace-nowrap md:whitespace-normal">{item.title}</span>
+                  {isComplete ? <Check className="size-3.5 shrink-0" aria-hidden="true" /> : null}
+                </Button>
               );
             })}
           </div>
@@ -175,11 +163,11 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
             <WhatsNewCard result={updates} onRetry={retryUpdates} />
 
             {route.kind === "invalid" ? (
-              <section className="rounded-2xl border border-destructive/30 bg-destructive/5 p-5 sm:p-7" role="alert">
+              <section className="rounded-2xl bg-destructive/5 p-5 sm:p-7" role="alert">
                 <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
                   <CircleAlert className="size-5" aria-hidden="true" />
                 </div>
-                <h2 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold">That lesson link is not available</h2>
+                <h2 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none">That lesson link is not available</h2>
                 <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
                   “{route.requestedTopic}” is not a Learn topic. Choose one of the lessons in the list to continue.
                 </p>
@@ -188,9 +176,8 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                 </Button>
               </section>
             ) : !topic ? (
-              <section className="rounded-2xl border border-border bg-card p-5 sm:p-7" role="status">
-                <BookOpen className="mb-3 size-6 text-primary" aria-hidden="true" />
-                <h2 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold">Lessons are not available in this build</h2>
+              <section className="rounded-2xl bg-card p-5 sm:p-7" role="status">
+                <h2 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none">Lessons are not available in this build</h2>
                 <p className="mt-2 text-sm text-muted-foreground">Refresh the Web UI. If the lessons are still missing, ask your Kollab administrator to update the Web UI bundle.</p>
                 <Button type="button" variant="outline" className="mt-4" onClick={() => window.location.reload()}>
                   <RefreshCw className="size-4" aria-hidden="true" /> Refresh Learn
@@ -198,18 +185,15 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
               </section>
             ) : (
               <>
-                <section className="relative overflow-hidden rounded-2xl border border-primary/20 bg-gradient-to-br from-primary/10 via-card to-card p-5 sm:p-7">
+                <section className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-primary/10 via-card to-card p-5 sm:p-7">
                   <div className="pointer-events-none absolute -right-8 -top-10 size-36 rounded-full bg-primary/5 blur-2xl" aria-hidden="true" />
                   <div className="relative flex flex-wrap items-start justify-between gap-4">
                     <div className="max-w-3xl">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-primary">
-                        Lesson {topicIndex + 1} of {LEARN_TOPICS.length}
-                      </p>
-                      <h2 ref={topicHeadingRef} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl">{topic.title}</h2>
-                      <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">{topic.summary}</p>
+                      <h2 ref={topicHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none">{topic.title}</h2>
+                      <p className="mt-3 max-w-3xl text-sm text-muted-foreground">{topic.summary}</p>
                     </div>
                     {completed.has(topic.id) ? (
-                      <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/25 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">
                         <Check className="size-3.5" aria-hidden="true" /> Completed
                       </span>
                     ) : null}
@@ -217,16 +201,11 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                 </section>
 
                 <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(15rem,0.8fr)]">
-                  <section className="rounded-2xl border border-border bg-card p-5 sm:p-6" aria-labelledby="learn-howto">
-                    <h3 id="learn-howto" className="flex items-center gap-2 text-base font-semibold">
-                      <span className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                        <BookOpen className="size-4" aria-hidden="true" />
-                      </span>
-                      How to get started
-                    </h3>
+                  <section className="rounded-2xl bg-card p-5 sm:p-6" aria-labelledby="learn-howto">
+                    <h3 id="learn-howto" className="text-sm font-semibold">How to get started</h3>
                     <ol className="mt-4 space-y-3">
                       {topic.howTo.map((step, index) => (
-                        <li key={step} className="flex items-start gap-3 text-sm leading-6">
+                        <li key={step} className="flex items-start gap-3 text-sm">
                           <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">{index + 1}</span>
                           <span className="min-w-0 text-foreground/90">{step}</span>
                         </li>
@@ -234,34 +213,31 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                     </ol>
                   </section>
 
-                  <section className="rounded-2xl border border-primary/20 bg-primary/[0.04] p-5 sm:p-6" aria-labelledby="learn-example">
-                    <h3 id="learn-example" className="flex items-center gap-2 text-base font-semibold">
-                      <Sparkles className="size-4 text-primary" aria-hidden="true" />
-                      Try an example
-                    </h3>
-                    <p className="mt-3 whitespace-pre-wrap break-words rounded-xl border border-border/70 bg-background/75 p-3.5 text-sm leading-6">{topic.example}</p>
+                  <section className="rounded-2xl bg-primary/[0.04] p-5 sm:p-6" aria-labelledby="learn-example">
+                    <h3 id="learn-example" className="text-sm font-semibold">Try an example</h3>
+                    <p className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-background/75 p-3.5 text-sm">{topic.example}</p>
                     {topic.note ? (
-                      <p className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                      <p className="mt-3 rounded-lg bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
                         <span className="font-semibold text-foreground">Good to know: </span>{topic.note}
                       </p>
                     ) : null}
                   </section>
                 </div>
 
-                <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-card/70 p-4 sm:px-5">
+                <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-card/70 p-4 sm:px-5">
                   <div className="flex min-w-0 flex-wrap items-center gap-3">
                     <Button
                       type="button"
                       variant="outline"
                       className={
                         completed.has(topic.id)
-                          ? "border-primary/35 bg-primary/10 text-primary hover:bg-primary/15"
-                          : "border-border bg-background text-foreground hover:border-primary/40"
+                          ? "bg-primary/10 text-primary hover:bg-primary/15"
+                          : "bg-background text-foreground"
                       }
                       aria-pressed={completed.has(topic.id)}
                       onClick={() => toggleComplete(topic.id)}
                     >
-                      {completed.has(topic.id) ? <Check className="size-4" aria-hidden="true" /> : <Gem className="size-4" aria-hidden="true" />}
+                      {completed.has(topic.id) ? <Check className="size-4" aria-hidden="true" /> : null}
                       {completed.has(topic.id) ? "Mark incomplete" : "Mark complete"}
                     </Button>
                     <span className="text-xs text-muted-foreground" aria-live="polite">
@@ -309,11 +285,9 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
 
 function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: () => void }) {
   return (
-    <section className="rounded-2xl border border-border bg-card/70 p-4 sm:p-5" aria-labelledby="whats-new-heading">
+    <section className="rounded-2xl bg-card/70 p-4 sm:p-5" aria-labelledby="whats-new-heading">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="whats-new-heading" className="flex items-center gap-2 text-sm font-semibold sm:text-base">
-          <Sparkles className="size-4 text-primary" aria-hidden="true" /> What’s new
-        </h2>
+        <h2 id="whats-new-heading" className="text-sm font-semibold">What’s new</h2>
         <a className="inline-flex min-h-7 items-center gap-1 rounded-sm text-xs text-primary underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" href={CHANGELOG_URL} target="_blank" rel="noreferrer">
           Full changelog <ExternalLink className="size-3.5" aria-hidden="true" />
         </a>
@@ -325,7 +299,7 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
             <div
               key={index}
               aria-hidden={index === 1}
-              className="min-h-48 rounded-xl border border-border/70 bg-background/60 p-3"
+              className="min-h-48 rounded-xl bg-background/60 p-3"
             >
               {index === 0 ? (
                 <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -353,7 +327,7 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
       ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           {result.sections.map((section) => (
-            <div key={`${section.version}-${section.date ?? ""}`} className="min-h-48 min-w-0 rounded-xl border border-border/70 bg-background/60 p-3">
+            <div key={`${section.version}-${section.date ?? ""}`} className="min-h-48 min-w-0 rounded-xl bg-background/60 p-3">
               <p className="text-xs font-semibold text-primary">
                 {section.version === "Unreleased" ? "Unreleased" : `Kollab ${section.version}`}
                 {section.date ? <span className="ml-1 font-normal text-muted-foreground">· {section.date}</span> : null}
@@ -363,7 +337,7 @@ function WhatsNewCard({ result, onRetry }: { result: WhatsNewResult; onRetry: ()
                   .flatMap((group) => group.items.map((item) => ({ category: group.category, item })))
                   .slice(0, 3)
                   .map(({ category, item }) => (
-                    <li key={`${category}-${item}`} className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+                    <li key={`${category}-${item}`} className="flex items-start gap-2 text-xs text-muted-foreground">
                       <span className="mt-1 size-1.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
                       <span className="line-clamp-2"><span className="font-medium text-foreground">{category}: </span>{item}</span>
                     </li>

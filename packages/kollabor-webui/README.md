@@ -76,8 +76,8 @@ if Node/npm is unavailable.
   browser-local storage. Revision checks reject stale-window writes rather
   than overwrite newer moves. If the stored JSON is unreadable, the engine
   preserves it and shows a recovery warning; a missing first-run file is normal.
-  The sidebar's Learn links open the Agents and Workspaces lessons for plain-language
-  guidance about agent roles, project folders, and how the sidebar order is saved.
+  The Learn book icon in the sidebar footer opens lessons about agent roles,
+  project folders, and how the sidebar order is saved.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list
@@ -102,8 +102,9 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
-- **Learn**: the sidebar opens a responsive, ten-topic guide at `/learn`; deep
-  links use `/learn?topic=<id>`, and lesson completion is stored in this browser.
+- **Learn**: the book icon in the sidebar footer opens a responsive, ten-topic
+  guide at `/learn`; deep links use `/learn?topic=<id>`, and lesson completion is
+  stored in this browser.
   What's New comes from the canonical changelog. See
   [`docs/features/learn.md`](../../docs/features/learn.md).
 - **Gem Studio** (sidebar footer): every agent is born with a random look (eyes

@@ -650,22 +650,6 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
-            <div className="flex flex-wrap gap-x-4 px-2 pb-1 text-xs">
-              <a
-                href="/learn?topic=agents"
-                onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
-              >
-                Learn about agents
-              </a>
-              <a
-                href="/learn?topic=workspaces"
-                onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
-              >
-                Learn about workspaces
-              </a>
-            </div>
             <SidebarMenu>
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
@@ -841,54 +825,12 @@ export function AppSidebar({
             </SidebarGroupContent>
           </FoldGroup>
         ) : null}
-        <div className="space-y-1 border-t border-sidebar-border/70 px-3 py-2">
-          <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-sidebar-foreground/60">
-            Network guides
-          </p>
-          <LearnMoreLink
-            topicId="networks"
-            label="Learn more about networks"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-          <LearnMoreLink
-            topicId="devices"
-            label="Learn more about devices"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-          <LearnMoreLink
-            topicId="phone-access"
-            label="Learn about WireGuard phone access"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-        </div>
-
       </SidebarContent>
 
       <SidebarFooter className="p-2">
         {hiddenError ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
         ) : null}
-        <SidebarMenu className="mb-1">
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              type="button"
-              tooltip="Learn"
-              isActive={learnActive}
-              aria-current={learnActive ? "page" : undefined}
-              onClick={() => {
-                setOpenMobile(false);
-                onLearn();
-              }}
-            >
-              <BookOpen className="size-4" />
-              <span>Learn</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-
         {sidebarOrder.warning ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
             Sidebar order needs recovery: {sidebarOrder.warning}
@@ -949,6 +891,18 @@ export function AppSidebar({
             }}
           >
             <Users className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Learn"
+            side="top"
+            className={`${FOOTER_BUTTON} ${learnActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""}`}
+            aria-current={learnActive ? "page" : undefined}
+            onClick={() => {
+              setOpenMobile(false);
+              onLearn();
+            }}
+          >
+            <BookOpen className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="Gem Studio"
