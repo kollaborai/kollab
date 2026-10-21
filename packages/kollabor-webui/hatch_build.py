@@ -6,10 +6,15 @@ npm is available, and force-include the generated assets in the wheel.  If a
 build environment has no Node.js toolchain (or npm cannot reach dependencies),
 keep any existing dist output intact so Python-only installs remain usable with
 the last generated UI or the legacy static fallback.
+
+Set ``KOLLAB_FRONTEND_DIST`` to package an explicit prebuilt frontend without
+running npm or changing the checkout's dist directory. An invalid explicit
+input fails the build instead of falling back to other assets.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -67,7 +72,14 @@ class CustomBuildHook(BuildHookInterface):
         dist = frontend / "dist"
         package_json = frontend / "package.json"
 
-        if package_json.exists():
+        prebuilt = os.environ.get("KOLLAB_FRONTEND_DIST")
+        if prebuilt is not None:
+            dist = Path(prebuilt)
+            if not prebuilt or dist.is_symlink() or not (dist / "index.html").is_file():
+                raise ValueError("KOLLAB_FRONTEND_DIST must name a built frontend directory containing index.html")
+            if any(asset.is_symlink() for asset in dist.rglob("*")):
+                raise ValueError("Prebuilt frontend assets must not be symlinks")
+        elif package_json.exists():
             npm = shutil.which("npm")
             if npm:
                 # Vite's emptyOutDir can remove a previously good build before

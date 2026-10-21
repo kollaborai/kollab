@@ -4,6 +4,11 @@
     python scripts/build_binary.py                    # builds the wheels from this checkout
     python scripts/build_binary.py --wheels dist      # or uses wheels already built
     python scripts/build_binary.py --expect-version 0.15.1
+    python scripts/build_binary.py --frontend-dist /tmp/kollab-ui
+
+--frontend-dist bundles an already built UI without rebuilding it. Pass the same
+directory to scripts/relay/build_service.py to package the same browser assets.
+With --wheels, it checks that those wheels already contain that exact UI.
 
 The binary is a pex scie: one executable holding a portable CPython and every
 wheel kollab needs, so it runs with no Python installed. It lands in --out as
@@ -25,6 +30,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +64,31 @@ def kollab_version(wheels: list[Path]) -> str:
         if match:
             return match.group(1)
     raise SystemExit("no kollab wheel among: " + ", ".join(w.name for w in wheels))
+
+
+def verify_frontend(wheels: list[Path], frontend: Path) -> None:
+    """Refuse a binary whose WebUI wheel differs from the chosen frontend output."""
+    if frontend.is_symlink() or not (frontend / "index.html").is_file():
+        raise SystemExit(f"--frontend-dist must contain index.html and not be a symlink: {frontend}")
+    expected = {}
+    for asset in sorted(frontend.rglob("*")):
+        if asset.is_symlink():
+            raise SystemExit(f"frontend assets must not be symlinks: {asset}")
+        if asset.is_file():
+            expected[asset.relative_to(frontend).as_posix()] = asset.read_bytes()
+    webui = [wheel for wheel in wheels if wheel.name.startswith("kollabor_webui-")]
+    if len(webui) != 1:
+        raise SystemExit(f"expected one kollabor-webui wheel, found {len(webui)}")
+    prefix = "kollabor_webui/static/assistant/"
+    with zipfile.ZipFile(webui[0]) as wheel:
+        bundled = {
+            name.removeprefix(prefix): wheel.read(name)
+            for name in wheel.namelist()
+            if name.startswith(prefix) and not name.endswith("/")
+        }
+    mismatched = sorted(name for name in expected.keys() | bundled.keys() if expected.get(name) != bundled.get(name))
+    if mismatched:
+        raise SystemExit(f"{webui[0].name} differs from --frontend-dist: {', '.join(mismatched)}")
 
 
 def platform_name() -> str:
@@ -141,6 +172,7 @@ def smoke(binary: Path, version: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--wheels", type=Path, help="directory of built wheels (default: build them here)")
+    parser.add_argument("--frontend-dist", type=Path, help="use this built frontend; verify it when using --wheels")
     parser.add_argument("--out", type=Path, default=ROOT / "dist" / "bin", help="where the binary goes")
     parser.add_argument("--expect-version", help="fail unless the binary is this version (v prefix allowed)")
     args = parser.parse_args()
@@ -149,8 +181,13 @@ def main() -> int:
         wheel_dir = args.wheels
         if wheel_dir is None:
             wheel_dir = Path(scratch, "wheels")
-            run(["uv", "build", "--all-packages", "--wheel", "--out-dir", str(wheel_dir)], cwd=ROOT)
+            env = dict(os.environ)
+            if args.frontend_dist is not None:
+                env["KOLLAB_FRONTEND_DIST"] = str(args.frontend_dist.absolute())
+            run(["uv", "build", "--all-packages", "--wheel", "--out-dir", str(wheel_dir)], cwd=ROOT, env=env)
         wheels = sorted(p for p in wheel_dir.glob("*.whl") if not p.name.startswith(BUNDLED))
+        if args.frontend_dist is not None:
+            verify_frontend(wheels, args.frontend_dist)
         version = kollab_version(wheels)
         if args.expect_version and args.expect_version.removeprefix("v") != version:
             raise SystemExit(f"the wheels are kollab {version}, not {args.expect_version}")

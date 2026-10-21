@@ -1,4 +1,8 @@
-"""Package the headless Kollab service from an explicit source allowlist."""
+"""Package the headless Kollab service from an explicit source allowlist.
+
+Pass the same --frontend-dist directory to scripts/build_binary.py to bundle
+one prebuilt frontend into the service and installed CLI/desktop artifacts.
+"""
 
 import argparse
 import hashlib
@@ -39,6 +43,8 @@ def build(output: Path, *, frontend_dist: Path | None = None) -> None:
     # not leave a partially constructed release that could be deployed.
     sources = {name: (root / name).read_bytes() for name in FILES}
     frontend = frontend_dist or root / "packages/kollabor-webui/frontend/dist"
+    if frontend.is_symlink():
+        raise ValueError("PhoneLink browser assets must not be symlinks")
     if not (frontend / "index.html").is_file():
         raise ValueError("Build the Kollab frontend before packaging a PhoneLink-capable directory")
     for asset in sorted(frontend.rglob("*")):
