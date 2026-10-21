@@ -60,6 +60,9 @@ start the session.
 Drag an agent row to reorder it within its workspace; the other rows move aside
 before you drop. Keyboard users can pick up a focused row with Space, move it with
 the arrow keys, and press Space to save or Escape to cancel.
+Drag past the sidebar's edge and release on the "Release to hide" cue to hide
+an agent. It shrinks into the Hidden Agents button and can be restored there. Move back inside
+or press Escape to cancel; hiding never deletes or stops an agent.
 
 Example: keep the Kollab repository and a customer repository in separate
 workspaces so their local agents and conversation history do not mix.

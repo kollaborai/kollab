@@ -62,6 +62,7 @@ export const LEARN_TOPICS = [
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
       "Give the agent a concrete result to produce and how you will verify it.",
       "Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.",
+      "Drag past the sidebar edge and release on the Release to hide cue to tuck an agent into Hidden Agents. You can restore it there; hiding does not stop or delete it.",
       "If another device changed the order at the same time, the sidebar refreshes and asks you to retry; your change is not silently lost.",
       "Review its output and tests before using the result.",
     ],

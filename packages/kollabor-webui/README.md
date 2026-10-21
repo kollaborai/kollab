@@ -73,6 +73,13 @@ if Node/npm is unavailable.
   Rows move aside during mouse or touch dragging; drop to save. With the row focused,
   Space picks it up, arrow keys move it, Space drops it, and Escape cancels.
   Ordering cannot move an agent to a different workspace, device, or network.
+  Drag more than 32 pixels past the sidebar's edge to see "Release to hide".
+  Releasing there shrinks the row into the Hidden Agents button; moving back or pressing Escape
+  cancels. This also works for the last row in a workspace. It uses the same
+  recoverable Hide Agent action as the row menu: restore it from Hidden Agents.
+  A rejected hide restores the row and shows the engine's error. Hiding does not
+  delete a session or stop its agent. The footer button stays available even when
+  the hidden list is empty. Reduced motion skips the travel animation.
   The engine stores
   this order in `~/.kollab/hub/sidebar-order.json`, shared across browser
   clients and durable across page, web UI, and engine restarts; it is not

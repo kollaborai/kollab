@@ -658,12 +658,10 @@ export function AppSidebar({
                     beginDrag={sidebarOrder.beginDrag}
                     onReorder={moveRow}
                   >
-                  {group.rows.map((row, index) => {
-                    const drag: AgentRowDrag = {
-                      id: row.key, index, disabled: group.rows.length < 2 || busy,
-                    };
-                    return row.session ? renderSession(row.session, drag) : renderOffline(row.offline!, drag);
-                  })}
+                    {group.rows.map((row, index) => {
+                      const drag: AgentRowDrag = { id: row.key, index, disabled: busy };
+                      return row.session ? renderSession(row.session, drag) : renderOffline(row.offline!, drag);
+                    })}
                   </AgentSidebarList>
                 </Fragment>
               ))}
@@ -731,7 +729,7 @@ export function AppSidebar({
                               key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
                               label: remoteName(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
                             })}
-                            drag={{ id: row.key, index, disabled: group.rows.length < 2 }}
+                            drag={{ id: row.key, index }}
                           >
                             <SidebarMenuButton
                               disabled={!id}
@@ -848,32 +846,31 @@ export function AppSidebar({
         ) : null}
         {/* One row of icons; each name shows on hover and to screen readers. */}
         <div className="flex items-center justify-around">
-          {hiddenList.length ? (
-            <Popover>
-              <PopoverTrigger asChild>
-                <TooltipIconButton tooltip={`Hidden Agents (${hiddenList.length})`} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2`}>
-                  <EyeOff className="size-4" />
-                  <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span>
-                </TooltipIconButton>
-              </PopoverTrigger>
-              <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
-                <p className="text-sm font-semibold">Hidden Agents</p>
-                <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
-                <ul className="my-2 max-h-64 overflow-y-auto">
-                  {hiddenList.map((agent) => (
-                    <li key={agent.key} className="flex items-center gap-2 py-1.5">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm">{agent.label}</p>
-                        <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
-                      </div>
-                      <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
-                    </li>
-                  ))}
-                </ul>
-                <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
-              </PopoverContent>
-            </Popover>
-          ) : null}
+          <Popover>
+            <PopoverTrigger asChild>
+              <TooltipIconButton data-sidebar-hide-target tooltip={hiddenList.length ? `Hidden Agents (${hiddenList.length})` : "Hidden Agents"} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2`}>
+                <EyeOff className="size-4" />
+                {hiddenList.length ? <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span> : null}
+              </TooltipIconButton>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
+              <p className="text-sm font-semibold">Hidden Agents</p>
+              <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
+              {!hiddenList.length ? <p className="text-muted-foreground mt-2 text-xs">No hidden agents.</p> : null}
+              <ul className="my-2 max-h-64 overflow-y-auto">
+                {hiddenList.map((agent) => (
+                  <li key={agent.key} className="flex items-center gap-2 py-1.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm">{agent.label}</p>
+                      <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
+                    </div>
+                    <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
+                  </li>
+                ))}
+              </ul>
+              {hiddenList.length ? <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button> : null}
+            </PopoverContent>
+          </Popover>
           <TooltipIconButton
             tooltip="Apps"
             side="top"
