@@ -8,6 +8,52 @@ This guide covers signed public discovery and the optional encrypted-presence re
 
 Kollab 0.9.0 installed with plain `pip install kollab` includes the relay client, service, supervisor, and Redis client dependency. A2A server/signing support remains optional: install `kollab[a2a]` only when operating the separate A2A receiver. Upgrade older installations with `pip install --upgrade kollab`. The dated deployment summary describes a source deployment, independently of package installation checks.
 
+## Source artifact and operator diagnostics
+
+The internal `connection-service` artifact carries the supervisor, worker,
+self-host entrypoint, discovery publisher and the existing encrypted relay
+client. Its source allowlist includes the canonical launcher/version helpers
+and root `pyproject.toml` for version detection. Install only its hashed service
+requirements from the extracted artifact directory:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r scripts/relay/requirements.txt
+.venv/bin/python kollabor_cli_main.py relay run --help
+```
+
+Use that venv directly. The included `pyproject.toml` describes the full source
+workspace; `uv run`, `uv sync`, and installing the artifact root as a project
+would attempt to discover workspace packages absent from this headless artifact.
+The deployment helper uses the plain venv/pip commands above.
+
+On a relay you operate, run transport diagnostics with an isolated state directory:
+
+```sh
+.venv/bin/python scripts/relay/peer_probe.py \
+  --origin https://agents.example.com \
+  --workspace "$HOME/kollab-probe/workspace" \
+  --state-dir "$HOME/kollab-probe/state"
+```
+
+Each stdin line accepts one of: `status`, `peers`, `approve KEY`, `revoke KEY`,
+`ping KEY`, `invite FILE`, `join FILE`, `leave`, or `quit`; EOF also exits.
+`KEY` is the full peer public key. `invite FILE` writes a new mode-0600 file
+without overwriting an existing path. `join FILE` and `--invitation-file FILE`
+read a regular, user-owned private file and never print its contents. Signed
+discovery, durable publisher pins and the advertised same-origin native relay
+endpoint are checked before attachment. Joining an invitation approves its
+inviter; the inviter must explicitly approve the other client before ping works.
+
+The probe rejects managed network state, including symlink aliases, before
+constructing a client. It installs no application handler and cannot dispatch
+agent or workspace tools. Exit disables and closes the diagnostic connection.
+JSON lines contain `result` and `status`; errors report fixed codes or exception
+class names without raw exception text. `measure_capacity.py --help` describes
+the bounded generated-client measurement, which uses fresh signed discovery
+and records that it has no persistent publisher pin across isolated runs.
+
 ## Self-host a directory in one command
 
 For one host, `kollab relay serve --domain <domain>` replaces the supervised relay, the standalone publisher and the static file server described further down: no config file, no Docker, no Redis.

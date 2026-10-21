@@ -38,7 +38,6 @@ from .device_names import (
     default_network_name,
     key_label,
 )
-from .device_primary import reconcile_join_with_choice, retire_primary_network
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -51,6 +50,7 @@ from .relay_state import (
     RelayStateStore,
     canonical_origin,
     failure_text,
+    is_machine_network_state_dir,
     parse_invite,
     strict_json,
     validate_key,
@@ -308,6 +308,10 @@ class RelayClient:
         join only reconciles with that choice (plugins/hub/device_primary.py
         -- and even clearing there needs the join to be for the chosen
         network itself, clearing a leftover of an older primary of it)."""
+        if not is_machine_network_state_dir(self.state_dir):
+            return
+        from .device_primary import reconcile_join_with_choice
+
         reconcile_join_with_choice(
             state_dir=self.state_dir,
             origin=self.state.origin,
@@ -348,6 +352,10 @@ class RelayClient:
         self.rotate_room()
         self.state.network_name = ""  # rotate keeps the name; leaving forgets it
         self._store.save()
+        if not is_machine_network_state_dir(state_dir):
+            return
+        from .device_primary import retire_primary_network
+
         retire_primary_network(
             departing_primary,
             state_dir=state_dir,

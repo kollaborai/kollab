@@ -79,6 +79,23 @@ class DiscoveryResult:
         )
 
 
+def relay_websocket_url(result: DiscoveryResult) -> str | None:
+    """Select the native relay endpoint from already verified discovery."""
+    payload = result.manifest
+    control = payload["endpoints"].get("control")
+    protocols = payload["coordinator"]["protocols"]
+    roles = payload["discovery"]["roles"]
+    if (
+        "kollab-relay/1" not in protocols
+        or "relay" not in roles
+        or "rendezvous" not in roles
+    ):
+        return None
+    if control != result.origin + "/relay/v1":
+        raise ValueError("Unsupported advertised relay control URL")
+    return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
+
+
 @dataclass(frozen=True)
 class ResolvedAgentCard:
     """Signed wire document plus cryptographic verification; not admission."""

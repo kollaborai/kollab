@@ -24,7 +24,7 @@ from .device_names import (
     validate_device_name,
     validate_trust,
 )
-from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target
+from .dns.discovery import DiscoveryError, discover, fetch_agent_card, normalize_target, relay_websocket_url
 from .dns.discovery_store import DiscoveryStore
 from .relay_state import RelayError
 
@@ -576,19 +576,7 @@ class RelayCommands:
 
     @staticmethod
     def _relay_url(result) -> str | None:
-        payload = result.manifest
-        control = payload["endpoints"].get("control")
-        protocols = payload["coordinator"]["protocols"]
-        roles = payload["discovery"]["roles"]
-        if (
-            "kollab-relay/1" not in protocols
-            or "relay" not in roles
-            or "rendezvous" not in roles
-        ):
-            return None
-        if control != result.origin + "/relay/v1":
-            raise ValueError("Unsupported advertised relay control URL")
-        return "wss://" + result.origin[len("https://") :] + "/relay/v1/ws"
+        return relay_websocket_url(result)
 
 
     def _membership_rows(self):

@@ -14,6 +14,10 @@ from pathlib import Path
 
 FILES = (
     "kollabor_cli_main.py",
+    "pyproject.toml",
+    "kollabor/__init__.py",
+    "kollabor/version.py",
+    "kollabor/binary.py",
     "plugins/__init__.py",
     "plugins/hub/__init__.py",
     "plugins/hub/relay_service.py",
@@ -23,7 +27,6 @@ FILES = (
     "plugins/hub/relay_client.py",
     "plugins/hub/phone_portal.py",
     "plugins/hub/relay_state.py",
-    "plugins/hub/relay_commands.py",
     "plugins/hub/device_names.py",
     "plugins/hub/knock_wire.py",
     "plugins/hub/dns/__init__.py",
