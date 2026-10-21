@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
@@ -116,7 +116,7 @@ function FoldGroup({
 }
 
 const FOOTER_BUTTON =
-  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
+  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-7 md:p-1.5";
 
 export function AppSidebar({
   sessions,
@@ -148,6 +148,8 @@ export function AppSidebar({
   onSettings,
   onLearn,
   learnActive,
+  onWhatsNew,
+  whatsNewActive,
   onStudio,
   onManageProfiles,
   // Named `onSelectSession`, not `onSelect`: ComponentProps<typeof Sidebar>
@@ -199,6 +201,8 @@ export function AppSidebar({
   onSettings: () => void;
   onLearn: () => void;
   learnActive: boolean;
+  onWhatsNew: () => void;
+  whatsNewActive: boolean;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
   onManageProfiles: () => void;
@@ -236,8 +240,8 @@ export function AppSidebar({
   const [optionsOpen, setOptionsOpen] = useState(false);
 
   useEffect(() => {
-    if (learnActive) setOptionsOpen(false);
-  }, [learnActive]);
+    if (learnActive || whatsNewActive) setOptionsOpen(false);
+  }, [learnActive, whatsNewActive]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -830,7 +834,7 @@ export function AppSidebar({
         ) : null}
       </SidebarContent>
 
-      <SidebarFooter className="p-2">
+      <SidebarFooter className="@container p-2 md:px-1.5">
         {hiddenError ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
         ) : null}
@@ -844,11 +848,14 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* One row of icons; each name shows on hover and to screen readers. */}
-        <div className="flex items-center justify-around">
+        {/* Use one row when it fits, otherwise center four actions over three. */}
+        <div
+          data-sidebar="footer-actions"
+          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
+        >
           <Popover>
             <PopoverTrigger asChild>
-              <TooltipIconButton data-sidebar-hide-target tooltip={hiddenList.length ? `Hidden Agents (${hiddenList.length})` : "Hidden Agents"} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2`}>
+              <TooltipIconButton data-sidebar-hide-target tooltip={hiddenList.length ? `Hidden Agents (${hiddenList.length})` : "Hidden Agents"} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2 md:px-1`}>
                 <EyeOff className="size-4" />
                 {hiddenList.length ? <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span> : null}
               </TooltipIconButton>
@@ -905,6 +912,18 @@ export function AppSidebar({
             }}
           >
             <BookOpen className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="What’s New"
+            side="top"
+            className={`${FOOTER_BUTTON} ${whatsNewActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""}`}
+            aria-current={whatsNewActive ? "page" : undefined}
+            onClick={() => {
+              setOpenMobile(false);
+              onWhatsNew();
+            }}
+          >
+            <Newspaper className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="Gem Studio"

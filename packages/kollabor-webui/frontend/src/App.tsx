@@ -58,7 +58,9 @@ import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
 import { LearnPage } from "@/components/learn/LearnPage";
-import { navigateToLearn, readLearnRoute, type LearnRoute } from "@/learn/catalog";
+import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
+import { navigateToLearn } from "@/learn/catalog";
+import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -305,8 +307,11 @@ function RuntimeShell({
 }
 
 export default function App() {
-  const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
-  const previousLearnRouteRef = useRef(learnRoute);
+  const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
+  const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
+  const whatsNewActive = pageRoute.kind === "whats-new";
+  const pageOpen = pageRoute.kind !== "chat";
+  const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
@@ -336,10 +341,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
-    const syncLearnRoute = () => {
-      const nextRoute = readLearnRoute(window.location);
-      setLearnRoute(nextRoute);
-      if (nextRoute) {
+    const syncPageRoute = () => {
+      const nextRoute = readMainPageRoute(window.location);
+      setPageRoute(nextRoute);
+      if (nextRoute.kind !== "chat") {
         setStudioOpen(false);
         setStudioFocus(null);
         setProfilesOpen(false);
@@ -349,22 +354,22 @@ export default function App() {
         setSettingsOpen(false);
       }
     };
-    window.addEventListener("popstate", syncLearnRoute);
-    return () => window.removeEventListener("popstate", syncLearnRoute);
+    window.addEventListener("popstate", syncPageRoute);
+    return () => window.removeEventListener("popstate", syncPageRoute);
   }, []);
 
   useEffect(() => {
-    const leavingLearn = previousLearnRouteRef.current !== null && learnRoute === null;
-    previousLearnRouteRef.current = learnRoute;
-    if (leavingLearn) {
+    const leavingPage = previousPageOpenRef.current && !pageOpen;
+    previousPageOpenRef.current = pageOpen;
+    if (leavingPage) {
       window.requestAnimationFrame(() => document.getElementById("app-main-pane")?.focus());
     }
-  }, [learnRoute]);
+  }, [pageOpen]);
 
   const returnToChat = useCallback(() => {
-    if (!readLearnRoute(window.location)) return;
-    window.history.pushState(null, "", "/");
-    setLearnRoute(null);
+    if (readMainPageRoute(window.location).kind === "chat") return;
+    window.history.pushState(null, "", pagePath("/", window.location.pathname));
+    setPageRoute({ kind: "chat" });
   }, []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
   const [settingsIntent, setSettingsIntent] = useState<{
@@ -1011,9 +1016,10 @@ export default function App() {
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider>
+      <SidebarProvider className="bg-muted/40">
         <AppSidebar
           learnActive={learnRoute !== null}
+          whatsNewActive={whatsNewActive}
           sessions={sessions}
           profiles={profiles}
           api={api}
@@ -1046,6 +1052,7 @@ export default function App() {
           onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
           onLearn={() => navigateToLearn()}
+          onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
             setStudioFocus(null);
             setStudioOpen(true);
@@ -1126,12 +1133,13 @@ export default function App() {
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
-          className="h-svh max-h-svh min-h-svh overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)] min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           {learnRoute ? (
             <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
           ) : null}
-          <div className={learnRoute ? "hidden" : "contents"}>
+          {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
+          <div className={pageOpen ? "hidden" : "contents"}>
           {versionMismatch ? (
             <div
               role="status"
