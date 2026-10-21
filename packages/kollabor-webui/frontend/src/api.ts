@@ -27,7 +27,7 @@ export type PhoneLinkState = {
   device: string;
   phones: Array<{ id: string; name: string; linked: boolean; connected: boolean; expires_at: number; last_seen: number | null; fingerprint: string; pending: Array<{ key: string; code: string }> }>;
 };
-export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; qr_svg: string };
+export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
 export type Session = {
   harness?: string;

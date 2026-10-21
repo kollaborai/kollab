@@ -10,6 +10,7 @@ import time
 
 import pytest
 import pytest_asyncio
+import segno
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from kollabor_engine.phone_link import CHUNK, PhoneLink, PhoneLinkError, pairing_code, session_keys
@@ -127,6 +128,16 @@ async def test_scan_does_not_approve_or_transfer_network_credentials(setup_link)
     assert "qr_svg" not in json.dumps(status)
     assert host.state.room not in json.dumps(status)
     assert all("host-only-token" not in json.dumps(frame) for _, frame in wire.sent)
+
+
+@pytest.mark.asyncio
+async def test_offer_link_is_the_invitation_the_qr_encodes(setup_link):
+    manager, offer, host, *_ = setup_link
+    assert offer["link"].startswith("https://")
+    assert "/relay/v1/phone/#v=1&id=" + offer["id"] in offer["link"]
+    assert f"room={host.state.room}" in offer["link"] and f"host={host.public_key}" in offer["link"]
+    qr = segno.make(offer["link"], error="m")
+    assert offer["qr_svg"] == qr.svg_inline(scale=4, border=4, dark="#000", light="#fff")
 
 
 @pytest.mark.asyncio

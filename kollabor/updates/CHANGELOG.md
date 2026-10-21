@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the computer's fingerprint beside a longer 12-character pairing code, each
   phone shows when it was last seen, and Revoke removes a phone in one tap.
   The loader is installable to the Home Screen and opens its verified copy.
+- Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
 
 ## [0.18.0] - 2026-10-21
 

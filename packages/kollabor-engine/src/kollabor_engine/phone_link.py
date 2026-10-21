@@ -484,6 +484,7 @@ class PhoneLink:
                 "name": self.records[identifier]["name"],
                 "expires_at": self.records[identifier]["expires"],
                 "fingerprint": host_fingerprint(client.public_key),
+                "link": link,
                 "qr_svg": segno.make(link, error="m").svg_inline(scale=4, border=4, dark="#000", light="#fff"),
             }
 

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronRight, QrCode } from "lucide-react";
+import { Check, ChevronRight, Copy, QrCode, Smartphone } from "lucide-react";
 import type { EngineApi, PhoneLinkOffer, PhoneLinkState } from "@/api";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { learnHref } from "@/learn/catalog";
+import { copyText } from "@/phonelink/copy-link";
 import { PhoneAccessSection } from "./PhoneAccessSection";
 
 type PhoneLinkPanelProps = {
@@ -45,6 +46,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState<"yes" | "failed" | "">("");
   const [now, setNow] = useState(Date.now());
   const epoch = useRef(0);
   const loading = useRef(false);
@@ -96,6 +98,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
       setBusy(false);
     }
   };
+  useEffect(() => setCopied(""), [offer?.id]);
   const expired = Boolean(offer && now / 1000 >= offer.expires_at);
   const phones = state?.phones ?? [];
   return (
@@ -178,6 +181,45 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                           Math.ceil((offer.expires_at - now / 1000) / 60),
                         )}{" "}
                         min. Keep this invitation private.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button asChild size="sm">
+                          <a href={offer.link} target="_blank" rel="noopener noreferrer">
+                            <Smartphone aria-hidden="true" />
+                            Open on This Phone
+                          </a>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void copyText(navigator.clipboard, offer.link).then(
+                              (ok) => setCopied(ok ? "yes" : "failed"),
+                            )
+                          }
+                        >
+                          {copied === "yes" ? (
+                            <Check aria-hidden="true" />
+                          ) : (
+                            <Copy aria-hidden="true" />
+                          )}
+                          {copied === "yes" ? "Copied" : "Copy Link"}
+                        </Button>
+                      </div>
+                      {copied === "failed" ? (
+                        <input
+                          readOnly
+                          aria-label="Invitation link"
+                          value={offer.link}
+                          autoFocus
+                          onFocus={(event) => event.currentTarget.select()}
+                          className="border-input bg-background w-full min-w-0 rounded-md border px-2 py-1 font-mono text-xs"
+                        />
+                      ) : null}
+                      <p className="text-muted-foreground text-xs">
+                        This link works for 5 minutes. Only share it with
+                        yourself. Nobody gets in until you approve the pairing
+                        code on this computer.
                       </p>
                     </>
                   )}

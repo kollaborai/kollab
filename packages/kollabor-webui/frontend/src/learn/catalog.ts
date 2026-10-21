@@ -152,7 +152,7 @@ export const LEARN_TOPICS = [
     howTo: [
       "Connect this computer to your Kollab network with /connect or Settings > Network.",
       "Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.",
-      "Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed.",
+      "Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed. Using Kollab on the phone itself? Choose Open on This Phone or Copy Link under the QR code instead.",
       "Check that the pairing code and the computer fingerprint match on both screens, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
       "Your phone loads Kollab from your computer, and only after it checks your computer's signature on it. Bookmark it, or add it to your Home Screen where your phone allows. PhoneLink shows when each phone was last seen; Revoke withdraws its access.",
     ],

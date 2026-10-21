@@ -12,6 +12,13 @@ The normal flow is **Settings > PhoneLink > Link a Phone**, scan with the phone'
 camera, compare the pairing code and approve on the computer. No WireGuard app,
 router changes, API-key transfer, or personal server setup is required.
 
+Under the QR code, **Open on This Phone** opens the same invitation link in a new
+tab of the current browser and **Copy Link** copies it (with a visible, selectable
+fallback when the browser blocks the clipboard), for linking the phone you are
+already holding. It is the exact link the QR encodes, so it carries no extra
+secret, works five minutes and still needs approval of the pairing code on the
+computer. Only share it with yourself.
+
 The computer and its engine must remain running and online. The selected
 `/connect` directory must serve the PhoneLink browser portal. Source support is
 not a claim that a public directory has been updated: the app checks its
