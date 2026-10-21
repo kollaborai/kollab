@@ -123,6 +123,15 @@ def contact_route_hex(public_key_hex: str) -> str:
     ).hexdigest()[:16]
 
 
+def format_contact_route(domain: str, public_key_hex: str) -> str:
+    """The bare shareable route for a directory authority and its device key.
+
+    The caller takes ``domain`` from the connection's canonical origin, never
+    its display name. No directory means there is no contact route to share.
+    """
+    return f"{domain}/c/{contact_route_hex(public_key_hex)}" if domain else ""
+
+
 def key_label(public_key_hex: str) -> str:
     """A stand-in device name for a peer with no bound name: 8 hash-derived hex.
 

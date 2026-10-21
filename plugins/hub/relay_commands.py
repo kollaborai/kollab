@@ -17,7 +17,7 @@ from kollabor_config.managed_config import clear_managed_config, read_managed_co
 from .device_names import (
     DEFAULT_TRUST,
     NAME_RE,
-    contact_route_hex,
+    format_contact_route,
     format_handle,
     key_label,
     short_fingerprint,
@@ -67,6 +67,9 @@ class ConnectSnapshot:
     read_only: bool = False
     # The primary that manages this device's settings, once its config arrived.
     config_from: str = ""
+    # Public contact route of this workspace's network connection. It rings the
+    # device, not an individual agent; empty when the owner cannot supply one.
+    contact_route: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """Plain JSON types, for the daemon's reply to an attached window.
@@ -86,6 +89,7 @@ class ConnectSnapshot:
             "offline_devices": list(self.offline_devices),
             "read_only": self.read_only,
             "config_from": self.config_from,
+            "contact_route": self.contact_route,
             "requests": [
                 {
                     "enrollment_id": row.enrollment_id,
@@ -117,10 +121,11 @@ class ConnectSnapshot:
             "config_from",
             "requests",
         }
-        # A daemon that predates ``read_only`` sends none: the screen is normal.
+        # Already-running daemons can omit these fields. Missing contact data
+        # stays unavailable instead of being inferred by an attached viewer.
         if (
             not isinstance(value, dict)
-            or not fields <= set(value) <= fields | {"read_only"}
+            or not fields <= set(value) <= fields | {"read_only", "contact_route"}
             or not isinstance(value.get("read_only", False), bool)
         ):
             raise ValueError("invalid connect snapshot")
@@ -159,9 +164,15 @@ class ConnectSnapshot:
             )
         trust = _wire_text(value["trust"], 16)
         validate_trust(trust)
+        domain = _wire_text(value["domain"], _WIRE_DOMAIN_MAX)
+        contact_route = _wire_text(value.get("contact_route", ""), _WIRE_CONTACT_ROUTE_MAX)
+        if contact_route:
+            match = _WIRE_CONTACT_ROUTE_RE.fullmatch(contact_route)
+            if match is None or match.group("domain") != domain:
+                raise ValueError("invalid connect snapshot")
         return cls(
             network=_wire_text(value["network"]),
-            domain=_wire_text(value["domain"], 253),
+            domain=domain,
             trust=trust,
             device=_wire_text(value["device"]),
             relay_online=value["relay_online"],
@@ -172,11 +183,15 @@ class ConnectSnapshot:
             offline_devices=_wire_texts(value["offline_devices"]),
             read_only=value.get("read_only", False),
             config_from=_wire_text(value["config_from"]) if value["config_from"] else "",
+            contact_route=contact_route,
         )
 
 
 _WIRE_MAX_ROWS = 64
 _WIRE_TEXT_MAX = 200
+_WIRE_DOMAIN_MAX = 253
+_WIRE_CONTACT_ROUTE_MAX = _WIRE_DOMAIN_MAX + len("/c/") + 16
+_WIRE_CONTACT_ROUTE_RE = re.compile(r"(?P<domain>[^\s/?#@]+)/c/[0-9a-f]{16}")
 _WIRE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
 
 
@@ -449,6 +464,7 @@ class RelayCommands:
         """The Connect screen's data: names and short fingerprints, never keys."""
         self.screen_polled()
         domain, online = self._domain_online()
+        contact_route = format_contact_route(domain, self.client.public_key)
         remote_rows = await self._remote_rows()
         requests = tuple(
             JoinRequestRow(
@@ -478,6 +494,7 @@ class RelayCommands:
                 offline_device_names(self.agent_bridge, remote_rows, self.client)
             ),
             config_from=self._config_from(),
+            contact_route=contact_route,
         )
 
     def _config_from(self) -> str:
@@ -733,10 +750,7 @@ class RelayCommands:
         if device_name:
             lines.append(f"this device {device_name}")
 
-        if domain:
-            lines.append(f"contact route {domain}/c/{contact_route_hex(state['key'])}")
-        else:
-            lines.append("contact route none")
+        lines.append(f"contact route {format_contact_route(domain, state['key']) or 'none'}")
 
         lines.append("online")
         remote_rows = await self._remote_rows()
