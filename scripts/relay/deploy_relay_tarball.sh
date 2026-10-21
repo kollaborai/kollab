@@ -79,7 +79,20 @@ PY
 "$PYTHON" -m venv .venv
 .venv/bin/pip install -q --upgrade pip >/dev/null
 .venv/bin/pip install -q -r scripts/relay/requirements.txt
-KOLLAB_NO_KEYRING=1 .venv/bin/python -c "import sys; sys.path.insert(0,'.'); import plugins.hub.relay_service, plugins.hub.relay_runtime"
+KOLLAB_NO_KEYRING=1 .venv/bin/python -I - <<'PY'
+import importlib, sys
+sys.path.insert(0, ".")
+for module in (
+    "plugins.hub.relay_service",
+    "plugins.hub.relay_runtime",
+    "plugins.hub.relay_client",
+    "plugins.hub.relay_selfhost",
+    "plugins.hub.dns.discovery_publish",
+):
+    importlib.import_module(module)
+PY
+KOLLAB_NO_KEYRING=1 .venv/bin/python -I scripts/relay/peer_probe.py --help >/dev/null
+KOLLAB_NO_KEYRING=1 .venv/bin/python -I scripts/relay/measure_capacity.py --help >/dev/null
 HEALTH_URL=$("$PYTHON" - "$RELAY_CONFIG" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1]))

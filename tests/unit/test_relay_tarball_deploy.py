@@ -62,9 +62,13 @@ if name == "python3":
     if args[:2] == ["-m", "venv"]:
         binary = pathlib.Path(args[2]) / "bin"
         binary.mkdir(parents=True)
-        for tool in ("python", "pip"):
-            (binary / tool).write_text("#!/bin/sh\nexit 0\n")
-            (binary / tool).chmod(0o755)
+        (binary / "pip").write_text("#!/bin/sh\nexit 0\n")
+        (binary / "pip").chmod(0o755)
+        (binary / "python").write_text(
+            "#!" + sys.executable + "\nimport os, sys\n"
+            "os.execv(sys.executable, [sys.executable, '-I', '-S', *sys.argv[1:]])\n"
+        )
+        (binary / "python").chmod(0o755)
         sys.exit(0)
     os.execv(sys.executable, [sys.executable, *args])
 if name == "flock":
@@ -120,8 +124,23 @@ def deployment(tmp_path):
     return tmp_path, relay_home, config, dropin, env
 
 
-def artifact(directory, *, bad_manifest=False, unsafe_member=False):
-    sources = {"kollabor_cli_main.py": b"", "scripts/relay/requirements.txt": b""}
+def artifact(directory, *, bad_manifest=False, unsafe_member=False, broken_module=None):
+    sources = dict.fromkeys((
+        "kollabor_cli_main.py",
+        "scripts/relay/requirements.txt",
+        "scripts/relay/peer_probe.py",
+        "scripts/relay/measure_capacity.py",
+        "plugins/__init__.py",
+        "plugins/hub/__init__.py",
+        "plugins/hub/relay_service.py",
+        "plugins/hub/relay_runtime.py",
+        "plugins/hub/relay_client.py",
+        "plugins/hub/relay_selfhost.py",
+        "plugins/hub/dns/__init__.py",
+        "plugins/hub/dns/discovery_publish.py",
+    ), b"")
+    if broken_module:
+        sources[broken_module] = b"import unavailable_diagnostic_dependency\n"
     if unsafe_member:
         sources["../escaped"] = b"must never extract"
     manifest = {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}
@@ -168,6 +187,25 @@ def test_remote_home_defaults_and_compact_health_activate_only_the_named_unit(de
     calls = [json.loads(line) for line in (directory / "commands.jsonl").read_text().splitlines()]
     restarts = [call["args"] for call in calls if call["program"] == "systemctl" and call["args"][0] == "restart"]
     assert restarts == [["restart", "scoped-relay.service"]]
+
+
+@pytest.mark.parametrize("broken_module", [
+    "plugins/hub/relay_client.py",
+    "plugins/hub/relay_selfhost.py",
+    "plugins/hub/dns/discovery_publish.py",
+    "scripts/relay/peer_probe.py",
+    "scripts/relay/measure_capacity.py",
+])
+def test_incomplete_runtime_stops_before_any_service_mutation(deployment, broken_module):
+    directory, relay_home, _, dropin, _ = deployment
+    selected = artifact(directory, broken_module=broken_module)
+    result = deploy(deployment, artifact=selected)
+    assert result.returncode != 0
+    assert "unavailable_diagnostic_dependency" in result.stderr
+    assert_previous_state(relay_home, dropin)
+    assert not list(relay_home.glob("rollback-*"))
+    calls = [json.loads(line) for line in (directory / "commands.jsonl").read_text().splitlines()]
+    assert not [call for call in calls if call["program"] in {"sudo", "systemctl"}]
 
 
 @pytest.mark.parametrize("health", ["degraded", "malformed"])
