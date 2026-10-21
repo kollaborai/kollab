@@ -23,6 +23,10 @@ content, agent identity, and available actions easy to read.
 - Give What's New its own page and newspaper icon in the bottom action row.
 - Match the main pane's outer corners and inset spacing to the floating sidebar.
 - Keep the removed guide links out of the sidebar and Agents modal.
+- Use Overview, Access, and Knocks tabs inside Network. Keep Trust as a compact
+  single-choice control and device name in a short row with an explicit Save.
+  Show the owning connection's Knocks address as plain text with a copy icon
+  when available; show Unavailable when the owner has no address to report.
 - Reorder agents by dragging, with neighboring rows moving during the gesture.
 - Reorder remote devices within their network by dragging the device header.
   Move the whole group together and save the order with the agent ordering preferences.

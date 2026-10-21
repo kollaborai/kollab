@@ -1,4 +1,4 @@
-import type { SlashCommand } from "@/api";
+import type { PanelActionResult, PanelField, SlashCommand } from "@/api";
 
 export type SettingsTab =
   | "session"
@@ -129,10 +129,45 @@ export function optionLabel(
   return field.option_labels?.[option] ?? option;
 }
 
-/** Summary rows as label/value pairs, whichever of the usual shapes arrives. */
+/** Route text is an action payload, so an incomplete keystroke must stay local. */
+export function pickerControlNeedsApply(panel: string, field: Pick<PanelField, "type">): boolean {
+  return panel === "connect-knocks" && field.type === "text_input";
+}
+
+export type PanelControlSubmission = { path: string; value: unknown };
+
+/** Settle just the submitted control, retaining other drafts and useful field errors. */
+export function settleControlSubmission(
+  current: { draft: Record<string, unknown>; errors: Record<string, string> },
+  submitted: PanelControlSubmission,
+  result: Pick<PanelActionResult, "ok" | "errors" | "message">,
+): { draft: Record<string, unknown>; errors: Record<string, string> } {
+  const errors = { ...current.errors, ...result.errors };
+  if (!result.ok) {
+    errors[submitted.path] = result.errors?.[submitted.path] || result.message || "That did not work.";
+    return { draft: current.draft, errors };
+  }
+  delete errors[submitted.path];
+  // A late response must not erase a newer edit to the same control.
+  if (!(submitted.path in current.draft) || !Object.is(current.draft[submitted.path], submitted.value)) {
+    return { draft: current.draft, errors };
+  }
+  const draft = { ...current.draft };
+  delete draft[submitted.path];
+  return { draft, errors };
+}
+
+export type PanelSummaryRow = {
+  label: string;
+  value: string;
+  /** Only an explicit daemon opt-in on a nonempty string enables copying. */
+  copyable?: true;
+};
+
+/** Summary rows, preserving the existing tuple and object-map contracts. */
 export function summaryRows(
   summary: unknown,
-): { label: string; value: string }[] {
+): PanelSummaryRow[] {
   const text = (value: unknown) =>
     value === null || value === undefined ? "" : String(value);
   if (Array.isArray(summary)) {
@@ -142,7 +177,14 @@ export function summaryRows(
       }
       if (item && typeof item === "object") {
         const row = item as Record<string, unknown>;
-        return [{ label: text(row.label), value: text(row.value) }];
+        const value = text(row.value);
+        return [{
+          label: text(row.label),
+          value,
+          ...(row.copyable === true && typeof row.value === "string" && value.trim()
+            ? { copyable: true as const }
+            : {}),
+        }];
       }
       return [];
     });
@@ -154,6 +196,20 @@ export function summaryRows(
     }));
   }
   return [];
+}
+
+/** The address must come from the owning daemon, never from browser identity. */
+export function networkSummaryRows(summary: unknown): PanelSummaryRow[] {
+  const rows = summaryRows(summary);
+  let hasAddress = false;
+  const shown = rows.map((row) => {
+    if (row.label.trim().toLowerCase() !== "knocks address") return row;
+    hasAddress = true;
+    return !row.value.trim() || row.value.trim().toLowerCase() === "unavailable"
+      ? { label: row.label, value: "Unavailable" }
+      : row;
+  });
+  return hasAddress ? shown : [...shown, { label: "Knocks Address", value: "Unavailable" }];
 }
 
 /**

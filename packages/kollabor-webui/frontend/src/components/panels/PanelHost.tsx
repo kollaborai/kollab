@@ -26,6 +26,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { serializeDraft, type Draft } from "./FieldRenderer";
 import { FormPanel } from "./FormPanel";
+import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
 import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
@@ -35,6 +36,9 @@ import {
   PANEL_NAME,
   SETTINGS_TABS,
   parseExpiry,
+  pickerControlNeedsApply,
+  settleControlSubmission,
+  type PanelControlSubmission,
   type PanelIntent,
   type PanelTab,
   type SettingsTab,
@@ -194,9 +198,11 @@ export function PanelHost({
   const [busy, setBusy] = useState(false);
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
+  const [networkSection, setNetworkSection] = useState<"overview" | "access">("overview");
   // Bumped on close: answers that arrive for an older window are dropped.
   const epoch = useRef(0);
   const inflight = useRef<Partial<Record<PanelTab, Promise<void>>>>({});
+  const openingKnocks = useRef<Promise<void> | null>(null);
   const consumed = useRef(0);
   const onChangedRef = useRef(onChanged);
   useEffect(() => {
@@ -276,10 +282,12 @@ export function PanelHost({
     if (open) return;
     epoch.current += 1;
     inflight.current = {};
+    openingKnocks.current = null;
     setTabs(freshTabs());
     setReveal(null);
     setPoll(null);
     setBusy(false);
+    setNetworkSection("overview");
   }, [open]);
 
   // A join code disappears when it expires.
@@ -298,6 +306,7 @@ export function PanelHost({
       name: string,
       result: PanelActionResult,
       reset: boolean,
+      submitted?: PanelControlSubmission,
     ) => {
       const message: Message | null = result.message
         ? { ok: result.ok, text: result.message }
@@ -308,7 +317,8 @@ export function PanelHost({
         if (!state.views.length) return state;
         const views = state.views.slice();
         const top = views[views.length - 1];
-        const errors = result.errors ?? {};
+        const settled = submitted ? settleControlSubmission(top, submitted, result) : null;
+        const errors = settled?.errors ?? result.errors ?? {};
         let step = top.step;
         if (!result.ok && top.panel.kind === "wizard") {
           // Show the first step that has a rejected field.
@@ -320,7 +330,7 @@ export function PanelHost({
         views[views.length - 1] = {
           ...top,
           panel: result.ok && result.panel ? result.panel : top.panel,
-          draft: result.ok && reset ? {} : top.draft,
+          draft: settled?.draft ?? (result.ok && reset ? {} : top.draft),
           step: result.ok && reset ? 0 : step,
           errors,
           message,
@@ -358,14 +368,14 @@ export function PanelHost({
       name: string,
       action: string,
       payload: Record<string, unknown> = {},
-      opts: { reset?: boolean; poll?: boolean } = {},
+      opts: { reset?: boolean; poll?: boolean; submitted?: PanelControlSubmission } = {},
     ) => {
       const mine = epoch.current;
       if (!opts.poll) setBusy(true);
       try {
         const result = await api.panelAction(sessionId, name, action, payload);
         if (mine !== epoch.current) return;
-        applyResult(target, name, result, Boolean(opts.reset));
+        applyResult(target, name, result, Boolean(opts.reset), opts.submitted);
         if (result.ok && !result.panel && !result.open && !result.poll) {
           // No fresh screen came back; ask for one so nothing shows stale.
           const fresh = await api.getPanel(sessionId, name);
@@ -377,7 +387,9 @@ export function PanelHost({
         if (mine !== epoch.current) return;
         patchTop(target, (view) => ({
           ...view,
-          errors: {},
+          ...(opts.submitted
+            ? settleControlSubmission(view, opts.submitted, { ok: false, message: errorText(error) })
+            : { errors: {} }),
           message: { ok: false, text: errorText(error) },
         }));
         setPoll(null);
@@ -408,15 +420,26 @@ export function PanelHost({
     if (tab !== "network" || !networkReady) return;
     consumed.current = intent.nonce;
     if (intent.action === "new_code") {
+      setNetworkSection("access");
+      setReveal(null);
+      patchTab("network", (state) => ({
+        ...state,
+        views: state.views[state.views.length - 1]?.panel.panel === "connect-knocks"
+          ? state.views.slice(0, -1)
+          : state.views,
+      }));
       void runAction("network", "connect", "new_code");
     } else {
+      setReveal(null);
       const mine = epoch.current;
       void api.getPanel(sessionId, "connect-knocks").then(
         (panel) => {
           if (mine !== epoch.current) return;
           patchTab("network", (state) => ({
             ...state,
-            views: [...state.views, newView(panel)],
+            views: state.views[state.views.length - 1]?.panel.panel === "connect-knocks"
+              ? [...state.views.slice(0, -1), newView(panel)]
+              : [...state.views, newView(panel)],
           }));
         },
         (error) => {
@@ -459,8 +482,25 @@ export function PanelHost({
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
-  const refresh = () => {
+  const refresh = async () => {
     if (tab === "session" || tab === "prompts") return;
+    if (tab === "network" && top?.panel.panel === "connect-knocks") {
+      const mine = epoch.current;
+      setBusy(true);
+      try {
+        const panel = await api.getPanel(sessionId, top.panel.panel);
+        if (mine === epoch.current) {
+          patchTop("network", (view) => ({ ...view, panel, errors: {}, message: null }));
+        }
+      } catch (error) {
+        if (mine === epoch.current) {
+          patchTop("network", (view) => ({ ...view, message: { ok: false, text: errorText(error) } }));
+        }
+      } finally {
+        if (mine === epoch.current) setBusy(false);
+      }
+      return;
+    }
     if (
       dirtyCount > 0 &&
       !window.confirm("Reloading discards your unsaved changes. Continue?")
@@ -476,6 +516,26 @@ export function PanelHost({
       ...current,
       views: current.views.slice(0, -1),
     }));
+  };
+
+  const changeNetworkSection = (next: NetworkSection) => {
+    // Pointer activation and focus can both arrive before busy re-renders.
+    if (busy || openingKnocks.current) return;
+    setReveal(null);
+    if (next === "knocks") {
+      if (top?.panel.panel !== "connect-knocks") {
+        const request = runAction("network", "connect", "knocks");
+        openingKnocks.current = request;
+        void request.finally(() => {
+          if (openingKnocks.current === request) openingKnocks.current = null;
+        });
+      }
+      return;
+    }
+    setNetworkSection(next);
+    patchTab("network", (current) => current.views[current.views.length - 1]?.panel.panel === "connect-knocks"
+      ? { ...current, views: current.views.slice(0, -1) }
+      : current);
   };
 
   const panelBody = () => {
@@ -508,10 +568,27 @@ export function PanelHost({
     }
     const name = top.panel.panel;
     const panel = top.panel;
+    const root = tab === "network"
+      ? state.views.find((view) => view.panel.panel === "connect" && view.panel.kind === "picker")?.panel
+      : undefined;
+    const networkRoot = root?.kind === "picker" ? root : undefined;
+    const networkPicker = Boolean(networkRoot && panel.kind === "picker" && (name === "connect" || name === "connect-knocks"));
+    const networkKnocksTab = networkPicker && name === "connect-knocks" && state.views.length === 2;
+    const onRowAction = (action: PanelAction, row: PanelRow) =>
+      void runAction(tab, name, action.id, {
+        id: row.id,
+        ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
+      });
+    const onToolbarAction = (action: PanelAction) => void runAction(tab, name, action.id);
+    const onControlChange = (field: PanelField, value: unknown, resetDraft = false) =>
+      void runAction(tab, name, field.action || field.path, { [field.path]: value }, {
+        reset: resetDraft,
+        ...(pickerControlNeedsApply(name, field) ? { submitted: { path: field.path, value } } : {}),
+      });
     return (
       <>
         <div className="flex shrink-0 items-center gap-2 px-4 pt-3 sm:px-6">
-          {state.views.length > 1 ? (
+          {state.views.length > 1 && !networkKnocksTab ? (
             <Button
               type="button"
               size="xs"
@@ -524,9 +601,9 @@ export function PanelHost({
             </Button>
           ) : null}
           <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
-            {panel.title}
+            {networkPicker && networkRoot ? networkRoot.title : panel.title}
           </h3>
-          {state.views.length === 1 ? (
+          {state.views.length === 1 || networkKnocksTab ? (
             <Button
               type="button"
               size="xs"
@@ -583,22 +660,32 @@ export function PanelHost({
           />
         ) : panel.kind === "picker" ? (
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-6">
-            <PickerList
-              panel={panel}
-              busy={busy}
-              onRowAction={(action: PanelAction, row: PanelRow) =>
-                void runAction(tab, name, action.id, {
-                  id: row.id,
-                  ...(action.payload_key ? { [action.payload_key]: row.id } : {}),
-                })
-              }
-              onToolbarAction={(action) => void runAction(tab, name, action.id)}
-              onControlChange={(field: PanelField, value) =>
-                void runAction(tab, name, field.action || field.path, {
-                  [field.path]: value,
-                })
-              }
-            />
+            {networkPicker && networkRoot ? (
+              <NetworkPanel
+                panel={panel}
+                rootPanel={networkRoot}
+                section={name === "connect-knocks" ? "knocks" : networkSection}
+                draft={top.draft}
+                errors={top.errors}
+                busy={busy}
+                onSectionChange={changeNetworkSection}
+                onDraftChange={(draft) => patchTop(tab, (view) => ({ ...view, draft }))}
+                onRowAction={onRowAction}
+                onToolbarAction={onToolbarAction}
+                onControlChange={onControlChange}
+              />
+            ) : (
+              <PickerList
+                panel={panel}
+                draft={top.draft}
+                onDraftChange={(draft) => patchTop(tab, (view) => ({ ...view, draft }))}
+                busy={busy}
+                errors={top.errors}
+                onRowAction={onRowAction}
+                onToolbarAction={onToolbarAction}
+                onControlChange={onControlChange}
+              />
+            )}
           </div>
         ) : panel.kind === "wizard" ? (
           <WizardSteps
