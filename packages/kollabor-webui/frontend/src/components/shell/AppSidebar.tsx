@@ -12,10 +12,11 @@ import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarList, AgentSidebarRow, type AgentRowDrag } from "@/components/shell/AgentSidebarRow";
+import { DeviceSidebarList } from "@/components/shell/DeviceSidebarList";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
-import { buildLocalOrderRows, groupByFolder, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
+import { buildLocalOrderRows, groupByFolder, orderedDevices, reorderDevicesWithinNetwork, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
 import { lastRanLabel, since } from "@/last-ran";
@@ -252,7 +253,7 @@ export function AppSidebar({
   );
   const visibleNetworks = networkTree.map((net) => ({
     ...net,
-    devices: net.devices.map((dev) => ({
+    devices: orderedDevices(net.id, net.devices.map((dev) => ({
       ...dev,
       workspaces: dev.workspaces.map((ws) => {
         const agents = ws.agents.filter((agent) => !hiddenKeys.has(sidebarAgentKey({
@@ -276,7 +277,7 @@ export function AppSidebar({
           orderRows,
         };
       }).filter((ws) => ws.agents.length),
-    })).filter((dev) => dev.workspaces.length),
+    })).filter((dev) => dev.workspaces.length), sidebarOrder.order),
   }));
   // Groups the viewer folded away, remembered in this browser only.
   const [folded, setFolded] = useState<Record<string, boolean>>(() => {
@@ -693,15 +694,17 @@ export function AppSidebar({
           >
             <SidebarGroupContent>
               {/* Full-width rows under small headers: nested sub-menus indented both sides and left the names a few letters wide. */}
-              {net.devices.map((dev) => (
-                <Fragment key={dev.device}>
-                  <div className="text-muted-foreground flex h-6 items-center gap-2 px-2 text-xs" title={dev.device}>
-                    <span className="min-w-0 truncate">{dev.device}</span>
-                    <span className="ml-auto shrink-0 text-[0.625rem] tabular-nums">
-                      {dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
-                    </span>
-                  </div>
-                  {dev.workspaces.map((ws) => (
+              <DeviceSidebarList
+                networkId={net.id}
+                devices={net.devices}
+                count={(dev) => dev.workspaces.reduce((sum, ws) => sum + ws.agents.length, 0)}
+                beginDrag={sidebarOrder.beginDrag}
+                onReorder={(key, to, devices) => {
+                  const next = reorderDevicesWithinNetwork(net.id, devices, key, to, sidebarOrder.order);
+                  if (next) void sidebarOrder.save(next);
+                }}
+              >
+                {(dev) => dev.workspaces.map((ws) => (
                     <Fragment key={ws.label || "-"}>
                       {ws.label ? (
                         <p className="text-muted-foreground truncate px-2 text-[0.6875rem]">{ws.label}</p>
@@ -785,9 +788,8 @@ export function AppSidebar({
                       </AgentSidebarList>
                       ))}
                     </Fragment>
-                  ))}
-                </Fragment>
-              ))}
+                ))}
+              </DeviceSidebarList>
             </SidebarGroupContent>
           </FoldGroup>
         ))}

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
 - Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
+- Web: drag device headers to reorder whole device groups within a network, with live movement and saved ordering.
 - Web: Phone Access provisions one WireGuard peer per phone with a one-time QR and standalone home-screen portal. The operator configures the VPN endpoint, UDP forwarding, DNS, and host apply helper.
 
 ### Changed

@@ -90,8 +90,15 @@ if Node/npm is unavailable.
   cancelled and unchanged drops do not write. Failed saves restore the confirmed
   order and show an error. If the stored JSON is unreadable, the engine
   preserves it and shows a recovery warning; a missing first-run file is normal.
-  The Learn book icon in the sidebar footer opens lessons about agent roles,
+  The Learn book icon in the sidebar footer opens topics about agent roles,
   project folders, and how the sidebar order is saved.
+- **Device order**: drag a remote device header to move its whole group within
+  that network. Its workspaces and agents travel together, with live feedback.
+  Space lifts the focused header, arrow keys move it, Space drops it, and Escape
+  cancels. Device ordering uses the same revisioned engine preference file as
+  agent ordering and survives refresh. This Computer and Contacts remain fixed.
+  A device rename has a new ordering identity because the network API identifies
+  devices by name.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list

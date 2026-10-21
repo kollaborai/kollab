@@ -24,6 +24,8 @@ content, agent identity, and available actions easy to read.
 - Match the main pane's outer corners and inset spacing to the floating sidebar.
 - Keep the removed guide links out of the sidebar and Agents modal.
 - Reorder agents by dragging, with neighboring rows moving during the gesture.
+- Reorder remote devices within their network by dragging the device header.
+  Move the whole group together and save the order with the agent ordering preferences.
 - Hide an agent by dragging it outside the sidebar. On release, shrink it into
   the bottom Hidden Agents button. Allow restoration from that button.
 
@@ -53,7 +55,7 @@ ornaments need a clear purpose in the current task.
 
 Inherit the app's system sans-serif stack. Use the existing rem-based utilities:
 
-- Page, dialog, and lesson titles: `text-lg font-semibold`.
+- Page, dialog, and topic titles: `text-lg font-semibold`.
 - Body and controls: `text-sm`; section headings: `text-sm font-semibold`.
 - Secondary labels, metadata, and supporting details: `text-xs`.
 

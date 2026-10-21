@@ -34,12 +34,13 @@ def _subprocess_env(home: Path) -> tuple[Path, dict[str, str]]:
 
 @pytest.mark.asyncio
 async def test_order_survives_an_engine_process_restart(no_real_sidebar_order, tmp_path):
+    keys = [*KEYS, '["device","network-one","office-laptop"]', '["device","network-two","office-laptop"]']
     async with new_engine() as client:
         initial = (await client.get("/sidebar/order")).json()
         assert initial == {"order": [], "revision": 0, "warning": None}
-        saved = await client.post("/sidebar/order", json={"order": KEYS, "revision": 0})
-        assert saved.json() == {"order": KEYS, "revision": 1, "warning": None}
-    assert json.loads(no_real_sidebar_order.read_text()) == {"order": KEYS, "revision": 1}
+        saved = await client.post("/sidebar/order", json={"order": keys, "revision": 0})
+        assert saved.json() == {"order": keys, "revision": 1, "warning": None}
+    assert json.loads(no_real_sidebar_order.read_text()) == {"order": keys, "revision": 1}
 
     # A second OS process reconstructs the engine and reads the order through
     # the same /sessions payload the Web UI uses on page reload.
@@ -73,7 +74,29 @@ asyncio.run(main())
         check=True,
     )
     output = [line for line in restarted.stdout.splitlines() if line.strip()]
-    assert json.loads(output[-1]) == {"order": KEYS, "revision": 1, "warning": None}
+    assert json.loads(output[-1]) == {"order": keys, "revision": 1, "warning": None}
+
+
+@pytest.mark.asyncio
+async def test_device_move_conflicts_with_another_clients_agent_move(no_real_sidebar_order):
+    devices = ['["device","network-one","office-laptop"]', '["device","network-one","desktop"]']
+    latent = '["device","network-one","temporarily-absent"]'
+    initial = [*devices, *KEYS, latent]
+    async with new_engine() as first_client, new_engine() as second_client:
+        saved = await first_client.post("/sidebar/order", json={"order": initial, "revision": 0})
+        assert saved.status_code == 200
+        stale = (await second_client.get("/sidebar/order")).json()
+        agent_move = [*reversed(KEYS), *devices, latent]
+        saved = await first_client.post("/sidebar/order", json={"order": agent_move, "revision": 1})
+        assert saved.status_code == 200
+        device_move = [*reversed(devices), *KEYS, latent]
+        rejected = await second_client.post("/sidebar/order", json={"order": device_move, "revision": stale["revision"]})
+        assert rejected.status_code == 409
+        refreshed = (await second_client.get("/sidebar/order")).json()
+        assert refreshed["order"] == agent_move
+        retry = [*reversed(devices), *reversed(KEYS), latent]
+        saved = await second_client.post("/sidebar/order", json={"order": retry, "revision": refreshed["revision"]})
+        assert saved.json() == {"order": retry, "revision": 3, "warning": None}
 
 
 @pytest.mark.asyncio
