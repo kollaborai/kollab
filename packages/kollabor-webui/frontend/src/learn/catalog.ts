@@ -145,20 +145,20 @@ export const LEARN_TOPICS = [
   },
   {
     id: "phone-access",
-    title: "WireGuard phone access",
+    title: "PhoneLink",
     summary:
-      "The Phone Access feature can create a WireGuard peer and one-time QR for a phone. Its management panel is delivered separately from this Learn page and is available only in builds that include Phone Access.",
+      "Open the same Kollab app on your phone through your existing Kollab connection. Scan a QR code, approve the phone on your computer, and continue in its browser.",
     howTo: [
-      "Ask the host administrator for the WireGuard server's public key, reachable endpoint, private tunnel subnet, and a reviewed peer-apply helper.",
-      "Have the network owner configure any needed router/firewall UDP forwarding, DNS, and trusted HTTPS certificate outside Kollab.",
-      "On the host, allow its private LAN address in KOLLAB_WEBUI_HOSTS and set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to the reviewed helper.",
-      "In Settings > Phone Access, when that separate panel is included in your build, enter the server endpoint/key, subnet, routes, DNS, and private portal address, then add a phone.",
-      "Scan the one-time QR in the official WireGuard app, activate the VPN, and open the private portal from the phone.",
+      "Connect this computer to your Kollab network with /connect or Settings > Network.",
+      "Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.",
+      "Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed.",
+      "Check that the pairing codes match, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
+      "Bookmark Kollab to return in the same phone browser. Remove a phone in PhoneLink to withdraw its access.",
     ],
     example:
-      "On a trusted host, allow only its LAN address with KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui. After the VPN connects, open http://192.168.1.20:8080; do not expose the Web UI publicly.",
+      "Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.",
     note:
-      "Kollab does not install WireGuard, configure router UDP forwarding, firewall rules, or DNS. The separate Phone Access panel may not be present until its feature is integrated. The host must set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to a reviewed peer-reconciliation helper; without it add/revoke stays disabled. The QR contains a private key: never share or screenshot it.",
+      "Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. Existing WireGuard access is optional under Advanced Settings.",
   },
 ] as const satisfies readonly LearnTopicDefinition[];
 
@@ -180,12 +180,13 @@ export function getLearnTopic(topicId: LearnTopicId): LearnTopic {
 }
 
 export function learnHref(topicId?: LearnTopicId): string {
-  return topicId ? `/learn?topic=${encodeURIComponent(topicId)}` : "/learn";
+  const root = typeof window !== "undefined" && window.location.pathname.startsWith("/relay/v1/phone/") ? "/relay/v1/phone" : "";
+  return topicId ? `${root}/learn?topic=${encodeURIComponent(topicId)}` : `${root}/learn`;
 }
 
 export function readLearnRoute(location: { pathname: string; search: string }): LearnRoute | null {
   const pathname = location.pathname.replace(/\/+$/, "") || "/";
-  if (pathname !== "/learn") return null;
+  if (pathname !== "/learn" && pathname !== "/relay/v1/phone/learn") return null;
 
   const requestedTopic = new URLSearchParams(location.search).get("topic");
   if (!requestedTopic) {

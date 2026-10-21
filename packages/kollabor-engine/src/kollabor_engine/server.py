@@ -104,8 +104,13 @@ async def _engine_lifespan(app: FastAPI):
     """Lifespan handlers (replaces deprecated on_event startup/shutdown)."""
     logger.info("Engine started")
     try:
+        try:
+            await app.state.phone_link.start()
+        except ValueError:
+            logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
+        await app.state.phone_link.close()
         for session in list(_sessions.values()):
             await session.shutdown()
         _sessions.clear()
@@ -119,6 +124,9 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
+    from .phone_link import PhoneLink
+
+    app.state.phone_link = PhoneLink(app)
 
     # Auth middleware
     @app.middleware("http")
@@ -204,6 +212,7 @@ def create_app() -> FastAPI:
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
     from .routes.phone import router as phone_router
+    from .routes.phonelink import router as phonelink_router
     from .routes.prompts import router as prompts_router
     from .routes.rosters import router as rosters_router
     from .routes.teams import router as teams_router
@@ -211,6 +220,7 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(phone_router)
+    app.include_router(phonelink_router)
     app.include_router(prompts_router)
     app.include_router(rosters_router)
     app.include_router(teams_router)

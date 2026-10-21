@@ -20,6 +20,15 @@ export type PhoneState = {
   can_create: boolean;
 };
 
+export type PhoneLinkState = {
+  state: "ready" | "connect_needed" | "service_update" | "offline";
+  message: string;
+  network: string;
+  device: string;
+  phones: Array<{ id: string; name: string; linked: boolean; connected: boolean; expires_at: number; pending: Array<{ key: string; code: string }> }>;
+};
+export type PhoneLinkOffer = { id: string; name: string; expires_at: number; qr_svg: string };
+
 export type Session = {
   harness?: string;
   provider?: string;
@@ -931,6 +940,22 @@ export class EngineApi {
 
   phoneState() {
     return this.json<PhoneState>("/phone", { cache: "no-store" });
+  }
+
+  phoneLinkState(refresh = false) {
+    return this.json<PhoneLinkState>(refresh ? "/phonelink/refresh" : "/phonelink", { method: refresh ? "POST" : "GET", cache: "no-store" });
+  }
+
+  linkPhone(name: string) {
+    return this.json<PhoneLinkOffer>("/phonelink/phones", { method: "POST", body: JSON.stringify({ name }), cache: "no-store" });
+  }
+
+  approvePhoneLink(id: string, key: string) {
+    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ key }), cache: "no-store" });
+  }
+
+  revokePhoneLink(id: string) {
+    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" });
   }
 
   savePhoneSettings(settings: Partial<PhoneSettings>) {

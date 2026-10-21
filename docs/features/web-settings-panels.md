@@ -1,6 +1,6 @@
 # Web Settings Panels
 
-The web UI (`kollab --web-ui`) has a **Settings** dialog with eight tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it inspects default and agent-bundle sections and saves per-user overrides without changing bundled files. On a phone the dialog is a full-screen sheet.
+The web UI (`kollab --web-ui`) has a **Settings** dialog with nine tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it inspects default and agent-bundle sections and saves per-user overrides without changing bundled files. On a phone the dialog is a full-screen sheet.
 
 Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-unified-config.md).
 
@@ -14,6 +14,7 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Model | Reasoning effort and the model picker for the active provider (terminal `/model`). | The profile manager the terminal `/model` uses. |
 | Setup | The first-run wizard as steps: provider, API key, endpoint, model, optional connection test, Save and Activate. A bad key shows a redacted error; a missing key jumps back to the key step. | A new profile, activated, through the same code as terminal `/setup`. |
 | Network | Your agent network: status, this device, join requests with accept and reject, trust level, rename, and New Join Code. Knocks opens the knock screen: ringing knocks (accept, reject, block), the knocks this device placed (stop), missed knocks, blocked routes, contacts, and who may knock. | The network state the terminal `/connect` and `/connect knocks` use. |
+| PhoneLink | Link a phone with an expiring QR code and local approval over the existing Kollab connection. Advanced Settings contains optional WireGuard controls. | Private phone identities on this computer; no provider credential sync to the phone. |
 | Voice | Classifier, transcript context, speech engine, Kokoro and VibeVoice settings, plus transcription, microphone and current readiness (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
 | Prompts | Browse the default prompt and agent-bundle sections in assembly order, edit sections marked editable, and preview the assembled prompt. | Per-user overrides under `~/.kollab/prompt-overrides/<bundle>/<section>.md`; bundled prompt files are unchanged. |
 

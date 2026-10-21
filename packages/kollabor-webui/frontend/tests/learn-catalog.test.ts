@@ -29,7 +29,7 @@ test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
     assert.ok(topic.howTo.length >= 3, `${topic.id} needs a short how-to`);
     assert.ok(topic.example.length > 15, `${topic.id} needs an example`);
   }
-  assert.match(getLearnTopic("phone-access").title, /WireGuard/i);
+  assert.equal(getLearnTopic("phone-access").title, "PhoneLink");
 
   const profile = getLearnTopic("profiles");
   const profileGuidance = [profile.summary, ...profile.howTo, profile.example, profile.note].join(" ");
@@ -89,4 +89,7 @@ test("Learn URLs round-trip and invalid topic IDs give an actionable route state
     requestedTopic: "missing",
   });
   assert.equal(readLearnRoute({ pathname: "/", search: "?topic=agents" }), null);
+  assert.deepEqual(readLearnRoute({ pathname: "/relay/v1/phone/learn", search: "?topic=phone-access" }), {
+    kind: "topic", topicId: "phone-access",
+  });
 });

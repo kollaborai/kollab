@@ -1,10 +1,66 @@
 ---
-title: "Phone Access"
+title: "PhoneLink"
 created: 2026-10-20
 modified: 2026-10-20
 status: active
 ---
-# Phone Access
+# PhoneLink
+
+PhoneLink opens this computer's Kollab app in a phone browser through the same
+signed discovery and outbound encrypted relay transport used by `/connect`.
+The normal flow is **Settings > PhoneLink > Link a Phone**, scan with the phone's
+camera, compare the pairing code and approve on the computer. No WireGuard app,
+router changes, API-key transfer, or personal server setup is required.
+
+The computer and its engine must remain running and online. The selected
+`/connect` directory must serve the PhoneLink browser portal. Source support is
+not a claim that a public directory has been updated: the app checks its
+capability endpoint before offering a QR code.
+
+## PhoneLink contract
+
+- Pairing uses a fresh private relay room per phone, separate from the agent
+  network's room. The QR carries an expiring invitation in the URL fragment,
+  never a query parameter, engine token, or phone private key. The browser
+  generates its own identity and keeps it on that phone.
+- Scanning requests access. Only an explicit local approval pins that phone's
+  key. An invitation admits at most one phone and expires after five minutes.
+- A phone is a trusted app viewer/controller, not an agent-network member.
+  It is not enrolled for network configuration sync or given an agent identity.
+  Provider calls and tools still run on the computer; no credential setup is
+  needed on the phone. Approve only phones you trust with the app's controls.
+- The existing authenticated, session-bound relay envelopes carry a dedicated
+  phone channel. A fresh ephemeral key exchange protects the HTTP content per
+  connection; reconnect invalidates the old session and its requests.
+- The engine dispatches allowed app API calls internally. No public engine
+  listener, arbitrary destination proxy, or phone-management API is exposed.
+  Chat streaming, explicit Stop, history, and normal tool approvals retain
+  their existing engine behavior. Dropping a stream does not cancel agent work.
+- Saved phone identities reconnect after an engine restart, even without a
+  running terminal agent. Revoke immediately
+  withdraws that phone's access. No status says connected until the phone has
+  completed its authenticated session.
+- One engine owns PhoneLink for this computer at a time. Another running engine
+  directs you to manage phones in the owner instead of accepting changes to
+  stale phone state. Closing the owner releases it. Start the next engine, or
+  open PhoneLink in an already-running engine, to restore saved identities and
+  approvals without pairing again. Phone retries alone do not activate a
+  standby engine.
+- The PhoneLink tab owns linking and saved phones. **Advanced Settings** starts
+  collapsed and contains the existing manual WireGuard access controls below.
+
+Verification must cover the real encrypted browser-to-engine path, rejected and
+expired invitations, wrong keys, replay, reconnect, revoke, streamed responses,
+and 390px/820px/desktop layouts. Public-service deployment and a physical phone
+scan remain separate acceptance gates.
+
+PhoneLink currently supports returning through the same phone browser's bookmark.
+Standalone Home Screen installation needs a separate identity handoff and is not
+claimed as working: Safari copies cookies, but not local storage, into a new
+Home Screen app ([WebKit's Safari 17.2 guidance](https://webkit.org/blog/14787/webkit-features-in-safari-17-2/)).
+The manual WireGuard flow below does not depend on this browser pairing identity.
+
+## Advanced: manual WireGuard access
 
 Phone Access creates one WireGuard peer per phone and presents its client
 configuration as a one-time QR code in the WebUI. The phone can then reach the

@@ -18,6 +18,7 @@ import type { SidebarOrder } from "@/hooks/use-sidebar-order";
 import { buildLocalOrderRows, groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
+import { learnHref } from "@/learn/catalog";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -652,14 +653,14 @@ export function AppSidebar({
           <SidebarGroupContent>
             <div className="flex flex-wrap gap-x-4 px-2 pb-1 text-xs">
               <a
-                href="/learn?topic=agents"
+                href={learnHref("agents")}
                 onClick={() => setOpenMobile(false)}
                 className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
               >
                 Learn about agents
               </a>
               <a
-                href="/learn?topic=workspaces"
+                href={learnHref("workspaces")}
                 onClick={() => setOpenMobile(false)}
                 className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
               >
@@ -859,7 +860,7 @@ export function AppSidebar({
           />
           <LearnMoreLink
             topicId="phone-access"
-            label="Learn about WireGuard phone access"
+            label="Learn about PhoneLink"
             className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
             onNavigate={() => setOpenMobile(false)}
           />

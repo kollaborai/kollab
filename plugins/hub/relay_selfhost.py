@@ -52,13 +52,14 @@ from .relay_service import (
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 9078
 PUBLISH_SECONDS = 60
-# The four routes a TLS proxy forwards. Nothing else (metrics included) is public.
+# The route families a TLS proxy forwards. Metrics remain private.
 # Knocks ride the websocket.
 ROUTES = (
     ("GET", WELL_KNOWN, "key file"),
     ("GET", "/relay/v1/health", "health"),
     ("WS", "/relay/v1/ws", "websocket"),
     ("POST", "/relay/v1/enrollment/*", "join codes"),
+    ("GET", "/relay/v1/phone/*", "PhoneLink and browser websocket"),
 )
 
 
@@ -186,7 +187,7 @@ _NGINX = """\
 #      limit_conn_zone $binary_remote_addr zone=@ZONE@:10m;
 #
 # 2. The rest, inside the TLS server block for that name.
-#    Only these four routes are forwarded; /relay/v1/metrics and everything else stay private.
+#    Only these route families are forwarded; metrics and everything else stay private.
 location = /.well-known/agent-keys.json {
     proxy_pass http://@UPSTREAM@;
     proxy_set_header Host $host;
@@ -213,16 +214,33 @@ location /relay/v1/enrollment/ {
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }
+location = /relay/v1/phone/ws {
+    limit_conn @ZONE@ @MAX_PER_SOURCE@;
+    proxy_pass http://@UPSTREAM@;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 10s;
+    proxy_buffering off;
+}
+location /relay/v1/phone/ {
+    proxy_pass http://@UPSTREAM@;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
 """
 
 _CADDY = """\
-# Kollab directory for @DOMAIN@. Only these four routes are forwarded;
+# Kollab directory for @DOMAIN@. Only these route families are forwarded;
 # /relay/v1/metrics and everything else stay private.
 # Caddy has no per-address connection limit (nginx's limit_conn), so the relay's own
 # cap of @MAX_PER_SOURCE@ open connections per address is the only one. For a cap at the edge
 # use nginx, or a firewall rule such as nftables "ct count over @MAX_PER_SOURCE@ drop" on port 443.
 @DOMAIN@ {
-    @kollab path /.well-known/agent-keys.json /relay/v1/health /relay/v1/ws /relay/v1/enrollment/*
+    @kollab path /.well-known/agent-keys.json /relay/v1/health /relay/v1/ws /relay/v1/enrollment/* /relay/v1/phone/*
     handle @kollab {
         reverse_proxy @UPSTREAM@ {
             header_up X-Real-IP {remote_host}

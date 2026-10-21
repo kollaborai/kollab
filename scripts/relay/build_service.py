@@ -16,6 +16,7 @@ FILES = (
     "plugins/hub/relay_runtime.py",
     "plugins/hub/relay_selfhost.py",
     "plugins/hub/relay_client.py",
+    "plugins/hub/phone_portal.py",
     "plugins/hub/relay_state.py",
     "plugins/hub/relay_commands.py",
     "plugins/hub/device_names.py",
@@ -32,11 +33,19 @@ FILES = (
 )
 
 
-def build(output: Path) -> None:
+def build(output: Path, *, frontend_dist: Path | None = None) -> None:
     root = Path(__file__).resolve().parents[2]
     # Read all sources before opening the artifact; a missing dependency must
     # not leave a partially constructed release that could be deployed.
     sources = {name: (root / name).read_bytes() for name in FILES}
+    frontend = frontend_dist or root / "packages/kollabor-webui/frontend/dist"
+    if not (frontend / "index.html").is_file():
+        raise ValueError("Build the Kollab frontend before packaging a PhoneLink-capable directory")
+    for asset in sorted(frontend.rglob("*")):
+        if asset.is_symlink():
+            raise ValueError("PhoneLink browser assets must not be symlinks")
+        if asset.is_file():
+            sources["plugins/hub/phone_static/" + asset.relative_to(frontend).as_posix()] = asset.read_bytes()
     hashes = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     sources["source-sha256.json"] = json.dumps(hashes, indent=2, sort_keys=True).encode()
     with tarfile.open(output, "x:gz") as archive:
@@ -50,4 +59,6 @@ def build(output: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    build(parser.parse_args().output)
+    parser.add_argument("--frontend-dist", type=Path, help="Use an isolated built frontend directory")
+    args = parser.parse_args()
+    build(args.output, frontend_dist=args.frontend_dist)

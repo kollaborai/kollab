@@ -16,7 +16,7 @@ const progressKey = "kollab.learn.progress.v1";
 const topics = [
   { id: "networks", title: "Kollab networks" },
   { id: "agents", title: "Agents" },
-  { id: "phone-access", title: "WireGuard phone access" },
+  { id: "phone-access", title: "PhoneLink" },
 ];
 
 function makeFixtures() {
@@ -398,7 +398,7 @@ async function main() {
       const captures = [
         { width: 390, height: 844, isMobile: true, id: "networks", title: "Kollab networks", file: "learn-page-390x844-networks.png" },
         { width: 820, height: 1180, isMobile: false, id: "agents", title: "Agents", file: "learn-page-820x1180-agents.png" },
-        { width: 1280, height: 900, isMobile: false, id: "phone-access", title: "WireGuard phone access", file: "learn-page-1280x900-phone-access.png" },
+        { width: 1280, height: 900, isMobile: false, id: "phone-access", title: "PhoneLink", file: "learn-page-1280x900-phone-access.png" },
       ];
       for (const capture of captures) {
         const captureFixtures = makeFixtures();

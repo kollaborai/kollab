@@ -167,16 +167,24 @@ For an editable checkout without installed console scripts:
 python -c "from kollabor_webui import main; main()"
 ```
 
-## Phone Access
+## PhoneLink
 
-The session settings panel can provision one WireGuard peer per phone and show
-its one-time QR code. The feature is restricted to authenticated clients on
-exact private subnets and requires direct private WebUI binding plus a host-admin
-apply helper; forwarded client chains and reverse proxies are not supported. See
-[`docs/features/phone-access.md`](../../docs/features/phone-access.md) for the
-server, UDP forwarding, DNS, private LAN, and revocation prerequisites. Kollab
-never configures a router or exposes the helper command in the WebUI.
+**Settings > PhoneLink** pairs a phone browser through the connection service
+already used by `/connect`. Scan the expiring QR with the phone camera, compare
+the pairing codes, and approve locally. Saved phones reconnect and can be
+removed independently. Provider calls and tools run on the computer; the phone
+needs no credential setup. Approve only phones you trust with the app's controls.
 
+The directory serves the same built frontend at `/relay/v1/phone/` and accepts
+same-origin browser registrations at `/relay/v1/phone/ws`. Each phone has an
+isolated private room; the engine's own ASGI application handles encrypted app
+requests and streamed responses. The engine token never leaves the computer.
+Native `/relay/v1/ws` continues to reject browser Origin headers. The directory
+capability endpoint must confirm support before a pairing QR can be created.
+
+The existing manual WireGuard flow is collapsed under **Advanced Settings**.
+See [`docs/features/phone-access.md`](../../docs/features/phone-access.md) for
+both contracts and their deployment/physical-phone verification gates.
 
 ## Frontend development
 

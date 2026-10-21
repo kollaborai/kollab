@@ -3,6 +3,7 @@ import { errorText } from "@/api";
 import type { EngineApi, PhoneSettings, PhoneState } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { learnHref } from "@/learn/catalog";
 
 const FIELDS: Array<{ key: keyof PhoneSettings; label: string; hint: string }> = [
   { key: "endpoint", label: "WireGuard UDP Endpoint", hint: "vpn.example.net:51820" },
@@ -64,18 +65,18 @@ export function PhoneAccessSection({ api }: { api: EngineApi }) {
   };
 
   return (
-    <section aria-label="Phone Access" className="grid min-w-0 gap-2 border-t pt-3">
-      <h4 className="text-muted-foreground text-xs font-medium">Phone Access</h4>
+    <section aria-label="Manual WireGuard Access" className="grid min-w-0 gap-2 border-t pt-3">
+      <h4 className="text-muted-foreground text-xs font-medium">Manual WireGuard Access</h4>
       <p className="text-muted-foreground text-xs break-words">
         Provision phones through your WireGuard server. You must configure its UDP port-forward,
         server and home-network portal address yourself; Kollab does not change router settings.
       </p>
 
       <a
-        href="/learn?topic=phone-access"
+        href={learnHref("phone-access")}
         className="text-xs underline underline-offset-2"
       >
-        Learn about phone access
+        Learn about PhoneLink
       </a>
 
       {loading ? (

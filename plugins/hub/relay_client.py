@@ -87,6 +87,8 @@ APPLICATION_METHODS = frozenset(
         "secure_identity",
         "secure_packet",
         "peer.forward",
+        "phone_session",
+        "phone_http",
     }
 )
 MAX_APPLICATION_PAYLOAD = 24 * 1024

@@ -304,7 +304,7 @@ function RuntimeShell({
   );
 }
 
-export default function App() {
+export default function App({ contained = false }: { contained?: boolean } = {}) {
   const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
   const previousLearnRouteRef = useRef(learnRoute);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -363,7 +363,7 @@ export default function App() {
 
   const returnToChat = useCallback(() => {
     if (!readLearnRoute(window.location)) return;
-    window.history.pushState(null, "", "/");
+    window.history.pushState(null, "", window.location.pathname.startsWith("/relay/v1/phone/") ? "/relay/v1/phone/" : "/");
     setLearnRoute(null);
   }, []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
@@ -1011,7 +1011,7 @@ export default function App() {
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider>
+      <SidebarProvider className={contained ? "h-full min-h-0" : undefined}>
         <AppSidebar
           learnActive={learnRoute !== null}
           sessions={sessions}
@@ -1126,7 +1126,7 @@ export default function App() {
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
-          className="h-svh max-h-svh min-h-svh overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className={`${contained ? "h-full max-h-full min-h-0" : "h-svh max-h-svh min-h-svh"} overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
           {learnRoute ? (
             <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />

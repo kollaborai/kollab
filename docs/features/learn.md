@@ -22,7 +22,7 @@ example. Topic URLs are stable and use `/learn?topic=<id>`.
 | `hub-messaging` | Shared Hub messages |
 | `voice` | Voice mode |
 | `system-prompts` | Agent system prompts |
-| `phone-access` | WireGuard phone access |
+| `phone-access` | PhoneLink |
 
 Use a lesson link from a related sidebar, workspace, or agent surface to open the
 matching topic. Progress is saved only in the current browser's local storage; it
@@ -120,36 +120,22 @@ rendered result.
 Example: add a short “verify before reporting” section and include it with
 `<trender type="include" path="sections/verify.md" />`.
 
-## WireGuard phone access
+## PhoneLink
 
-WireGuard phone access joins a phone to an administrator-prepared private VPN so
-it can open the Web UI at a private address. It does not publish the Web UI.
+PhoneLink opens this computer's Kollab app in a phone browser through the same
+connection service used by `/connect`. Open **Settings > PhoneLink**, choose
+**Link a Phone**, scan with the phone's camera, compare the pairing code, and
+approve on the computer. The invitation expires after five minutes and links
+one phone. Bookmark the opened app to return in the same phone browser.
 
+Keep the computer awake, online and running Kollab. Agents, provider calls and
+tools still run on the computer. The phone is a trusted app controller, with no
+credential setup or agent-network enrollment. Removing the phone withdraws its app access.
+The directory must include the PhoneLink portal; the UI checks this before
+issuing a QR. Code in a checkout does not establish public deployment.
 
-The phone-management panel is a separate feature from Learn and may not be present
-in a build until that feature is integrated. This lesson documents prerequisites;
-it does not provision or modify a phone peer.
-
-1. Ask the host administrator to prepare a reachable WireGuard server, its public
-   key and endpoint, and a private tunnel address for the phone.
-2. The network owner configures any required router/firewall UDP forwarding, DNS,
-   and trusted HTTPS certificate outside Kollab.
-3. The host administrator keeps the Web UI private by allowing only its LAN IP
-   in `KOLLAB_WEBUI_HOSTS` before launch (for example,
-   `KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui`). The host also sets
-   `KOLLAB_PHONE_ACCESS_APPLY_COMMAND` to a reviewed peer-reconciliation helper;
-   this helper is not editable from the phone API. Without it, add/revoke controls
-   remain disabled.
-4. In a build that includes the Phone Access panel, add the phone and scan its
-   one-time QR code with the official WireGuard app. If the panel is absent, Learn
-   cannot provision a peer. The QR contains the phone's private key; keep it secret
-   and do not save it in screenshots or share it.
-5. Activate the VPN on the phone, then open the Web UI through its private
-   address (for example, `http://<private-host>:8080`).
-
-Kollab does not install WireGuard, configure routers, open firewalls, or set up
-DNS. Keep the Web UI restricted to the private network; do not expose it as a
-public service just to reach it from a phone.
+Manual WireGuard access remains optional under **Advanced Settings**; its
+operator prerequisites are in [PhoneLink](phone-access.md).
 
 ## What's New and progress
 

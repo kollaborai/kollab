@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Web: PhoneLink has its own Settings tab, expiring QR invitations, local phone
+  approval and per-phone revocation over the existing `/connect` transport.
+  The directory now includes a same-origin browser portal; its deployment is
+  checked before the app offers a QR. Manual WireGuard controls are collapsed
+  under Advanced Settings.
 - Web: add a responsive Learn page with ten guided topics, contextual links, local progress, and changelog-backed What's New.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
