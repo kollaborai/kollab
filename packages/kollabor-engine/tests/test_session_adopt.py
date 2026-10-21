@@ -278,7 +278,9 @@ async def test_adopt_does_not_await_slow_history_refresh(monkeypatch):
     )
 
     class Pool:
-        async def adopt(self, session_id, found):
+        async def adopt(self, session_id, found, *, owned=False, webui_owned=False):
+            assert owned is False
+            assert webui_owned is False
             return handle
 
         async def stop(self, session_id):
@@ -324,7 +326,9 @@ async def test_an_adopted_row_keeps_what_presence_says_until_the_daemon_answers(
     )
 
     class Pool:
-        async def adopt(self, session_id, found):
+        async def adopt(self, session_id, found, *, owned=False, webui_owned=False):
+            assert owned is False
+            assert webui_owned is False
             return handle
 
         async def stop(self, session_id):
@@ -365,7 +369,9 @@ async def test_an_adopted_harness_row_keeps_its_harness_name(monkeypatch):
     )
 
     class Pool:
-        async def adopt(self, session_id, found):
+        async def adopt(self, session_id, found, *, owned=False, webui_owned=False):
+            assert owned is False
+            assert webui_owned is False
             return handle
 
         async def stop(self, session_id):

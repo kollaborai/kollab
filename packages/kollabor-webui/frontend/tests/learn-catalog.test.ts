@@ -93,3 +93,14 @@ test("Learn URLs round-trip and invalid topic IDs give an actionable route state
     kind: "topic", topicId: "phone-access",
   });
 });
+
+
+test("agents lesson explains Web UI persistence and explicit stop actions", () => {
+  const agents = getLearnTopic("agents");
+  const guidance = [agents.summary, ...agents.howTo, agents.example, agents.note].join(" ");
+  assert.match(guidance, /Web UI/);
+  assert.match(guidance, /engine restarts/);
+  assert.match(guidance, /conversation/);
+  assert.match(guidance, /Delete/);
+  assert.match(guidance, /\/quit/);
+});

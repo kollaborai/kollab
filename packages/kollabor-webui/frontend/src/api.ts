@@ -1084,6 +1084,7 @@ export class EngineApi {
     return this.json<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(body),
+      headers: { "X-Kollab-Session-Source": "webui" },
     });
   }
 

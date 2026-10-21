@@ -65,7 +65,9 @@ class _FakeSession:
         self.initialize_error = initialize_error
         self.shutdown = AsyncMock()
 
-    async def initialize(self) -> None:
+    async def initialize(self, on_spawned=None) -> None:
+        if on_spawned is not None:
+            await on_spawned(self)
         if self.initialize_error is not None:
             raise self.initialize_error
 
@@ -127,7 +129,9 @@ async def test_in_flight_session_id_reservation_conflicts_before_second_spawn(
     created: list[_BlockingSession] = []
 
     class _BlockingSession(_FakeSession):
-        async def initialize(self) -> None:
+        async def initialize(self, on_spawned=None) -> None:
+            if on_spawned is not None:
+                await on_spawned(self)
             started.set()
             await release.wait()
 
@@ -200,3 +204,119 @@ async def test_oserror_initialize_shuts_down_and_returns_503(
     assert "sess-oserror" not in registry
     with sessions._session_reservation_lock:
         assert "sess-oserror" not in sessions._pending_session_ids
+
+
+@pytest.mark.asyncio
+async def test_webui_create_persists_immediately_after_spawn_and_after_initialize(
+    monkeypatch, registry
+):
+    events = []
+    constructed = {}
+
+    class Store:
+        def register_session(self, session):
+            events.append("persisted")
+
+    store = Store()
+    request = _request()
+    request.scope["app"] = SimpleNamespace(state=SimpleNamespace(handover_store=store))
+
+    request.scope["headers"] = [(b"x-kollab-session-source", b"webui")]
+
+    class PersistentSession(_FakeSession):
+        def __init__(self, **kwargs):
+            super().__init__(kwargs["session_id"])
+            constructed.update(kwargs)
+            self.webui_owned = kwargs["webui_owned"]
+            self.daemon = SimpleNamespace(pid=1234)
+
+        async def initialize(self, on_spawned=None):
+            assert on_spawned is not None
+            await on_spawned(self)
+            events.append("initialized")
+
+    monkeypatch.setattr(sessions, "EngineSession", PersistentSession)
+    response = await sessions.create_session(_body("web-session-test"), request)
+
+    assert constructed["webui_owned"] is True
+    assert events == ["persisted", "initialized", "persisted"]
+    assert response["session_id"] == "web-session-test"
+    assert registry["web-session-test"].webui_owned is True
+
+
+@pytest.mark.asyncio
+async def test_unmarked_api_session_remains_nonpersistent_with_store_available(
+    monkeypatch, registry
+):
+    events = []
+    request = _request()
+    request.scope["app"] = SimpleNamespace(
+        state=SimpleNamespace(
+            handover_store=SimpleNamespace(register_session=lambda session: events.append(session))
+        )
+    )
+
+    class UnmarkedSession(_FakeSession):
+        def __init__(self, **kwargs):
+            super().__init__(kwargs["session_id"])
+            self.webui_owned = kwargs["webui_owned"]
+
+        async def initialize(self, on_spawned=None):
+            assert on_spawned is None
+
+    monkeypatch.setattr(sessions, "EngineSession", UnmarkedSession)
+    await sessions.create_session(_body("api-session-test"), request)
+
+    assert registry["api-session-test"].webui_owned is False
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_webui_delete_stops_pid_before_manifest_removal(monkeypatch, registry):
+    events = []
+
+    class Store:
+        def remove_session(self, session_id):
+            events.append(("remove", session_id))
+
+    async def stop():
+        events.append(("stop", "web-session-delete"))
+
+    session = SimpleNamespace(webui_owned=True, shutdown=stop)
+    registry["web-session-delete"] = session
+    monkeypatch.setattr(sessions, "_handover_store", Store())
+
+    response = await sessions.delete_session("web-session-delete")
+
+    assert response == {"ok": True, "session_id": "web-session-delete"}
+    assert events == [("stop", "web-session-delete"), ("remove", "web-session-delete")]
+    assert "web-session-delete" not in registry
+
+
+@pytest.mark.asyncio
+async def test_failed_webui_delete_retains_manifest_and_reports_action(
+    monkeypatch, registry
+):
+    from fastapi import HTTPException
+
+    events = []
+
+    class Store:
+        def remove_session(self, session_id):
+            events.append(("remove", session_id))
+
+    async def fail_stop():
+        events.append(("stop", "web-session-stuck"))
+        raise RuntimeError("simulated PID stop failure")
+
+    session = SimpleNamespace(webui_owned=True, shutdown=fail_stop)
+    registry["web-session-stuck"] = session
+    monkeypatch.setattr(sessions, "_handover_store", Store())
+
+    with pytest.raises(HTTPException) as error:
+        await sessions.delete_session("web-session-stuck")
+
+    assert error.value.status_code == 503
+    assert "/quit" in error.value.detail
+    assert events == [("stop", "web-session-stuck")]
+    assert registry["web-session-stuck"] is session

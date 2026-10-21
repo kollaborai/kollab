@@ -60,6 +60,8 @@ export const LEARN_TOPICS = [
     howTo: [
       "Open Agents to see the rosters and teams available in the selected workspace.",
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
+
+      "Agents created from the Web UI stay running through Web UI or engine restarts and return with their conversation. Use Delete in the Web UI or send /quit to the agent to stop it.",
       "Give the agent a concrete result to produce and how you will verify it.",
       "Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.",
       "Drag past the sidebar edge and release on the Release to hide cue to tuck an agent into Hidden Agents. You can restore it there; hiding does not stop or delete it.",
@@ -67,7 +69,7 @@ export const LEARN_TOPICS = [
       "Review its output and tests before using the result.",
     ],
     example:
-      "Ask a coding agent to add a small feature, name the relevant files, and require it to run the focused tests before reporting back. Then move its workspace row to the top so the next session starts there.",
+      "Start a Web UI agent on a focused task, restart the engine, and confirm the same agent and conversation return in the sidebar. Use Web UI Delete or send /quit when you want it to stop.",
   },
   {
     id: "profiles",

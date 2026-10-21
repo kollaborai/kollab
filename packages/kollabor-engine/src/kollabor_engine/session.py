@@ -23,7 +23,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.snapshots import ProfileSnapshot
 from kollabor_ai.model_registry import supports_vision
@@ -145,11 +145,17 @@ class EngineSession:
         solo: bool = False,
         stop_on_owner_exit: bool = False,
         launch_brief: Optional[str] = None,
+        webui_owned: bool = False,
     ):
         self.session_id = session_id
         self.launch_brief = launch_brief or ""
         self.solo = solo
         self.stop_on_owner_exit = stop_on_owner_exit
+        # Only sessions created through the WebUI are detached and reowned
+        # across engine shutdown. CLI-created sessions keep the old stop policy.
+        self.webui_owned = bool(webui_owned)
+
+        self.on_persistence_changed: Optional[Callable[["EngineSession"], None]] = None
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
@@ -236,8 +242,27 @@ class EngineSession:
 
     # === lifecycle ===
 
-    async def initialize(self) -> None:
-        """Spawn the daemon and start tracking its event stream."""
+    def _notify_persistence_changed(self) -> None:
+        """Persist changed public session metadata without interrupting chat."""
+        callback = getattr(self, "on_persistence_changed", None)
+        if callback is None:
+            return
+        try:
+            callback(self)
+        except Exception:
+            logger.exception("could not update persisted metadata for session %s", self.session_id)
+
+
+    async def initialize(
+        self,
+        on_spawned: Optional[Callable[["EngineSession"], Awaitable[None]]] = None,
+    ) -> None:
+        """Spawn the daemon, persist its owner record, then initialize it.
+
+        ``on_spawned`` is awaited immediately after attach, before any profile,
+        approval, or history RPC can block. WebUI persistence therefore exists
+        as soon as the daemon PID and socket are known.
+        """
         profile_name = getattr(self.profile, "name", None) or str(self.profile or "")
         is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
         if is_acp:
@@ -262,7 +287,10 @@ class EngineSession:
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
             stop_on_owner_exit=self.stop_on_owner_exit,
+            webui_owned=self.webui_owned,
         )
+        if on_spawned is not None:
+            await on_spawned(self)
         if isinstance(self.profile, str):
             # Inbound clients pass a portable profile name. The daemon loads
             # it in the requested workspace, whose config can differ from the
@@ -328,11 +356,19 @@ class EngineSession:
             raise
 
     @classmethod
-    async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":
-        """Open a live agent this engine did not start (a discover_sessions row).
+    async def adopt(
+        cls,
+        found: Dict[str, Any],
+        *,
+        owned: bool = False,
+        webui_owned: bool = False,
+        created_at: Optional[datetime] = None,
+    ) -> "EngineSession":
+        """Attach to a discoverable or manifest-reowned local agent.
 
-        Nothing about the agent changes: its profile and approval mode are read
-        from it, never set, and closing the session only detaches.
+        Ordinary discovery remains external and detach-only. A WebUI manifest
+        may explicitly transfer process ownership after the prior engine exits;
+        profile and approval settings are still read, never mutated.
         """
         session_id = str(found["session_id"])
         # What presence says it runs: the row keeps its model while a busy
@@ -350,7 +386,8 @@ class EngineSession:
             agent=str(found.get("agent") or "") or None,
             identity=str(found.get("identity") or "") or None,
         )
-        session.external = True
+        session.external = not webui_owned
+        session.webui_owned = bool(webui_owned)
         session.display_name = str(found.get("name") or "")
         session.device = str(found.get("device") or "")
         discovered_workspace = str(found.get("workspace") or "") or None
@@ -370,15 +407,34 @@ class EngineSession:
                     session.conversation_id = log_path.stem
             except OSError:
                 pass
-        if found.get("created_at"):
+        if created_at is not None:
+            session.created_at = (
+                created_at.replace(tzinfo=timezone.utc)
+                if created_at.tzinfo is None
+                else created_at.astimezone(timezone.utc)
+            )
+        elif found.get("created_at"):
             # keep it aware: created_at is timezone-aware since the 3.14
             # launch-runtime change (datetime.now(timezone.utc) above), and a
             # naive/aware mix would break any comparison or subtraction.
             session.created_at = datetime.fromtimestamp(
                 float(found["created_at"]), timezone.utc
             )
+        if not session.conversation_id:
+            # The per-port manifest stores only the opaque log identifier, not
+            # history contents. Restrict it to a filename component before it
+            # is used to resolve a path below the workspace conversations dir.
+            conversation_id = str(found.get("conversation_id") or "")
+            if (
+                conversation_id
+                and Path(conversation_id).name == conversation_id
+                and conversation_id not in {".", ".."}
+            ):
+                session.conversation_id = conversation_id
         try:
-            session.daemon = await get_daemon_pool().adopt(session_id, found)
+            session.daemon = await get_daemon_pool().adopt(
+                session_id, found, owned=owned, webui_owned=webui_owned
+            )
             # An existing pool-owned handle belongs to its original session;
             # this attached view only owns its own subscriptions/tasks.
             session._borrowed_daemon = session.daemon.launcher is not None
@@ -396,7 +452,7 @@ class EngineSession:
         except BaseException:
             if session.daemon is not None:
                 try:
-                    await session.shutdown()
+                    await session.shutdown(stop_daemon=not webui_owned)
                 except BaseException as cleanup_error:
                     logger.warning("adopted session cleanup failed (%s)", type(cleanup_error).__name__)
             raise
@@ -410,6 +466,8 @@ class EngineSession:
             # A profile-change event can arrive while this initial RPC waits.
             if revision == self._profile_revision:
                 self.profile = profile
+
+                self._notify_persistence_changed()
             mode = (await self.state.get_permission_state()).approval_mode
             self.approval_mode = str(mode or "").lower()
             if self.device:
@@ -420,7 +478,12 @@ class EngineSession:
                 "session %s: could not read its profile: %s", self.session_id, e
             )
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, stop_daemon: bool = True) -> None:
+        """Close session tasks and either stop or detach the daemon.
+
+        Delete and `/quit` keep the default stop behavior. The engine lifespan
+        passes ``False`` only for explicitly WebUI-owned persistent sessions.
+        """
         tasks = (
             self._facts_task,
             self._event_task,
@@ -440,7 +503,11 @@ class EngineSession:
         self._history_refresh_task = None
         self._active_turn_task = None
         if not self._borrowed_daemon:
-            await get_daemon_pool().stop(self.session_id)
+            pool = get_daemon_pool()
+            if stop_daemon:
+                await pool.stop(self.session_id)
+            else:
+                await pool.detach(self.session_id)
         self.daemon = None
 
     # === daemon access ===
@@ -562,6 +629,8 @@ class EngineSession:
             ) or ""
             if native_session_id and not getattr(self, "conversation_id", ""):
                 self.conversation_id = native_session_id
+
+                self._notify_persistence_changed()
             if native_session_id and display_history and display_history[0].get("role") == "user":
                 # Old resumed bases lost initialization metadata. Recover it
                 # from typed source records for display only; the daemon and
@@ -845,6 +914,8 @@ class EngineSession:
                     payload = event.get("profile")
                     if isinstance(payload, dict) and payload.get("name"):
                         self.profile = ProfileSnapshot.from_dict(payload)
+
+                        self._notify_persistence_changed()
                         self._profile_revision += 1
                         if self.profile.provider != "acp":
                             self.acp_plan = {}

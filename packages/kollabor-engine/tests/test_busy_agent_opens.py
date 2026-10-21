@@ -75,7 +75,9 @@ async def test_permissions_answer_from_the_engine_while_the_agent_is_busy(regist
 async def test_opening_an_agent_does_not_wait_for_what_it_runs_with(monkeypatch):
     state = BusyState()
 
-    async def adopt(session_id, found):
+    async def adopt(session_id, found, *, owned=False, webui_owned=False):
+        assert owned is False
+        assert webui_owned is False
         return _daemon(state)
 
     async def stop(session_id):
