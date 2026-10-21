@@ -134,7 +134,7 @@ reduced motion.
 The learning system remains under review. The first reference-browser and task-card
 mockups were rejected. Current prototypes explore a session walkthrough using the
 actual controls, and an interactive model of networks, devices, workspaces, and
-agents. Neither content direction has been selected for implementation.
+agents. Neither content direction has been selected for implementation. The [review prototypes](docs/design/learn-prototypes/README.md) preserve both concepts.
 
 - [LearnPage.tsx](packages/kollabor-webui/frontend/src/components/learn/LearnPage.tsx):
   compact headings, plain topic navigation, and borderless content groups.
