@@ -27,9 +27,9 @@ exclude = [
     "/frontend/dist",
 ]
 
-# hatch_build.py generates the Vite output when npm is available and copies it
-# into kollabor_webui/static/assistant. If a build environment has no Node
-# toolchain, the legacy static UI remains the usable fallback.
+# hatch_build.py packages KOLLAB_FRONTEND_DIST or compiles isolated Vite output
+# into kollabor_webui/static/assistant. Missing npm or failed compilation is a
+# build error, never permission to substitute an older or legacy UI.
 [tool.hatch.build.hooks.custom]
 
 [tool.uv.sources]

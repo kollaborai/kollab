@@ -23,31 +23,42 @@ def rebuild_stale_bundle() -> None:
     package has no ``frontend/src`` and serves the bundle it shipped with.
     """
     from .server import SOURCE_ASSISTANT_STATIC_DIR as dist
+    from .server import _explicit_frontend_dir, _validate_frontend_dir
+
+    # An explicit, validated artifact is already compiled. This includes
+    # editable installs, whose source dist may be older than the chosen app.
+    if _explicit_frontend_dir() is not None:
+        return
 
     frontend = dist.parent
     if not (frontend / "src").is_dir():
         return
     index = dist / "index.html"
     built = index.stat().st_mtime if index.is_file() else 0.0
-    inputs = [*frontend.glob("*.html"), *frontend.glob("*.json"), *frontend.glob("vite.config.*")]
-    if not any(path.is_file() and path.stat().st_mtime > built for path in [*inputs, *(frontend / "src").rglob("*")]):
+    inputs = [
+        *frontend.glob("*.html"), *frontend.glob("*.json"), *frontend.glob("vite.config.*"),
+        frontend / "CHANGELOG.md", frontend.parents[2] / "kollabor/updates/CHANGELOG.md",
+        *(frontend / "src").rglob("*"), *(frontend / "public").rglob("*"),
+    ]
+    if not any(path.is_file() and path.stat().st_mtime > built for path in inputs):
         return
     npm = shutil.which("npm")
     if npm is None or not (frontend / "node_modules").is_dir():
-        print(f"  (the web ui source is newer than its build: run `npm run build` in {frontend})")
-        return
+        raise RuntimeError(
+            f"The WebUI source is newer than its build. Install its npm dependencies and run `npm run build` in "
+            f"{frontend}, or select a compiled app with KOLLAB_FRONTEND_DIST."
+        )
     print("  (the web ui source is newer than its build; rebuilding it...)")
     try:
         result = subprocess.run(
             [npm, "run", "build"], cwd=frontend, capture_output=True, text=True, timeout=300
         )
-    except subprocess.TimeoutExpired:
-        print("  (the rebuild took over 5 minutes; serving the previous build)")
-        return
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("The WebUI rebuild could not finish; no older build will be served.") from exc
     if result.returncode != 0:
-        print("  (the rebuild failed; serving the previous build)")
-        for line in (result.stderr or result.stdout).strip().splitlines()[-5:]:
-            print(f"    {line}")
+        detail = "\n".join((result.stderr or result.stdout).strip().splitlines()[-5:])
+        raise RuntimeError(f"The WebUI rebuild failed; no older build will be served.\n{detail}")
+    _validate_frontend_dir(dist)
 
 
 def _listen(hosts: list[str], port: int) -> list[socket.socket]:
@@ -96,9 +107,9 @@ def main() -> None:
         bind_hosts = configured_bind_hosts()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
+    rebuild_stale_bundle()
     sockets = _listen(bind_hosts, port)
     active_hosts = [str(sock.getsockname()[0]) for sock in sockets]
-    rebuild_stale_bundle()
 
     print("\n  kollabor-webui starting...")
     print(f"  engine: {engine_url}")

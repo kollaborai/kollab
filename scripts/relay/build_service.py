@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -42,6 +43,11 @@ def build(output: Path, *, frontend_dist: Path | None = None) -> None:
     # Read all sources before opening the artifact; a missing dependency must
     # not leave a partially constructed release that could be deployed.
     sources = {name: (root / name).read_bytes() for name in FILES}
+    selected = os.environ.get("KOLLAB_FRONTEND_DIST")
+    if frontend_dist is None and selected is not None:
+        if not selected:
+            raise ValueError("KOLLAB_FRONTEND_DIST must name a built frontend directory")
+        frontend_dist = Path(selected)
     frontend = frontend_dist or root / "packages/kollabor-webui/frontend/dist"
     if frontend.is_symlink():
         raise ValueError("PhoneLink browser assets must not be symlinks")

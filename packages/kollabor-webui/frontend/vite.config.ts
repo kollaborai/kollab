@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
@@ -18,7 +18,11 @@ const KOLLAB_CHANGELOG_MODULE = "virtual:kollab-changelog";
 const RESOLVED_KOLLAB_CHANGELOG_MODULE = `\0${KOLLAB_CHANGELOG_MODULE}`;
 
 function kollabCanonicalChangelogPlugin(): Plugin {
-  const changelogPath = path.resolve(frontendDir, "../../../kollabor/updates/CHANGELOG.md");
+  const canonicalChangelog = path.resolve(frontendDir, "../../../kollabor/updates/CHANGELOG.md");
+  // Hatch includes the same canonical file as a build input in standalone sdists.
+  const changelogPath = existsSync(canonicalChangelog)
+    ? canonicalChangelog
+    : path.resolve(frontendDir, "CHANGELOG.md");
   return {
     name: "kollab-canonical-changelog",
     resolveId(source) {

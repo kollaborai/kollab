@@ -60,8 +60,16 @@ def test_binary_wheel_must_match_every_service_frontend_asset(tmp_path, frontend
             build_binary.verify_frontend([wheel], frontend)
 
 
-def test_binary_build_scopes_the_chosen_frontend_to_its_wheel_build(tmp_path, frontend, monkeypatch):
+@pytest.mark.parametrize("input_method", ["argument", "environment"])
+def test_binary_build_scopes_the_chosen_frontend_to_its_wheel_build(
+    tmp_path, frontend, monkeypatch, input_method
+):
     calls = []
+    argv = ["build_binary.py"]
+    if input_method == "argument":
+        argv.extend(["--frontend-dist", str(frontend)])
+    else:
+        monkeypatch.setenv("KOLLAB_FRONTEND_DIST", str(frontend))
     original = os.environ.get("KOLLAB_FRONTEND_DIST")
 
     def run(command, **kwargs):
@@ -84,14 +92,17 @@ def test_binary_build_scopes_the_chosen_frontend_to_its_wheel_build(tmp_path, fr
     monkeypatch.setattr(build_binary, "run", run)
     monkeypatch.setattr(build_binary, "build", build)
     monkeypatch.setattr(build_binary, "smoke", lambda binary, version: None)
-    monkeypatch.setattr(sys, "argv", ["build_binary.py", "--frontend-dist", str(frontend)])
+    monkeypatch.setattr(sys, "argv", argv)
     assert build_binary.main() == 0
     assert len(calls) == 1
     assert calls[0][1]["env"]["KOLLAB_FRONTEND_DIST"] == str(frontend.absolute())
     assert os.environ.get("KOLLAB_FRONTEND_DIST") == original
 
 
-def test_reusing_wheels_rejects_a_different_ui_before_building_the_binary(tmp_path, frontend, monkeypatch):
+@pytest.mark.parametrize("input_method", ["argument", "environment"])
+def test_reusing_wheels_rejects_a_different_ui_before_building_the_binary(
+    tmp_path, frontend, monkeypatch, input_method
+):
     wheels = tmp_path / "wheels"
     webui_wheel(wheels, {"index.html": b"stale UI with the same 0.17.0 package version"})
     (wheels / "kollab-0.17.0-py3-none-any.whl").touch()
@@ -101,10 +112,12 @@ def test_reusing_wheels_rejects_a_different_ui_before_building_the_binary(tmp_pa
 
     monkeypatch.setattr(build_binary, "run", unexpected_build)
     monkeypatch.setattr(build_binary, "build", unexpected_build)
-    monkeypatch.setattr(sys, "argv", [
-        "build_binary.py", "--wheels", str(wheels), "--frontend-dist", str(frontend),
-        "--expect-version", "0.17.0",
-    ])
+    argv = ["build_binary.py", "--wheels", str(wheels), "--expect-version", "0.17.0"]
+    if input_method == "argument":
+        argv.extend(["--frontend-dist", str(frontend)])
+    else:
+        monkeypatch.setenv("KOLLAB_FRONTEND_DIST", str(frontend))
+    monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit, match="differs from --frontend-dist"):
         build_binary.main()
 
@@ -119,3 +132,22 @@ def test_explicit_frontend_cannot_use_a_symlink_or_a_missing_index(tmp_path, fro
         with pytest.raises(ValueError):
             build_service.build(tmp_path / (invalid.name + ".tar.gz"), frontend_dist=invalid)
         assert not (tmp_path / (invalid.name + ".tar.gz")).exists()
+
+
+def test_service_packages_the_same_environment_selected_frontend(tmp_path, frontend, monkeypatch):
+    monkeypatch.setenv("KOLLAB_FRONTEND_DIST", str(frontend))
+    archive = tmp_path / "environment-service.tar.gz"
+    build_service.build(archive)
+    with tarfile.open(archive) as service:
+        assert service.extractfile("plugins/hub/phone_static/assets/app.js").read() == b"/* chosen frontend */"
+
+
+def test_empty_frontend_environment_cannot_select_a_checkout_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_FRONTEND_DIST", "")
+    monkeypatch.setattr(sys, "argv", ["build_binary.py"])
+    with pytest.raises(SystemExit):
+        build_binary.main()
+    archive = tmp_path / "invalid-service.tar.gz"
+    with pytest.raises(ValueError, match="KOLLAB_FRONTEND_DIST must name"):
+        build_service.build(archive)
+    assert not archive.exists()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -63,8 +64,29 @@ def _is_local(request: Request) -> bool:
     return address.is_loopback
 
 
+def _validate_frontend_dir(directory: Path) -> Path:
+    if directory.is_symlink() or not (directory / "index.html").is_file():
+        raise ValueError("Frontend output must be a directory containing index.html")
+    if any(asset.is_symlink() for asset in directory.rglob("*")):
+        raise ValueError("Frontend assets must not be symlinks")
+    return directory
+
+
+def _explicit_frontend_dir() -> Path | None:
+    selected = os.environ.get("KOLLAB_FRONTEND_DIST")
+    if selected is None:
+        return None
+    if not selected:
+        raise ValueError("KOLLAB_FRONTEND_DIST must name a built frontend directory containing index.html")
+    return _validate_frontend_dir(Path(selected))
+
+
 def _assistant_static_dir() -> Path | None:
-    """Return the first available assistant-ui build directory."""
+    """Return the selected app, or the normal source/installed build."""
+
+    selected = _explicit_frontend_dir()
+    if selected is not None:
+        return selected
 
     # An editable checkout can also contain an older packaged bundle. Its
     # freshly built source output is the implementation being developed.
@@ -93,6 +115,9 @@ def create_app(
     *,
     bind_hosts: Sequence[str] | None = None,
 ) -> FastAPI:
+    # Refuse an invalid explicit selection before allocating clients or serving
+    # any page; it must never become permission to use an older bundle.
+    _explicit_frontend_dir()
     bind_hosts = validate_bind_hosts(bind_hosts or configured_bind_hosts())
     trusted_hosts = allowed_hostnames(bind_hosts)
     interface_networks = interface_networks_for_hosts(bind_hosts)

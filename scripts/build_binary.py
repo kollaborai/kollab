@@ -176,6 +176,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "dist" / "bin", help="where the binary goes")
     parser.add_argument("--expect-version", help="fail unless the binary is this version (v prefix allowed)")
     args = parser.parse_args()
+    selected = os.environ.get("KOLLAB_FRONTEND_DIST")
+    if args.frontend_dist is None and selected is not None:
+        if not selected:
+            parser.error("KOLLAB_FRONTEND_DIST must name a built frontend directory")
+        args.frontend_dist = Path(selected)
 
     with tempfile.TemporaryDirectory() as scratch:
         wheel_dir = args.wheels
