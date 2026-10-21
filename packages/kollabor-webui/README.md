@@ -6,6 +6,8 @@ It serves the assistant-ui single-page app, proxies engine configuration to the
 browser, and connects to the local engine API for sessions, assistant-transport
 streaming, permission prompts, profiles, MCP, and hub controls.
 
+Visual direction and review rules: [Web UI design guide](../../design.md).
+
 ## Architecture
 
 | Module/Asset | Responsibility |
