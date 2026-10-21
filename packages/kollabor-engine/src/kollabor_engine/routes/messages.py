@@ -11,9 +11,11 @@ import copy
 import json
 import logging
 import time
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+import anyio
 from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
@@ -1105,7 +1107,23 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             session.unsubscribe(queue)
 
     stream = create_run(run_callback, state=body.state)
-    return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
+    protocol_stream = _assistant_protocol_stream(stream, completion)
+
+    class _OwnedAssistantTransportResponse(AssistantTransportResponse):
+        async def stream_response(self, send):
+            try:
+                await super().stream_response(send)
+            finally:
+                # Cancellation can arrive during downstream send, outside the
+                # generators. Close every owned layer explicitly so create_run
+                # releases its callback/subscription without stopping the daemon.
+                with anyio.CancelScope(shield=True):
+                    async with AsyncExitStack() as closing:
+                        closing.push_async_callback(stream.aclose)
+                        closing.push_async_callback(protocol_stream.aclose)
+                        closing.push_async_callback(self.body_iterator.aclose)
+
+    return _OwnedAssistantTransportResponse(protocol_stream)
 
 
 class CancelRequest(BaseModel):
