@@ -19,6 +19,14 @@ import json, os, pathlib, shutil, subprocess, sys
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 with open(os.environ["RELAY_TEST_LOG"], "a") as log:
     log.write(json.dumps({"program": name, "args": args}) + "\n")
+def operator_edit(target):
+    if target == "dropin":
+        path = pathlib.Path(os.environ["DROPIN"])
+        value = b"[Service]\nWorkingDirectory=/operator-edit\n"
+    else:
+        path = pathlib.Path(os.environ["RELAY_TEST_REMOTE_HOME"]) / ".local/share/kollab-relay/version"
+        value = b"operator-version\n"
+    path.write_bytes(value)
 if name == "ssh":
     if args[0] == "--":
         args.pop(0)
@@ -34,7 +42,14 @@ if name == "scp":
 if name == "sudo":
     if args[0] == "-n":
         args.pop(0)
-    sys.exit(subprocess.run(args).returncode)
+    result = subprocess.run(args)
+    if result.returncode == 0 and args[:2] == ["cp", "-p"]:
+        target = pathlib.Path(args[-1])
+        if target.name == "dropin.conf" and os.environ.get("RELAY_TEST_EDIT_BEFORE_ACTIVATION"):
+            operator_edit("dropin")
+        if target == pathlib.Path(os.environ["DROPIN"]) and os.environ.get("RELAY_TEST_EDIT_DURING_ROLLBACK"):
+            operator_edit("version")
+    sys.exit(result.returncode)
 if name == "systemctl":
     if args[0] == "restart":
         counter = pathlib.Path(os.environ["RELAY_TEST_REMOTE_HOME"]) / "restarts"
@@ -59,6 +74,11 @@ if name == "sleep":
 if name == "curl":
     candidate = "WorkingDirectory=" in pathlib.Path(os.environ["DROPIN"]).read_text()
     mode = os.environ.get("RELAY_TEST_HEALTH", "compact") if candidate else "compact"
+    edit = os.environ.get("RELAY_TEST_EDIT_DURING_HEALTH")
+    edited = pathlib.Path(os.environ["RELAY_TEST_REMOTE_HOME"]) / "operator-edit-during-health"
+    if candidate and edit and not edited.exists():
+        operator_edit(edit)
+        edited.touch()
     if mode == "malformed":
         print("not-json")
     else:
@@ -185,6 +205,55 @@ def test_autoupdate_lock_contention_never_activates_the_uploaded_artifact(deploy
     assert_previous_state(relay_home, dropin)
     assert not list(relay_home.glob("rollback-*"))
     assert "not activated" in result.stderr
+
+
+def test_operator_dropin_edit_before_activation_is_preserved(deployment):
+    directory, relay_home, _, dropin, _ = deployment
+    result = deploy(deployment, RELAY_TEST_EDIT_BEFORE_ACTIVATION="1")
+    assert result.returncode != 0
+    assert dropin.read_bytes() == b"[Service]\nWorkingDirectory=/operator-edit\n"
+    assert (relay_home / "version").read_bytes() == b"0.17.0\n"
+    calls = [json.loads(line) for line in (directory / "commands.jsonl").read_text().splitlines()]
+    assert not [call for call in calls if call["program"] in {"tee", "systemctl"}]
+    assert "concurrent edit" in result.stderr
+    assert "rollback status=1" in result.stderr
+
+
+@pytest.mark.parametrize("health", ["compact", "degraded"])
+@pytest.mark.parametrize("target", ["dropin", "version"])
+def test_operator_edit_during_health_poll_refuses_automatic_rollback(deployment, health, target):
+    directory, relay_home, _, dropin, _ = deployment
+    result = deploy(deployment, RELAY_TEST_EDIT_DURING_HEALTH=target, RELAY_TEST_HEALTH=health)
+    assert result.returncode != 0
+    if target == "dropin":
+        assert dropin.read_bytes() == b"[Service]\nWorkingDirectory=/operator-edit\n"
+        assert (relay_home / "version").read_bytes() == b"0.17.0\n"
+    else:
+        assert (relay_home / "version").read_bytes() == b"operator-version\n"
+        assert "/.venv/bin/python kollabor_cli_main.py relay run" in dropin.read_text()
+    calls = [json.loads(line) for line in (directory / "commands.jsonl").read_text().splitlines()]
+    restarts = [call for call in calls if call["program"] == "systemctl" and call["args"][0] == "restart"]
+    assert len(restarts) == 1
+    assert "concurrent edit" in result.stderr
+    assert "automatic rollback refused" in result.stderr
+    assert "rollback status=1" in result.stderr
+
+
+@pytest.mark.parametrize("originally_absent", [False, True])
+def test_rollback_rechecks_version_after_restoring_dropin(deployment, originally_absent):
+    directory, relay_home, _, dropin, _ = deployment
+    if originally_absent:
+        (relay_home / "version").unlink()
+    result = deploy(deployment, RELAY_TEST_FAIL_RESTART="1", RELAY_TEST_EDIT_DURING_ROLLBACK="1")
+    assert result.returncode != 0
+    assert dropin.read_bytes() == b"[Service]\nExecStart=old exact service command\n"
+    assert (relay_home / "version").read_bytes() == b"operator-version\n"
+    calls = [json.loads(line) for line in (directory / "commands.jsonl").read_text().splitlines()]
+    restarts = [call for call in calls if call["program"] == "systemctl" and call["args"][0] == "restart"]
+    assert len(restarts) == 1
+    assert "concurrent edit" in result.stderr
+    assert "automatic rollback refused" in result.stderr
+    assert "rollback status=1" in result.stderr
 
 
 @pytest.mark.parametrize("problem", ["upload", "manifest", "unsafe_member"])

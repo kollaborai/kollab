@@ -99,6 +99,33 @@ except (ValueError, OSError):
 sys.exit(0 if isinstance(value, dict) and value.get("status") == "ok" and value.get("degraded") is False else 1)
 '
 }
+fingerprint() {
+    "$PYTHON" - "$1" <<'PY'
+import hashlib, os, stat, sys
+try:
+    descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    print("absent")
+else:
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise SystemExit("deployment target must be an ordinary file")
+        os.set_blocking(stream.fileno(), True)
+        print(hashlib.file_digest(stream, "sha256").hexdigest())
+PY
+}
+require_hash() {
+    local actual
+    actual=$(fingerprint "$1") || { echo "cannot verify deployment target: $1" >&2; return 1; }
+    if [ "$actual" != "$2" ] && { [ -z "${3:-}" ] || [ "$actual" != "$3" ]; }; then
+        echo "concurrent edit prevents changing $1; retained backup=$BACKUP" >&2
+        return 1
+    fi
+}
+render_dropin() {
+    printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config %s\n' \
+        "$REL" "$REL" "$RELAY_CONFIG"
+}
 sudo -n test -f "$DROPIN"
 [ ! -L "$RELAY_HOME/version" ] || { echo "version marker must not be a symlink" >&2; exit 1; }
 BACKUP=$(mktemp -d "$RELAY_HOME/rollback-$TAG.XXXXXX")
@@ -110,20 +137,44 @@ else
     touch "$BACKUP/version.absent"
 fi
 printf '%s\n' "Retain until operator approval for cleanup." > "$BACKUP/RETENTION"
+ORIGINAL_DROPIN_SHA=$(fingerprint "$BACKUP/dropin.conf")
+ORIGINAL_VERSION_SHA=absent
+if [ -f "$BACKUP/version" ]; then ORIGINAL_VERSION_SHA=$(fingerprint "$BACKUP/version"); fi
+OWNED_DROPIN_SHA=$ORIGINAL_DROPIN_SHA
+OWNED_VERSION_SHA=$ORIGINAL_VERSION_SHA
+PENDING_VERSION_SHA=
+CANDIDATE_DROPIN_SHA=$(render_dropin | "$PYTHON" -c 'import hashlib,sys; print(hashlib.file_digest(sys.stdin.buffer,"sha256").hexdigest())')
+restore_files() {
+    # Refuse the whole rollback if either target already belongs to another writer.
+    require_hash "$DROPIN" "$OWNED_DROPIN_SHA" || return 1
+    require_hash "$RELAY_HOME/version" "$OWNED_VERSION_SHA" "$PENDING_VERSION_SHA" || return 1
+    require_hash "$BACKUP/dropin.conf" "$ORIGINAL_DROPIN_SHA" || return 1
+    if [ "$ORIGINAL_VERSION_SHA" != absent ]; then
+        require_hash "$BACKUP/version" "$ORIGINAL_VERSION_SHA" || return 1
+    fi
+    # Recheck each target immediately before its own write/removal.
+    require_hash "$DROPIN" "$OWNED_DROPIN_SHA" || return 1
+    sudo -n cp -p -- "$BACKUP/dropin.conf" "$DROPIN" || return 1
+    require_hash "$RELAY_HOME/version" "$OWNED_VERSION_SHA" "$PENDING_VERSION_SHA" || return 1
+    if [ "$ORIGINAL_VERSION_SHA" = absent ]; then
+        if [ -e "$RELAY_HOME/version" ]; then rm -- "$RELAY_HOME/version" || return 1; fi
+    else
+        cp -p -- "$BACKUP/version" "$RELAY_HOME/version" || return 1
+    fi
+}
 rollback() {
     local original_status=$1 failed=0
     trap - ERR INT TERM HUP
     set +e
-    sudo -n cp -p -- "$BACKUP/dropin.conf" "$DROPIN" || failed=1
-    if [ -f "$BACKUP/version.absent" ]; then
-        if [ -e "$RELAY_HOME/version" ]; then rm -- "$RELAY_HOME/version" || failed=1; fi
+    if restore_files; then
+        sudo -n systemctl daemon-reload || failed=1
+        sudo -n systemctl restart "$SERVICE" || failed=1
+        if [ "$failed" -eq 0 ]; then
+            healthy || { echo "prior files restored; previous service health remains unverified" >&2; failed=1; }
+        fi
     else
-        cp -p -- "$BACKUP/version" "$RELAY_HOME/version" || failed=1
-    fi
-    sudo -n systemctl daemon-reload || failed=1
-    sudo -n systemctl restart "$SERVICE" || failed=1
-    if [ "$failed" -eq 0 ]; then
-        healthy || { echo "prior files restored; previous service health remains unverified" >&2; failed=1; }
+        failed=1
+        echo "automatic rollback refused or incomplete; service left for operator recovery" >&2
     fi
     echo "deployment failed (status $original_status); rollback status=$failed; retained backup=$BACKUP" >&2
     exit "$original_status"
@@ -132,17 +183,27 @@ trap 'rollback $?' ERR
 trap 'rollback 130' INT
 trap 'rollback 143' TERM
 trap 'rollback 129' HUP
-printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python kollabor_cli_main.py relay run --config %s\n' \
-    "$REL" "$REL" "$RELAY_CONFIG" | sudo -n tee "$DROPIN" >/dev/null
+require_hash "$RELAY_HOME/version" "$OWNED_VERSION_SHA"
+require_hash "$DROPIN" "$OWNED_DROPIN_SHA"
+OWNED_DROPIN_SHA=$CANDIDATE_DROPIN_SHA
+render_dropin | sudo -n tee "$DROPIN" >/dev/null
 sudo -n systemctl daemon-reload
 sudo -n systemctl restart "$SERVICE"
 for ((i=1; i<=ATTEMPTS; i++)); do
     sleep "$INTERVAL"
     if healthy; then
+        require_hash "$DROPIN" "$OWNED_DROPIN_SHA"
+        require_hash "$RELAY_HOME/version" "$OWNED_VERSION_SHA"
         if [ -n "$VERSION" ]; then
             marker=$(mktemp "$RELAY_HOME/.version.XXXXXX")
             printf '%s\n' "$VERSION" > "$marker"
+            NEW_VERSION_SHA=$(fingerprint "$marker")
+            require_hash "$RELAY_HOME/version" "$OWNED_VERSION_SHA"
+            # A signal can arrive immediately after mv, before the next assignment.
+            PENDING_VERSION_SHA=$NEW_VERSION_SHA
             mv -- "$marker" "$RELAY_HOME/version"
+            OWNED_VERSION_SHA=$NEW_VERSION_SHA
+            PENDING_VERSION_SHA=
         fi
         trap - ERR INT TERM HUP
         echo "activated=$REL service=$SERVICE version=${VERSION:-unchanged} sha256=$WANT"
