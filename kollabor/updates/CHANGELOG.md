@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-21
+
 ### Added
 - Web: PhoneLink has its own Settings tab, expiring QR invitations, local phone
   approval and per-phone revocation over the existing `/connect` transport.
   The directory now includes a same-origin browser portal; its deployment is
   checked before the app offers a QR. Manual WireGuard controls are collapsed
   under Advanced Settings.
-- Web: add ten Learn reference topics with compact typography and plain topic navigation. What's New has its own page and sidebar action.
+- Web: Learn opens as a compact modal with ten reference topics, plain navigation, and an X to close. What's New has its own page and sidebar action.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
 - Docs: add a product-ready checklist and PR template requiring evidence or a
@@ -43,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override uses the shared fast model, then the active session model.
 
 ### Fixed
+- Web: disconnecting or revoking a phone closes buffered assistant streams without leaving event subscriptions running. Explicit Stop still cancels the agent turn.
+- Build: one selected frontend is reused by CLI, desktop, service and Python packages. Invalid selections and failed source builds stop instead of silently serving older UI.
+- Network: attached clients show the owning connection's Knocks address.
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
 - Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.
 - Profile API responses, state snapshots, and CLI summaries omit URL userinfo/query/fragment, credential-like path segments, header values, ACP command arguments, and local runtime paths; unchanged redacted endpoint edits preserve server-side configuration.
