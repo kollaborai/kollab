@@ -167,6 +167,16 @@ class EngineSession:
         self.agent = agent
         self.requested_identity = identity
         self.approval_mode = approval_mode
+        # Actionable warnings for facts that could not be read or saved.
+        # They never carry private transport or filesystem details, and None
+        # means no known problem.
+        self.approval_mode_warning: Optional[str] = None
+        self.persistence_warning: Optional[str] = None
+        # Delete stopped the daemon but its durable owner record is still
+        # present: the row stays listed and a retried Delete clears it
+        # without stopping anything a second time.
+        self.deletion_pending = False
+        self.deletion_warning: Optional[str] = None
         self.mcp_server_names = mcp_server_names or []
         # Started outside this engine (a terminal, another engine) and attached
         # by adopt(): shutdown detaches. display_name is its own conversation's
@@ -251,6 +261,14 @@ class EngineSession:
             callback(self)
         except Exception:
             logger.exception("could not update persisted metadata for session %s", self.session_id)
+            # Report the failure, never the underlying path or transport error.
+            self.persistence_warning = (
+                "This agent's saved details could not be updated. It keeps "
+                "running, but an engine restart may restore older details. "
+                "The next successful save clears this."
+            )
+        else:
+            self.persistence_warning = None
 
 
     async def initialize(
@@ -460,6 +478,9 @@ class EngineSession:
 
     async def _read_agent_facts(self) -> None:
         """An adopted agent's profile, approval mode and, on another computer, folder."""
+        # Each fact is read independently: one failed read reports a warning
+        # for that fact only, and the others still land. The daemon's private
+        # error details stay in the log, never in a warning string.
         try:
             revision = self._profile_revision
             profile = await self.state.get_active_profile()
@@ -468,15 +489,30 @@ class EngineSession:
                 self.profile = profile
 
                 self._notify_persistence_changed()
-            mode = (await self.state.get_permission_state()).approval_mode
-            self.approval_mode = str(mode or "").lower()
-            if self.device:
-                # Its folder is on that computer: what its own daemon reports.
-                self.workspace = (await self.state.get_system_info()).cwd or None
         except Exception as e:
             logger.debug(
                 "session %s: could not read its profile: %s", self.session_id, e
             )
+        try:
+            mode = (await self.state.get_permission_state()).approval_mode
+            self.approval_mode = str(mode or "").lower()
+            self.approval_mode_warning = None
+        except Exception as e:
+            self.approval_mode_warning = (
+                "This agent's approval mode could not be read, so it shows as "
+                "unknown. Open the agent again or send it a message to refresh it."
+            )
+            logger.debug(
+                "session %s: could not read its approval mode: %s", self.session_id, e
+            )
+        if self.device:
+            try:
+                # Its folder is on that computer: what its own daemon reports.
+                self.workspace = (await self.state.get_system_info()).cwd or None
+            except Exception as e:
+                logger.debug(
+                    "session %s: could not read its folder: %s", self.session_id, e
+                )
 
     async def shutdown(self, *, stop_daemon: bool = True) -> None:
         """Close session tasks and either stop or detach the daemon.
@@ -961,9 +997,20 @@ class EngineSession:
             "agent": agent_name,
             "workspace": self.workspace,
             "device": self.device,
-            "approval_mode": _APPROVAL_MODE_MAP.get(
-                self.approval_mode, ApprovalMode.TRUST_ALL
-            ).value,
+            # The mode name, matching permissions.py; None (unknown) while the
+            # facts read has not answered or last failed. Reporting a guessed
+            # mode here would let the UI act on permissions the agent does not
+            # have.
+            "approval_mode": (
+                self.approval_mode
+                if self.approval_mode in _APPROVAL_MODE_MAP
+                and not self.approval_mode_warning
+                else None
+            ),
+            "approval_mode_warning": self.approval_mode_warning,
+            "persistence_warning": self.persistence_warning,
+            "deletion_pending": self.deletion_pending,
+            "deletion_warning": self.deletion_warning,
             "created_at": self.created_at.isoformat(),
             "total_turns": self.total_turns,
             "total_input_tokens": self.total_input_tokens,

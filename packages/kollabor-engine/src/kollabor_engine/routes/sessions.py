@@ -969,25 +969,49 @@ async def delete_session(session_id: str):
     session = registry.pop(session_id, None)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    try:
-        await session.shutdown()
-    except Exception as exc:
-        # Keep the live session and manifest discoverable when the PID could not
-        # be stopped; the user can retry Delete or send /quit in the agent.
-        registry[session_id] = session
+    # A Delete whose owner-record removal failed already stopped the daemon:
+    # retry only the durable part, never stop a stopped agent again.
+    if not getattr(session, "deletion_pending", False):
+        try:
+            await session.shutdown()
+        except Exception as exc:
+            # Keep the live session and manifest discoverable when the PID could not
+            # be stopped; the user can retry Delete or send /quit in the agent.
+            registry[session_id] = session
 
-        logger.exception("failed to stop deleted session %s", session_id)
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Could not confirm that agent {session_id} stopped. "
-                "Retry Delete or send /quit to the agent."
-            ),
-        ) from exc
+            logger.exception("failed to stop deleted session %s", session_id)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Could not confirm that agent {session_id} stopped. "
+                    "Retry Delete or send /quit to the agent."
+                ),
+            ) from exc
     if _handover_store is not None and session.webui_owned:
         # Delete is an explicit stop: remove the durable owner record only after
         # the pool successfully stopped the daemon.
-        _handover_store.remove_session(session_id)
+        try:
+            _handover_store.remove_session(session_id)
+        except Exception as exc:
+            # The agent is stopped but still owns a durable record: keep the
+            # row listed so a restart cannot resurrect a zombie, and let the
+            # user clear it by retrying Delete.
+            session.deletion_pending = True
+            session.deletion_warning = (
+                "Stopped, but its saved owner record could not be removed. "
+                "It stays listed so it is not lost; retry Delete to clear it."
+            )
+            registry[session_id] = session
+            logger.exception(
+                "could not remove owner record for stopped session %s", session_id
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Agent {session_id} stopped, but its owner record could not "
+                    "be removed. It stays in the list; retry Delete to clear it."
+                ),
+            ) from exc
     return {"ok": True, "session_id": session_id}
 
 

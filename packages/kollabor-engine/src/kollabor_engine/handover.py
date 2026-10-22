@@ -217,9 +217,16 @@ class HandoverStore:
         self._require_acquired()
         sessions = self._data["sessions"]
         retained = [row for row in sessions if row.get("session_id") != session_id]
-        if len(retained) != len(sessions):
-            self._data["sessions"] = retained
+        if len(retained) == len(sessions):
+            return
+        # The durable file is the truth: swap the in-memory view only once the
+        # write succeeds, so a failed remove stays visible and retryable.
+        self._data["sessions"] = retained
+        try:
             self._write()
+        except BaseException:
+            self._data["sessions"] = sessions
+            raise
 
 
     def prune_dead_sessions(self) -> int:
@@ -298,7 +305,15 @@ class HandoverStore:
             if graceful and self._acquired and self._data is not None:
                 self._data["owner"]["shutdown"] = True
                 self._data["owner"]["shutdown_at"] = time.time()
-                self._write()
+                try:
+                    self._write()
+                except OSError:
+                    # The marker is an optimization; PID plus start time still
+                    # detects this owner after exit. A failed marker write must
+                    # never keep the lock or break engine shutdown.
+                    logger.exception(
+                        "could not write the shutdown marker for port %s", self.port
+                    )
         finally:
             self._release_file_lock()
             self._acquired = False

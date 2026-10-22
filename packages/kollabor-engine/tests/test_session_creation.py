@@ -320,3 +320,58 @@ async def test_failed_webui_delete_retains_manifest_and_reports_action(
     assert "/quit" in error.value.detail
     assert events == [("stop", "web-session-stuck")]
     assert registry["web-session-stuck"] is session
+
+
+@pytest.mark.asyncio
+async def test_webui_delete_manifest_failure_is_retryable_without_stopping_twice(
+    monkeypatch, registry
+):
+    """A stopped agent stays visible until its owner record is durably removed."""
+    events = []
+
+    class Store:
+        attempts = 0
+
+        def remove_session(self, session_id):
+            self.attempts += 1
+            events.append(("remove", session_id))
+            if self.attempts == 1:
+                raise OSError("private manifest path")
+
+    async def stop():
+        events.append(("stop", "web-session-retry"))
+
+    session = SimpleNamespace(
+        session_id="web-session-retry",
+        webui_owned=True,
+        shutdown=stop,
+        to_dict=lambda: {
+            "session_id": "web-session-retry",
+            "active": False,
+            "deletion_pending": getattr(session, "deletion_pending", False),
+            "deletion_warning": getattr(session, "deletion_warning", None),
+        },
+    )
+    registry[session.session_id] = session
+    monkeypatch.setattr(sessions, "_handover_store", Store())
+
+    with pytest.raises(HTTPException) as error:
+        await sessions.delete_session(session.session_id)
+
+    assert error.value.status_code == 503
+    assert "stopped" in error.value.detail.lower()
+    assert "retry" in error.value.detail.lower()
+    assert registry[session.session_id] is session
+    assert session.deletion_pending is True
+    assert session.deletion_warning
+    assert events == [("stop", session.session_id), ("remove", session.session_id)]
+
+    response = await sessions.delete_session(session.session_id)
+
+    assert response == {"ok": True, "session_id": session.session_id}
+    assert session.session_id not in registry
+    assert events == [
+        ("stop", session.session_id),
+        ("remove", session.session_id),
+        ("remove", session.session_id),
+    ]

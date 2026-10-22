@@ -384,3 +384,91 @@ async def test_an_adopted_harness_row_keeps_its_harness_name(monkeypatch):
         assert session.to_dict()["harness"] == "Claude Code"
     finally:
         await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_adopted_approval_mode_failure_is_unknown_and_recovers(monkeypatch):
+    attempts = 0
+
+    class State:
+        async def get_conversation(self, **kwargs):
+            return {"messages": []}
+
+        async def get_active_profile(self):
+            return SimpleNamespace(name="profile", model="model", provider="openai")
+
+        async def get_permission_state(self):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("private permission transport detail")
+            return SimpleNamespace(approval_mode="CONFIRM_ALL")
+
+    handle = SimpleNamespace(
+        alive=True,
+        launcher=None,
+        state=State(),
+        identity="koordinator",
+        agent_name="default",
+        pid=4242,
+        project="/tmp/workspace",
+        subscribe=lambda: asyncio.Queue(),
+        unsubscribe=lambda queue: None,
+        fan_out=lambda event: None,
+    )
+
+    class Pool:
+        async def adopt(self, session_id, found, *, owned=False, webui_owned=False):
+            return handle
+
+        async def stop(self, session_id):
+            return True
+
+        async def detach(self, session_id):
+            return True
+
+    monkeypatch.setattr("kollabor_engine.session.get_daemon_pool", lambda: Pool())
+    async def no_track(self):
+        return None
+
+    monkeypatch.setattr(EngineSession, "_track_events", no_track)
+    monkeypatch.setattr(EngineSession, "_schedule_refresh", lambda self: None)
+
+    session = await EngineSession.adopt(_row(session_id="unknown-approval"))
+    try:
+        assert session._facts_task is not None
+        await session._facts_task
+        first = session.to_dict()
+        assert first["approval_mode"] is None
+        assert first["approval_mode_warning"]
+        assert "private permission transport detail" not in repr(first)
+
+        await session._read_agent_facts()
+        recovered = session.to_dict()
+        assert recovered["approval_mode"] == "confirm_all"
+        assert recovered["approval_mode_warning"] is None
+    finally:
+        await session.shutdown(stop_daemon=False)
+
+
+def test_persistence_warning_is_actionable_and_clears_after_retry():
+    session = EngineSession(session_id="persist-warning", profile=None)
+    attempts = 0
+
+    def persist(_session):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("private manifest location")
+
+    session.on_persistence_changed = persist
+    session._notify_persistence_changed()
+    failed = session.to_dict()
+    assert failed["persistence_warning"]
+    assert "private manifest location" not in repr(failed)
+
+    # A later metadata change invokes the same callback again and clears the
+    # warning once its durable write succeeds.
+    session._notify_persistence_changed()
+    assert session.to_dict()["persistence_warning"] is None
+    assert attempts == 2

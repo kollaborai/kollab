@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked before the app offers a QR. Manual WireGuard controls are collapsed
   under Advanced Settings.
 - Web: Learn opens as a compact modal with ten reference topics, plain navigation, and an X to close. What's New has its own page and sidebar action.
-- Engine: Web UI-created agents survive engine and Web UI restarts, restoring the same conversation; use `/quit` or Web UI Delete to stop them.
+- Engine: Web UI-created agents survive engine and Web UI restarts, restoring the same conversation; use `/quit` or Web UI Delete to stop them. A Delete that stops an agent but cannot update its saved record keeps the agent listed with a retry hint instead of vanishing or stopping it twice; unreadable approval mode reports as unknown with a warning instead of guessing, and both the session panel and the delete error say what to do.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
 - Docs: add a product-ready checklist and PR template requiring evidence or a

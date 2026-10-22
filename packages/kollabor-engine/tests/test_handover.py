@@ -382,3 +382,23 @@ def _stop_pid(pid: int) -> None:
             process.wait(timeout=3)
         except psutil.NoSuchProcess:
             pass
+
+
+def test_remove_session_write_failure_restores_in_memory_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    store.acquire()
+    row = {"session_id": "web-session-retry", "daemon_pid": 4321}
+    store._data["sessions"] = [row]
+
+    def fail_write() -> None:
+        raise OSError("simulated manifest fsync failure")
+
+    monkeypatch.setattr(store, "_write", fail_write)
+    try:
+        with pytest.raises(OSError, match="fsync"):
+            store.remove_session("web-session-retry")
+        assert store._data["sessions"] == [row]
+    finally:
+        store.close()

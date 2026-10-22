@@ -250,6 +250,10 @@ through the Web UI; terminal/CLI-launched agents keep their existing lifecycle.
 The Web UI restart handover request flushes current metadata when available, but
 crash recovery does not depend on the request.
 
+If Delete stops the agent but cannot update its saved record, the agent stays in
+the sidebar with a warning (also shown in its session panel) and a retried
+Delete clears it without stopping the agent again.
+
 
 ## Using Agents
 
