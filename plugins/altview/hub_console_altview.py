@@ -51,6 +51,11 @@ class HubConsoleAltView(AltView):
         self.agents: List[Dict[str, Any]] = []
         self.feed_lines: List[str] = []
         self._feed_is_raw = False  # True when feed_lines contain ANSI (socket capture)
+        # Preserve the existing ANSI-colored feed by default; transcript view is opt-in.
+        self._transcript_mode = False
+        # Invalidate in-flight requests from the previous display mode after a toggle.
+        self._feed_mode_generation = 0
+
         self.selected_idx = 0
         self.active_pane = "agents"
         self.agent_scroll = 0
@@ -77,6 +82,9 @@ class HubConsoleAltView(AltView):
 
     async def on_enter(self, renderer: Any) -> None:
         self._renderer = renderer
+        self._transcript_mode = False
+        self._feed_mode_generation += 1
+
         self.selected_idx = 0
         self.feed_scroll = 0
         self.agent_scroll = 0
@@ -146,8 +154,8 @@ class HubConsoleAltView(AltView):
     def _refresh_feed(self) -> None:
         """Schedule a feed refresh for the selected agent.
 
-        Tries live socket capture first (same data as `kollab --hub capture`).
-        Falls back to vault stream JSONL for self or when socket is unavailable.
+        Raw mode retains its live-output/vault fallback behavior. Transcript mode
+        uses structured capture for remote agents and reports when unavailable.
         """
         if not self.agents or self.selected_idx >= len(self.agents):
             self.feed_lines = ["(no agent selected)"]
@@ -165,18 +173,56 @@ class HubConsoleAltView(AltView):
                 self._fetch_feed_from_socket(ident, socket_path),
                 name="feed_refresh",
             )
+        elif self._transcript_mode:
+            self.feed_lines = ["(transcript capture unavailable for this agent)"]
+            self._feed_is_raw = False
         else:
             self._load_vault_stream(ident)
 
     async def _fetch_feed_from_socket(self, ident: str, socket_path: str) -> None:
-        """Fetch live output from agent socket (same as `--hub capture`)."""
+        """Fetch raw output or the shared transcript rendering from an agent."""
         from plugins.hub.messenger import AgentMessenger
+
+        transcript_mode = self._transcript_mode
+        generation = self._feed_mode_generation
+        if transcript_mode:
+            try:
+                payload, capture_error = await AgentMessenger.request_capture(
+                    socket_path,
+                    lines=100,
+                    timeout=5.0,
+                    capture_format="json",
+                    max_chars=10_000,
+                )
+            except Exception as exc:
+                payload, capture_error = None, type(exc).__name__
+
+            if generation != self._feed_mode_generation:
+                return
+            if capture_error:
+                self.feed_lines = [f"(capture failed: {capture_error})"]
+            elif payload is None:
+                self.feed_lines = [f"(no recent output from '{ident}')"]
+            else:
+                from plugins.hub.capture import render_transcript
+
+                transcript = render_transcript(
+                    payload,
+                    identity=ident,
+                    max_lines=100,
+                    max_chars=10_000,
+                )
+                self.feed_lines = transcript.splitlines() or ["(empty feed)"]
+            self._feed_is_raw = False
+            return
 
         try:
             raw = await AgentMessenger.request_output(socket_path, lines=100)
         except Exception:
             raw = []
 
+        if generation != self._feed_mode_generation:
+            return
         if raw:
             # Each element may be a multi-line rendered block; split on newlines.
             # Keep ANSI codes — _render_feed_panel will write them raw.
@@ -485,7 +531,11 @@ class HubConsoleAltView(AltView):
                     "",
                 )
         else:
-            footer = " up/down: select | tab: switch pane | enter: attach | esc: exit "
+            mode_hint = "raw" if self._transcript_mode else "transcript"
+            footer = (
+                f" t: {mode_hint} | up/down: select | tab: switch pane | "
+                f"enter: attach | esc: exit "
+            )
             footer_line = footer.center(width)
             self.renderer.write_at(
                 0,
@@ -506,6 +556,21 @@ class HubConsoleAltView(AltView):
         # When attached, route keyboard input to the input buffer
         if self.attached_to:
             return await self._handle_attached_input(key_press)
+
+        if key_press.char and key_press.char.lower() == "t":
+            self._transcript_mode = not self._transcript_mode
+            self._feed_mode_generation += 1
+            self.feed_scroll = 0
+            self._feed_is_raw = False
+            self.feed_lines = [
+                (
+                    "(loading transcript...)"
+                    if self._transcript_mode
+                    else "(loading raw output...)"
+                )
+            ]
+            self._refresh_feed()
+            return False
 
         if key_press.name == "Tab":
             self.active_pane = "feed" if self.active_pane == "agents" else "agents"
