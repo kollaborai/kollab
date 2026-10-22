@@ -14,6 +14,7 @@ const expectedIds: LearnTopicId[] = [
   "workspaces",
   "agents",
   "profiles",
+  "context-compaction",
   "koordinator",
   "hub-messaging",
   "voice",
@@ -21,7 +22,7 @@ const expectedIds: LearnTopicId[] = [
   "phone-access",
 ];
 
-test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
+test("Learn catalog keeps all eleven public topic IDs stable and useful", () => {
   assert.deepEqual(LEARN_TOPICS.map((topic) => topic.id), expectedIds);
   for (const topic of LEARN_TOPICS) {
     assert.ok(topic.title.length > 0, `${topic.id} needs a title`);
