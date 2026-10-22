@@ -124,7 +124,7 @@ Session and message endpoints:
 | `POST` | `/sessions` | create a session; `workspace` is the folder its daemon runs in (default the engine's own), and the session it creates reports that folder, never null |
 | `GET` | `/sessions` | list sessions |
 | `GET` | `/sessions/{session_id}` | inspect one session |
-| `DELETE` | `/sessions/{session_id}` | shut down and remove a session |
+| `DELETE` | `/sessions/{session_id}` | shut down and remove a session; a removal that stops the agent but cannot update its owner record returns 503 with a retry hint and keeps the session listed (`deletion_pending`), and a retried call clears the record without stopping it again |
 | `GET` | `/sessions/{session_id}/history` | read conversation history |
 | `DELETE` | `/sessions/{session_id}/history` | clear history, preserving system prompt |
 | `POST` | `/sessions/{session_id}/message` | send one turn; returns SSE |
