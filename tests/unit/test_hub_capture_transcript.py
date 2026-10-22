@@ -3,11 +3,13 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import kollabor.cli as cli_module
 from kollabor.cli import _handle_cli_hub, _print_hub_help, parse_arguments
 from kollabor_agent.tool_definitions.hub import hub_capture as hub_capture_tool
 from plugins.hub.capture import normalize_records, render_transcript
@@ -189,6 +191,56 @@ def test_cli_parser_routes_raw_to_hub_capture_only():
     with pytest.raises(SystemExit) as exc:
         parse_arguments(argv=["--raw"])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_cli_main_parses_and_dispatches_capture_mode(
+    raw, tmp_path, capsys, monkeypatch
+):
+    socket_path = _write_presence(tmp_path, "lapis")
+    payload = {"lines": normalize_records(_events()), "truncated": False}
+    capture = AsyncMock(return_value=(payload, None))
+    raw_capture = AsyncMock(return_value=["raw terminal line"])
+    dispatched = []
+    original_handler = cli_module._handle_cli_hub
+
+    async def _dispatch(hub_args):
+        dispatched.append(list(hub_args))
+        await original_handler(hub_args)
+
+    monkeypatch.setattr(cli_module, "_update_before_launch", lambda: None)
+    monkeypatch.setattr(cli_module, "_should_use_daemon", lambda: False)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_async_main_with_sigterm_cleanup",
+        lambda _detached: asyncio.run(cli_module.async_main()),
+    )
+    monkeypatch.setattr(cli_module, "setup_bootstrap_logging", lambda: None)
+    monkeypatch.setattr(cli_module, "discover_plugin_args", lambda: ([], None))
+    monkeypatch.setattr(cli_module, "handle_early_plugin_args", lambda *_args: False)
+    monkeypatch.setattr(cli_module, "_handle_cli_hub", _dispatch)
+    monkeypatch.setattr(sys, "argv", ["kollab", "--hub", "capture", "lapis", "7"])
+    if raw:
+        sys.argv.append("--raw")
+
+    with (
+        patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
+        patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
+        patch("plugins.hub.messenger.AgentMessenger.request_output", raw_capture),
+    ):
+        cli_module.cli_main()
+
+    expected = ["capture", "lapis", "7"] + (["--raw"] if raw else [])
+    assert dispatched == [expected]
+    if raw:
+        raw_capture.assert_awaited_once_with(socket_path, lines=7)
+        assert capture.await_count == 0
+        assert capsys.readouterr().out == "raw terminal line\n"
+    else:
+        capture.assert_awaited_once()
+        assert capture.await_args.kwargs["capture_format"] == "json"
+        assert raw_capture.await_count == 0
+        assert "User: Question red" in capsys.readouterr().out
 
 
 def test_cli_capture_usage_mentions_raw(capsys):
