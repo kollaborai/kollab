@@ -458,3 +458,62 @@ def test_stale_sequence_cursor_after_restart_is_reset_and_marked_truncated():
     assert page["lines"][0]["text"] == "agent ready"
     assert page["truncated"] is True
     assert page["next_cursor"] == "1"
+    assert page["cursor_reset"] is True
+    assert "capture window reset" in render_transcript(page, identity="lapis")
+
+
+def test_cursor_page_returns_next_grouped_records_not_the_tail_window():
+    events = [
+        {"seq": seq, "type": "status", "text": f"status {seq}"} for seq in range(1, 101)
+    ]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(
+        limit=50,
+        format="json",
+        max_chars=100_000,
+        cursor=10,
+    )
+
+    assert [record["seq"] for record in page["lines"]] == list(range(11, 61))
+    assert page["truncated"] is True
+    assert page["next_cursor"] == "60"
+    assert page.get("cursor_reset") is not True
+
+
+def test_two_grouped_records_with_limit_one_report_omission():
+    events = [
+        {"seq": 1, "type": "status", "text": "first group"},
+        {"seq": 2, "type": "status", "text": "second group"},
+    ]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(limit=1, format="json", max_chars=10_000)
+
+    assert [record["seq"] for record in page["lines"]] == [2]
+    assert page["truncated"] is True
+    assert page["next_cursor"] == "2"
+    assert page.get("cursor_reset") is not True
+
+
+def test_cursor_older_than_retained_ring_resets_with_usable_cursor():
+    events = [
+        {"seq": seq, "type": "status", "text": f"retained {seq}"}
+        for seq in range(51, 151)
+    ]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(
+        limit=50,
+        format="json",
+        max_chars=100_000,
+        cursor=10,
+    )
+
+    assert [record["seq"] for record in page["lines"]] == list(range(51, 101))
+    assert page["truncated"] is True
+    assert page["cursor_reset"] is True
+    assert page["next_cursor"] == "100"

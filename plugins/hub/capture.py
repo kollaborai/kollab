@@ -154,13 +154,29 @@ def paginate(
     records: list[dict[str, Any]],
     cursor: Any = None,
     max_chars: int | None = None,
+    limit: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str | None]:
     try:
         after_seq = int(cursor) if cursor is not None else 0
     except (TypeError, ValueError):
         after_seq = 0
-    page = [record for record in records if int(record["seq"]) > after_seq]
-    truncated = False
+    eligible = [record for record in records if int(record["seq"]) > after_seq]
+    line_truncated = False
+    if limit is None:
+        page = eligible
+    else:
+        try:
+            page_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            page_limit = 100
+        if cursor is None:
+            page = eligible[-page_limit:]
+        else:
+            page = eligible[:page_limit]
+        line_truncated = len(eligible) > page_limit
+
+    truncated = line_truncated
+    page_count = len(page)
     used = 0
     try:
         budget = max(1, int(max_chars)) if max_chars is not None else None
@@ -180,7 +196,7 @@ def paginate(
             kept.append(record)
             used += cost
         page = kept
-        truncated = truncated or len(page) < len([record for record in records if int(record["seq"]) > after_seq])
+        truncated = truncated or len(page) < page_count
     next_cursor = str(page[-1]["seq"]) if truncated and page else None
     return page, truncated, next_cursor
 
@@ -397,6 +413,7 @@ def _bounded_transcript(
     truncated: bool,
     next_cursor: Any,
     empty_message: str,
+    cursor_reset: bool = False,
 ) -> str:
     try:
         line_limit = min(_MAX_TRANSCRIPT_LINES, max(1, int(max_lines)))
@@ -420,8 +437,11 @@ def _bounded_transcript(
 
     if truncated:
         cursor = normalize_text(_string_value(next_cursor))[:120]
+        marker_reason = "capture window reset; truncated" if cursor_reset else "truncated"
         marker = (
-            f"... (truncated, next_cursor={cursor})" if cursor else "... (truncated)"
+            f"... ({marker_reason}, next_cursor={cursor})"
+            if cursor
+            else f"... ({marker_reason})"
         )
         marker = marker[:char_limit]
         if line_limit == 1 and visible:
@@ -464,11 +484,13 @@ def render_transcript(
     )
     truncated = False
     next_cursor = None
+    cursor_reset = False
     raw_records: Any = None
 
     if isinstance(capture, dict):
         truncated = bool(capture.get("truncated"))
         next_cursor = capture.get("next_cursor")
+        cursor_reset = bool(capture.get("cursor_reset"))
         raw_records = capture.get("lines", capture.get("records"))
         if raw_records is None:
             text = normalize_text(_string_value(capture.get("text", "")))
@@ -480,6 +502,7 @@ def render_transcript(
                 truncated=truncated,
                 next_cursor=next_cursor,
                 empty_message=empty_message,
+                cursor_reset=cursor_reset,
             )
     elif isinstance(capture, list):
         raw_records = capture
@@ -502,6 +525,7 @@ def render_transcript(
             truncated=truncated,
             next_cursor=next_cursor,
             empty_message=empty_message,
+            cursor_reset=cursor_reset,
         )
 
     if all(isinstance(record, dict) for record in raw_records):
@@ -520,6 +544,7 @@ def render_transcript(
             truncated=truncated,
             next_cursor=next_cursor,
             empty_message=empty_message,
+            cursor_reset=cursor_reset,
         )
 
     records = group_transcript_records(records)
@@ -536,4 +561,5 @@ def render_transcript(
         truncated=truncated,
         next_cursor=next_cursor,
         empty_message=empty_message,
+        cursor_reset=cursor_reset,
     )

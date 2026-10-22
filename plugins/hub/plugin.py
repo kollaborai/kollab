@@ -14404,12 +14404,15 @@ class HubPlugin(BasePlugin):
             ]
         records = group_transcript_records(normalize_records(semantic))
         ring_truncated = False
+        first_seq = 0
         latest_seq = 0
         if raw_events:
             try:
-                ring_truncated = int(raw_events[0].get("seq", 0)) > 1
+                first_seq = int(raw_events[0].get("seq", 0))
+                ring_truncated = first_seq > 1
                 latest_seq = max(int(event.get("seq", 0)) for event in raw_events)
             except (AttributeError, TypeError, ValueError):
+                first_seq = 0
                 ring_truncated = False
                 latest_seq = 0
         cursor_reset = False
@@ -14423,28 +14426,42 @@ class HubPlugin(BasePlugin):
                 if latest_seq and cursor_seq > latest_seq:
                     cursor = None
                     cursor_reset = True
-        record_window = records[-limit:]
+                elif ring_truncated and cursor_seq < first_seq - 1:
+                    # The requested sequence predates the in-memory ring.
+                    # Restart at the oldest retained event and signal the gap.
+                    cursor = first_seq - 1
+                    cursor_reset = True
+                elif not latest_seq:
+                    cursor = None
+                    cursor_reset = True
         page, truncated, next_cursor = paginate(
-            record_window, cursor=cursor, max_chars=max_chars
+            records,
+            cursor=cursor,
+            max_chars=max_chars,
+            limit=limit,
         )
         truncated = truncated or ring_truncated or cursor_reset
         if truncated and next_cursor is None and page:
             next_cursor = str(page[-1].get("seq", "")) or None
         if format == "plain":
-            return {
+            response = {
                 "format": "plain",
                 "order": "oldest-first",
                 "text": plain_text(page),
                 "truncated": truncated,
                 "next_cursor": next_cursor,
             }
-        return {
-            "format": "json",
-            "order": "oldest-first",
-            "lines": page,
-            "truncated": truncated,
-            "next_cursor": next_cursor,
-        }
+        else:
+            response = {
+                "format": "json",
+                "order": "oldest-first",
+                "lines": page,
+                "truncated": truncated,
+                "next_cursor": next_cursor,
+            }
+        if cursor_reset:
+            response["cursor_reset"] = True
+        return response
 
     async def _inject_attacher_input(
         self,
