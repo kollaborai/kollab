@@ -892,6 +892,9 @@ def create_app(config: RelayConfig) -> web.Application:
     app.router.add_get(HEALTH_PATH, health_handler)
     app.router.add_get("/relay/v1/metrics", metrics_handler)
     app.router.add_get(WEBSOCKET_PATH, websocket_handler)
+    from .phone_portal import install_phone_portal
+
+    install_phone_portal(app)
     app.router.add_post(ENROLLMENT_OFFERS_PATH, enrollment_offer_handler)
     app.router.add_post(ENROLLMENT_LOOKUP_PATH, enrollment_lookup_handler)
     app.router.add_post(ENROLLMENT_REQUEST_PATH, enrollment_request_handler)
@@ -988,13 +991,15 @@ async def metrics_handler(request: web.Request) -> web.Response:
     )
 
 
-async def websocket_handler(request: web.Request) -> web.StreamResponse:
+async def websocket_handler(request: web.Request, *, phone: bool = False) -> web.StreamResponse:
     state: RelayState = request.app["relay_state"]
     if request.query_string:
         raise web.HTTPBadRequest(
             text="credentials and parameters are not accepted in the URL"
         )
-    if "Origin" in request.headers:
+    if phone and request.headers.get("Origin") != state.config.origin:
+        raise web.HTTPForbidden(text="PhoneLink requires the directory's own browser origin")
+    if not phone and "Origin" in request.headers:
         raise web.HTTPForbidden(text="browser Origin headers are not accepted")
     source_ip = _source_ip(request, state.config.trusted_proxies)
     if source_ip is None:

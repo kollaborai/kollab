@@ -1522,6 +1522,12 @@ No agent-facing XML tags. This plugin hooks `LLM_REQUEST_PRE` and
 when thresholds are crossed. The agent doesn't invoke it directly —
 it runs transparently on every request.
 
+The plugin preserves only a bounded number of recent Task Ledger assignments that are
+still active, paused, or explicitly targeted; archived completed tasks are summarized.
+A typed request-error hook can trigger one forced compaction after a context-window
+failure, without replaying the failed request. Compaction state is published separately
+so the TUI and Web UI can show paused, running, ready-to-retry, and failed states.
+
 #### deep_thought plugin (`plugins/deep_thought/plugin.py`)
 
 No agent-facing XML tags. Hooks `USER_INPUT_PRE` to spawn parallel

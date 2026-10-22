@@ -60,13 +60,16 @@ export const LEARN_TOPICS = [
     howTo: [
       "Open Agents to see the rosters and teams available in the selected workspace.",
       "Choose a single agent for a focused task, or a team when the work needs parallel roles.",
+
+      "Agents created from the Web UI stay running through Web UI or engine restarts and return with their conversation. Use Delete in the Web UI or send /quit to the agent to stop it.",
       "Give the agent a concrete result to produce and how you will verify it.",
-      "To reorder sidebar rows, open an agent or workspace row menu and choose Move Up or Move Down. The order is saved for the whole network and restored on refresh.",
+      "Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.",
+      "Drag past the sidebar edge and release on the Release to hide cue to tuck an agent into Hidden Agents. You can restore it there; hiding does not stop or delete it.",
       "If another device changed the order at the same time, the sidebar refreshes and asks you to retry; your change is not silently lost.",
       "Review its output and tests before using the result.",
     ],
     example:
-      "Ask a coding agent to add a small feature, name the relevant files, and require it to run the focused tests before reporting back. Then move its workspace row to the top so the next session starts there.",
+      "Start a Web UI agent on a focused task, restart the engine, and confirm the same agent and conversation return in the sidebar. Use Web UI Delete or send /quit when you want it to stop.",
   },
   {
     id: "profiles",
@@ -84,6 +87,21 @@ export const LEARN_TOPICS = [
     note: "Profile names do not guarantee the provider endpoint. Verify the base URL, and never paste key values into prompts or Hub messages."
   },
   {
+    id: "context-compaction",
+    title: "Context compaction",
+    summary:
+      "Long conversations are compacted automatically before they reach the model's context window. Recent turns and live assignments are kept; older history is summarized.",
+    howTo: [
+      "Let compaction run on its own; it starts when the conversation approaches the model's context window.",
+      "Read the compaction status to know where things stand: running, paused, ready to retry, or failed.",
+      "If a turn is rejected for context size, Kollab compacts once in the background. When the status says ready, send your message again; the failed request is never resent for you.",
+      "Use /compact now to compact immediately, or /compact status to see the state and the next step.",
+    ],
+    example:
+      "After a long session the status says compaction is ready to retry; resend the last message and the conversation continues within the window.",
+    note: "A paused or failed compaction is shown in the terminal status widget and the web UI banner, each with the next step.",
+  },
+  {
     id: "koordinator",
     title: "Koordinator",
     summary:
@@ -92,11 +110,12 @@ export const LEARN_TOPICS = [
       "Start or join the hub that owns the work.",
       "Give the koordinator a bounded goal, acceptance checks, and any no-go constraints.",
       "Check the task board and ask for a report when an assignment finishes.",
+      "Run /hub status to see the idle supervisor: open and stalled work, and alerts when the coordinator stops completing turns.",
       "Review the delivered changes and test evidence yourself before accepting them.",
     ],
     example:
       "Split a feature into one UI task and one test task, then ask the koordinator to report both results and the integration check.",
-    note: "A coordinator organizes work; it does not replace review or make an untested change safe to ship.",
+    note: "A coordinator organizes work; it does not replace review or make an untested change safe to ship. A supervisor alert means wakes stopped producing turns: check the provider profile, /compact status and the app log.",
   },
   {
     id: "hub-messaging",
@@ -145,20 +164,20 @@ export const LEARN_TOPICS = [
   },
   {
     id: "phone-access",
-    title: "WireGuard phone access",
+    title: "PhoneLink",
     summary:
-      "The Phone Access feature can create a WireGuard peer and one-time QR for a phone. Its management panel is delivered separately from this Learn page and is available only in builds that include Phone Access.",
+      "Open the same Kollab app on your phone through your existing Kollab connection. Scan a QR code, approve the phone on your computer, and continue in its browser.",
     howTo: [
-      "Ask the host administrator for the WireGuard server's public key, reachable endpoint, private tunnel subnet, and a reviewed peer-apply helper.",
-      "Have the network owner configure any needed router/firewall UDP forwarding, DNS, and trusted HTTPS certificate outside Kollab.",
-      "On the host, allow its private LAN address in KOLLAB_WEBUI_HOSTS and set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to the reviewed helper.",
-      "In Settings > Phone Access, when that separate panel is included in your build, enter the server endpoint/key, subnet, routes, DNS, and private portal address, then add a phone.",
-      "Scan the one-time QR in the official WireGuard app, activate the VPN, and open the private portal from the phone.",
+      "Connect this computer to your Kollab network with /connect or Settings > Network.",
+      "Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.",
+      "Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no VPN app or personal server setup is needed. Using Kollab on the phone itself? Choose Open on This Phone or Copy Link under the QR code instead.",
+      "Check that the pairing code and the computer fingerprint match on both screens, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
+      "Your phone loads Kollab from your computer, and only after it checks your computer's signature on it. Bookmark it, or add it to your Home Screen where your phone allows. PhoneLink shows when each phone was last seen; Revoke withdraws its access.",
     ],
     example:
-      "On a trusted host, allow only its LAN address with KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui. After the VPN connects, open http://192.168.1.20:8080; do not expose the Web UI publicly.",
+      "Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.",
     note:
-      "Kollab does not install WireGuard, configure router UDP forwarding, firewall rules, or DNS. The separate Phone Access panel may not be present until its feature is integrated. The host must set KOLLAB_PHONE_ACCESS_APPLY_COMMAND to a reviewed peer-reconciliation helper; without it add/revoke stays disabled. The QR contains a private key: never share or screenshot it.",
+      "Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. The connection service never supplies the app, so it cannot change what runs on your phone after the first page.",
   },
 ] as const satisfies readonly LearnTopicDefinition[];
 
@@ -180,12 +199,13 @@ export function getLearnTopic(topicId: LearnTopicId): LearnTopic {
 }
 
 export function learnHref(topicId?: LearnTopicId): string {
-  return topicId ? `/learn?topic=${encodeURIComponent(topicId)}` : "/learn";
+  const root = typeof window !== "undefined" && window.location.pathname.startsWith("/relay/v1/phone/") ? "/relay/v1/phone" : "";
+  return topicId ? `${root}/learn?topic=${encodeURIComponent(topicId)}` : `${root}/learn`;
 }
 
 export function readLearnRoute(location: { pathname: string; search: string }): LearnRoute | null {
   const pathname = location.pathname.replace(/\/+$/, "") || "/";
-  if (pathname !== "/learn") return null;
+  if (pathname !== "/learn" && pathname !== "/relay/v1/phone/learn") return null;
 
   const requestedTopic = new URLSearchParams(location.search).get("topic");
   if (!requestedTopic) {

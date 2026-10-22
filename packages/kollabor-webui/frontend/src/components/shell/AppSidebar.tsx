@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
@@ -11,11 +11,11 @@ import { groupNetworkTree } from "@/components/shell/agent-network";
 import { liveAgentOf } from "@/components/shell/live-agent";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
-import { AgentSidebarRow } from "@/components/shell/AgentSidebarRow";
+import { AgentSidebarList, AgentSidebarRow, type AgentRowDrag } from "@/components/shell/AgentSidebarRow";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
-import { buildLocalOrderRows, groupByFolder, moveWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
+import { buildLocalOrderRows, groupByFolder, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
 import { lastRanLabel, since } from "@/last-ran";
@@ -76,7 +76,6 @@ function OpenError({ text }: { text: string }) {
   return <span className="text-destructive text-[0.6875rem] leading-snug break-words whitespace-normal">{text}</span>;
 }
 
-type Move = { up?: () => void; down?: () => void };
 type LocalRow = { key: string; folder: string; session?: Session; offline?: OfflineAgent };
 
 const FOLDED_KEY = "kollab.sidebar.folded";
@@ -117,7 +116,7 @@ function FoldGroup({
 }
 
 const FOOTER_BUTTON =
-  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
+  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-7 md:p-1.5";
 
 export function AppSidebar({
   sessions,
@@ -149,6 +148,8 @@ export function AppSidebar({
   onSettings,
   onLearn,
   learnActive,
+  onWhatsNew,
+  whatsNewActive,
   onStudio,
   onManageProfiles,
   // Named `onSelectSession`, not `onSelect`: ComponentProps<typeof Sidebar>
@@ -200,6 +201,8 @@ export function AppSidebar({
   onSettings: () => void;
   onLearn: () => void;
   learnActive: boolean;
+  onWhatsNew: () => void;
+  whatsNewActive: boolean;
   /** Opens the Gem Studio; works without a session. */
   onStudio: () => void;
   onManageProfiles: () => void;
@@ -237,8 +240,8 @@ export function AppSidebar({
   const [optionsOpen, setOptionsOpen] = useState(false);
 
   useEffect(() => {
-    if (learnActive) setOptionsOpen(false);
-  }, [learnActive]);
+    if (learnActive || whatsNewActive) setOptionsOpen(false);
+  }, [learnActive, whatsNewActive]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -313,8 +316,8 @@ export function AppSidebar({
     () => groupByFolder<LocalRow>(buildLocalOrderRows(visibleSessions, visibleOffline, sidebarOrder.order), sidebarOrder.order),
     [visibleSessions, visibleOffline, sidebarOrder.order],
   );
-  const moveRow = (key: string, by: -1 | 1) => {
-    const next = moveWithinFolder(folderGroups, key, by, sidebarOrder.order);
+  const moveRow = (key: string, to: number) => {
+    const next = reorderWithinFolder(folderGroups, key, to, sidebarOrder.order);
     if (next) void sidebarOrder.save(next);
   };
   const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
@@ -333,7 +336,7 @@ export function AppSidebar({
     }
   };
 
-  const renderSession = (session: Session, move: Move) => {
+  const renderSession = (session: Session, drag: AgentRowDrag) => {
                   const gem = session.identity || session.agent || "";
                   // Hub presence when this very agent is live; otherwise the engine's
                   // own word on whether a daemon backs the session. Gem names repeat
@@ -354,13 +357,12 @@ export function AppSidebar({
                   };
                   return (
                   <AgentSidebarRow
-                    key={session.session_id}
+                    key={drag.id}
                     name={heading}
                     onHide={() => hide({ key: sessionKey(session), label: heading, detail: session.workspace || workspacePath, instance: instanceOf(session) })}
                     onProperties={session.identity ? () => openProperties("chat") : undefined}
                     onDelete={session.external ? undefined : () => setPendingDelete(session)}
-                    onMoveUp={move.up}
-                    onMoveDown={move.down}
+                    drag={drag}
                     busy={busy}
                   >
                         <SidebarMenuButton
@@ -426,12 +428,11 @@ export function AppSidebar({
                   </AgentSidebarRow>
                   );
                 };
-  const renderOffline = (agent: OfflineAgent, move: Move) => (
+  const renderOffline = (agent: OfflineAgent, drag: AgentRowDrag) => (
                   <AgentSidebarRow
-                    key={`offline:${agent.workspace}:${agent.identity}`}
+                    key={drag.id}
                     name={offlineName(agent)}
-                    onMoveUp={move.up}
-                    onMoveDown={move.down}
+                    drag={drag}
                     onHide={() => hide({ key: offlineKey(agent), label: offlineName(agent), detail: agent.workspace })}
                   >
                     <SidebarMenuButton
@@ -650,36 +651,22 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
-            <div className="flex flex-wrap gap-x-4 px-2 pb-1 text-xs">
-              <a
-                href="/learn?topic=agents"
-                onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
-              >
-                Learn about agents
-              </a>
-              <a
-                href="/learn?topic=workspaces"
-                onClick={() => setOpenMobile(false)}
-                className="inline-flex min-h-8 items-center text-sm text-foreground underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
-              >
-                Learn about workspaces
-              </a>
-            </div>
-            <SidebarMenu>
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
                   <div className="text-muted-foreground flex h-6 items-center gap-2 px-2 text-xs" title={group.folder}>
                     <span className="min-w-0 truncate">{workspaceName(group.folder)}</span>
                     <span className="ml-auto shrink-0 text-[0.625rem] tabular-nums">{group.rows.length}</span>
                   </div>
-                  {group.rows.map((row, at) => {
-                    const move: Move = {
-                      up: at > 0 ? () => moveRow(row.key, -1) : undefined,
-                      down: at < group.rows.length - 1 ? () => moveRow(row.key, 1) : undefined,
-                    };
-                    return row.session ? renderSession(row.session, move) : renderOffline(row.offline!, move);
-                  })}
+                  <AgentSidebarList
+                    id={JSON.stringify(["local", group.folder])}
+                    beginDrag={sidebarOrder.beginDrag}
+                    onReorder={moveRow}
+                  >
+                    {group.rows.map((row, index) => {
+                      const drag: AgentRowDrag = { id: row.key, index, disabled: busy };
+                      return row.session ? renderSession(row.session, drag) : renderOffline(row.offline!, drag);
+                    })}
+                  </AgentSidebarList>
                 </Fragment>
               ))}
               {!visibleSessions.length && !visibleOffline.length ? (
@@ -687,7 +674,6 @@ export function AppSidebar({
                   {localSessions.length || offline.length ? "No visible agents." : "No sessions yet."}
                 </p>
               ) : null}
-            </SidebarMenu>
           </SidebarGroupContent>
         </FoldGroup>
         {visibleNetworks.map((net) => (
@@ -720,8 +706,17 @@ export function AppSidebar({
                       {ws.label ? (
                         <p className="text-muted-foreground truncate px-2 text-[0.6875rem]">{ws.label}</p>
                       ) : null}
-                      <SidebarMenu>
-                        {ws.orderRows.flatMap((group) => group.rows).map((row, at) => {
+                      {ws.orderRows.map((group) => (
+                      <AgentSidebarList
+                        key={group.folder}
+                        id={JSON.stringify(["remote", net.id, dev.device, ws.label, group.folder])}
+                        beginDrag={sidebarOrder.beginDrag}
+                        onReorder={(key, to) => {
+                          const next = reorderWithinFolder(ws.orderRows, key, to, sidebarOrder.order);
+                          if (next) void sidebarOrder.save(next);
+                        }}
+                      >
+                        {group.rows.map((row, index) => {
                           const agent = row.agent;
                           // Opens through the network once that computer allows this one.
                           const id = agent.handle || "";
@@ -730,10 +725,6 @@ export function AppSidebar({
                           const up = (net.live !== false && network.live !== false) && agent.state !== "offline";
                           const seen = agent.last_seen ? `Seen ${since(agent.last_seen)}` : "";
 
-                          const move = (by: -1 | 1) => {
-                            const next = moveWithinFolder(ws.orderRows, row.key, by, sidebarOrder.order);
-                            if (next) void sidebarOrder.save(next);
-                          };
                           return (
                           <AgentSidebarRow
                             key={row.key}
@@ -742,8 +733,7 @@ export function AppSidebar({
                               key: sidebarAgentKey({ name: agent.name, device: agent.device || dev.device, workspace: agent.workspace || ws.label, network: agent.network || net.id }),
                               label: remoteName(agent.name), detail: [agent.device || dev.device, ws.label, net.name].filter(Boolean).join(" · "),
                             })}
-                            onMoveUp={at > 0 ? () => move(-1) : undefined}
-                            onMoveDown={at < ws.agents.length - 1 ? () => move(1) : undefined}
+                            drag={{ id: row.key, index }}
                           >
                             <SidebarMenuButton
                               disabled={!id}
@@ -792,7 +782,8 @@ export function AppSidebar({
                           </AgentSidebarRow>
                           );
                         })}
-                      </SidebarMenu>
+                      </AgentSidebarList>
+                      ))}
                     </Fragment>
                   ))}
                 </Fragment>
@@ -841,54 +832,12 @@ export function AppSidebar({
             </SidebarGroupContent>
           </FoldGroup>
         ) : null}
-        <div className="space-y-1 border-t border-sidebar-border/70 px-3 py-2">
-          <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-sidebar-foreground/60">
-            Network guides
-          </p>
-          <LearnMoreLink
-            topicId="networks"
-            label="Learn more about networks"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-          <LearnMoreLink
-            topicId="devices"
-            label="Learn more about devices"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-          <LearnMoreLink
-            topicId="phone-access"
-            label="Learn about WireGuard phone access"
-            className="min-h-7 text-xs text-sidebar-foreground hover:text-sidebar-accent-foreground"
-            onNavigate={() => setOpenMobile(false)}
-          />
-        </div>
-
       </SidebarContent>
 
-      <SidebarFooter className="p-2">
+      <SidebarFooter className="@container p-2 md:px-1.5">
         {hiddenError ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">{hiddenError}</p>
         ) : null}
-        <SidebarMenu className="mb-1">
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              type="button"
-              tooltip="Learn"
-              isActive={learnActive}
-              aria-current={learnActive ? "page" : undefined}
-              onClick={() => {
-                setOpenMobile(false);
-                onLearn();
-              }}
-            >
-              <BookOpen className="size-4" />
-              <span>Learn</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-
         {sidebarOrder.warning ? (
           <p role="alert" className="text-destructive px-2 pb-1 text-xs break-words">
             Sidebar order needs recovery: {sidebarOrder.warning}
@@ -899,34 +848,36 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* One row of icons; each name shows on hover and to screen readers. */}
-        <div className="flex items-center justify-around">
-          {hiddenList.length ? (
-            <Popover>
-              <PopoverTrigger asChild>
-                <TooltipIconButton tooltip={`Hidden Agents (${hiddenList.length})`} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2`}>
-                  <EyeOff className="size-4" />
-                  <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span>
-                </TooltipIconButton>
-              </PopoverTrigger>
-              <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
-                <p className="text-sm font-semibold">Hidden Agents</p>
-                <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
-                <ul className="my-2 max-h-64 overflow-y-auto">
-                  {hiddenList.map((agent) => (
-                    <li key={agent.key} className="flex items-center gap-2 py-1.5">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm">{agent.label}</p>
-                        <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
-                      </div>
-                      <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
-                    </li>
-                  ))}
-                </ul>
-                <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button>
-              </PopoverContent>
-            </Popover>
-          ) : null}
+        {/* Use one row when it fits, otherwise center four actions over three. */}
+        <div
+          data-sidebar="footer-actions"
+          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
+        >
+          <Popover>
+            <PopoverTrigger asChild>
+              <TooltipIconButton data-sidebar-hide-target tooltip={hiddenList.length ? `Hidden Agents (${hiddenList.length})` : "Hidden Agents"} side="top" className={`${FOOTER_BUTTON} w-auto gap-1 px-2 md:px-1`}>
+                <EyeOff className="size-4" />
+                {hiddenList.length ? <span className="text-xs tabular-nums" aria-hidden>{hiddenList.length}</span> : null}
+              </TooltipIconButton>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="start" className="w-72 max-w-[calc(100vw-2rem)] p-3">
+              <p className="text-sm font-semibold">Hidden Agents</p>
+              <p className="text-muted-foreground mt-1 text-xs">Hidden in every window and browser.</p>
+              {!hiddenList.length ? <p className="text-muted-foreground mt-2 text-xs">No hidden agents.</p> : null}
+              <ul className="my-2 max-h-64 overflow-y-auto">
+                {hiddenList.map((agent) => (
+                  <li key={agent.key} className="flex items-center gap-2 py-1.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm">{agent.label}</p>
+                      <p className="text-muted-foreground truncate text-xs" title={agent.detail}>{agent.detail}</p>
+                    </div>
+                    <Button size="sm" variant="ghost" aria-label={`Show ${agent.label}`} onClick={() => show(agent.key)}><Eye className="size-4" />Show</Button>
+                  </li>
+                ))}
+              </ul>
+              {hiddenList.length ? <Button size="sm" variant="outline" className="w-full" onClick={showAll}>Show All</Button> : null}
+            </PopoverContent>
+          </Popover>
           <TooltipIconButton
             tooltip="Apps"
             side="top"
@@ -949,6 +900,30 @@ export function AppSidebar({
             }}
           >
             <Users className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Learn"
+            side="top"
+            className={`${FOOTER_BUTTON} ${learnActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""}`}
+            aria-current={learnActive ? "page" : undefined}
+            onClick={() => {
+              setOpenMobile(false);
+              onLearn();
+            }}
+          >
+            <BookOpen className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="What’s New"
+            side="top"
+            className={`${FOOTER_BUTTON} ${whatsNewActive ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""}`}
+            aria-current={whatsNewActive ? "page" : undefined}
+            onClick={() => {
+              setOpenMobile(false);
+              onWhatsNew();
+            }}
+          >
+            <Newspaper className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="Gem Studio"

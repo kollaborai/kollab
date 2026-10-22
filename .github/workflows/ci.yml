@@ -33,6 +33,11 @@ jobs:
           # otherwise race to save one key ("Unable to reserve cache").
           cache-suffix: ${{ github.job }}
 
+      # Wheel/editable builds fail instead of substituting an older WebUI.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
@@ -96,6 +101,10 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
@@ -156,6 +165,10 @@ jobs:
 
       # build_binary.py verifies its own output before exiting: it runs the
       # binary with --version, kollab's imports and an HTTPS request.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       - name: Build the Linux binary and check that it runs
         env:
           # science, the scie builder pex runs, reads the Python Standalone Builds

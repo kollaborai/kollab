@@ -19,7 +19,6 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
 
 const SOURCES = { bundled: "Bundled", user: "User", project: "Project" } as const;
 
@@ -306,14 +305,6 @@ function LibraryBody({
         <DialogDescription>
           What this folder can start: rosters of agents, and teams that start several together.
         </DialogDescription>
-
-        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-          <LearnMoreLink topicId="agents" className="min-h-7 text-xs" />
-          <LearnMoreLink topicId="koordinator" className="min-h-7 text-xs" />
-          <LearnMoreLink topicId="hub-messaging" className="min-h-7 text-xs" />
-          <LearnMoreLink topicId="system-prompts" className="min-h-7 text-xs" />
-          <LearnMoreLink topicId="voice" className="min-h-7 text-xs" />
-        </div>
       </DialogHeader>
       <div className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-x-3 px-5 pb-3 sm:max-w-md">
         <Label htmlFor="agents-folder" className="text-muted-foreground text-xs font-normal">

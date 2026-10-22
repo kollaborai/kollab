@@ -1968,6 +1968,49 @@ class QueueProcessor:
             error_msg = str(e) or f"{type(e).__name__} (no details)"
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
+
+            # Publish a typed failure separately from the generic UI error.
+            # Compaction hooks can react to context overflow, but the failed
+            # request is never resubmitted automatically.
+            error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
+            nested_error = getattr(e, "error", None)
+            if not error_code and isinstance(nested_error, dict):
+                error_code = nested_error.get("code")
+            error_code = str(error_code)[:120] if error_code else None
+            error_text = str(e).lower()
+            context_window_exceeded = (
+                error_code
+                in {
+                    "model_context_window_exceeded",
+                    "context_window_exceeded",
+                    "context_length_exceeded",
+                }
+                or any(
+                    phrase in error_text
+                    for phrase in (
+                        "context window",
+                        "context_window",
+                        "maximum context length",
+                        "too many tokens",
+                        "prompt is too long",
+                    )
+                )
+            )
+            event_bus = getattr(self, "event_bus", None)
+            if event_bus is not None:
+                try:
+                    await event_bus.emit_with_hooks(
+                        EventType.LLM_REQUEST_ERROR,
+                        {
+                            "error_type": type(e).__name__,
+                            "error_code": error_code,
+                            "context_window_exceeded": context_window_exceeded,
+                        },
+                        "llm_service",
+                    )
+                except Exception:
+                    logger.exception("Failed to dispatch LLM request error hooks")
+
             self.message_display_service.display_error_message(error_msg)
             # Web clients follow the turn through semantic events, not the
             # terminal's red line; without this a failed turn ends silently.
@@ -1982,7 +2025,7 @@ class QueueProcessor:
             self.active_voice = None
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
-            if context_size > 0:
+            if context_size > 0 and not self.last_turn_error:
                 publish_semantic(self.renderer, "usage_update", payload={
                     "sessionUpdate": "usage_update",
                     "used": int(self.session_stats.get("input_tokens", 0) or 0)

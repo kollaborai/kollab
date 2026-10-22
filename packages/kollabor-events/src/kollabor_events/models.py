@@ -48,6 +48,8 @@ class EventType(Enum):
     LLM_REQUEST_PRE = "llm_request_pre"
     LLM_REQUEST = "llm_request"
     LLM_REQUEST_POST = "llm_request_post"
+    LLM_REQUEST_ERROR = "llm_request_error"
+
     LLM_RESPONSE_PRE = "llm_response_pre"
     LLM_RESPONSE = "llm_response"
     LLM_RESPONSE_POST = "llm_response_post"

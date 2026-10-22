@@ -1,24 +1,11 @@
-export type PhonePeer = {
-  id: string;
-  name: string;
-  address: string;
-  public_key: string;
-  created: number;
+export type PhoneLinkState = {
+  state: "ready" | "connect_needed" | "service_update" | "offline";
+  message: string;
+  network: string;
+  device: string;
+  phones: Array<{ id: string; name: string; linked: boolean; connected: boolean; expires_at: number; last_seen: number | null; fingerprint: string; pending: Array<{ key: string; code: string }> }>;
 };
-export type PhoneSettings = {
-  endpoint: string;
-  server_public_key: string;
-  subnet: string;
-  allowed_ips: string;
-  dns: string;
-  portal_url: string;
-};
-export type PhoneState = {
-  settings: PhoneSettings;
-  peers: PhonePeer[];
-  apply_configured: boolean;
-  can_create: boolean;
-};
+export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
 export type Session = {
   harness?: string;
@@ -36,7 +23,14 @@ export type Session = {
   supports_vision?: boolean;
   agent?: string;
   workspace?: string | null;
-  approval_mode?: string;
+  approval_mode?: string | null;
+  /** Why the approval mode could not be read (it reports as unknown meanwhile). */
+  approval_mode_warning?: string | null;
+  /** Why this agent's saved details could not be updated (restart may restore older state). */
+  persistence_warning?: string | null;
+  /** Delete stopped the agent but its owner record is still present; retry Delete to clear it. */
+  deletion_pending?: boolean;
+  deletion_warning?: string | null;
   history_length?: number;
   active?: boolean;
   total_turns?: number;
@@ -929,32 +923,20 @@ export class EngineApi {
     }>("/sessions");
   }
 
-  phoneState() {
-    return this.json<PhoneState>("/phone", { cache: "no-store" });
+  phoneLinkState(refresh = false) {
+    return this.json<PhoneLinkState>(refresh ? "/phonelink/refresh" : "/phonelink", { method: refresh ? "POST" : "GET", cache: "no-store" });
   }
 
-  savePhoneSettings(settings: Partial<PhoneSettings>) {
-    return this.json<PhoneState>("/phone/settings", {
-      method: "PUT",
-      body: JSON.stringify(settings),
-      cache: "no-store",
-    });
+  linkPhone(name: string) {
+    return this.json<PhoneLinkOffer>("/phonelink/phones", { method: "POST", body: JSON.stringify({ name }), cache: "no-store" });
   }
 
-  /** The QR in the answer is the only delivery of the phone's private key. */
-  addPhone(name: string) {
-    return this.json<{ peer: PhonePeer; qr_svg: string; applied: boolean }>("/phone/peers", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-      cache: "no-store",
-    });
+  approvePhoneLink(id: string, key: string) {
+    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ key }), cache: "no-store" });
   }
 
-  revokePhone(id: string) {
-    return this.json<{ peers: PhonePeer[]; applied: boolean }>(
-      `/phone/peers/${encodeURIComponent(id)}`,
-      { method: "DELETE", cache: "no-store" },
-    );
+  revokePhoneLink(id: string) {
+    return this.json<PhoneLinkState>(`/phonelink/phones/${encodeURIComponent(id)}`, { method: "DELETE", cache: "no-store" });
   }
 
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
@@ -1059,6 +1041,7 @@ export class EngineApi {
     return this.json<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(body),
+      headers: { "X-Kollab-Session-Source": "webui" },
     });
   }
 

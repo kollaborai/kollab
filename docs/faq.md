@@ -109,10 +109,10 @@ and [web UI README](../packages/kollabor-webui/README.md).
 ### How do I learn the browser UI?
 
 Open **Learn** in the Web UI sidebar. It explains networks, devices, workspaces,
-agents, provider profiles, the koordinator, Hub messaging, voice, system prompts,
-and WireGuard phone access. You can share a lesson link such as
+agents, provider profiles, the koordinator, Hub messaging, voice, and system
+prompts. You can share a lesson link such as
 `/learn?topic=profiles`. See the [Learn feature guide](features/learn.md) for
-examples and external phone-access setup requirements.
+examples.
 
 ### How do I use pipe mode?
 

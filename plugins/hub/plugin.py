@@ -80,9 +80,11 @@ from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
+    DEFAULT_ALERT_COOLDOWN,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_STALL_THRESHOLD,
     DEFAULT_WAKE_COOLDOWN,
+    DEFAULT_WAKE_INEFFICACY,
     SupervisorState,
 )
 from .supervisor import (
@@ -630,6 +632,8 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._supervisor_state = SupervisorState()
+        # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
+        self._supervisor_alerts: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
@@ -718,6 +722,8 @@ class HubPlugin(BasePlugin):
                     "supervisor_stall_threshold": 900,
                     "supervisor_wake_cooldown": 120,
                     "supervisor_max_reassignments": 3,
+                    "supervisor_wake_inefficacy": 3,
+                    "supervisor_alert_cooldown": 900,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -6293,6 +6299,9 @@ class HubPlugin(BasePlugin):
             "plugins.hub.supervisor_max_reassignments",
             3,
         )
+        # Boot counts as fresh activity: wake-efficacy alerts need real
+        # stall time after start, not a zero baseline (issue #283).
+        self._supervisor_state.last_turn_end = time.time()
         while True:
             try:
                 await asyncio.sleep(max(1.0, float(poll_interval)))
@@ -6338,6 +6347,18 @@ class HubPlugin(BasePlugin):
             stall_threshold=stall,
             wake_cooldown=cooldown,
             max_reassignments=max_reassign,
+            wake_inefficacy=self.config.get(
+                "plugins.hub.supervisor_wake_inefficacy",
+                DEFAULT_WAKE_INEFFICACY,
+            )
+            if self.config
+            else DEFAULT_WAKE_INEFFICACY,
+            alert_cooldown=self.config.get(
+                "plugins.hub.supervisor_alert_cooldown",
+                DEFAULT_ALERT_COOLDOWN,
+            )
+            if self.config
+            else DEFAULT_ALERT_COOLDOWN,
             state=self._supervisor_state,
         )
         if not decisions:
@@ -6396,6 +6417,21 @@ class HubPlugin(BasePlugin):
                         decision.worker,
                         decision.card_id,
                     )
+                    # A nudge nobody received must not vanish (issue #283):
+                    # surface it; the next pass requeues the card.
+                    self._record_supervisor_alert(
+                        f"nudge for task {decision.card_id} was not"
+                        f" delivered to {decision.worker} (offline or"
+                        " unreachable); the card will be requeued"
+                    )
+            elif decision.kind == "alert_coordinator_stalled":
+                # Wake efficacy failed: the coordinator got the wakes and
+                # still produced no turn. Say it loudly — this is the
+                # 2026-10-16/#283 stall that used to sit in silence.
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append("alert: coordinator stalled")
             else:  # requeue_stalled — already applied on the ledger
                 outcomes.append(
                     f"requeue_stalled: task {decision.card_id}"
@@ -8128,6 +8164,10 @@ class HubPlugin(BasePlugin):
             )
 
         # Auto-create TaskCard for incoming task assignments.
+        assigned_task_id = str(
+            (message.metadata or {}).get("task_id", "") or ""
+        ).strip()
+
         # Messages with task metadata or work-assignment patterns
         # get persisted to disk so they survive compaction.
         if (
@@ -8166,6 +8206,7 @@ class HubPlugin(BasePlugin):
                     task_id = str(message.metadata.get("task_id", "") or "").strip()
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
+                        assigned_task_id = str(existing.id)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -8184,6 +8225,8 @@ class HubPlugin(BasePlugin):
                             card_id=task_id,
                         )
                         logger.info(f"Auto-created task {card.id} from" f" {assigner}")
+                        assigned_task_id = str(card.id)
+
                     else:
                         # Heuristic match (no tag): mint as OPEN so the
                         # worker must claim it and the idle supervisor
@@ -8202,6 +8245,8 @@ class HubPlugin(BasePlugin):
                             card.id,
                             assigner,
                         )
+                        assigned_task_id = str(card.id)
+
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -8499,6 +8544,9 @@ class HubPlugin(BasePlugin):
                     "hub_wake_mode": wake_decision.mode,
                     "hub_wake_reason": wake_decision.reason,
                 }
+                if assigned_task_id:
+                    msg_metadata["task_id"] = assigned_task_id
+
                 # Pass through bridge metadata for relay
                 if hasattr(message, "metadata") and message.metadata:
                     if message.metadata.get("bridge_platform"):
@@ -9221,6 +9269,7 @@ class HubPlugin(BasePlugin):
             self._running_tools.pop(tool_id, None)
         elif kind in ("turn_complete", "error"):
             self._running_tools.clear()
+            self._stamp_supervisor_turn(kind, event)
         else:
             return
         tool = next(reversed(self._running_tools.values()), {})
@@ -9229,6 +9278,89 @@ class HubPlugin(BasePlugin):
             identity.current_tool = tool
             if self._presence:
                 self._presence.publish()
+
+    def _stamp_supervisor_turn(self, kind: str, event: Dict[str, Any]) -> None:
+        """Feed the supervisor's wake-efficacy tracking (issue #283).
+
+        A completed turn proves the coordinator is alive; a failed turn
+        only explains why it is not. Errors are kept so the stall alert
+        names the actual blocker (context overflow, provider outage)
+        instead of silence.
+        """
+        state = getattr(self, "_supervisor_state", None)
+        if state is None:
+            return
+        if kind == "turn_complete":
+            state.last_turn_end = time.time()
+            state.wakes_since_turn = 0
+        else:
+            err = str(
+                event.get("error") or event.get("message") or ""
+            ).strip()
+            if err:
+                state.last_error = err[:200]
+
+    def _record_supervisor_alert(self, text: str) -> None:
+        """Keep the last few supervisor alerts for /hub status (issue #283)."""
+        self._supervisor_alerts.append((time.time(), text))
+        del self._supervisor_alerts[:-10]
+        tap = getattr(self, "_display_tap", None)
+        if tap is not None:
+            try:
+                tap.publish({"type": "supervisor_alert", "message": text})
+            except Exception:
+                logger.debug("supervisor alert publish failed", exc_info=True)
+
+    async def _notify_supervisor_alert(self, text: str) -> None:
+        """Send the alert through the configured notifier channel, if any."""
+        backend = getattr(getattr(self, "_notifier", None), "_backend", None)
+        if backend is None:
+            return
+        try:
+            await backend.send(
+                f"[idle-supervisor] {text}", {"kind": "supervisor_alert"}
+            )
+        except Exception as e:
+            logger.warning("supervisor alert delivery failed: %s", e)
+
+    def _supervisor_status_lines(self) -> List[str]:
+        """Idle-supervisor section for /hub status (issue #283).
+
+        Shown for a coordinator running the loop even while healthy: an
+        open stall must be visible on request, not only when it alerts.
+        """
+        if (
+            not self._identity
+            or not self._identity.is_coordinator
+            or self._task_ledger is None
+            or self._supervisor_task is None
+        ):
+            return []
+        state = self._supervisor_state
+        open_cards = self._task_ledger.get_open()
+        stalled = self._task_ledger.get_stalled(
+            self.config.get(
+                "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
+            )
+            if self.config
+            else DEFAULT_STALL_THRESHOLD
+        )
+        lines = [
+            f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
+            f" {len(self._supervisor_alerts)} alert(s)"
+        ]
+        if state.wakes_since_turn and state.last_turn_end:
+            idle = max(0, int((time.time() - state.last_turn_end) // 60))
+            lines.append(
+                f"  {state.wakes_since_turn} wake(s) without a completed"
+                f" turn; last completed turn {idle}m ago"
+            )
+        now = time.time()
+        for ts, text in self._supervisor_alerts[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            first = " ".join(text.split())[:110]
+            lines.append(f"  alert ({ago}m ago): {first}")
+        return lines
 
     async def _broadcast_user_input(self, data, event=None):
         """Broadcast user input to all peers so they see what the human said."""
@@ -13480,6 +13612,7 @@ class HubPlugin(BasePlugin):
             for slot in pending[:5]:
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
+        lines.extend(self._supervisor_status_lines())
         lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
 

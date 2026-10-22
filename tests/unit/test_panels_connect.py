@@ -15,6 +15,7 @@ SNAP = {
     "network": "marco-home", "domain": "kollabor.ai", "trust": "open", "device": "mac-home",
     "relay_online": True, "knocks": 1, "local_agents": ["lapis"], "remote_agents": ["ruby@box"],
     "offline_devices": [], "read_only": False, "config_from": "",
+    "contact_route": "kollabor.ai/c/8f3a2c1d9e4b7a60",
     "requests": [{"enrollment_id": "abc123", "device": "new-box", "fingerprint": "ab12…ef01",
                   "categories": []}],
 }
@@ -95,6 +96,11 @@ async def test_describe_shows_the_snapshot_and_never_mints_a_code():
     summary = {row["label"]: row["value"] for row in panel["summary"]}
     assert summary["Network"] == "marco-home  via kollabor.ai" and summary["Trust"] == "open"
     assert summary["This Device"] == "mac-home" and summary["Agents On Other Devices"] == "ruby@box"
+    device_index = next(i for i, row in enumerate(panel["summary"]) if row["label"] == "This Device")
+    assert panel["summary"][device_index + 1] == {
+        "label": "Knocks Address", "value": SNAP["contact_route"], "copyable": True,
+    }
+    assert [row["label"] for row in panel["summary"] if row.get("copyable")] == ["Knocks Address"]
     assert [(r["id"], r["label"]) for r in panel["rows"]] == [("abc123", "new-box")]
     assert "ab12…ef01" in panel["rows"][0]["detail"]
     assert ids(panel["row_actions"]) == ["accept", "reject"]
@@ -106,14 +112,33 @@ async def test_describe_shows_the_snapshot_and_never_mints_a_code():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", [SNAP["contact_route"], "", None])
+async def test_offline_address_is_copyable_only_when_the_owner_supplies_one(route):
+    snap = {**SNAP, "relay_online": False}
+    if route is None:
+        snap.pop("contact_route")  # an already-running owner without the new field
+    else:
+        snap["contact_route"] = route
+    panel = await CONNECT.describe(Hub(snap), {})
+    row = next(row for row in panel["summary"] if row["label"] == "Knocks Address")
+    assert row["value"] == (route or "Unavailable")
+    assert bool(row.get("copyable")) is bool(route)
+    assert {"label": "Connection", "value": "Offline"} in panel["summary"]
+
+
+@pytest.mark.asyncio
 async def test_no_network_offers_the_two_guide_choices_and_read_only_offers_none():
     panel = await CONNECT.describe(Hub({**SNAP, "domain": ""}), {})
     assert panel["notice"] == NO_NETWORK_LINE
     assert ids(panel["toolbar_actions"]) == ["new_network", "join"] and panel["rows"] == []
-    read_only = Hub({**SNAP, "read_only": True})
+    assert panel["summary"] == []  # a stale route cannot survive leaving the network
+    read_only = Hub({**SNAP, "read_only": True, "contact_route": ""})
     panel = await CONNECT.describe(read_only, {})
     assert panel["notice"] and not panel["row_actions"] and not panel["toolbar_actions"]
     assert panel["read_only"] is True  # the engine routes to the folder's owner on this
+    assert next(row for row in panel["summary"] if row["label"] == "Knocks Address") == {
+        "label": "Knocks Address", "value": "Unavailable",
+    }
     assert "read_only" not in await CONNECT.describe(Hub(SNAP), {})
     with pytest.raises(PanelError) as err:
         await CONNECT.act(read_only, "accept", {"id": "abc123"})

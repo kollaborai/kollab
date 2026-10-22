@@ -78,9 +78,9 @@ async def test_capacity_pairs_require_explicit_approval_in_both_directions(monke
 
     monkeypatch.setattr(measure_capacity, "discover", fake_discover)
     monkeypatch.setattr(
-        measure_capacity.RelayCommands,
-        "_relay_url",
-        staticmethod(lambda _result: "wss://example.test/relay/v1/ws"),
+        measure_capacity,
+        "relay_websocket_url",
+        lambda _result: "wss://example.test/relay/v1/ws",
     )
     args = SimpleNamespace(
         origin="https://example.test",
@@ -174,9 +174,9 @@ async def test_capacity_report_hashes_artifact_and_labels_topology_as_unverified
 
     monkeypatch.setattr(measure_capacity, "discover", fake_discover)
     monkeypatch.setattr(
-        measure_capacity.RelayCommands,
-        "_relay_url",
-        staticmethod(lambda _result: "wss://example.test/relay/v1/ws"),
+        measure_capacity,
+        "relay_websocket_url",
+        lambda _result: "wss://example.test/relay/v1/ws",
     )
     artifact = tmp_path / "service.tar.gz"
     artifact.write_bytes(b"frozen relay service artifact")

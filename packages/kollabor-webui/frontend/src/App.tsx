@@ -13,6 +13,13 @@ import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
+
+import {
+  contextCompactionStatusTitle,
+  isUrgentContextCompactionStatus,
+  parseContextCompactionStatus,
+  type ContextCompactionStatus,
+} from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
@@ -57,8 +64,10 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
-import { LearnPage } from "@/components/learn/LearnPage";
-import { navigateToLearn, readLearnRoute, type LearnRoute } from "@/learn/catalog";
+import { LearnDialog } from "@/components/learn/LearnDialog";
+import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
+import { navigateToLearn } from "@/learn/catalog";
+import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -304,9 +313,12 @@ function RuntimeShell({
   );
 }
 
-export default function App() {
-  const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
-  const previousLearnRouteRef = useRef(learnRoute);
+export default function App({ contained = false }: { contained?: boolean } = {}) {
+  const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
+  const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
+  const whatsNewActive = pageRoute.kind === "whats-new";
+  const pageOpen = pageRoute.kind !== "chat";
+  const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
@@ -336,10 +348,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
-    const syncLearnRoute = () => {
-      const nextRoute = readLearnRoute(window.location);
-      setLearnRoute(nextRoute);
-      if (nextRoute) {
+    const syncPageRoute = () => {
+      const nextRoute = readMainPageRoute(window.location);
+      setPageRoute(nextRoute);
+      if (nextRoute.kind !== "chat") {
         setStudioOpen(false);
         setStudioFocus(null);
         setProfilesOpen(false);
@@ -349,22 +361,22 @@ export default function App() {
         setSettingsOpen(false);
       }
     };
-    window.addEventListener("popstate", syncLearnRoute);
-    return () => window.removeEventListener("popstate", syncLearnRoute);
+    window.addEventListener("popstate", syncPageRoute);
+    return () => window.removeEventListener("popstate", syncPageRoute);
   }, []);
 
   useEffect(() => {
-    const leavingLearn = previousLearnRouteRef.current !== null && learnRoute === null;
-    previousLearnRouteRef.current = learnRoute;
-    if (leavingLearn) {
+    const leavingPage = previousPageOpenRef.current && !pageOpen;
+    previousPageOpenRef.current = pageOpen;
+    if (leavingPage) {
       window.requestAnimationFrame(() => document.getElementById("app-main-pane")?.focus());
     }
-  }, [learnRoute]);
+  }, [pageOpen]);
 
   const returnToChat = useCallback(() => {
-    if (!readLearnRoute(window.location)) return;
-    window.history.pushState(null, "", "/");
-    setLearnRoute(null);
+    if (readMainPageRoute(window.location).kind === "chat") return;
+    window.history.pushState(null, "", pagePath("/", window.location.pathname));
+    setPageRoute({ kind: "chat" });
   }, []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
   const [settingsIntent, setSettingsIntent] = useState<{
@@ -412,6 +424,9 @@ export default function App() {
   // Folded from the open session's events, so a hub-driven turn still animates.
   const eventActivityRef = useRef(NO_LIVE_ACTIVITY);
   const [eventActivity, setEventActivity] = useState<Activity | null>(null);
+
+  const [contextCompactionStatus, setContextCompactionStatus] =
+    useState<ContextCompactionStatus | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -443,6 +458,11 @@ export default function App() {
   );
 
   useEffect(() => abortRecovery, [abortRecovery]);
+
+
+  useEffect(() => {
+    setContextCompactionStatus(null);
+  }, [activeId]);
 
   const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const { stamp: stampOrder, sync: syncOrder } = sidebarOrder;
@@ -587,6 +607,11 @@ export default function App() {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+
+            const compactionStatus = parseContextCompactionStatus(event);
+            if (compactionStatus !== undefined) {
+              setContextCompactionStatus(compactionStatus);
+            }
             if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
@@ -1011,9 +1036,10 @@ export default function App() {
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider>
+      <SidebarProvider className={`bg-muted/40 ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
+          whatsNewActive={whatsNewActive}
           sessions={sessions}
           profiles={profiles}
           api={api}
@@ -1046,6 +1072,7 @@ export default function App() {
           onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
           onLearn={() => navigateToLearn()}
+          onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
             setStudioFocus(null);
             setStudioOpen(true);
@@ -1123,15 +1150,14 @@ export default function App() {
             onSessionUpdated={handleSessionUpdated}
           />
         ) : null}
+        {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
-          className="h-svh max-h-svh min-h-svh overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
-          {learnRoute ? (
-            <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
-          ) : null}
-          <div className={learnRoute ? "hidden" : "contents"}>
+          {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
+          <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
             <div
               role="status"
@@ -1145,6 +1171,29 @@ export default function App() {
               <span>Update available: v{updateInfo.release.version}</span>
               <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
               <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
+            </div>
+          ) : null}
+          {contextCompactionStatus ? (
+            <div
+              role={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "alert"
+                  : "status"
+              }
+              aria-live={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "assertive"
+                  : "polite"
+              }
+              className="bg-amber-500/10 text-amber-700 dark:text-amber-300 flex flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2 text-sm"
+            >
+              <strong>
+                {contextCompactionStatusTitle(contextCompactionStatus.status)}
+              </strong>
+              <span>{contextCompactionStatus.message}</span>
+              {contextCompactionStatus.action ? (
+                <span className="font-medium">{contextCompactionStatus.action}</span>
+              ) : null}
             </div>
           ) : null}
           {activeSession && initialState ? (

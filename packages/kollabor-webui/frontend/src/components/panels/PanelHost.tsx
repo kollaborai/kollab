@@ -30,6 +30,7 @@ import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
 import { SessionSettings } from "./SessionSettings";
+import { PhoneLinkPanel } from "./PhoneLinkPanel";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
   PANEL_NAME,
@@ -265,6 +266,7 @@ export function PanelHost({
       open &&
       tab !== "session" &&
       tab !== "prompts" &&
+      tab !== "phonelink" &&
       tabs[tab].status === "idle"
     ) {
       void loadRoot(tab);
@@ -453,14 +455,14 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" ? null : tabs[tab];
+  const state = tab === "session" || tab === "prompts" || tab === "phonelink" ? null : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = () => {
-    if (tab === "session" || tab === "prompts") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
     if (
       dirtyCount > 0 &&
       !window.confirm("Reloading discards your unsaved changes. Continue?")
@@ -470,7 +472,7 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -479,7 +481,7 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts") return null;
+    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink") return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -684,7 +686,12 @@ export function PanelHost({
           >
             <PromptsPage api={promptsApi} />
           </div>
-          {tab !== "session" && tab !== "prompts" ? (
+          {tab === "phonelink" && open ? (
+            <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 flex-1 flex-col">
+              <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
+            </div>
+          ) : null}
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}
