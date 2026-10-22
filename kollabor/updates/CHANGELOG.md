@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hub: Dream Model selects a provider-supported model for dreaming. A blank
   override uses the shared fast model, then the active session model.
 
+- Hub capture commands show a bounded readable transcript by default; `--raw`
+  keeps the previous terminal output.
+
 ### Fixed
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
 - Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.

@@ -122,6 +122,7 @@ kollab --agent technical-writer --as sapphire
 kollab --hub status
 kollab --hub msg lapis "review the latest diff"
 kollab --hub capture lapis 100
+kollab --hub capture lapis 100 --raw
 ```
 
 Hub features include:
@@ -129,7 +130,8 @@ Hub features include:
 - Zero-config peer discovery for local agents in the same project.
 - Optional fixed identities with `--as` (for example, `--as lapis`) when you
   want stable names instead of auto-assigned identities.
-- Direct messages, broadcasts, live output capture, and interactive attach mode.
+- Direct messages, broadcasts, readable transcript capture by default, raw
+  terminal capture with `--raw`, and interactive attach mode.
 - Durable task ledgers with `active -> done -> QA review -> closed` workflows, including the `task_snooze` reminder control.
 - Vault-backed memory with raw streams, rolling working memory, and crystallized long-term notes.
 - Recurring hub messages through `/hub cron`.
@@ -572,6 +574,7 @@ kollab --agent coder --as lapis
 kollab --hub status
 kollab --hub msg lapis "review the latest diff"
 kollab --hub capture lapis 100
+kollab --hub capture lapis 100 --raw
 kollab --hub org engineering "ship the billing flow"
 kollab --org engineering
 kollab --hub stop lapis

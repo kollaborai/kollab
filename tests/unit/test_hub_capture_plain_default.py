@@ -1,11 +1,8 @@
-"""Hub capture defaults to plain (ANSI-stripped) output; raw is opt-in.
+"""Hub capture defaults to a readable transcript; raw is opt-in.
 
-Regression tests for the capture format default: _handle_capture_command
-used to call _capture_peer_output(peer, lines) with no format, so both the
-CLI (/hub capture) and the hub_capture agent tool returned raw terminal
-rendering whose ANSI escape codes inflated agent token usage. Plain —
-escape-free text from plugins.hub.capture — is now the default; raw
-terminal output requires an explicit request (--raw / format="terminal").
+Regression tests for the shared transcript renderer and raw terminal path.
+The JSON capture transport retains semantic records; the renderer labels
+messages, tools, statuses, and errors while the explicit raw path is unchanged.
 """
 
 import asyncio
@@ -68,15 +65,30 @@ def _patch_transport(plain_payload=None, raw_lines=None):
     )
 
 
-class TestCaptureCommandPlainDefault(unittest.TestCase):
-    def test_capture_command_defaults_to_plain_format(self):
+class TestCaptureCommandTranscriptDefault(unittest.TestCase):
+    def test_capture_command_defaults_to_transcript_json(self):
         plugin = _make_plugin()
         plugin._get_peer_by_identity = MagicMock(return_value=_peer())
         plain_patch, raw_patch, ctx = _patch_transport(
             plain_payload={
-                "format": "plain",
+                "format": "json",
                 "order": "oldest-first",
-                "text": "clean output",
+                "lines": [
+                    {
+                        "seq": 1,
+                        "kind": "message",
+                        "role": "user",
+                        "text": "question",
+                        "payload": {},
+                    },
+                    {
+                        "seq": 2,
+                        "kind": "text",
+                        "role": "assistant",
+                        "text": "answer",
+                        "payload": {},
+                    },
+                ],
                 "truncated": False,
                 "next_cursor": None,
             },
@@ -85,11 +97,32 @@ class TestCaptureCommandPlainDefault(unittest.TestCase):
         with plain_patch, raw_patch:
             result = _run(plugin._handle_capture_command("lapis 50"))
 
-        self.assertEqual(result, "clean output")
+        self.assertEqual(result, "User: question\nAssistant: answer")
         ctx.raw.assert_not_awaited()
         ctx.plain.assert_awaited_once()
-        self.assertEqual(ctx.plain.await_args.kwargs.get("capture_format"), "plain")
+        self.assertEqual(ctx.plain.await_args.kwargs.get("capture_format"), "json")
         self.assertEqual(ctx.plain.await_args.kwargs.get("lines"), 50)
+
+    def test_explicit_plain_format_keeps_plain_transport(self):
+        plugin = _make_plugin()
+        plugin._get_peer_by_identity = MagicMock(return_value=_peer())
+        plain_patch, raw_patch, ctx = _patch_transport(
+            plain_payload={
+                "format": "plain",
+                "text": "clean output",
+                "truncated": False,
+            },
+            raw_lines=["raw"],
+        )
+        with plain_patch, raw_patch:
+            result = _run(
+                plugin._handle_capture_command("lapis 50", capture_format="plain")
+            )
+
+        self.assertEqual(result, "clean output")
+        ctx.raw.assert_not_awaited()
+        self.assertEqual(ctx.plain.await_args.kwargs.get("capture_format"), "plain")
+        self.assertIsNone(ctx.plain.await_args.kwargs.get("max_chars"))
 
     def test_capture_command_raw_flag_uses_terminal_diagnostics(self):
         plugin = _make_plugin()
@@ -164,12 +197,31 @@ class TestPlainEnvelopeRendering(unittest.TestCase):
         )
 
 
-class TestHubCaptureToolPlainDefault(unittest.TestCase):
-    def test_tool_defaults_to_plain_transport(self):
+class TestHubCaptureToolTranscriptDefault(unittest.TestCase):
+    def test_tool_defaults_to_transcript_json(self):
         plugin = _make_plugin()
         plugin._get_peer_by_identity = MagicMock(return_value=_peer())
         plain_patch, raw_patch, ctx = _patch_transport(
-            plain_payload={"format": "plain", "text": "clean", "truncated": False},
+            plain_payload={
+                "format": "json",
+                "lines": [
+                    {
+                        "seq": 1,
+                        "kind": "message",
+                        "role": "user",
+                        "text": "question",
+                        "payload": {},
+                    },
+                    {
+                        "seq": 2,
+                        "kind": "text",
+                        "role": "assistant",
+                        "text": "answer",
+                        "payload": {},
+                    },
+                ],
+                "truncated": False,
+            },
             raw_lines=["\x1b[31mraw\x1b[0m"],
         )
         with plain_patch, raw_patch:
@@ -184,9 +236,9 @@ class TestHubCaptureToolPlainDefault(unittest.TestCase):
                 )
             )
         self.assertTrue(result.success)
-        self.assertEqual(result.output, "clean")
+        self.assertEqual(result.output, "User: question\nAssistant: answer")
         ctx.raw.assert_not_awaited()
-        self.assertEqual(ctx.plain.await_args.kwargs.get("capture_format"), "plain")
+        self.assertEqual(ctx.plain.await_args.kwargs.get("capture_format"), "json")
 
     def test_tool_format_terminal_requests_raw(self):
         plugin = _make_plugin()
@@ -247,12 +299,13 @@ class TestHubCaptureToolPlainDefault(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(seen["args"], "sapphire 25 --raw")
 
-    def test_tool_plain_format_is_the_quiet_default(self):
+    def test_tool_explicit_plain_format_is_forwarded(self):
         plugin = _make_plugin()
         seen = {}
 
-        async def _fake_handle_capture_command(arg):
+        async def _fake_handle_capture_command(arg, *, capture_format="json"):
             seen["args"] = arg
+            seen["capture_format"] = capture_format
             return "plain text"
 
         plugin._handle_capture_command = _fake_handle_capture_command
@@ -263,6 +316,8 @@ class TestHubCaptureToolPlainDefault(unittest.TestCase):
         )
         self.assertTrue(result.success)
         self.assertEqual(seen["args"], "lapis 50")
+
+        self.assertEqual(seen["capture_format"], "plain")
 
 
 if __name__ == "__main__":

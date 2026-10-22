@@ -146,7 +146,12 @@ class LLMService:
         if role == "user":
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
-            publish_semantic(getattr(self, "event_bus", None), "user_message")
+            publish_semantic(
+                getattr(self, "event_bus", None),
+                "user_message",
+                role="user",
+                text=content_to_text(content),
+            )
 
         return cast(str, message_uuid)
 

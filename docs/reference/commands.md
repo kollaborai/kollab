@@ -60,7 +60,8 @@ manage agents from CLI (no TUI needed):
                                                    reply as it arrives, exit 0 when
                                                    its turn ends (waits up to 600s)
   kollab --hub msg infra@home-server "hi" --no-wait   send and return immediately
-  kollab --hub capture ruby 50           read last 50 output lines
+  kollab --hub capture ruby 50           read a transcript of the last 50 events
+  kollab --hub capture ruby 50 --raw     read the previous terminal rendering
   kollab --hub stop ruby                 send shutdown signal
   kollab --hub stop all                  stop all agents
   kollab --hub broadcast "stand down"    message all agents
@@ -186,6 +187,7 @@ examples:
   kollab --hub msg lapis "hey, got a minute?"
   kollab --hub broadcast "rolling to lunch, bbiab"
   kollab --hub capture koordinator 200
+  kollab --hub capture koordinator 200 --raw
   kollab --hub org engineering "ship the billing flow"
 
 capture addresses a live hub identity or live orchestrator session. It does not
@@ -193,6 +195,14 @@ address a bundle name, and an offline inbox is not a capturable process. For
 example, `offline inboxes: lapis(1)` means a message is waiting for `lapis`; it
 does not mean `kollab --hub capture lapis` can read output before that identity
 is online.
+
+By default, capture renders a bounded transcript with user/assistant messages,
+tool calls/results, status, and errors. Add `--raw` to preserve the previous
+terminal rendering; ANSI/control cleanup applies to the transcript only.
+
+Recent user-authored text is included by design, so treat captures as sensitive.
+The transcript is bounded to recent in-memory events and omits tool arguments
+and reasoning; it does not reconstruct stored conversation history.
 
 interactive equivalents:
   /hub status       /hub msg <name> <text>    /hub broadcast <text>

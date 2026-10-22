@@ -35,7 +35,13 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
-from .capture import normalize_records, normalize_text, paginate, plain_text
+from .capture import (
+    normalize_records,
+    normalize_text,
+    paginate,
+    plain_text,
+    render_transcript,
+)
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
@@ -4603,16 +4609,22 @@ class HubPlugin(BasePlugin):
             or tool_data.get("lines", "")
             or "50"
         )
-        cap_format = str(
-            request.get("format", "") or tool_data.get("cap_format", "") or ""
-        ).strip().lower()
+        cap_format = (
+            str(request.get("format", "") or tool_data.get("cap_format", "") or "")
+            .strip()
+            .lower()
+        )
         wants_raw = cap_format == "terminal" or bool(request.get("raw"))
         args = cap_name.strip()
         if cap_lines:
             args += f" {cap_lines}"
         if wants_raw:
             args += " --raw"
-        result = await self._handle_capture_command(args)
+            result = await self._handle_capture_command(args)
+        elif cap_format == "plain":
+            result = await self._handle_capture_command(args, capture_format="plain")
+        else:
+            result = await self._handle_capture_command(args)
         # Truncate per-agent capture to 10k chars (2000 was too low —
         # oldest entries consumed the entire budget before recent work
         # became visible).  Entries are already newest-first.
@@ -11847,12 +11859,11 @@ class HubPlugin(BasePlugin):
 
     @staticmethod
     def _render_plain_capture(identity: str, payload: Any) -> str:
-        """Render a plain capture envelope as escape-free text.
+        """Render an explicitly requested plain capture envelope.
 
-        Plain is the default chat/CLI format: it strips ANSI and control
-        codes so agent captures do not burn tokens on terminal styling.
-        Older peers may still answer the get_output request with bare
-        "lines" (no envelope); those lines are normalized here too.
+        This preserves the socket/API plain-text contract for callers that
+        request it. Default Hub capture commands use ``render_transcript``;
+        older peers may still answer with bare lines, normalized here too.
         """
         if not isinstance(payload, dict):
             return str(payload or f"no recent output from '{identity}'")
@@ -12178,20 +12189,23 @@ class HubPlugin(BasePlugin):
 
         return msg
 
-    async def _handle_capture_command(self, rest: str) -> str:
+    async def _handle_capture_command(
+        self, rest: str, *, capture_format: str = "json"
+    ) -> str:
         """Handle /hub capture <identity|name|all> [lines] [--raw].
 
-        Accepts hub identity names (e.g. "lapis"), orchestrator agent
-        names, or "all". Hub identities capture directly over peer sockets.
-        Orchestrator session names still route through agent_orchestrator.
-        Defaults to the plain format (ANSI/control codes stripped);
-        pass --raw for the raw terminal rendering.
+        Hub identities use the shared transcript renderer by default. The
+        explicit ``plain`` format remains available to tool callers, while
+        --raw preserves the terminal capture path. Orchestrator session names
+        continue to route through agent_orchestrator.
         """
         args = rest.split() if rest.strip() else []
-        # Plain (ANSI-stripped) is the default capture format; --raw opts
-        # back into the raw terminal rendering.
-        capture_format = "terminal" if "--raw" in args else "plain"
+        raw = "--raw" in args
         args = [a for a in args if a != "--raw"]
+        if raw:
+            capture_format = "terminal"
+        if capture_format not in {"json", "plain", "terminal"}:
+            capture_format = "json"
         refusal = self._remote_target_refusal(args[0] if args else "")
         if refusal:
             return refusal
@@ -12221,9 +12235,22 @@ class HubPlugin(BasePlugin):
 
             peer = self._get_peer_by_identity(target)
             if peer is not None:
-                return await self._capture_peer_output(
-                    peer, lines, format=capture_format
-                )
+                if capture_format == "json":
+                    payload = await self._capture_peer_output(
+                        peer, lines, format="json", max_chars=10_000
+                    )
+                else:
+                    payload = await self._capture_peer_output(
+                        peer, lines, format=capture_format
+                    )
+                if capture_format == "json":
+                    return render_transcript(
+                        payload,
+                        identity=peer.identity,
+                        max_lines=lines,
+                        max_chars=10_000,
+                    )
+                return payload
 
             resolved = self._resolve_identity_to_agent_name(target)
             if resolved is not None:
@@ -12239,7 +12266,15 @@ class HubPlugin(BasePlugin):
                     return f"error: agent '{target}' not found"
 
         result = await orch._cmd_capture(args)
-        return str(result.message)
+        message = str(result.message)
+        if capture_format == "json":
+            return render_transcript(
+                message,
+                identity=target,
+                max_lines=lines,
+                max_chars=10_000,
+            )
+        return message
 
     async def _handle_wake_command(self, rest: str) -> str:
         """Handle /hub wake <identity> — manually wake a waiting agent."""
