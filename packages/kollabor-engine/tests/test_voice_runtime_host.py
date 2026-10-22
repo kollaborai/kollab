@@ -275,3 +275,37 @@ async def test_failed_teardown_keeps_idempotency_and_handle_for_retry():
     assert stopped.state == "stopped"
     assert stopped.generation == 3
     assert len(backend.stop_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_admission_generation_guard_serializes_stop():
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    binding = backend.start_calls[0]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def enqueue_message():
+        entered.set()
+        await release.wait()
+        return "accepted"
+
+    admission_task = asyncio.create_task(host.run_if_current(binding, enqueue_message))
+    await entered.wait()
+    stop_task = asyncio.create_task(
+        host.stop_session(
+            "owner-1",
+            ready.voice_session_id,
+            StopVoiceSessionRequest(generation=1, reason="session_switch"),
+        )
+    )
+    done, _ = await asyncio.wait({stop_task}, timeout=0.05)
+    assert stop_task not in done
+
+    release.set()
+    assert await admission_task == "accepted"
+    stopping = await stop_task
+    assert stopping.state == "stopping"
+    assert stopping.generation == 2

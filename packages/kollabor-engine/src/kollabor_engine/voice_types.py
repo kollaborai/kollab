@@ -119,3 +119,47 @@ class VoiceSessionTicket(_FrozenModel):
     livekit_url: str
     participant_token: str
     expires_at_utc_ms: int
+
+
+TurnId = VoiceSessionId
+TranscriptId = VoiceSessionId
+TranscriptRevision = Annotated[int, Field(ge=1)]
+
+
+class VoiceTranscriptSnapshot(_FrozenModel):
+    transcript_id: TranscriptId
+    voice_session_id: VoiceSessionId
+    turn_id: TurnId
+    generation: Generation
+    speaker: Literal["user", "assistant"]
+    revision: TranscriptRevision
+    final: bool
+    display_text: str
+    spoken_text: str | None
+    language: str | None
+    observed_at_utc_ms: Annotated[int, Field(ge=0)]
+
+
+# A final user transcript is a validated projection, not a second wire schema.
+FinalTranscript = VoiceTranscriptSnapshot
+
+
+class VoiceTurnContext(_FrozenModel):
+    source: Literal["livekit_voice"]
+    voice_session_id: VoiceSessionId
+    voice_provider_profile_id: str
+    voice_prompt_revision: str
+    voice_tool_policy: VoiceToolPolicy
+
+
+class AdmissionReceipt(_FrozenModel):
+    accepted: bool
+    request_id: TurnId
+    conversation_session_id: SessionId
+    queued: bool
+    duplicate: bool
+
+
+class CancelReceipt(_FrozenModel):
+    cancelled: bool
+    generation: Generation

@@ -11,8 +11,8 @@ import asyncio
 import platform
 import sys
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Protocol, TypeVar
 from uuid import uuid4
 
 from .voice_types import (
@@ -32,6 +32,8 @@ from .voice_types import (
     VoiceSessionTicket,
     VoiceSessionView,
 )
+
+_T = TypeVar("_T")
 
 
 class RuntimeHost(Protocol):
@@ -120,6 +122,8 @@ class _SessionRecord:
     handle: object | None = None
     start_task: asyncio.Task[None] | None = None
     stop_reason: StopReason | None = None
+
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class EngineRuntimeHost:
@@ -217,36 +221,48 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
             if record.binding.owner_id != owner_id:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
-            if request.generation != record.generation:
-                raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
-            if record.state in {"stopping", "stopped"}:
-                return _to_view(record)
+            operation_lock = record.operation_lock
 
-            old_binding = record.binding
-            old_handle = record.handle
-            old_state = record.state
-            record.generation += 1
-            record.state = "stopping"
-            record.detail = None
-            record.retryable = False
-            record.stop_reason = request.reason
-            record.handle = None
-            if old_handle is not None:
-                self._spawn(
-                    self._stop_handle(
-                        old_binding,
-                        old_handle,
-                        expected_generation=record.generation,
-                        reason=request.reason,
+        # A transcript admission holds this per-session lock until the ordinary
+        # Engine message queue has accepted it, so stop cannot fence halfway
+        # through an admission transaction.
+        async with operation_lock:
+            async with self._lock:
+                record = self._sessions.get(voice_session_id)
+                if record is None:
+                    raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if record.binding.owner_id != owner_id:
+                    raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+                if request.generation != record.generation:
+                    raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                if record.state in {"stopping", "stopped"}:
+                    return _to_view(record)
+
+                old_binding = record.binding
+                old_handle = record.handle
+                old_state = record.state
+                record.generation += 1
+                record.state = "stopping"
+                record.detail = None
+                record.retryable = False
+                record.stop_reason = request.reason
+                record.handle = None
+                if old_handle is not None:
+                    self._spawn(
+                        self._stop_handle(
+                            old_binding,
+                            old_handle,
+                            expected_generation=record.generation,
+                            reason=request.reason,
+                        )
                     )
-                )
-            elif old_state != "starting" and (record.start_task is None or record.start_task.done()):
-                record.state = "stopped"
-                if self._active_by_key.get(record.idempotency_key) == voice_session_id:
-                    self._active_by_key.pop(record.idempotency_key, None)
-            # A start still in flight observes the new generation and cleans
-            # up its late handle; the stop acknowledgement does not await it.
-            return _to_view(record)
+                elif old_state != "starting" and (record.start_task is None or record.start_task.done()):
+                    record.state = "stopped"
+                    if self._active_by_key.get(record.idempotency_key) == voice_session_id:
+                        self._active_by_key.pop(record.idempotency_key, None)
+                # A start still in flight observes the new generation and cleans
+                # up its late handle; the stop acknowledgement does not await it.
+                return _to_view(record)
 
     async def get_status(
         self,
@@ -276,6 +292,31 @@ class EngineRuntimeHost:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
+
+    async def run_if_current(
+        self,
+        binding: VoiceSessionBinding,
+        operation: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        """Serialize a short Engine admission with stop/generation fencing."""
+        async with self._lock:
+            record = self._sessions.get(binding.voice_session_id)
+            if record is None:
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            if record.binding.owner_id != binding.owner_id:
+                raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+            operation_lock = record.operation_lock
+
+        async with operation_lock:
+            async with self._lock:
+                current = self._sessions.get(binding.voice_session_id)
+                if current is not record:
+                    raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if current.generation != binding.generation:
+                    raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                if current.state not in {"ready", "listening", "thinking", "speaking"}:
+                    raise RuntimeHostError("session_busy", 409, "Voice session is not ready to admit a turn.")
+            return await operation()
 
     async def _start_session(self, binding: VoiceSessionBinding) -> None:
         try:
