@@ -12,6 +12,7 @@ from kollabor_engine.voice_runtime_host import (
 )
 from kollabor_engine.voice_types import (
     CreateVoiceSessionRequest,
+    JoinVoiceSessionRequest,
     RuntimeStatus,
     StopVoiceSessionRequest,
 )
@@ -20,6 +21,7 @@ from kollabor_engine.voice_types import (
 class FakeSessionResolver:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
+        self.service_lease_epoch = 7
 
     async def resolve(
         self, owner_id: str, control_session_id: str, selected_thread_id: str | None
@@ -30,7 +32,7 @@ class FakeSessionResolver:
             thread_id=selected_thread_id,
             voice_provider_profile_id="voice-profile-1",
             voice_prompt_revision="voice-prompt-r1",
-            service_lease_epoch=7,
+            service_lease_epoch=self.service_lease_epoch,
         )
 
 
@@ -81,6 +83,15 @@ class FakeRuntimeBackend:
         await self.release_stop.wait()
 
 
+class FakeJoinTicketSigner:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def sign(self, binding, *, room_name: str, expires_at_utc_ms: int) -> str:
+        self.calls.append((binding, room_name, expires_at_utc_ms))
+        return f"signed:{room_name}"
+
+
 def _request(thread_id: str | None = "thread-1") -> CreateVoiceSessionRequest:
     return CreateVoiceSessionRequest(selected_thread_id=thread_id)
 
@@ -90,11 +101,17 @@ def _host(
     resolver: FakeSessionResolver | None = None,
     *,
     platform_supported=lambda: True,
+    join_ticket_signer=None,
+    livekit_url: str | None = None,
+    utc_now_ms=None,
 ) -> EngineRuntimeHost:
     return EngineRuntimeHost(
         session_resolver=resolver or FakeSessionResolver(),
         runtime=backend,
         platform_supported=platform_supported,
+        join_ticket_signer=join_ticket_signer,
+        livekit_url=livekit_url,
+        utc_now_ms=utc_now_ms,
     )
 
 
@@ -309,3 +326,146 @@ async def test_admission_generation_guard_serializes_stop():
     stopping = await stop_task
     assert stopping.state == "stopping"
     assert stopping.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_join_ticket_binds_generation_room_and_300_second_expiry():
+    backend = FakeRuntimeBackend()
+    signer = FakeJoinTicketSigner()
+    host = _host(
+        backend,
+        join_ticket_signer=signer,
+        livekit_url="wss://livekit.example.test",
+        utc_now_ms=lambda: 1_800_000_000_000,
+    )
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    ticket = await host.issue_join_ticket(
+        "owner-1",
+        ready.voice_session_id,
+        JoinVoiceSessionRequest(generation=ready.generation),
+    )
+
+    expected_room = f"kollab-{ready.voice_session_id}-g{ready.generation}"
+    assert ticket.voice_session_id == ready.voice_session_id
+    assert ticket.generation == ready.generation
+    assert ticket.room_name == expected_room
+    assert ticket.livekit_url == "wss://livekit.example.test"
+    assert ticket.participant_token == f"signed:{expected_room}"
+    assert ticket.expires_at_utc_ms == 1_800_000_300_000
+    assert signer.calls == [(backend.start_calls[0], expected_room, 1_800_000_300_000)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner_id", "generation", "error_code", "stop_session_first"),
+    [
+        ("owner-2", 1, "forbidden", False),
+        ("owner-1", 1, "stale_generation", True),
+    ],
+)
+async def test_invalid_owner_or_generation_never_calls_ticket_signer(
+    owner_id,
+    generation,
+    error_code,
+    stop_session_first,
+):
+    backend = FakeRuntimeBackend()
+    signer = FakeJoinTicketSigner()
+    host = _host(backend, join_ticket_signer=signer, livekit_url="wss://livekit.example.test")
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    if stop_session_first:
+        await host.stop_session(
+            "owner-1",
+            ready.voice_session_id,
+            StopVoiceSessionRequest(generation=ready.generation, reason="user"),
+        )
+        await host.wait_for_background_tasks()
+
+    with pytest.raises(RuntimeHostError) as error:
+        await host.issue_join_ticket(
+            owner_id,
+            ready.voice_session_id,
+            JoinVoiceSessionRequest(generation=generation),
+        )
+
+    assert error.value.code == error_code
+    assert signer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_replaces_idempotent_binding_when_service_lease_changes():
+    backend = FakeRuntimeBackend()
+    resolver = FakeSessionResolver()
+    host = _host(backend, resolver)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    resolver.service_lease_epoch = 8
+    replacement = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    assert replacement.voice_session_id != first.voice_session_id
+    assert replacement.generation == 1
+    assert len(backend.start_calls) == 2
+    assert backend.start_calls[0].service_lease_epoch == 7
+    assert backend.start_calls[1].service_lease_epoch == 8
+    assert len(backend.stop_calls) == 1
+    assert backend.stop_calls[0][0].voice_session_id == first.voice_session_id
+    assert backend.stop_calls[0][2] == "session_switch"
+
+    duplicate = await host.create_session("owner-1", "session-1", _request())
+    assert duplicate.voice_session_id == replacement.voice_session_id
+    assert duplicate.agent_id == "agent-from-engine"
+    assert len(backend.start_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fences_and_stops_ready_sessions_idempotently():
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    await host.shutdown()
+
+    stopped = await host.get_status("owner-1", ready.voice_session_id)
+    assert stopped.state == "stopped"
+    assert stopped.generation == ready.generation + 1
+    assert len(backend.stop_calls) == 1
+    assert backend.stop_calls[0][0].generation == ready.generation
+    assert backend.stop_calls[0][2] == "shutdown"
+
+    await host.shutdown()
+    assert len(backend.stop_calls) == 1
+    with pytest.raises(RuntimeHostError) as error:
+        await host.create_session("owner-1", "session-2", _request())
+    assert error.value.code == "runtime_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_pending_start_and_stops_late_handle():
+    backend = FakeRuntimeBackend(block_start=True)
+    host = _host(backend)
+    starting = await host.create_session("owner-1", "session-1", _request())
+    await backend.start_entered.wait()
+
+    shutdown_task = asyncio.create_task(host.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown_task.done()
+    stopping = await host.get_status("owner-1", starting.voice_session_id)
+    assert stopping.state == "stopping"
+    assert stopping.generation == starting.generation + 1
+    assert backend.stop_calls == []
+
+    backend.release_start.set()
+    await asyncio.wait_for(shutdown_task, timeout=1)
+
+    stopped = await host.get_status("owner-1", starting.voice_session_id)
+    assert stopped.state == "stopped"
+    assert stopped.generation == starting.generation + 1
+    assert len(backend.stop_calls) == 1
+    assert backend.stop_calls[0][0].generation == starting.generation
+    assert backend.stop_calls[0][2] == "shutdown"

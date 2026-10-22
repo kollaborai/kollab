@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import platform
 import sys
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Protocol, TypeVar
 from uuid import uuid4
 
 from .voice_types import (
+    AdmissionReceipt,
     AgentId,
     CreateVoiceSessionRequest,
     JoinVoiceSessionRequest,
@@ -26,6 +28,7 @@ from .voice_types import (
     StopReason,
     StopVoiceSessionRequest,
     ThreadId,
+    TurnId,
     VoiceSessionBinding,
     VoiceSessionId,
     VoiceSessionState,
@@ -34,6 +37,7 @@ from .voice_types import (
 )
 
 _T = TypeVar("_T")
+JOIN_TICKET_TTL_MS = 300_000
 
 
 class RuntimeHost(Protocol):
@@ -95,6 +99,16 @@ class RuntimeBackend(Protocol):
     async def stop_session(self, binding: VoiceSessionBinding, handle: object, reason: StopReason) -> None: ...
 
 
+class JoinTicketSigner(Protocol):
+    async def sign(
+        self,
+        binding: VoiceSessionBinding,
+        *,
+        room_name: str,
+        expires_at_utc_ms: int,
+    ) -> str: ...
+
+
 class RuntimeHostError(RuntimeError):
     def __init__(
         self,
@@ -125,6 +139,8 @@ class _SessionRecord:
 
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
+    admitted_turns: dict[TurnId, AdmissionReceipt] = field(default_factory=dict, repr=False)
+
 
 class EngineRuntimeHost:
     """Manage Engine voice-session generations around an injected runtime backend."""
@@ -136,15 +152,22 @@ class EngineRuntimeHost:
         runtime: RuntimeBackend,
         platform_supported: Callable[[], bool] | None = None,
         id_factory: Callable[[], str] | None = None,
+        join_ticket_signer: JoinTicketSigner | None = None,
+        livekit_url: str | None = None,
+        utc_now_ms: Callable[[], int] | None = None,
     ) -> None:
         self._session_resolver = session_resolver
         self._runtime = runtime
         self._platform_supported = platform_supported or _is_supported_platform
         self._id_factory = id_factory or (lambda: str(uuid4()))
+        self._join_ticket_signer = join_ticket_signer
+        self._livekit_url = livekit_url
+        self._utc_now_ms = utc_now_ms or (lambda: time.time_ns() // 1_000_000)
         self._lock = asyncio.Lock()
         self._sessions: dict[VoiceSessionId, _SessionRecord] = {}
         self._active_by_key: dict[tuple[str, str, str, str | None, str], VoiceSessionId] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._shutting_down = False
 
     async def prepare(self) -> RuntimeStatus:
         if not self._platform_supported():
@@ -176,38 +199,124 @@ class EngineRuntimeHost:
             target.thread_id,
             target.voice_provider_profile_id,
         )
-        async with self._lock:
-            existing_id = self._active_by_key.get(key)
-            if existing_id is not None:
-                existing = self._sessions.get(existing_id)
-                if existing is not None and existing.state in {
-                    "starting",
-                    "ready",
-                    "stopping",
-                    "error",
-                }:
+        while True:
+            async with self._lock:
+                self._raise_if_shutting_down()
+                existing_id = self._active_by_key.get(key)
+                existing = self._sessions.get(existing_id) if existing_id is not None else None
+                if existing is None or existing.state not in {"starting", "ready", "stopping", "error"}:
+                    if existing_id is not None and self._active_by_key.get(key) == existing_id:
+                        self._active_by_key.pop(key, None)
+                    return self._create_session_locked(owner_id, control_session_id, target, key)
+                if existing.binding.service_lease_epoch == target.service_lease_epoch:
                     return _to_view(existing)
-                self._active_by_key.pop(key, None)
+                operation_lock = existing.operation_lock
 
-            voice_session_id = self._id_factory()
-            binding = VoiceSessionBinding(
-                owner_id=owner_id,
+            # A replacement lease is a new runtime identity. Serialize the
+            # fence against admission and stop before replacing the idempotent
+            # mapping, but never hold the host lock while waiting for it.
+            async with operation_lock:
+                async with self._lock:
+                    self._raise_if_shutting_down()
+                    if self._active_by_key.get(key) != existing_id:
+                        continue
+                    current = self._sessions.get(existing_id)
+                    if current is None:
+                        self._active_by_key.pop(key, None)
+                        return self._create_session_locked(owner_id, control_session_id, target, key)
+                    if current.state not in {"starting", "ready", "stopping", "error"}:
+                        self._active_by_key.pop(key, None)
+                        return self._create_session_locked(owner_id, control_session_id, target, key)
+                    if current.binding.service_lease_epoch == target.service_lease_epoch:
+                        return _to_view(current)
+
+                    self._fence_record_locked(current, reason="session_switch")
+                    self._active_by_key.pop(key, None)
+                    return self._create_session_locked(owner_id, control_session_id, target, key)
+
+    async def issue_join_ticket(
+        self,
+        owner_id: OwnerId,
+        voice_session_id: VoiceSessionId,
+        request: JoinVoiceSessionRequest,
+    ) -> VoiceSessionTicket:
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is None:
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            if record.binding.owner_id != owner_id:
+                raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+            if request.generation != record.generation:
+                raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+            operation_lock = record.operation_lock
+
+        # Stop/switch and admission share this per-session lock. Recheck after
+        # acquiring it so a queued stale join never invokes the signer.
+        async with operation_lock:
+            async with self._lock:
+                current = self._sessions.get(voice_session_id)
+                if current is None:
+                    raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if current.binding.owner_id != owner_id:
+                    raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+                if request.generation != current.generation:
+                    raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                self._raise_if_shutting_down()
+                if current.state != "ready":
+                    raise RuntimeHostError(
+                        "models_not_ready",
+                        409,
+                        "The voice runtime is not ready to issue a join ticket.",
+                        retryable=True,
+                    )
+                signer = self._join_ticket_signer
+                livekit_url = self._livekit_url
+                if signer is None or not livekit_url or not livekit_url.strip():
+                    raise RuntimeHostError(
+                        "runtime_unavailable",
+                        503,
+                        "LiveKit join ticket signing is not configured.",
+                    )
+                binding = current.binding.model_copy(update={"generation": current.generation})
+                room_name = f"kollab-{voice_session_id}-g{current.generation}"
+                expires_at_utc_ms = self._utc_now_ms() + JOIN_TICKET_TTL_MS
+
+            try:
+                participant_token = await signer.sign(
+                    binding,
+                    room_name=room_name,
+                    expires_at_utc_ms=expires_at_utc_ms,
+                )
+            except Exception as exc:
+                raise RuntimeHostError(
+                    "runtime_unavailable",
+                    503,
+                    "The LiveKit join ticket could not be signed.",
+                    retryable=True,
+                ) from exc
+            if not isinstance(participant_token, str) or not participant_token:
+                raise RuntimeHostError(
+                    "runtime_unavailable",
+                    503,
+                    "The LiveKit join ticket signer returned an empty token.",
+                    retryable=True,
+                )
+
+            async with self._lock:
+                current = self._sessions.get(voice_session_id)
+                if current is not record or current.generation != request.generation or current.state != "ready":
+                    raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                if self._shutting_down:
+                    raise RuntimeHostError("runtime_unavailable", 503, "Voice runtime is shutting down.")
+
+            return VoiceSessionTicket(
                 voice_session_id=voice_session_id,
-                control_session_id=control_session_id,
-                conversation_session_id=control_session_id,
-                agent_id=target.agent_id,
-                thread_id=target.thread_id,
-                voice_provider_profile_id=target.voice_provider_profile_id,
-                voice_prompt_revision=target.voice_prompt_revision,
-                voice_tool_policy="voice_terminal_hub_v1",
-                generation=1,
-                service_lease_epoch=target.service_lease_epoch,
+                generation=request.generation,
+                room_name=room_name,
+                livekit_url=livekit_url,
+                participant_token=participant_token,
+                expires_at_utc_ms=expires_at_utc_ms,
             )
-            record = _SessionRecord(binding=binding, idempotency_key=key)
-            self._sessions[voice_session_id] = record
-            self._active_by_key[key] = voice_session_id
-            record.start_task = self._spawn(self._start_session(binding))
-            return _to_view(record)
 
     async def stop_session(
         self,
@@ -282,16 +391,130 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
             return _to_view(record)
 
+    async def shutdown(self) -> None:
+        """Fence all session generations, stop ready handles, and drain starts/stops."""
+        async with self._lock:
+            self._shutting_down = True
+            records = tuple(self._sessions.values())
+
+        # Use the per-session operation locks shared by stop and admission.
+        # Late starts observe the fence and clean up any handle they create.
+        for record in records:
+            async with record.operation_lock:
+                async with self._lock:
+                    current = self._sessions.get(record.binding.voice_session_id)
+                    if current is not record or current.state in {"stopping", "stopped"}:
+                        continue
+                    self._fence_record_locked(current, reason="shutdown")
+
+        await self.wait_for_background_tasks()
+
     async def wait_for_background_tasks(self) -> None:
         """Drain lifecycle tasks in tests and during Engine shutdown."""
         while self._background_tasks:
             await asyncio.gather(*tuple(self._background_tasks))
+
+    def _raise_if_shutting_down(self) -> None:
+        if self._shutting_down:
+            raise RuntimeHostError("runtime_unavailable", 503, "Voice runtime is shutting down.")
+
+    def _create_session_locked(
+        self,
+        owner_id: OwnerId,
+        control_session_id: SessionId,
+        target: ResolvedVoiceTarget,
+        key: tuple[str, str, str, str | None, str],
+    ) -> VoiceSessionView:
+        voice_session_id = self._id_factory()
+        binding = VoiceSessionBinding(
+            owner_id=owner_id,
+            voice_session_id=voice_session_id,
+            control_session_id=control_session_id,
+            conversation_session_id=control_session_id,
+            agent_id=target.agent_id,
+            thread_id=target.thread_id,
+            voice_provider_profile_id=target.voice_provider_profile_id,
+            voice_prompt_revision=target.voice_prompt_revision,
+            voice_tool_policy="voice_terminal_hub_v1",
+            generation=1,
+            service_lease_epoch=target.service_lease_epoch,
+        )
+        record = _SessionRecord(binding=binding, idempotency_key=key)
+        self._sessions[voice_session_id] = record
+        self._active_by_key[key] = voice_session_id
+        record.start_task = self._spawn(self._start_session(binding))
+        return _to_view(record)
+
+    def _fence_record_locked(self, record: _SessionRecord, *, reason: StopReason) -> None:
+        if record.state in {"stopping", "stopped"}:
+            return
+
+        old_binding = record.binding
+        old_handle = record.handle
+        old_state = record.state
+        record.generation += 1
+        record.state = "stopping"
+        record.detail = None
+        record.retryable = False
+        record.stop_reason = reason
+        record.handle = None
+        if old_handle is not None:
+            self._spawn(
+                self._stop_handle(
+                    old_binding,
+                    old_handle,
+                    expected_generation=record.generation,
+                    reason=reason,
+                )
+            )
+        elif old_state != "starting" or record.start_task is None or record.start_task.done():
+            record.state = "stopped"
+            if self._active_by_key.get(record.idempotency_key) == old_binding.voice_session_id:
+                self._active_by_key.pop(record.idempotency_key, None)
 
     def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coroutine)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
+
+    async def admit_turn(
+        self,
+        binding: VoiceSessionBinding,
+        turn_id: TurnId,
+        operation: Callable[[], Awaitable[AdmissionReceipt]],
+    ) -> AdmissionReceipt:
+        """Atomically deduplicate a turn with the current generation fence."""
+        async with self._lock:
+            record = self._sessions.get(binding.voice_session_id)
+            if record is None:
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            if record.binding.owner_id != binding.owner_id:
+                raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+            operation_lock = record.operation_lock
+
+        async with operation_lock:
+            async with self._lock:
+                current = self._sessions.get(binding.voice_session_id)
+                if current is not record:
+                    raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if current.generation != binding.generation:
+                    raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                self._raise_if_shutting_down()
+                if current.state not in {"ready", "listening", "thinking", "speaking"}:
+                    raise RuntimeHostError("session_busy", 409, "Voice session is not ready to admit a turn.")
+                previous = current.admitted_turns.get(turn_id)
+                if previous is not None:
+                    return previous.model_copy(update={"duplicate": True})
+
+            receipt = await operation()
+            if receipt.accepted:
+                async with self._lock:
+                    current = self._sessions.get(binding.voice_session_id)
+                    if current is not record or current.generation != binding.generation:
+                        raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                    current.admitted_turns[turn_id] = receipt
+            return receipt
 
     async def run_if_current(
         self,
@@ -314,6 +537,7 @@ class EngineRuntimeHost:
                     raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
                 if current.generation != binding.generation:
                     raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
+                self._raise_if_shutting_down()
                 if current.state not in {"ready", "listening", "thinking", "speaking"}:
                     raise RuntimeHostError("session_busy", 409, "Voice session is not ready to admit a turn.")
             return await operation()
