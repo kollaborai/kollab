@@ -95,11 +95,12 @@ export const LEARN_TOPICS = [
       "Start or join the hub that owns the work.",
       "Give the koordinator a bounded goal, acceptance checks, and any no-go constraints.",
       "Check the task board and ask for a report when an assignment finishes.",
+      "Run /hub status to see the idle supervisor: open and stalled work, and alerts when the coordinator stops completing turns.",
       "Review the delivered changes and test evidence yourself before accepting them.",
     ],
     example:
       "Split a feature into one UI task and one test task, then ask the koordinator to report both results and the integration check.",
-    note: "A coordinator organizes work; it does not replace review or make an untested change safe to ship.",
+    note: "A coordinator organizes work; it does not replace review or make an untested change safe to ship. A supervisor alert means wakes stopped producing turns: check the provider profile, /compact status and the app log.",
   },
   {
     id: "hub-messaging",

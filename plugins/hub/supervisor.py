@@ -35,6 +35,18 @@ DEFAULT_NUDGE_GRACE = 300.0
 DEFAULT_MAX_REASSIGNMENTS = 3
 """A card requeued this many times is reported as blocked, not requeued."""
 
+DEFAULT_WAKE_INEFFICACY = 3
+"""Wakes delivered with no completed coordinator turn before alerting.
+
+Issue #283: a wake that never produces a turn (provider down, context
+overflow, compaction paused) is indistinguishable from a working wake
+unless someone counts. Once this many wakes land without a completed
+turn, the supervisor says so instead of looping in silence.
+"""
+
+DEFAULT_ALERT_COOLDOWN = 900.0
+"""Minimum seconds between stalled-coordinator alerts."""
+
 # Presence states from which a direct coordinator-originated message can
 # re-invoke an agent. "waiting" agents accept coordinator delivery, which
 # is exactly what the supervisor is.
@@ -57,10 +69,21 @@ class SupervisorDecision:
 
 @dataclass
 class SupervisorState:
-    """Cooldown bookkeeping carried between evaluate() calls."""
+    """Cooldown bookkeeping carried between evaluate() calls.
+
+    ``last_turn_end`` / ``wakes_since_turn`` / ``last_error`` are stamped
+    by the hub plugin: a completed turn proves the coordinator is alive,
+    a failed turn only explains why it is not. Wakes are counted against
+    the last completed turn so a wedged coordinator is detected rather
+    than endlessly re-woken.
+    """
 
     last_wake: float = 0.0
     nudges: Dict[str, float] = field(default_factory=dict)
+    last_turn_end: float = 0.0
+    wakes_since_turn: int = 0
+    last_error: str = ""
+    last_alert: float = 0.0
 
 
 def _online(roster: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -108,20 +131,28 @@ def evaluate(
     wake_cooldown: float = DEFAULT_WAKE_COOLDOWN,
     nudge_grace: float = DEFAULT_NUDGE_GRACE,
     max_reassignments: int = DEFAULT_MAX_REASSIGNMENTS,
+    wake_inefficacy: int = DEFAULT_WAKE_INEFFICACY,
+    alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
     state: Optional[SupervisorState] = None,
 ) -> Tuple[List[SupervisorDecision], SupervisorState]:
     """Decide what the supervisor should do this pass.
 
     Decisions in order:
-      nudge_worker      — first stall of an active card whose worker is
-                          online; one nudge per stall window.
-      requeue_stalled   — card still stalled after its nudge grace (or
-                          worker offline): back to the open queue,
-                          unassigned. Done on the ledger here so the wake
-                          text below reflects it; the plugin only logs this
-                          decision.
-      wake_coordinator  — open or stalled work exists and the coordinator
-                          is idle, throttled by ``wake_cooldown``.
+      nudge_worker             — first stall of an active card whose worker
+                                 is online; one nudge per stall window.
+      requeue_stalled          — card still stalled after its nudge grace (or
+                                 worker offline): back to the open queue,
+                                 unassigned. Done on the ledger here so the
+                                 wake text below reflects it; the plugin only
+                                 logs this decision.
+      wake_coordinator         — open or stalled work exists and the
+                                 coordinator is idle, throttled by
+                                 ``wake_cooldown``.
+      alert_coordinator_stalled — too many wakes without a completed
+                                 coordinator turn: the coordinator is wedged
+                                 and a human must see it (issue #283). The
+                                 wake still goes out, so the hub recovers by
+                                 itself the moment the blockage clears.
 
     Returns (decisions, next_state). ``state`` may be shared/mutated.
     """
@@ -242,6 +273,37 @@ def evaluate(
                 worker=str(coord.get("identity", "") or ""),
                 text="\n".join(lines),
             )
+            # Wake efficacy (issue #283): count this wake against the last
+            # COMPLETED turn. A wake whose turn errors out (context
+            # overflow, provider outage) never proves life, so enough of
+            # them in a row means the coordinator is stalled, not busy.
+            # The wake still goes out — it is also the recovery path once
+            # the blockage clears (e.g. compaction finished).
+            state.wakes_since_turn += 1
+            stalled_seconds = now - state.last_turn_end if state.last_turn_end else 0.0
+            if (
+                state.wakes_since_turn >= wake_inefficacy
+                and stalled_seconds >= stall_threshold
+                and now - state.last_alert >= alert_cooldown
+            ):
+                minutes = max(1, int(stalled_seconds // 60))
+                err = (
+                    f"; last turn error: {state.last_error}" if state.last_error else ""
+                )
+                decisions.append(
+                    SupervisorDecision(
+                        kind="alert_coordinator_stalled",
+                        worker=str(coord.get("identity", "") or ""),
+                        text=(
+                            f"coordinator has not completed a turn in"
+                            f" {minutes}m while {state.wakes_since_turn}"
+                            f" supervisor wakes were delivered{err}."
+                            " Waking cannot fix this: check the provider"
+                            " profile, /compact status and the app log."
+                        ),
+                    )
+                )
+                state.last_alert = now
             decisions.append(wake_decision)
             state.last_wake = now
             state.nudges = nudges

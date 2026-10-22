@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phone shows when it was last seen, and Revoke removes a phone in one tap.
   The loader is installable to the Home Screen and opens its verified copy.
 - Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
+- Hub: the idle supervisor now proves its wakes work. Wakes that produce no
+  completed coordinator turn are counted; once enough land while the
+  coordinator is stalled, an alert names the blocker (including the last turn
+  error) in `/hub status`, the log, attached web clients, and the configured
+  notifier channel. Undelivered worker nudges surface there too instead of
+  vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
 ## [0.18.0] - 2026-10-21
 
