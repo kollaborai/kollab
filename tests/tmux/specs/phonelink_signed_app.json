@@ -54,7 +54,7 @@
     },
     {
       "action": "shell",
-      "command": "(cd packages/kollabor-webui/frontend && PATH=\"$PWD/../../../.venv/bin:$PATH\" timeout 110 node tests/phonelink-browser-e2e.mjs 2>&1 | grep -E 'PASS|Error' | head -3); echo E2E_DONE",
+      "command": "real=$(eval echo ~$(id -un)); for c in \"$real/Library/Caches/ms-playwright\" \"$real/.cache/ms-playwright\"; do [ -d \"$c\" ] && export PLAYWRIGHT_BROWSERS_PATH=\"$c\"; done; (cd packages/kollabor-webui/frontend && PATH=\"$PWD/../../../.venv/bin:$PATH\" timeout 110 node tests/phonelink-browser-e2e.mjs 2>&1 | grep -E 'PASS|Error' | head -3); echo E2E_DONE",
       "description": "Pair, load the signed app, relaunch, and refuse a tampered copy in Chromium"
     },
     {

@@ -84,7 +84,7 @@ try {
   await page.waitForTimeout(1500);
   const scripts = fetched.filter((p) => p.endsWith(".js") || p.endsWith(".gz"));
   assert.deepEqual([...new Set(scripts)], ["/relay/v1/phone/loader.js"], "relay supplied only the loader");
-  assert.ok(await page.evaluate(() => document.querySelector("style")?.textContent.length > 1000), "app styles ran");
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll("style")].some((style) => style.textContent.length > 1000)), "app styles ran");
   await shot("phonelink-app-390");
   for (const [w, h] of [[820, 1180], [1280, 800]]) {
     await page.setViewportSize({ width: w, height: h });
