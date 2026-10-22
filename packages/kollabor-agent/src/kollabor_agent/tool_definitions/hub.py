@@ -789,7 +789,7 @@ hub_cron_add = ToolDefinition(
     examples=[
         '<hub_cron_add interval="5m">check build status</hub_cron_add>',
         '<hub_cron_add to="infra@home-server" interval="1h">'
-        "check the wireguard tunnel and report the handshake age</hub_cron_add>",
+        "check the backup job and report the last run status</hub_cron_add>",
     ],
     result_format="Cron job ID.",
     key_rules=[

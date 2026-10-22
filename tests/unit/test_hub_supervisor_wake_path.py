@@ -51,6 +51,7 @@ def _make_plugin(tmp_path, identity_name="koordinator", coordinator=True):
         "plugins.hub.supervisor_wake_cooldown": 120,
         "plugins.hub.supervisor_max_reassignments": 3,
     }
+    plugin._supervisor_alerts = []
     plugin._supervisor_state = __import__(
         "plugins.hub.supervisor", fromlist=["SupervisorState"]
     ).SupervisorState()
@@ -152,3 +153,112 @@ def test_work_format_lists_open_cards(tmp_path):
     text = plugin._format_work()
     assert "open ledger cards: 1" in text
     assert "visible work" in text
+
+
+# --- Wake efficacy and stall alerts (issue #283) -------------------------
+
+
+def test_wakes_without_a_completed_turn_alert(tmp_path):
+    """Acceptance (#283): repeated wakes that produce no completed turn
+    raise a stalled-coordinator alert instead of looping in silence."""
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger.enqueue(assigner="peridot", directive="work")
+    state = plugin._supervisor_state
+    state.last_turn_end = time.time() - 3600  # no turn for an hour
+    for _ in range(3):
+        _run(plugin._supervisor_tick(900, 0, 3))
+    assert state.wakes_since_turn == 3
+    assert plugin._supervisor_alerts, "no alert after three ineffective wakes"
+    assert "not completed a turn" in plugin._supervisor_alerts[-1][1]
+    # The wake still went out: it doubles as the recovery path.
+    assert plugin._on_message_received.await_count == 3
+
+
+def test_completed_turn_resets_wake_counter(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger.enqueue(assigner="peridot", directive="work")
+    for _ in range(2):
+        _run(plugin._supervisor_tick(900, 0, 3))
+    plugin._stamp_supervisor_turn("turn_complete", {})
+    assert plugin._supervisor_state.wakes_since_turn == 0
+    assert plugin._supervisor_state.last_turn_end > 0
+    _run(plugin._supervisor_tick(900, 0, 3))
+    assert plugin._supervisor_alerts == []
+
+
+def test_failed_turn_error_is_quoted_in_the_alert(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger.enqueue(assigner="peridot", directive="work")
+    plugin._stamp_supervisor_turn(
+        "error", {"error": "Your input exceeds the context window"}
+    )
+    state = plugin._supervisor_state
+    assert state.last_error == "Your input exceeds the context window"
+    # A failed turn does NOT reset the counter: it is not proof of life.
+    state.last_turn_end = time.time() - 7200
+    for _ in range(3):
+        _run(plugin._supervisor_tick(900, 0, 3))
+    assert any(
+        "exceeds the context window" in text for _, text in plugin._supervisor_alerts
+    )
+
+
+def test_alert_respects_its_cooldown(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger.enqueue(assigner="peridot", directive="work")
+    plugin._supervisor_state.last_turn_end = time.time() - 3600
+    for _ in range(6):
+        _run(plugin._supervisor_tick(900, 0, 3))
+    # Six wakes, one alert: the 900s alert cooldown suppresses repeats.
+    stalled_alerts = [
+        t for _, t in plugin._supervisor_alerts if "not completed a turn" in t
+    ]
+    assert len(stalled_alerts) == 1
+
+
+def test_undelivered_nudge_is_recorded_not_swallowed(tmp_path):
+    """Acceptance (#283): a nudge nobody received surfaces as an alert."""
+    plugin = _make_plugin(tmp_path)
+    card = plugin._task_ledger.enqueue(assigner="peridot", directive="stalled")
+    plugin._task_ledger.claim(card.id, "lapis")
+    plugin._task_ledger._mutate_locked(
+        card.id,
+        lambda c: setattr(c, "last_activity_at", time.time() - 1000) or True,
+    )
+    # Delivery race: discovery listed lapis for the roster (so evaluate
+    # chose a nudge), then found nobody on the delivery pass.
+    plugin._presence = SimpleNamespace(
+        discover_agents_async=AsyncMock(
+            side_effect=[
+                [
+                    {
+                        "identity": "koordinator",
+                        "state": "idle",
+                        "is_coordinator": True,
+                    },
+                    {
+                        "identity": "lapis",
+                        "state": "idle",
+                        "is_coordinator": False,
+                    },
+                ],
+                [],
+            ]
+        )
+    )
+    _run(plugin._supervisor_tick(900, 120, 3))
+    assert any(
+        "was not delivered to lapis" in text for _, text in plugin._supervisor_alerts
+    )
+
+
+def test_status_lists_supervisor_section_for_coordinator(tmp_path):
+    """Acceptance (#283): /hub status shows the supervisor even while
+    healthy — visibility on request, not only on alert."""
+    plugin = _make_plugin(tmp_path)
+    lines = plugin._supervisor_status_lines()
+    assert lines and lines[0].startswith("supervisor: 0 open, 0 stalled")
+    # Workers running no loop show nothing.
+    worker = _make_plugin(tmp_path, identity_name="lapis", coordinator=False)
+    worker._supervisor_task = None
+    assert worker._supervisor_status_lines() == []

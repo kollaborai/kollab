@@ -2081,6 +2081,60 @@ def _terminate_child(proc, timeout: float = 5.0) -> None:
             pass
 
 
+def _webui_engine_port(webui_port: int) -> Optional[int]:
+    """Find the engine URL from the Kollab WebUI process serving this port."""
+    from urllib.parse import urlparse
+
+    import psutil
+
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            if "kollabor_webui" not in " ".join(proc.info["cmdline"] or []):
+                continue
+            conns = getattr(proc, "net_connections", proc.connections)(kind="tcp")
+            if not any(
+                c.status == psutil.CONN_LISTEN and c.laddr.port == webui_port
+                for c in conns
+            ):
+                continue
+            parsed = urlparse(proc.environ().get("KOLLAB_ENGINE_URL", ""))
+            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            }:
+                return None
+            return parsed.port
+        except (psutil.Error, OSError, ValueError):
+            continue
+    return None
+
+
+def _request_webui_handover(webui_port: int) -> bool:
+    """Best-effort flush before restart; persistence does not depend on it."""
+    import urllib.error
+    import urllib.request
+
+    engine_port = _webui_engine_port(webui_port)
+    if engine_port is None:
+        return False
+    try:
+        from kollabor_engine.auth import read_token_from_disk
+
+        token = read_token_from_disk()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{engine_port}/handover",
+            data=b"",
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError, RuntimeError, ValueError):
+        return False
+
+
+
 def _stop_webui(port: int, timeout: float = 20.0) -> bool:
     """Stop the web UI listening on ``port``; True once nothing serves it.
 
@@ -2209,6 +2263,11 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
             return False
 
     if restart and webui_running(webui_port):
+        if not _request_webui_handover(webui_port):
+            # This flush is advisory only. Each WebUI session is durably
+            # registered at spawn, so a crash or unavailable endpoint cannot
+            # make persistence depend on this controlled-restart path.
+            print("  (handover endpoint unavailable; durable agent records will still be adopted)")
         print(f"\n  stopping the kollab web ui on {webui_port}...")
         if not _stop_webui(webui_port):
             print(f"Error: the web ui on port {webui_port} did not stop", file=sys.stderr)

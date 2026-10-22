@@ -125,8 +125,8 @@ def main():
 
     generate_token()
 
-    app = create_app()
     port = args.port
+    app = create_app(port=port)
     host = args.host
     log_level = args.log_level
 

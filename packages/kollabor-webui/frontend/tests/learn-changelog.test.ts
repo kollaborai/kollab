@@ -2,6 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseChangelog, whatsNewFromMarkdown } from "../src/learn/changelog.ts";
 
+test("wrapped changelog entries retain their continuation lines", () => {
+  const sections = parseChangelog(`## [Unreleased]
+### Added
+- A compact Learn modal with
+  searchable topics and \`PhoneLink\` guidance.
+  It keeps the rest of the app available.
+- A separate updates page.
+### Fixed
+  Text before any entry is not a continuation.
+- The footer layout.
+
+Unrelated paragraph.
+  This does not belong to the footer entry.
+`);
+  assert.deepEqual(sections[0].groups, [
+    { category: "Added", items: ["A compact Learn modal with searchable topics and PhoneLink guidance. It keeps the rest of the app available.", "A separate updates page."] },
+    { category: "Fixed", items: ["The footer layout."] },
+  ]);
+});
+
 test("What's New parser reads Unreleased and the newest release from Markdown", () => {
   const sections = parseChangelog(`# Changelog
 

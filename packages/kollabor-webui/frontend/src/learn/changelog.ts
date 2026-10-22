@@ -27,6 +27,7 @@ export function parseChangelog(markdown: string): ChangeSection[] {
   let date: string | undefined;
   let groups: ChangeGroup[] = [];
   let category = "Updates";
+  let activeGroup: ChangeGroup | undefined;
 
   const finish = () => {
     if (version && groups.some((group) => group.items.length > 0)) {
@@ -42,6 +43,7 @@ export function parseChangelog(markdown: string): ChangeSection[] {
       date = heading[3]?.trim() || undefined;
       groups = [];
       category = "Updates";
+      activeGroup = undefined;
       continue;
     }
 
@@ -49,17 +51,27 @@ export function parseChangelog(markdown: string): ChangeSection[] {
     const subgroup = CATEGORY_HEADING.exec(line);
     if (subgroup) {
       category = subgroup[1].trim();
+      activeGroup = undefined;
       continue;
     }
 
     const bullet = BULLET.exec(line);
-    if (!bullet) continue;
+    if (!bullet) {
+      if (/^\s{2,}\S/.test(line) && activeGroup?.items.length) {
+        const last = activeGroup.items.length - 1;
+        activeGroup.items[last] += ` ${line.trim().replace(/`([^`]+)`/g, "$1")}`;
+      } else if (line.trim()) {
+        activeGroup = undefined;
+      }
+      continue;
+    }
     let group = groups.find((item) => item.category === category);
     if (!group) {
       group = { category, items: [] };
       groups.push(group);
     }
     group.items.push(bullet[1].replace(/`([^`]+)`/g, "$1"));
+    activeGroup = group;
   }
   finish();
 

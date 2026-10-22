@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.context_compaction_plugin import (  # noqa: E402
     _TASK_INDICATORS,
+    MAX_PRESERVED_COORDINATION_CHARS,
     ContextCompactionPlugin,
 )
 
@@ -150,6 +151,53 @@ class TestCoordinationExtraction(unittest.TestCase):
             [_Msg(content="purely technical message")]
         )
         self.assertEqual(blocks, [])
+
+
+    def test_task_tool_examples_are_not_coordination_controls(self):
+        stale_task = _Msg(
+            content=(
+                "[hub channel: koordinator -> sapphire]\n"
+                "Task: an archived assignment. When complete, call task_complete "
+                "and task_checkpoint with the result."
+            ),
+            metadata={"hub_message": True, "hub_is_intended": True},
+        )
+
+        self.assertEqual(
+            ContextCompactionPlugin._extract_coordination_lines([stale_task]), []
+        )
+
+    def test_mixed_stale_task_and_go_extracts_only_go_block(self):
+        mixed = _Msg(
+            content=(
+                "[hub channel: koordinator -> sapphire]\n"
+                "Task: archived details that say task_complete when done.\n"
+                "[hub channel: koordinator -> sapphire]\n"
+                "GO — run the current assigned check and report back."
+            ),
+            metadata={"hub_message": True, "hub_is_intended": True},
+        )
+
+        blocks = ContextCompactionPlugin._extract_coordination_lines([mixed])
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("GO — run the current assigned check", blocks[0])
+        self.assertNotIn("archived details", blocks[0])
+
+
+    def test_coordination_reinjection_has_a_total_character_budget(self):
+        control = _Msg(
+            content=(
+                "[hub channel: koordinator -> sapphire]\n"
+                "GO — " + "x" * (MAX_PRESERVED_COORDINATION_CHARS * 2)
+            ),
+            metadata={"hub_message": True},
+        )
+
+        blocks = ContextCompactionPlugin._extract_coordination_lines([control])
+        self.assertLessEqual(
+            len("\n\n".join(blocks)), MAX_PRESERVED_COORDINATION_CHARS
+        )
+        self.assertIn("truncated for bounded compaction", blocks[-1])
 
 
 class TestReadinessGate(unittest.TestCase):

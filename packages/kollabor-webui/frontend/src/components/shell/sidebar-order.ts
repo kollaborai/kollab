@@ -147,20 +147,20 @@ export function groupByFolder<T extends OrderRow>(rows: T[], order: string[]): F
   return [...groups].map(([folder, list]) => ({ folder, rows: list }));
 }
 
-/** The order to save after `key` moves one place within its folder; null when it cannot move. */
-export function moveWithinFolder<T extends OrderRow>(
+/** Save a drop at an absolute position in the row's folder; invalid/no-op drops do not write. */
+export function reorderWithinFolder<T extends OrderRow>(
   groups: FolderGroup<T>[],
   key: string,
-  by: -1 | 1,
+  to: number,
   saved: string[],
 ): string[] | null {
   const group = groups.find((g) => g.rows.some((row) => row.key === key));
   if (!group) return null;
   const from = group.rows.findIndex((row) => row.key === key);
-  const to = from + by;
-  if (to < 0 || to >= group.rows.length) return null;
+  if (!Number.isInteger(to) || to < 0 || to >= group.rows.length || to === from) return null;
   const rows = [...group.rows];
-  [rows[from], rows[to]] = [rows[to], rows[from]];
+  const [moved] = rows.splice(from, 1);
+  rows.splice(to, 0, moved);
   const persistedAliases = new Set<string>();
   const persistRows = (items: T[]) => items.flatMap((row) => {
     const keys = [row.key];

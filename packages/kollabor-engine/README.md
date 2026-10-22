@@ -74,13 +74,35 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:7433/sessions
 ```
 
-Programmatic app creation:
+
+Programmatic app creation (pass the listening port to enable Web UI persistence):
 
 ```python
 from kollabor_engine import create_app
 
-app = create_app()
+app = create_app(port=7433)
 ```
+
+Calling `create_app()` without a port preserves the non-persistent lifecycle used
+by embedded/test integrations.
+
+## Web UI Agent Persistence
+
+The `kollab --web-ui` launcher starts the engine with its selected port. Only
+sessions created by that Web UI are marked persistent: the engine records a
+per-port manifest at `~/.kollab/engine/webui-<port>.json` with the daemon PID,
+process start time, identity, workspace, socket, and conversation identifier.
+The manifest is atomically updated with restrictive file permissions (user-only
+on POSIX) and excludes credentials and conversation contents. A new engine adopts only a matching live
+PID/socket/identity after the prior owner has shut down or exited, then restores
+the session and history in the Web UI. `POST /handover` flushes that metadata
+before an orderly launcher restart; crash recovery does not rely on it.
+
+Closing or restarting the Web UI/engine detaches the engine connection without
+stopping a persistent daemon. Web UI Delete and agent `/quit` remain explicit
+stop actions. Agents launched by the terminal/CLI are not marked persistent and
+keep their existing stop-on-engine-shutdown behavior.
+
 
 ## API Surface
 
@@ -93,6 +115,8 @@ Health and metadata endpoints:
 | `GET` | `/status` | session count, providers, MCP status |
 | `GET` | `/ready` | profile/API credential readiness |
 
+| `POST` | `/handover` | flush current WebUI-owned session metadata before a controlled restart; never stops a daemon |
+
 Session and message endpoints:
 
 | Method | Path | Notes |
@@ -100,7 +124,7 @@ Session and message endpoints:
 | `POST` | `/sessions` | create a session; `workspace` is the folder its daemon runs in (default the engine's own), and the session it creates reports that folder, never null |
 | `GET` | `/sessions` | list sessions |
 | `GET` | `/sessions/{session_id}` | inspect one session |
-| `DELETE` | `/sessions/{session_id}` | shut down and remove a session |
+| `DELETE` | `/sessions/{session_id}` | shut down and remove a session; a removal that stops the agent but cannot update its owner record returns 503 with a retry hint and keeps the session listed (`deletion_pending`), and a retried call clears the record without stopping it again |
 | `GET` | `/sessions/{session_id}/history` | read conversation history |
 | `DELETE` | `/sessions/{session_id}/history` | clear history, preserving system prompt |
 | `POST` | `/sessions/{session_id}/message` | send one turn; returns SSE |
@@ -149,8 +173,9 @@ reliable service boundary:
 - The session MCP connect endpoint currently reports `connecting` but does not
   start a connection.
 - Anthropic profile testing imports a missing legacy `APIService`.
-- Shutdown cleans up sessions, but provider-registry and background watcher
-  lifecycle still need a first-class lifespan model.
+- Provider-registry and background watcher lifecycle still need a first-class
+  lifespan model. WebUI-owned daemons now detach and reattach across engine
+  shutdown; ordinary CLI sessions are still stopped by the engine.
 
 ## Roadmap
 

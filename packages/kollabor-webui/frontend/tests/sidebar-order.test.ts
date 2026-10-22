@@ -7,7 +7,7 @@ import {
   localConversationOrderKey,
   localOfflineOrderKey,
   localSessionOrderKey,
-  moveWithinFolder,
+  reorderWithinFolder,
   orderKey,
   workspaceName,
 } from "../src/components/shell/sidebar-order.ts";
@@ -24,12 +24,12 @@ test("rows group by folder and follow the saved order; unsaved rows keep arrival
   assert.deepEqual(groups[1].rows.map((r) => r.key), [orderKey("/a", "peridot"), orderKey("/a", "lapis")]);
 });
 
-test("moving swaps within the folder, keeps hidden spots, and stops at the edges", () => {
+test("dropping reorders within the folder, retains hidden keys, and ignores no-op moves", () => {
   const groups = groupByFolder([row("/a", "x"), row("/a", "y")], []);
   const hidden = orderKey("/z", "gone");
-  const next = moveWithinFolder(groups, orderKey("/a", "y"), -1, [hidden]);
+  const next = reorderWithinFolder(groups, orderKey("/a", "y"), 0, [hidden]);
   assert.deepEqual(next, [orderKey("/a", "y"), orderKey("/a", "x"), hidden]);
-  assert.equal(moveWithinFolder(groups, orderKey("/a", "x"), -1, []), null);
+  assert.equal(reorderWithinFolder(groups, orderKey("/a", "x"), 0, []), null);
 });
 
 
@@ -39,6 +39,36 @@ test("remote order keys are scoped by network and device without changing local 
   assert.notEqual(networkOne, orderKey("/w/one", "lapis@laptop", ["remote", "network-two", "laptop"]));
   assert.notEqual(networkOne, orderKey("/w/one", "lapis@laptop", ["remote", "network-one", "desktop"]));
   assert.notEqual(networkOne, orderKey("/w/one", "lapis@laptop"));
+});
+
+test("every drag position preserves the other rows, workspaces, and hidden keys", () => {
+  const hidden = orderKey("/hidden", "hidden");
+  for (let count = 1; count <= 6; count += 1) {
+    const moving = Array.from({ length: count }, (_, at) => row("/a", `agent-${at}`));
+    const other = [row("/b", "first"), row("/b", "last")];
+    const groups = groupByFolder([...moving, ...other], []);
+    for (let from = 0; from < count; from += 1) {
+      for (let to = 0; to < count; to += 1) {
+        const next = reorderWithinFolder(groups, moving[from].key, to, [hidden]);
+        if (from === to) {
+          assert.equal(next, null);
+          continue;
+        }
+        assert.ok(next);
+        const restored = groupByFolder([...moving, ...other], next);
+        const keys = restored[0].rows.map((item) => item.key);
+        assert.equal(keys[to], moving[from].key);
+        assert.deepEqual(keys.filter((key) => key !== moving[from].key), moving.filter((_, at) => at !== from).map((item) => item.key));
+        assert.deepEqual(restored[1].rows, other);
+        assert.equal(next.filter((key) => key === hidden).length, 1);
+        assert.equal(new Set(next).size, next.length);
+      }
+    }
+    for (const invalid of [-1, count, 0.5, NaN, Infinity]) {
+      assert.equal(reorderWithinFolder(groups, moving[0].key, invalid, []), null);
+    }
+    assert.equal(reorderWithinFolder(groups, "missing-agent", 0, []), null);
+  }
 });
 
 test("workspace labels handle POSIX paths, Windows paths, and empty folders", () => {
@@ -67,6 +97,43 @@ const orderClient = (
   isConflict: (reason: unknown) => typeof reason === "object" && reason !== null && "status" in reason && reason.status === 409,
   isRecoveryRequired: (reason: unknown) => typeof reason === "object" && reason !== null && "status" in reason && reason.status === 422,
   errorText: (reason: unknown) => reason instanceof Error ? reason.message : String(reason),
+});
+
+test("dragging holds polled ranks stable and cancellation releases the hold once", () => {
+  const original = { order: ["a", "b"], revision: 2, warning: null };
+  const newer = { order: ["b", "a"], revision: 3, warning: null };
+  const controller = createSidebarOrderController(orderClient(async () => original, async () => newer), () => {});
+  controller.sync(controller.stamp(), original);
+  const oldPoll = controller.stamp();
+  const release = controller.beginDrag();
+  controller.sync(oldPoll, newer);
+  controller.sync(controller.stamp(), newer);
+  assert.deepEqual(controller.snapshot().order, original.order);
+  release();
+  release();
+  controller.sync(oldPoll, newer);
+  assert.deepEqual(controller.snapshot().order, original.order);
+  controller.sync(controller.stamp(), newer);
+  assert.deepEqual(controller.snapshot().order, newer.order);
+});
+
+test("a drop uses the drag-start revision so concurrent moves conflict and refresh", async () => {
+  const original = { order: ["a", "b"], revision: 2, warning: null };
+  const newer = { order: ["other-client"], revision: 3, warning: null };
+  const revisions: number[] = [];
+  const controller = createSidebarOrderController(orderClient(async (_order, revision) => {
+    revisions.push(revision);
+    throw Object.assign(new Error("conflict"), { status: 409 });
+  }, async () => newer), () => {});
+  controller.sync(controller.stamp(), original);
+  const release = controller.beginDrag();
+  controller.sync(controller.stamp(), newer);
+  const dropped = controller.save(["b", "a"]);
+  release();
+  await dropped;
+  assert.deepEqual(revisions, [2]);
+  assert.deepEqual(controller.snapshot().order, newer.order);
+  assert.match(controller.snapshot().error || "", /another client/i);
 });
 
 test("failed writes restore the last confirmed order and ignore stale polls", async () => {
@@ -189,7 +256,7 @@ test("duplicate local sessions use stable session keys with persona/offline anch
   assert.deepEqual(rows.map((row) => row.key), [sessionA, sessionB, offline]);
   assert.equal(new Set(rows.map((row) => row.key)).size, rows.length);
 
-  const moved = moveWithinFolder(groupByFolder(rows, []), sessionB, -1, []);
+  const moved = reorderWithinFolder(groupByFolder(rows, []), sessionB, 0, []);
   assert.deepEqual(moved, [sessionB, conversationB, personaKey, sessionA, localConversationOrderKey(folder, identity, "conversation-a"), offline]);
   assert.equal(moved?.filter((key) => key === personaKey).length, 1);
 
@@ -224,7 +291,7 @@ test("conversation fallbacks preserve exact interleaving when session IDs rotate
   const groups = groupByFolder(initial, []);
   assert.deepEqual(groups[0].rows.map((row) => row.session?.conversation_id), ["conv-b", "conv-a", "conv-c"]);
 
-  const saved = moveWithinFolder(groups, sessionA, 1, []);
+  const saved = reorderWithinFolder(groups, sessionA, 2, []);
   const expectedB = localSessionOrderKey(folder, lapis, "b-live");
   const expectedC = orderKey(folder, "sapphire");
   assert.deepEqual(saved, [
@@ -254,7 +321,7 @@ test("same-conversation duplicate rows remain individually movable without key c
   ], [], []);
   assert.equal(new Set(rows.map((row) => row.key)).size, 2);
   const groups = groupByFolder(rows, []);
-  const moved = moveWithinFolder(groups, rows[1].key, -1, []);
+  const moved = reorderWithinFolder(groups, rows[1].key, 0, []);
   assert.deepEqual(moved?.slice(0, 2), [rows[1].key, localConversationOrderKey(folder, identity, "same-conversation")]);
 });
 
@@ -270,7 +337,7 @@ test("specific conversation ranks preserve interleaving when session IDs rotate"
   ], [], []);
   const sessionA = localSessionOrderKey(folder, lapis, "a-live");
   const groups = groupByFolder(initial, []);
-  const saved = moveWithinFolder(groups, sessionA, 1, []);
+  const saved = reorderWithinFolder(groups, sessionA, 2, []);
   const sessionB = localSessionOrderKey(folder, lapis, "b-live");
   const personaSapphire = orderKey(folder, "sapphire");
   assert.deepEqual(saved, [
@@ -300,7 +367,7 @@ test("two rows sharing a conversation stay unique and movable", () => {
   ];
   const rows = buildLocalOrderRows(sessions, [], []);
   assert.equal(new Set(rows.map((row) => row.key)).size, 2);
-  const moved = moveWithinFolder(groupByFolder(rows, []), rows[1].key, -1, []);
+  const moved = reorderWithinFolder(groupByFolder(rows, []), rows[1].key, 0, []);
   assert.deepEqual(moved?.slice(0, 3), [
     rows[1].key,
     localConversationOrderKey(folder, identity, "shared-conversation"),

@@ -1,0 +1,803 @@
+"""Phone-only app access over Kollab's existing /connect transport.
+
+Each phone has an isolated two-party relay room, explicit local approval, and
+ephemeral session encryption inside the normal authenticated relay envelopes.
+Only the engine's own ASGI application is reachable; it is never a URL proxy.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import errno
+import hashlib
+import json
+import os
+import re
+import secrets
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import unquote, urlencode, urlsplit
+
+import aiohttp
+import dns.asyncresolver
+import segno
+from nacl.public import Box, PrivateKey, PublicKey
+from nacl.secret import SecretBox
+
+from kollabor_config.config_utils import get_config_directory
+from plugins.hub.dns.discovery import _PublicResolver, discover
+from plugins.hub.dns.discovery_store import DiscoveryStore
+from plugins.hub.relay_client import RelayClient
+from plugins.hub.relay_state import ID, KEY, RelayError, canonical_origin, strict_json
+
+from .auth import get_token, read_token_from_disk
+from .hub_bridge import network_daemons
+
+PHONE_PROTOCOL = "kollab-phonelink/1"
+MAX_PHONES = 8
+CHUNK = 8192
+APP_CHUNK = 12288  # the relay caps one payload at 24 KiB after two layers of base64
+MAX_BODY = 8 * 1024 * 1024
+API_ROOTS = frozenset(
+    {
+        "sessions", "agents", "profiles", "models", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
+        "prompts", "phone-app",
+    }
+)
+APP_PROTOCOL = "kollab-phonelink-app/1"
+APP_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+SEEN_SAVE_SECONDS = 60
+
+
+def pairing_code(key: str) -> str:
+    """The code both screens show for a phone key: 12 characters in groups of four."""
+    head = key[:12].upper()
+    return "-".join(head[i : i + 4] for i in range(0, 12, 4))
+
+
+def host_fingerprint(host_key: str) -> str:
+    """What the computer shows and the phone recomputes from the key in its QR."""
+    digest = hashlib.sha256(b"kollab-phonelink-fingerprint/1\n" + bytes.fromhex(host_key)).hexdigest()[:20]
+    return "-".join(digest[i : i + 4] for i in range(0, 20, 4)).upper()
+
+
+def app_directory() -> Path | None:
+    """The built phone app. It is served only by this computer, never by the relay."""
+    try:
+        from kollabor_webui.server import _assistant_static_dir
+    except ImportError:
+        return None
+    root = _assistant_static_dir()
+    candidate = root / "phonelink" / "app" if root else None
+    return candidate if candidate and (candidate / "phone-app.js.gz").is_file() else None
+
+
+def signed_app_manifest(directory: Path, host_key: str, sign) -> bytes:
+    """List the app files, then sign that list's hash with the host's device key.
+
+    The phone recomputes the hash from `serial` and `files` and checks the
+    signature against the host key from its QR before it runs any of the code.
+    """
+    files = []
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file() or not APP_NAME.fullmatch(path.name):
+            continue
+        data = path.read_bytes()
+        files.append({"name": path.name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+    if not files:
+        raise PhoneLinkError("The phone app is not built on this computer.")
+    serial = int(max(path.stat().st_mtime for path in directory.iterdir() if path.is_file()))
+    bundle = app_bundle_hash(serial, files)
+    signature = sign(app_signed_message(host_key, bundle))
+    return json.dumps(
+        {"protocol": APP_PROTOCOL, "serial": serial, "files": files, "bundle": bundle, "host": host_key,
+         "signature": signature},
+        separators=(",", ":"),
+    ).encode()
+
+
+def app_bundle_hash(serial: int, files: list[dict]) -> str:
+    listing = f"{serial}\n" + "\n".join(f"{f['name']} {f['sha256']} {f['size']}" for f in files)
+    return hashlib.sha256(listing.encode()).hexdigest()
+
+
+def app_signed_message(host_key: str, bundle: str) -> bytes:
+    return f"{APP_PROTOCOL}\n{host_key}\n{bundle}".encode()
+
+
+class PhoneLinkError(ValueError):
+    pass
+
+
+def _save(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".phone-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def session_keys(shared: bytes, host_session: str, phone_session: str) -> tuple[bytes, bytes]:
+    binding = PHONE_PROTOCOL.encode() + bytes.fromhex(host_session + phone_session)
+    return (
+        hashlib.sha256(shared + binding + b"phone-to-host").digest(),
+        hashlib.sha256(shared + binding + b"host-to-phone").digest(),
+    )
+
+
+@dataclass
+class PhoneSession:
+    incoming: SecretBox
+    outgoing: SecretBox
+    host_session: str
+    phone_session: str
+    received: int = -1
+    sent: int = 0
+    used: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class HttpExchange:
+    method: str
+    path: str
+    headers: list
+    size: int
+    body: bytearray = field(default_factory=bytearray)
+    events: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=16))
+    pending: dict | None = None
+    static: tuple[str, bytes] | None = None
+    task: asyncio.Task | None = None
+    used: float = field(default_factory=time.monotonic)
+    sequence: int = 0
+
+
+class PhoneLink:
+    def __init__(self, app, directory: Path | None = None):
+        self.app = app
+        self.directory = directory or get_config_directory() / "phonelink"
+        self.records: dict[str, dict] = {}
+        self.clients: dict[str, RelayClient] = {}
+        self.sessions: dict[str, PhoneSession] = {}
+        self.exchanges: dict[tuple[str, str], HttpExchange] = {}
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+        self._loaded = False
+        self._owner_fd: int | None = None
+        self._network_cache: tuple[float, dict | None] = (0, None)
+        self._capabilities: dict[str, tuple[float, bool]] = {}
+        self._closed = False
+
+    async def network(self) -> dict | None:
+        if time.monotonic() - self._network_cache[0] < 5:
+            return self._network_cache[1]
+        selected = None
+        async for row, status in network_daemons():
+            # network_status is the existing local /connect interface. Its
+            # display contract is '<network> via <domain>', or just <domain>.
+            domain = str(status.get("network", "")).rpartition(" via ")[-1]
+            try:
+                origin = canonical_origin("https://" + domain)
+            except RelayError:
+                continue
+            selected = {
+                "origin": origin,
+                "network": status["network"],
+                "device": status.get("device", ""),
+                "workspace": row.get("workspace", ""),
+            }
+            break
+        self._network_cache = (time.monotonic(), selected)
+        return selected
+
+    async def directory_ready(self, origin: str) -> bool:
+        cached = self._capabilities.get(origin)
+        if cached and time.monotonic() - cached[0] < 30:
+            return cached[1]
+        # Exactly the discovery + durable publisher pin used by /connect.
+        result = await discover(origin)
+        await asyncio.to_thread(DiscoveryStore(self.directory / "discovery").accept, result)
+        if result.manifest.get("endpoints", {}).get("control") != origin + "/relay/v1":
+            return False
+        connector = aiohttp.TCPConnector(
+            resolver=_PublicResolver(dns.asyncresolver.Resolver(), ()), use_dns_cache=False
+        )
+        async with aiohttp.ClientSession(
+            connector=connector, trust_env=False, timeout=aiohttp.ClientTimeout(total=10)
+        ) as http:
+            async with http.get(origin + "/relay/v1/phone/status", allow_redirects=False) as response:
+                if response.status != 200:
+                    ready = False
+                else:
+                    raw = await response.content.read(2049)
+                    data = strict_json(raw, limit=2048)
+                    ready = data.get("protocol") == PHONE_PROTOCOL and data.get("ready") is True
+        self._capabilities[origin] = (time.monotonic(), ready)
+        return ready
+
+    def _claim_owner(self) -> int:
+        """One engine owns the device-wide cache and all of its live rooms."""
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(
+            self.directory / "owner.lock",
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            if os.name == "nt":  # pragma: no cover - native Windows lock
+                import msvcrt
+
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise PhoneLinkError(
+                    "Another Kollab engine is managing PhoneLink on this computer. "
+                    "Manage phones there, or close that engine and try again."
+                ) from None
+            raise
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self._loaded:
+                return
+            try:
+                owner_fd = self._claim_owner()
+            except OSError:
+                raise PhoneLinkError(
+                    "PhoneLink state could not be locked. Its saved data has been preserved."
+                ) from None
+            path = self.directory / "phones.json"
+            try:
+                data = strict_json(path.read_bytes(), limit=32768)
+                records = data["phones"]
+                if data.get("version") != 1 or not isinstance(records, dict) or len(records) > MAX_PHONES:
+                    raise ValueError()
+                for identifier, row in records.items():
+                    if not ID.fullmatch(identifier) or not isinstance(row, dict):
+                        raise ValueError()
+                    canonical_origin(row["origin"])
+                    if (
+                        not isinstance(row["name"], str)
+                        or not 1 <= len(row["name"]) <= 48
+                        or not row["name"].isprintable()
+                    ):
+                        raise ValueError()
+                    if type(row["expires"]) is not int or type(row["created"]) is not int:
+                        raise ValueError()
+                    if not isinstance(row["key"], str) or (row["key"] and not KEY.fullmatch(row["key"])):
+                        raise ValueError()
+                    if not KEY.fullmatch(row.setdefault("host", "")) and row["host"]:
+                        raise ValueError()
+                    if type(row.setdefault("seen", 0)) is not int:
+                        raise ValueError()
+                self.records = records
+            except FileNotFoundError:
+                self.records = {}
+            except OSError, ValueError, KeyError, TypeError:
+                os.close(owner_fd)
+                raise PhoneLinkError("Saved PhoneLink data could not be read. It has been preserved.") from None
+            except BaseException:
+                os.close(owner_fd)
+                raise
+            self._owner_fd = owner_fd
+            self._loaded = True
+            self._closed = False
+            self._task = asyncio.create_task(self._maintain(), name="kollab-phonelink")
+
+    def _persist(self) -> None:
+        _save(self.directory / "phones.json", {"version": 1, "phones": self.records})
+
+    async def _client(self, identifier: str) -> RelayClient:
+        if identifier in self.clients:
+            return self.clients[identifier]
+        row = self.records[identifier]
+        client = RelayClient(self.directory, state_dir=self.directory / identifier)
+        if row["key"]:
+            # The locally approved metadata pin is authoritative. Recover a
+            # crash after its save and before the transport's separate save.
+            client.approve(row["key"])
+        client.set_request_handler(lambda peer, method, payload: self._receive(identifier, peer, method, payload))
+        client.add_peer_session_listener(lambda _: self._invalidate(identifier))
+        self.clients[identifier] = client
+        try:
+            await client.connect(row["origin"], ws_url=row["origin"].replace("https://", "wss://", 1) + "/relay/v1/ws")
+            if self.records.get(identifier) is not row:
+                raise PhoneLinkError("That invitation has been removed.")
+        except BaseException:
+            self.clients.pop(identifier, None)
+            await client.close()
+            raise
+        return client
+
+    def _invalidate(self, identifier: str) -> None:
+        self.sessions.pop(identifier, None)
+        for key, exchange in tuple(self.exchanges.items()):
+            if key[0] == identifier:
+                if exchange.task:
+                    exchange.task.cancel()
+                self.exchanges.pop(key, None)
+
+    async def _maintain(self) -> None:
+        try:
+            while not self._closed:
+                if not self.records:
+                    await asyncio.sleep(5)
+                    continue
+                async with self._lock:
+                    for identifier, row in tuple(self.records.items()):
+                        expired = not row["key"] and row["expires"] < time.time()
+                        if expired:
+                            self._invalidate(identifier)
+                            client = self.clients.pop(identifier, None)
+                            if client:
+                                await client.close()
+                    for key, exchange in tuple(self.exchanges.items()):
+                        if time.monotonic() - exchange.used > 45:
+                            if exchange.task:
+                                exchange.task.cancel()
+                            self.exchanges.pop(key, None)
+                # Saved phone approval is device-wide. A busy or absent agent
+                # daemon must not disconnect it, and connection attempts must
+                # never hold the lock needed to revoke another phone.
+                for identifier, row in tuple(self.records.items()):
+                    if identifier not in self.clients and (row["key"] or row["expires"] >= time.time()):
+                        try:
+                            if await self.directory_ready(row["origin"]) and identifier in self.records:
+                                await self._client(identifier)
+                        except Exception:
+                            pass  # unavailable transport preserves the saved identity
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            pass
+
+    async def status(self, *, refresh: bool = False) -> dict:
+        await self.start()
+        if refresh:
+            self._network_cache = (0, None)
+            self._capabilities.clear()
+        network = await self.network()
+        state, message = (
+            "connect_needed",
+            "PhoneLink needs a Kollab connection. Open Network to check or connect this computer.",
+        )
+        if network:
+            try:
+                ready = await self.directory_ready(network["origin"])
+                state = "ready" if ready else "service_update"
+                message = (
+                    "Scan with your phone's camera, then approve it here."
+                    if ready
+                    else "Your connection service needs a PhoneLink update before it can open Kollab on your phone."
+                )
+            except Exception:
+                state, message = (
+                    "offline",
+                    "The connection service could not be reached. Check your connection and try again.",
+                )
+        phones = []
+        for identifier, row in self.records.items():
+            client = self.clients.get(identifier)
+            peers = client.peers() if client else []
+            pending = []
+            if not row["key"] and row["expires"] >= time.time():
+                pending = [{"key": p["key"], "code": pairing_code(p["key"])} for p in peers if not p["approved"]]
+            session = self.sessions.get(identifier)
+            connected = bool(
+                session
+                and client
+                and client.status()["state"] == "online"
+                and any(p["key"] == row["key"] and p["session"] == session.phone_session for p in peers)
+                and time.monotonic() - session.used < 45
+            )
+            phones.append(
+                {
+                    "id": identifier,
+                    "name": row["name"],
+                    "linked": bool(row["key"]),
+                    "connected": connected,
+                    "expires_at": row["expires"],
+                    "last_seen": row["seen"] or None,
+                    "fingerprint": host_fingerprint(row["host"]) if row["host"] else "",
+                    "pending": pending,
+                }
+            )
+        return {
+            "state": state,
+            "message": message,
+            "network": network["network"] if network else "",
+            "device": network["device"] if network else "",
+            "phones": phones,
+        }
+
+    async def offer(self, name: str) -> dict:
+        await self.start()
+        if not isinstance(name, str) or len(name.strip()) > 48 or (name.strip() and not name.strip().isprintable()):
+            raise PhoneLinkError("Use a phone name of at most 48 printable characters.")
+        status = await self.status(refresh=True)
+        if status["state"] != "ready":
+            raise PhoneLinkError(status["message"])
+        network = await self.network()
+        async with self._lock:
+            if len(self.records) >= MAX_PHONES:
+                raise PhoneLinkError("Up to eight phones can be saved. Remove a phone before adding another.")
+            identifier = secrets.token_hex(16)
+            self.records[identifier] = {
+                "name": name.strip() or "My Phone",
+                "origin": network["origin"],
+                "key": "",
+                "host": "",
+                "seen": 0,
+                "created": int(time.time()),
+                "expires": int(time.time()) + 300,
+            }
+        try:
+            client = await self._client(identifier)
+            async with self._lock:
+                if identifier not in self.records:
+                    raise PhoneLinkError("That invitation has been removed.")
+                self._persist()
+        except BaseException:
+            async with self._lock:
+                self.records.pop(identifier, None)
+                self._persist()
+                client = self.clients.pop(identifier, None)
+                if client:
+                    await client.close()
+            raise
+        async with self._lock:
+            if identifier not in self.records:
+                raise PhoneLinkError("That invitation has been removed.")
+            self.records[identifier]["host"] = client.public_key
+            self._persist()
+            fragment = urlencode(
+                {
+                    "v": "1",
+                    "id": identifier,
+                    "room": client.state.room,
+                    "host": client.public_key,
+                    "expires": self.records[identifier]["expires"],
+                }
+            )
+            link = network["origin"] + "/relay/v1/phone/#" + fragment
+            return {
+                "id": identifier,
+                "name": self.records[identifier]["name"],
+                "expires_at": self.records[identifier]["expires"],
+                "fingerprint": host_fingerprint(client.public_key),
+                "link": link,
+                "qr_svg": segno.make(link, error="m").svg_inline(scale=4, border=4, dark="#000", light="#fff"),
+            }
+
+    async def approve(self, identifier: str, key: str) -> dict:
+        await self.start()
+        async with self._lock:
+            row = self.records.get(identifier)
+            client = self.clients.get(identifier)
+            if not row or not client or row["key"] or row["expires"] < time.time():
+                raise PhoneLinkError("That invitation is no longer waiting for approval. Create a new QR code.")
+            if not any(peer["key"] == key and not peer["approved"] for peer in client.peers()):
+                raise PhoneLinkError("That phone is no longer waiting to connect.")
+            # Pin in durable metadata first; no incoming request runs before
+            # both metadata and the existing transport's approval are saved.
+            row["key"] = key
+            try:
+                self._persist()
+                client.approve(key)
+            except BaseException:
+                row["key"] = ""
+                self._persist()
+                raise
+        return await self.status()
+
+    async def revoke(self, identifier: str) -> dict:
+        await self.start()
+        async with self._lock:
+            row = self.records.get(identifier)
+            if row is None:
+                raise PhoneLinkError("That phone is no longer saved.")
+            del self.records[identifier]
+            try:
+                self._persist()
+            except BaseException:
+                self.records[identifier] = row
+                raise
+            self._invalidate(identifier)
+            client = self.clients.pop(identifier, None)
+            if client:
+                # Disconnect the whole phone-only room. It cannot route to
+                # any agent-network peer, and no identity files are deleted.
+                await client.close()
+        return await self.status()
+
+    async def _receive(self, identifier: str, peer: str, method: str, payload: dict) -> dict:
+        row = self.records.get(identifier)
+        client = self.clients.get(identifier)
+        if not row or row["key"] != peer or not client:
+            raise RelayError("phone is not approved")
+        phone_session = next((p["session"] for p in client.peers() if p["key"] == peer), "")
+        host_session = client.status()["session"]
+        if method == "phone_session":
+            if not isinstance(payload.get("public_key"), str) or not KEY.fullmatch(payload["public_key"]):
+                raise RelayError("invalid phone session key")
+            private = PrivateKey.generate()
+            shared = Box(private, PublicKey(bytes.fromhex(payload["public_key"]))).shared_key()
+            incoming, outgoing = session_keys(shared, host_session, phone_session)
+            self._invalidate(identifier)
+            self.sessions[identifier] = PhoneSession(
+                SecretBox(incoming), SecretBox(outgoing), host_session, phone_session
+            )
+            return {"public_key": private.public_key.encode().hex(), "name": row["name"], "protocol": PHONE_PROTOCOL}
+        session = self.sessions.get(identifier)
+        if (
+            method != "phone_http"
+            or not session
+            or (session.host_session, session.phone_session) != (host_session, phone_session)
+        ):
+            raise RelayError("phone session is unavailable")
+        try:
+            raw = base64.b64decode(payload["packet"], validate=True)
+            request = strict_json(session.incoming.decrypt(raw), limit=16384)
+            sequence = request.pop("seq")
+            if type(sequence) is not int or sequence <= session.received:
+                raise ValueError()
+            session.received = sequence
+        except Exception:
+            raise RelayError("invalid phone session packet") from None
+        session.used = time.monotonic()
+        self._touch(row)
+        try:
+            result = await self._http(identifier, request)
+        except PhoneLinkError as exc:
+            result = {"error": str(exc)}
+        if self.sessions.get(identifier) is not session:
+            raise RelayError("phone session changed")
+        result["seq"] = session.sent
+        session.sent += 1
+        return {
+            "packet": base64.b64encode(
+                session.outgoing.encrypt(json.dumps(result, separators=(",", ":")).encode())
+            ).decode()
+        }
+
+    def _touch(self, row: dict) -> None:
+        """Remember when this phone last spoke; saved at most once a minute."""
+        now = int(time.time())
+        if now - row["seen"] >= SEEN_SAVE_SECONDS:
+            row["seen"] = now
+            try:
+                self._persist()
+            except OSError:
+                pass  # last-seen is informational; never fail the phone's request
+
+    def _phone_app(self, identifier: str, path: str) -> tuple[str, bytes]:
+        directory = app_directory()
+        client = self.clients.get(identifier)
+        if directory is None or client is None:
+            raise PhoneLinkError("The phone app is not built on this computer.")
+        name = unquote(urlsplit(path).path).removeprefix("/phone-app/")
+        if name == "manifest.json":
+            return "application/json", signed_app_manifest(directory, client.public_key, client.sign)
+        if not APP_NAME.fullmatch(name) or not (directory / name).is_file() or (directory / name).is_symlink():
+            raise PhoneLinkError("That phone app file does not exist.")
+        return "application/octet-stream", (directory / name).read_bytes()
+
+    async def _http(self, phone: str, request: dict) -> dict:
+        operation = request.get("op")
+        identifier = request.get("id")
+        if not isinstance(identifier, str) or not ID.fullmatch(identifier):
+            raise PhoneLinkError("Invalid app request.")
+        key = (phone, identifier)
+        exchange = self.exchanges.get(key)
+        if operation == "start":
+            if exchange or sum(k[0] == phone for k in self.exchanges) >= 16:
+                raise PhoneLinkError("Too many app requests. Try again shortly.")
+            method, path, headers, size = (request.get(n) for n in ("method", "path", "headers", "size"))
+            try:
+                parsed = urlsplit(path) if isinstance(path, str) else None
+            except ValueError:
+                raise PhoneLinkError("Invalid app address.") from None
+            decoded = unquote(parsed.path) if parsed else ""
+            if (
+                method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                or not parsed
+                or parsed.scheme
+                or parsed.netloc
+                or not decoded.startswith("/")
+                or "\\" in decoded
+                or "\x00" in decoded
+                or any(part in {".", ".."} for part in decoded.split("/"))
+                or parsed.fragment
+                or decoded.split("/")[1] not in API_ROOTS
+            ):
+                raise PhoneLinkError("This action is available only on the computer.")
+            if type(size) is not int or not 0 <= size <= MAX_BODY or not isinstance(headers, list):
+                raise PhoneLinkError("App request is too large.")
+            clean_headers = []
+            for entry in headers:
+                if (
+                    not isinstance(entry, list)
+                    or len(entry) != 2
+                    or any(not isinstance(v, str) or len(v) > 2048 or "\r" in v or "\n" in v for v in entry)
+                ):
+                    raise PhoneLinkError("Invalid app headers.")
+                if entry[0].lower() in {"content-type", "accept"}:
+                    clean_headers.append(entry)
+            exchange = self.exchanges[key] = HttpExchange(method, path, clean_headers, size)
+            if decoded.split("/")[1] == "phone-app":
+                if method != "GET" or size:
+                    self.exchanges.pop(key, None)
+                    raise PhoneLinkError("The phone app can only be read.")
+                try:
+                    exchange.static = self._phone_app(phone, path)
+                except PhoneLinkError:
+                    self.exchanges.pop(key, None)
+                    raise
+            return {"ok": True}
+        if exchange is None:
+            raise PhoneLinkError("This app request has ended. Try again.")
+        exchange.used = time.monotonic()
+        if operation == "write":
+            try:
+                chunk = base64.b64decode(request["data"], validate=True)
+            except KeyError, ValueError, TypeError:
+                raise PhoneLinkError("Invalid upload chunk.") from None
+            if (
+                exchange.task
+                or request.get("offset") != len(exchange.body)
+                or len(chunk) > CHUNK
+                or len(exchange.body) + len(chunk) > exchange.size
+            ):
+                raise PhoneLinkError("Upload changed or exceeded its limit.")
+            exchange.body.extend(chunk)
+            return {"offset": len(exchange.body)}
+        if operation == "run":
+            if exchange.task is None:
+                if len(exchange.body) != exchange.size:
+                    raise PhoneLinkError("Upload is incomplete.")
+                serve = self._serve_static if exchange.static else self._serve
+                exchange.task = asyncio.create_task(serve(exchange), name="kollab-phone-http")
+            return {"ok": True}
+        if operation == "cancel":
+            if exchange.task:
+                exchange.task.cancel()
+            self.exchanges.pop(key, None)
+            return {"ok": True}
+        if operation == "read" and exchange.task:
+            try:
+                if exchange.pending is not None:
+                    event, exchange.pending = exchange.pending, None
+                else:
+                    event = await asyncio.wait_for(exchange.events.get(), timeout=15)
+            except TimeoutError:
+                return {"type": "waiting"}
+            if event.get("type") == "data":
+                # Drain queued token events into one bounded packet. One relay
+                # round trip per token would make fast chat streams fall behind.
+                body = bytearray(base64.b64decode(event["data"]))
+                limit = APP_CHUNK if exchange.static else CHUNK
+                while len(body) < limit:
+                    try:
+                        extra = exchange.events.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if extra.get("type") != "data":
+                        exchange.pending = extra
+                        break
+                    chunk = base64.b64decode(extra["data"])
+                    if len(body) + len(chunk) > limit:
+                        exchange.pending = extra
+                        break
+                    body.extend(chunk)
+                event = {"type": "data", "data": base64.b64encode(body).decode()}
+            if event.get("type") in ("end", "error"):
+                self.exchanges.pop(key, None)
+            return event
+        raise PhoneLinkError("Unknown app request.")
+
+    async def _serve_static(self, exchange: HttpExchange) -> None:
+        content_type, body = exchange.static
+        await exchange.events.put({"type": "headers", "status": 200, "headers": [["content-type", content_type]]})
+        for offset in range(0, len(body), APP_CHUNK):
+            await exchange.events.put(
+                {"type": "data", "data": base64.b64encode(body[offset : offset + APP_CHUNK]).decode()}
+            )
+        await exchange.events.put({"type": "end"})
+
+    async def _serve(self, exchange: HttpExchange) -> None:
+        parsed = urlsplit(exchange.path)
+        headers = [(k.lower().encode(), v.encode()) for k, v in exchange.headers]
+        headers += [
+            (b"authorization", ("Bearer " + (get_token() or read_token_from_disk())).encode()),
+            (b"host", b"127.0.0.1"),
+        ]
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": exchange.method,
+            "scheme": "http",
+            "path": unquote(parsed.path),
+            "raw_path": parsed.path.encode(),
+            "query_string": parsed.query.encode(),
+            "root_path": "",
+            "headers": headers,
+            "client": ("127.0.0.1", 0),
+            "server": ("127.0.0.1", 0),
+        }
+        received = False
+
+        async def receive():
+            nonlocal received
+            if received:
+                await asyncio.Future()  # cancellation is the disconnect signal
+            received = True
+            body = bytes(exchange.body)
+            exchange.body.clear()
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                allowed = {b"content-type", b"content-disposition"}
+                await exchange.events.put(
+                    {
+                        "type": "headers",
+                        "status": message["status"],
+                        "headers": [
+                            [k.decode(), v.decode()] for k, v in message.get("headers", []) if k.lower() in allowed
+                        ],
+                    }
+                )
+            elif message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                for offset in range(0, len(body), CHUNK):
+                    await exchange.events.put(
+                        {"type": "data", "data": base64.b64encode(body[offset : offset + CHUNK]).decode()}
+                    )
+                if not message.get("more_body", False):
+                    await exchange.events.put({"type": "end"})
+
+        try:
+            await self.app(scope, receive, send)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await exchange.events.put({"type": "error", "error": "The app request failed on the computer."})
+
+    async def close(self) -> None:
+        async with self._lock:
+            self._closed = True
+            try:
+                if self._task:
+                    self._task.cancel()
+                    await asyncio.gather(self._task, return_exceptions=True)
+                for identifier in tuple(self.clients):
+                    self._invalidate(identifier)
+                await asyncio.gather(*(client.close() for client in self.clients.values()), return_exceptions=True)
+            finally:
+                self.clients.clear()
+                self.records.clear()
+                self._task = None
+                self._loaded = False
+                if self._owner_fd is not None:
+                    os.close(self._owner_fd)
+                    self._owner_fd = None

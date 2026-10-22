@@ -137,6 +137,14 @@ scripts/docker-runtime.sh smoke
    existing platforms, unsigned Tauri desktop bundles for macOS arm64 and
    x86_64, and Linux x86_64 AppImage/Debian packages. Publish the packages, then
    create the GitHub Release with every asset attached.
+   The Binaries workflow compiles one isolated `frontend-dist` artifact. Every
+   CLI producer passes that same output through `--frontend-dist`; desktop
+   stages those binaries, and PyPI publication supplies the downloaded output
+   through `KOLLAB_FRONTEND_DIST`. The `connection-service` workflow artifact
+   packages the same frontend for the operator's service rollout. These two
+   internal artifacts stay outside the 20-file public release manifest.
+   Missing selected output or a failed frontend build stops packaging; old
+   checkout output is never a successful build fallback.
 5. Verify the package page, the four CLI binaries and their `.sha256` files,
    both architectures' `kollab-desktop-macos-*` `.app.zip`/`.dmg` pairs,
    both `kollab-desktop-linux-x86_64-X.Y.Z` packages and their checksums,

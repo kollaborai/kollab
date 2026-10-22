@@ -33,7 +33,7 @@ koordinator starts three agents that build and test a change together. A second 
 - Run named agents on all your computers. They find each other, message `agent@device`, and keep their memory between sessions. Each machine dials out on port 443, so nothing needs an open port.
 - Bring Claude Code and Codex onto that network as named agents, and use Kollab from Zed and other ACP clients with `kollab acp`.
 - Add MCP servers, CLI tools, and skills from `/mcp` in the terminal or the Apps button in the browser UI.
-- Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone.
+- Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone. Agents created in the Web UI stay running across Web UI/engine restarts and return with their conversation; use Web UI Delete or send `/quit` to stop one.
 - Pick the model for each agent: Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint, with named loadouts for model, effort, and sampling. Switch with `/llm` without leaving the session.
 - Chat in a fast terminal UI, or run one-shot prompts and shell pipelines with `kollab -p`.
 - Gate shell, file, and MCP tool use through risk-aware approvals.
@@ -319,28 +319,26 @@ Model, Setup, Network, Voice and Prompts. Most map to the terminal's `/config`,
 `/llm`, `/model`, `/setup`, `/connect` and `/voice config` screens; Prompts is
 browser-only (type `/prompts` in web chat to open it). See [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
 
-### Private Phone Access
+### PhoneLink
 
-Open **Session Settings > Phone Access** to create a distinct WireGuard peer and
-one-time QR for each phone. The phone can then open the WebUI's private LAN
-address and add it to the home screen. To make the WebUI reachable from home
-Wi-Fi, bind it to a specific private host address:
+Open **Session Settings > PhoneLink** and choose **Link a Phone** to show an
+expiring QR invitation. Scan it with the phone camera, compare the pairing codes
+on both screens, and approve on the computer; revoke a phone any time. The phone
+controls the same Kollab over the existing connection, with no VPN or credential
+setup on the phone. To make the WebUI reachable from home Wi-Fi, bind it to a
+specific private host address:
 
 ```bash
 KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
 ```
 
-Phone access is direct-bind only: wildcards, public interfaces, forwarded client
-headers and reverse proxies are rejected. Configure the WireGuard server endpoint,
-its UDP port-forward and DNS outside Kollab; install a host-admin peer apply helper
-for live add/revoke. Kollab never configures the router or edits the WireGuard
-base config; only the operator-owned helper applies generated phone peer snippets
-to the running server.
-See [Phone Access setup](docs/features/phone-access.md) before connecting a phone.
+The WebUI is direct-bind only: wildcards, public interfaces, forwarded client
+headers and reverse proxies are rejected.
+See [PhoneLink](docs/features/phone-access.md) before connecting a phone.
 
 The sidebar's **Learn** entry opens a guided tour of networks, devices, workspaces,
-agents, profiles, the koordinator, Hub messaging, voice, system prompts, and
-WireGuard phone access. Lesson progress is saved in this browser; **What's New**
+agents, profiles, the koordinator, Hub messaging, voice, and system prompts.
+Lesson progress is saved in this browser; **What's New**
 uses the canonical changelog. See the [Learn feature guide](docs/features/learn.md).
 
 ## Apps
@@ -656,6 +654,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/login` | Run provider login flows |
 | `/mcp` | Open the MCP manager; `browse`, `search`, `add`, `remove` for MCP servers, CLI tools, and skills |
 | `/resume` | Resume a previous conversation |
+| `/compact` | Compact the conversation; `status` shows the pause state and the retry step |
 | `/config` | Open the settings editor |
 | `/updates` | Browse recent release notes in the terminal |
 | `/help` | Show available commands |

@@ -91,4 +91,17 @@ The global config at `~/.kollab/config.json` can customize conversation-related 
 }
 ```
 
-`save_conversations` turns conversation logging on or off. The whole conversation is sent to the model on every request: nothing trims it by message count. Compaction is what keeps it inside the model's context window.
+`save_conversations` turns conversation logging on or off. Conversation history is not trimmed by a fixed message count. Automatic compaction
+summarizes older history and keeps a recent working window as the prompt approaches
+the model's context window.
+
+Automatic compaction keeps a bounded set of the latest assignments that are still
+active in the Task Ledger; completed or stale hub tasks are summarized instead of
+being copied back into the prompt. If compaction cannot reduce the prompt enough,
+the status reports that automatic compaction is paused until a later successful turn
+reports enough new context for another check.
+A provider context-limit error triggers one background compaction attempt even while
+paused. The failed request is never sent again automatically: wait until the status
+says compaction is ready, then retry your turn. The TUI status widget and Web UI banner
+show whether compaction is paused, running, ready to retry, or failed, with a next
+step. Use `/compact now` for an explicit manual attempt.

@@ -1,0 +1,44 @@
+{
+  "name": "hub-supervisor-status",
+  "description": "A lone app is its folder's coordinator, so /hub status carries the idle-supervisor section even while healthy (issue #283): open and stalled card counts plus any stall alerts. Wake-efficacy logic (wakes without a completed turn, failed-turn errors quoted in the alert) is covered by unit tests; this spec pins the operator-visible surface.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); D=$(mktemp -d); cd \"$D\" && exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 4,
+    "show_captures": false,
+    "term_width": 140,
+    "term_height": 40
+  },
+  "steps": [
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "slash_command",
+      "command": "hub",
+      "subcommand": "status"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "supervisor: [0-9]+ open, [0-9]+ stalled, [0-9]+ alert",
+      "description": "the supervisor section is on /hub status while healthy"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "alert \\(",
+      "description": "no stall alert on a freshly booted hub"
+    }
+  ]
+}
