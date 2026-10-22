@@ -1,7 +1,7 @@
 ---
 title: "PhoneLink"
 created: 2026-10-20
-modified: 2026-10-20
+modified: 2026-10-21
 status: active
 ---
 # PhoneLink
@@ -54,11 +54,70 @@ expired invitations, wrong keys, replay, reconnect, revoke, streamed responses,
 and 390px/820px/desktop layouts. Public-service deployment and a physical phone
 scan remain separate acceptance gates.
 
-PhoneLink currently supports returning through the same phone browser's bookmark.
-Standalone Home Screen installation needs a separate identity handoff and is not
-claimed as working: Safari copies cookies, but not local storage, into a new
-Home Screen app ([WebKit's Safari 17.2 guidance](https://webkit.org/blog/14787/webkit-features-in-safari-17-2/)).
-The manual WireGuard flow below does not depend on this browser pairing identity.
+## Signed app served from the computer
+
+The connection service never supplies the phone app. A QR opens a small
+**loader** from the directory (`/relay/v1/phone/`: `index.html`, `loader.js`,
+icons, manifest; built into `dist/phonelink/loader`). The loader holds no app
+UI. It joins the pairing room, waits for local approval, then fetches the app
+**from this computer** over the encrypted session (`GET /phone-app/...`, served
+by PhoneLink itself, never by the engine's routes, read-only, confined to the
+built files) and runs it from a verified copy.
+
+- **Signature.** The computer lists the app files (name, SHA-256, size) with a
+  build serial, hashes that list, and signs `kollab-phonelink-app/1`, the host
+  key and the hash with the room's Ed25519 device key: the host key from the QR.
+  The phone recomputes the hash itself (it never trusts the sender's), verifies
+  the signature against the QR's host key, then checks every file's SHA-256
+  before running anything. A wrong key, a changed file list or serial, a
+  changed file, a malformed list or an older serial than the copy already on
+  the phone is refused with a plain message and nothing runs.
+- **Fingerprint.** Both screens show the host key's fingerprint
+  (`XXXX-XXXX-XXXX-XXXX-XXXX`) beside a 12-character pairing code. Compare both
+  before approving.
+- **Updates.** A new signed app replaces the stored copy only after it
+  verifies. The verified copy is kept in the phone browser (IndexedDB) and is
+  checked again at every launch, so a modified copy is re-fetched from the
+  computer, or refused when the computer is out of reach.
+- **Home Screen.** The loader is installable (manifest and icons), and the
+  verified app opens from its stored copy. Safari's Home Screen app has its own
+  storage (WebKit copies cookies, not local storage), so a phone linked in the
+  Safari tab is not linked inside a new iOS Home Screen app. On Android and
+  desktop browsers the installed app shares the link.
+- **Last seen and revoke.** The computer shows each phone's last-seen time and
+  a Revoke button per phone; revoke closes that phone's room at once.
+
+Screenshots (a scratch relay and host, a stubbed engine): Settings > PhoneLink
+at [390](../screenshots/phone-access/phonelink-panel-390.png),
+[820](../screenshots/phone-access/phonelink-panel-820.png) and
+[1280](../screenshots/phone-access/phonelink-panel-1280.png); the phone's pairing
+screen ([390](../screenshots/phone-access/phonelink-pairing-390.png)), the app
+served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png),
+[820](../screenshots/phone-access/phonelink-app-820.png),
+[1280](../screenshots/phone-access/phonelink-app-1280.png)) and a refused copy
+([390](../screenshots/phone-access/phonelink-refused-390.png)).
+
+### Security notes
+
+- The first page, the loader, still comes from the directory: a browser cannot
+  verify the code that does the verifying. It is small, contains no app UI or
+  secrets, and the relay can no longer change what runs after it, but a
+  malicious directory could serve a modified loader to a new phone. Use a
+  directory you trust for the QR scan; compare the fingerprint on both screens.
+- The relay still sees only encrypted packets; it cannot sign for the computer.
+- The signature proves the computer built the file list, not that it is
+  harmless; approve only phones you trust with the app's controls.
+- Fingerprints and signatures use the room's device key, so they change when a
+  new invitation (a new room) is created.
+- The downgrade check is per phone: the signed serial must not go down. After
+  reinstalling an older Kollab, link the phone again.
+
+Verification: `tests/unit/test_phone_link_app.py` (signature, tampered bundle,
+wrong key, path confinement, last seen), `frontend/tests/phone-app-verify.test.ts`
+(the phone's verifier), `frontend/tests/phonelink-browser-e2e.mjs` (real
+Chromium, real relay service and PhoneLink host on scratch ports and a scratch
+HOME) and `tests/tmux/specs/phonelink_signed_app.json`. A physical phone scan on
+a public directory remains a separate acceptance gate.
 
 ## Advanced: manual WireGuard access
 

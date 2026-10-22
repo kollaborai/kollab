@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- PhoneLink: the connection service no longer supplies the phone app. A small
+  loader fetches it from your computer over the encrypted session and runs it
+  only after the computer's signature on the app files checks out against the
+  host key in the QR; a tampered or mismatched app is refused. Both screens show
+  the computer's fingerprint beside a longer 12-character pairing code, each
+  phone shows when it was last seen, and Revoke removes a phone in one tap.
+  The loader is installable to the Home Screen and opens its verified copy.
+
 ## [0.18.0] - 2026-10-21
 
 ### Added

@@ -153,13 +153,13 @@ export const LEARN_TOPICS = [
       "Connect this computer to your Kollab network with /connect or Settings > Network.",
       "Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.",
       "Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed.",
-      "Check that the pairing codes match, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
-      "Bookmark Kollab to return in the same phone browser. Remove a phone in PhoneLink to withdraw its access.",
+      "Check that the pairing code and the computer fingerprint match on both screens, then approve the phone on your computer. The invitation expires after five minutes and links one phone.",
+      "Your phone loads Kollab from your computer, and only after it checks your computer's signature on it. Bookmark it, or add it to your Home Screen where your phone allows. PhoneLink shows when each phone was last seen; Revoke withdraws its access.",
     ],
     example:
       "Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.",
     note:
-      "Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. Existing WireGuard access is optional under Advanced Settings.",
+      "Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. The connection service never supplies the app, so it cannot change what runs on your phone after the first page. Existing WireGuard access is optional under Advanced Settings.",
   },
 ] as const satisfies readonly LearnTopicDefinition[];
 
