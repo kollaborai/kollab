@@ -43,7 +43,7 @@ The model decides what it keeps. The user does not curate anything.
 |---|---|
 | `/compact` | Ask the model what to keep; it compacts when ready |
 | `/compact now` | Compact immediately, no question asked |
-| `/compact status` | Show threshold, window, token count and state |
+| `/compact status` | Show threshold, window, token count, state, and the next step when paused or waiting to retry |
 | `/compact preview` | Show what a compaction would remove |
 
 Code: `packages/kollabor-ai/src/kollabor_ai/context_service/` (ledger,

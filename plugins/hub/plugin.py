@@ -8164,6 +8164,10 @@ class HubPlugin(BasePlugin):
             )
 
         # Auto-create TaskCard for incoming task assignments.
+        assigned_task_id = str(
+            (message.metadata or {}).get("task_id", "") or ""
+        ).strip()
+
         # Messages with task metadata or work-assignment patterns
         # get persisted to disk so they survive compaction.
         if (
@@ -8202,6 +8206,7 @@ class HubPlugin(BasePlugin):
                     task_id = str(message.metadata.get("task_id", "") or "").strip()
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
+                        assigned_task_id = str(existing.id)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -8220,6 +8225,8 @@ class HubPlugin(BasePlugin):
                             card_id=task_id,
                         )
                         logger.info(f"Auto-created task {card.id} from" f" {assigner}")
+                        assigned_task_id = str(card.id)
+
                     else:
                         # Heuristic match (no tag): mint as OPEN so the
                         # worker must claim it and the idle supervisor
@@ -8238,6 +8245,8 @@ class HubPlugin(BasePlugin):
                             card.id,
                             assigner,
                         )
+                        assigned_task_id = str(card.id)
+
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -8535,6 +8544,9 @@ class HubPlugin(BasePlugin):
                     "hub_wake_mode": wake_decision.mode,
                     "hub_wake_reason": wake_decision.reason,
                 }
+                if assigned_task_id:
+                    msg_metadata["task_id"] = assigned_task_id
+
                 # Pass through bridge metadata for relay
                 if hasattr(message, "metadata") and message.metadata:
                     if message.metadata.get("bridge_platform"):

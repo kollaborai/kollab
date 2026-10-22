@@ -87,6 +87,21 @@ export const LEARN_TOPICS = [
     note: "Profile names do not guarantee the provider endpoint. Verify the base URL, and never paste key values into prompts or Hub messages."
   },
   {
+    id: "context-compaction",
+    title: "Context compaction",
+    summary:
+      "Long conversations are compacted automatically before they reach the model's context window. Recent turns and live assignments are kept; older history is summarized.",
+    howTo: [
+      "Let compaction run on its own; it starts when the conversation approaches the model's context window.",
+      "Read the compaction status to know where things stand: running, paused, ready to retry, or failed.",
+      "If a turn is rejected for context size, Kollab compacts once in the background. When the status says ready, send your message again; the failed request is never resent for you.",
+      "Use /compact now to compact immediately, or /compact status to see the state and the next step.",
+    ],
+    example:
+      "After a long session the status says compaction is ready to retry; resend the last message and the conversation continues within the window.",
+    note: "A paused or failed compaction is shown in the terminal status widget and the web UI banner, each with the next step.",
+  },
+  {
     id: "koordinator",
     title: "Koordinator",
     summary:

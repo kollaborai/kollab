@@ -784,3 +784,108 @@ class TestRequestTracking:
         provider = MockOpenAIProvider(config)
 
         assert provider.supports_tools is True
+
+
+def test_openai_oauth_uses_cached_backend_context_window(monkeypatch):
+    monkeypatch.setattr(
+        "kollabor_ai.model_catalog.cached_provider_models",
+        lambda profile: [
+            {"id": "gpt-6-luna", "note": "272K ctx", "context_window": 272000}
+        ],
+    )
+
+    config = create_config_from_profile(
+        {
+            "name": "openai-oauth",
+            "provider": "openai_responses",
+            "auth_type": "oauth",
+            "api_key": "oauth-token",
+            "model": "gpt-6-luna",
+        }
+    )
+
+    assert config.context_window == 272000
+
+
+def test_openai_oauth_unknown_model_uses_conservative_window_not_public_registry(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kollabor_ai.providers.registry._cached_openai_oauth_context_window",
+        lambda profile, model_name: None,
+    )
+    monkeypatch.setattr(
+        "kollabor_ai.model_registry.resolve_context_window",
+        lambda *args, **kwargs: 1_050_000,
+    )
+
+    config = create_config_from_profile(
+        {
+            "name": "openai-oauth",
+            "provider": "openai_responses",
+            "auth_type": "oauth",
+            "api_key": "oauth-token",
+            "model": "gpt-6-luna",
+        }
+    )
+
+    assert config.context_window == 200000
+
+
+def test_openai_oauth_explicit_context_window_override_wins(monkeypatch):
+    monkeypatch.setattr(
+        "kollabor_ai.providers.registry._cached_openai_oauth_context_window",
+        lambda profile, model_name: 272000,
+    )
+
+    config = create_config_from_profile(
+        {
+            "provider": "openai_responses",
+            "auth_type": "oauth",
+            "api_key": "oauth-token",
+            "model": "gpt-6-luna",
+            "context_window": 128000,
+        }
+    )
+
+    assert config.context_window == 128000
+
+
+def test_openai_oauth_explicit_window_is_clamped_to_catalog_boundary(monkeypatch):
+    monkeypatch.setattr(
+        "kollabor_ai.providers.registry._cached_openai_oauth_context_window",
+        lambda profile, model_name: 272000,
+    )
+
+    config = create_config_from_profile(
+        {
+            "provider": "openai_responses",
+            "auth_type": "oauth",
+            "api_key": "oauth-token",
+            "model": "gpt-6-luna",
+            "context_window": 500000,
+        }
+    )
+
+    assert config.context_window == 272000
+
+
+def test_non_oauth_provider_keeps_generic_registry_resolution(monkeypatch):
+    monkeypatch.setattr(
+        "kollabor_ai.model_registry.resolve_context_window",
+        lambda *args, **kwargs: 1_050_000,
+    )
+    monkeypatch.setattr(
+        "kollabor_ai.providers.registry._cached_openai_oauth_context_window",
+        lambda *args, **kwargs: pytest.fail("OAuth cache used for non-OAuth provider"),
+    )
+
+    config = create_config_from_profile(
+        {
+            "provider": "openai",
+            "api_key": "sk-test-key-123",
+            "model": "gpt-6.1-sol",
+        }
+    )
+
+    assert config.context_window == 1_050_000

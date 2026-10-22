@@ -13,6 +13,13 @@ import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
+
+import {
+  contextCompactionStatusTitle,
+  isUrgentContextCompactionStatus,
+  parseContextCompactionStatus,
+  type ContextCompactionStatus,
+} from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
@@ -417,6 +424,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // Folded from the open session's events, so a hub-driven turn still animates.
   const eventActivityRef = useRef(NO_LIVE_ACTIVITY);
   const [eventActivity, setEventActivity] = useState<Activity | null>(null);
+
+  const [contextCompactionStatus, setContextCompactionStatus] =
+    useState<ContextCompactionStatus | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -448,6 +458,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   );
 
   useEffect(() => abortRecovery, [abortRecovery]);
+
+
+  useEffect(() => {
+    setContextCompactionStatus(null);
+  }, [activeId]);
 
   const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const { stamp: stampOrder, sync: syncOrder } = sidebarOrder;
@@ -592,6 +607,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+
+            const compactionStatus = parseContextCompactionStatus(event);
+            if (compactionStatus !== undefined) {
+              setContextCompactionStatus(compactionStatus);
+            }
             if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
@@ -1151,6 +1171,29 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               <span>Update available: v{updateInfo.release.version}</span>
               <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
               <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
+            </div>
+          ) : null}
+          {contextCompactionStatus ? (
+            <div
+              role={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "alert"
+                  : "status"
+              }
+              aria-live={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "assertive"
+                  : "polite"
+              }
+              className="bg-amber-500/10 text-amber-700 dark:text-amber-300 flex flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2 text-sm"
+            >
+              <strong>
+                {contextCompactionStatusTitle(contextCompactionStatus.status)}
+              </strong>
+              <span>{contextCompactionStatus.message}</span>
+              {contextCompactionStatus.action ? (
+                <span className="font-medium">{contextCompactionStatus.action}</span>
+              ) : null}
             </div>
           ) : null}
           {activeSession && initialState ? (
