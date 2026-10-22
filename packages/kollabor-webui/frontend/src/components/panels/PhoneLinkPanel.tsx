@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { learnHref } from "@/learn/catalog";
 import { copyText } from "@/phonelink/copy-link";
+import { responsiveQrSvg } from "@/utils/qr-svg";
 import { PhoneAccessSection } from "./PhoneAccessSection";
 
 type PhoneLinkPanelProps = {
@@ -164,7 +165,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                         role="img"
                         aria-label="PhoneLink pairing QR code"
                         className="w-full max-w-56 rounded-lg bg-white p-2 [&_svg]:h-auto [&_svg]:w-full"
-                        dangerouslySetInnerHTML={{ __html: offer.qr_svg }}
+                        dangerouslySetInnerHTML={{ __html: responsiveQrSvg(offer.qr_svg) }}
                       />
                       <p className="text-xs">
                         <span className="text-muted-foreground">

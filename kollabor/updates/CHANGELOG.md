@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifier channel. Undelivered worker nudges surface there too instead of
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
+### Fixed
+- Web: PhoneLink and WireGuard QR codes scale to fit their panels without cutting off the corner markers, so phone cameras can recognize the complete code.
+
 ## [0.18.0] - 2026-10-21
 
 ### Added

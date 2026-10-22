@@ -59,6 +59,8 @@ capability endpoint before offering a QR code.
   standby engine.
 - The PhoneLink tab owns linking and saved phones. **Advanced Settings** starts
   collapsed and contains the existing manual WireGuard access controls below.
+- Both QR displays preserve the SVG's full drawing frame when resized, including
+  all three corner markers and the surrounding white margin.
 
 Verification must cover the real encrypted browser-to-engine path, rejected and
 expired invitations, wrong keys, replay, reconnect, revoke, streamed responses,
