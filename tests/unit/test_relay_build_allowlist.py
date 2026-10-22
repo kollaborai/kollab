@@ -15,8 +15,8 @@ from scripts.relay import build_service
 @pytest.fixture
 def artifact_tree(tmp_path):
     frontend = tmp_path / "frontend"
-    frontend.mkdir()
-    (frontend / "index.html").write_text("<main>PhoneLink</main>")
+    (frontend / "phonelink/loader").mkdir(parents=True)
+    (frontend / "phonelink/loader/index.html").write_text("<main>PhoneLink</main>")
     archive = tmp_path / "source.tar.gz"
     build_service.build(archive, frontend_dist=frontend)
     tree = tmp_path / "tree"
