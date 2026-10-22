@@ -45,6 +45,34 @@ class QueuedInput:
 
     content: MessageContent
     voice: dict
+    origin_context: dict[str, Any] | None = None
+
+
+def merge_livekit_origin_contexts(queued_inputs: List[QueuedInput]) -> dict[str, Any] | None:
+    contexts = [
+        item.origin_context
+        for item in queued_inputs
+        if isinstance(item.origin_context, dict)
+        and item.origin_context.get("source") == "livekit_voice"
+    ]
+    if not contexts:
+        return None
+    if len(contexts) != len(queued_inputs):
+        return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+
+    signatures = {
+        (
+            context.get("voice_session_id"),
+            context.get("generation"),
+            context.get("turn_id"),
+            context.get("voice_tool_policy"),
+        )
+        for context in contexts
+    }
+    if len(signatures) != 1:
+        # A mixed voice batch has no single authority scope; fail closed.
+        return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+    return dict(contexts[-1])
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -393,6 +421,7 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
+        self.active_origin_context: dict[str, Any] | None = None
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -949,6 +978,7 @@ class QueueProcessor:
         """
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+        self.active_origin_context = merge_livekit_origin_contexts(voice_inputs)
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -972,6 +1002,12 @@ class QueueProcessor:
         )
 
         # Execute LLM turn with user message
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=True,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=True,
             current_parent_uuid=current_parent_uuid,
@@ -986,15 +1022,34 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=False,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=False,
             current_parent_uuid=current_parent_uuid,
+        )
+
+    async def _execute_tool_with_context(
+        self,
+        tool_data: dict[str, Any],
+        execution_context: dict[str, Any] | None,
+    ) -> ToolExecutionResult:
+        if execution_context is None:
+            return await self.tool_executor.execute_tool(tool_data)
+        return await self.tool_executor.execute_tool(
+            tool_data,
+            execution_context=execution_context,
         )
 
     async def _execute_llm_turn(
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Execute a single LLM turn (deduped from process_message_batch and continue_conversation).
 
@@ -1021,6 +1076,12 @@ class QueueProcessor:
         async with self._turn_lock:
             self.last_turn_error = None
             try:
+                if execution_context is not None:
+                    return await self._execute_llm_turn_inner(
+                        user_message_provided,
+                        current_parent_uuid,
+                        execution_context=execution_context,
+                    )
                 return await self._execute_llm_turn_inner(
                     user_message_provided, current_parent_uuid
                 )
@@ -1036,6 +1097,7 @@ class QueueProcessor:
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Watchdog heartbeat: a turn is actually executing = forward progress.
@@ -1590,9 +1652,15 @@ class QueueProcessor:
                 )
                 self.renderer.update_thinking(True, f"Executing {tool_desc}...")
 
-                native_results = await self._native_tools_handler.execute_tool_calls(
-                    self.tool_executor
-                )
+                if execution_context is None:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor
+                    )
+                else:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor,
+                        execution_context=execution_context,
+                    )
                 self.renderer.update_thinking(False)
 
                 # Display native tool results
@@ -1640,7 +1708,7 @@ class QueueProcessor:
                             f"Executing {tool_desc}... ({i + 1}/{tool_count})",
                         )
 
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
 
                         self.renderer.update_thinking(False)
@@ -1668,7 +1736,7 @@ class QueueProcessor:
                     for i, tool_data in enumerate(all_tools):
                         if self.cancel_processing:
                             break
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
                         logger.info(
                             f"[TOOL-DISPLAY-DEBUG] calling display_tool_results "
@@ -2023,6 +2091,7 @@ class QueueProcessor:
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
             self.active_voice = None
+            self.active_origin_context = None
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
             if context_size > 0 and not self.last_turn_error:

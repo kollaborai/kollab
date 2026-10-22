@@ -137,6 +137,33 @@ class TestLLMServiceIntegration(unittest.TestCase):
             # Check queue size (background task mocked to prevent consumption)
             self.assertEqual(self.service.processing_queue.qsize(), 1)
 
+    def test_livekit_origin_is_preserved_in_queued_input(self):
+        from kollabor_agent.queue_processor import QueuedInput
+
+        message = "show status"
+        origin_context = {
+            "source": "livekit_voice",
+            "voice_session_id": "voice-session-1",
+            "generation": 1,
+            "turn_id": "turn-1",
+            "voice_tool_policy": "voice_terminal_hub_v1",
+        }
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            result = asyncio.run(
+                self.service.process_user_input(message, origin_context=origin_context)
+            )
+
+        self.assertEqual(result["status"], "queued")
+        queued = self.service.processing_queue.get_nowait()
+        self.assertIsInstance(queued, QueuedInput)
+        self.assertEqual(queued.content, message)
+        self.assertEqual(queued.origin_context, origin_context)
+
+
     def test_process_user_input_displays_before_lazy_alias_rebuild(self):
         """First submit must echo immediately before alias/prompt rebuild work."""
         message = "Test user input"

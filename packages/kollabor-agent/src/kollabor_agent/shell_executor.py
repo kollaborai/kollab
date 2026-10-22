@@ -15,7 +15,7 @@ import platform
 import signal
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class ShellExecutor:
 
     async def run(
         self,
-        command: str,
+        command: str | Sequence[str],
         timeout: int = 30,
         cwd: Optional[Path] = None,
         env: Optional[Dict[str, str]] = None,
@@ -99,10 +99,18 @@ class ShellExecutor:
 
         start_time = time.time()
 
-        if not command.strip():
-            return ShellResult(
-                success=False, stdout="", stderr="", exit_code=-1, error="Empty command"
-            )
+        argv: tuple[str, ...] | None = None
+        if isinstance(command, str):
+            if not command.strip():
+                return ShellResult(
+                    success=False, stdout="", stderr="", exit_code=-1, error="Empty command"
+                )
+        else:
+            argv = tuple(command)
+            if not argv or any(not isinstance(argument, str) or not argument for argument in argv):
+                return ShellResult(
+                    success=False, stdout="", stderr="", exit_code=-1, error="Invalid argv"
+                )
 
         cwd = cwd or Path.cwd()
         self._cancelled = False
@@ -112,8 +120,18 @@ class ShellExecutor:
             env = self._filter_env(os.environ.copy())
 
         try:
-            # Platform-specific process creation
-            if self._is_windows:
+            # Voice-originated commands pass argv sequences and never enter a
+            # shell. Existing string callers retain their configured shell path.
+            if argv is not None:
+                if self._is_windows:
+                    self._current_process = await self._create_windows_process_argv(
+                        argv, cwd, env
+                    )
+                else:
+                    self._current_process = await self._create_unix_process_argv(
+                        argv, cwd, env
+                    )
+            elif self._is_windows:
                 self._current_process = await self._create_windows_process(
                     command, cwd, env
                 )
@@ -220,6 +238,31 @@ class ShellExecutor:
                             )
                 self._current_process = None
 
+    async def run_argv(
+        self,
+        argv: Sequence[str],
+        timeout: int = 30,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        max_output_bytes: int = 10 * 1024 * 1024,
+    ) -> ShellResult:
+        """Execute an already parsed argv sequence without invoking a shell."""
+        if isinstance(argv, str):
+            return ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                error="run_argv requires an argument sequence",
+            )
+        return await self.run(
+            tuple(argv),
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+            max_output_bytes=max_output_bytes,
+        )
+
     async def cancel(self) -> None:
         """Cancel currently running command.
 
@@ -275,6 +318,36 @@ class ShellExecutor:
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP if self._is_windows else 0  # type: ignore[attr-defined]
             ),
+        )
+
+    async def _create_unix_process_argv(
+        self, argv: Sequence[str], cwd: Path, env: Dict[str, str]
+    ) -> asyncio.subprocess.Process:
+        """Create a shell-free Unix process from a validated argv sequence."""
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+
+    async def _create_windows_process_argv(
+        self, argv: Sequence[str], cwd: Path, env: Dict[str, str]
+    ) -> asyncio.subprocess.Process:
+        """Create a shell-free Windows process from a validated argv sequence."""
+        import subprocess
+
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
     async def _kill_process_group(self) -> None:

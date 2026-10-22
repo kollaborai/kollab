@@ -164,6 +164,14 @@ class MessageHandler:
                     }
                 return {"status": "startup_hold", "requeued": True}
 
+        origin_context = data.get("origin_context")
+        if not (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
+        ):
+            origin_context = None
+        origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
@@ -171,12 +179,15 @@ class MessageHandler:
             return await plugin.admit(
                 data,
                 lambda: self._coordinator.process_user_input(
-                    message, pre_displayed=pre_displayed, voice=data["voice"]
+                    message,
+                    pre_displayed=pre_displayed,
+                    voice=data["voice"],
+                    **origin_kwargs,
                 ),
             )
 
         result = await self._coordinator.process_user_input(
-            message, pre_displayed=pre_displayed
+            message, pre_displayed=pre_displayed, **origin_kwargs
         )
         return result  # type: ignore[no-any-return]
 
