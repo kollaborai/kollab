@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from kollabor_engine.phone_link import CHUNK, PhoneLink, PhoneLinkError, session_keys
+from kollabor_engine.phone_link import CHUNK, PhoneLink, PhoneLinkError, pairing_code, session_keys
 from nacl.public import Box, PrivateKey, PublicKey
 from nacl.secret import SecretBox
 
@@ -114,7 +114,7 @@ async def test_scan_does_not_approve_or_transfer_network_credentials(setup_link)
     manager, offer, host, phone, wire, _ = setup_link
     status = await manager.status()
     assert not status["phones"][0]["linked"]
-    assert status["phones"][0]["pending"] == [{"key": phone.public_key, "code": phone.public_key[:8].upper()}]
+    assert status["phones"][0]["pending"] == [{"key": phone.public_key, "code": pairing_code(phone.public_key)}]
     with pytest.raises(RelayError):
         await phone.request(
             host.public_key,

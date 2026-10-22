@@ -1,5 +1,4 @@
 import { createRoot } from "react-dom/client";
-import { lazy, Suspense } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import App from "./App";
 import "./styles.css";
@@ -8,8 +7,6 @@ import "./styles.css";
 // terminal identity is dark, so pin the class here rather than shipping a
 // half-wired theme toggle.
 document.documentElement.classList.add("dark");
-const PhoneApp = lazy(() => import("./phonelink/PhoneApp"));
-const phone = window.location.pathname.startsWith("/relay/v1/phone/");
 
 // No <StrictMode>: its dev-only double render breaks the assistant-ui store
 // (@assistant-ui/store 0.3.2 on tap 0.9.8). Each pass builds its own
@@ -20,6 +17,6 @@ const phone = window.location.pathname.startsWith("/relay/v1/phone/");
 // StrictMode; put it back with that upgrade.
 createRoot(document.getElementById("root")!).render(
   <TooltipProvider>
-    {phone ? <Suspense fallback={<p className="p-6 text-sm" role="status">Opening PhoneLink…</p>}><PhoneApp /></Suspense> : <App />}
+    <App />
   </TooltipProvider>,
 );

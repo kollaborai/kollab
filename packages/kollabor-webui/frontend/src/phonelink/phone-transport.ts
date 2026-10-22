@@ -46,6 +46,23 @@ const lost = () =>
     "Connection to your computer was lost. An action already sent may still finish there.",
   );
 
+/** 12 characters in groups of four; the computer shows the same code. */
+export function pairingCode(key: string) {
+  const head = key.slice(0, 12).toUpperCase();
+  return [head.slice(0, 4), head.slice(4, 8), head.slice(8, 12)].join("-");
+}
+
+/** Derived from the host key in the QR; the computer shows the same fingerprint. */
+export async function hostFingerprint(hostKey: string) {
+  await sodium.ready;
+  const digest = hex(
+    await sha256(join(sodium.from_string("kollab-phonelink-fingerprint/1\n"), sodium.from_hex(hostKey))),
+  )
+    .slice(0, 20)
+    .toUpperCase();
+  return digest.match(/.{4}/g)!.join("-");
+}
+
 function storedIdentity(raw: string): PhoneIdentity | null {
   try {
     const value = JSON.parse(raw);
@@ -154,15 +171,19 @@ export class PhoneTransport {
   private retry: ReturnType<typeof setTimeout> | null = null;
   private onState: (state: string, code?: string) => void;
 
+  readonly identity: PhoneIdentity;
+
   constructor(
-    readonly identity: PhoneIdentity,
+    identity: PhoneIdentity,
     onState: (state: string, code?: string) => void,
   ) {
+    // No parameter property: Node's type-stripping test runner rejects it.
+    this.identity = identity;
     this.onState = onState;
   }
 
   get pairingCode() {
-    return hex(this.keypair.publicKey).slice(0, 8).toUpperCase();
+    return pairingCode(hex(this.keypair.publicKey));
   }
 
   connect(): Promise<void> {

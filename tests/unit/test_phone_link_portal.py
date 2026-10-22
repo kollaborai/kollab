@@ -84,6 +84,8 @@ async def test_javascript_phone_client_reaches_streaming_engine(tmp_path, monkey
         "origin": ORIGIN,
         "name": "Phone",
         "key": "",
+        "host": host.public_key,
+        "seen": 0,
         "created": int(time.time()),
         "expires": int(time.time()) + 300,
     }
@@ -131,7 +133,7 @@ async def test_javascript_phone_client_reaches_streaming_engine(tmp_path, monkey
             reader = asyncio.create_task(read())
             process = await asyncio.create_subprocess_exec(
                 "node",
-                "--experimental-transform-types",
+                "--experimental-strip-types",
                 "tests/phonelink-interop.mts",
                 cwd=frontend,
                 stdin=asyncio.subprocess.PIPE,

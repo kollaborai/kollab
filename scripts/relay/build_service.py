@@ -54,13 +54,15 @@ def build(output: Path, *, frontend_dist: Path | None = None) -> None:
     frontend = frontend_dist or root / "packages/kollabor-webui/frontend/dist"
     if frontend.is_symlink():
         raise ValueError("PhoneLink browser assets must not be symlinks")
-    if not (frontend / "index.html").is_file():
+    loader = frontend / "phonelink" / "loader"
+    if not (loader / "index.html").is_file():
         raise ValueError("Build the Kollab frontend before packaging a PhoneLink-capable directory")
-    for asset in sorted(frontend.rglob("*")):
+    # The directory carries only the small loader, never the phone app itself.
+    for asset in sorted(loader.rglob("*")):
         if asset.is_symlink():
             raise ValueError("PhoneLink browser assets must not be symlinks")
         if asset.is_file():
-            sources["plugins/hub/phone_static/" + asset.relative_to(frontend).as_posix()] = asset.read_bytes()
+            sources["plugins/hub/phone_static/" + asset.relative_to(loader).as_posix()] = asset.read_bytes()
     hashes = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     sources["source-sha256.json"] = json.dumps(hashes, indent=2, sort_keys=True).encode()
     with tarfile.open(output, "x:gz") as archive:
