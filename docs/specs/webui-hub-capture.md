@@ -103,6 +103,9 @@ its response shape must be stable enough for a later native event source.
    `next_cursor` rather than silently clipping a record.
 8. The common transcript renderer respects line and character budgets and keeps
    the pagination marker when a record or page is truncated.
+9. The Hub display tap is a bounded 200-event in-memory ring. Mark capture as
+   truncated when older events have been evicted. `next_cursor` is process-local
+   and must not be persisted or reused after an engine restart.
 
 ## Compatibility and security
 

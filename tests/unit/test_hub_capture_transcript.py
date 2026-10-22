@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,7 +13,12 @@ import pytest
 import kollabor.cli as cli_module
 from kollabor.cli import _handle_cli_hub, _print_hub_help, parse_arguments
 from kollabor_agent.tool_definitions.hub import hub_capture as hub_capture_tool
-from plugins.hub.capture import normalize_records, render_transcript
+from plugins.hub.capture import (
+    group_transcript_records,
+    normalize_records,
+    render_transcript,
+)
+from plugins.hub.plugin import HubPlugin
 
 
 def _events():
@@ -144,12 +150,14 @@ def test_cli_capture_defaults_to_transcript_json_dispatch(tmp_path, capsys):
         "next_cursor": "9",
     }
     capture = AsyncMock(return_value=(payload, None))
-    raw = AsyncMock(return_value=["raw terminal line"])
+    raw = AsyncMock(return_value=(["raw terminal line"], None))
+    legacy_wrapper = AsyncMock(return_value=["unexpected wrapper call"])
 
     with (
         patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
         patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
-        patch("plugins.hub.messenger.AgentMessenger.request_output", raw),
+        patch("plugins.hub.messenger.AgentMessenger.request_output_diagnostic", raw),
+        patch("plugins.hub.messenger.AgentMessenger.request_output", legacy_wrapper),
     ):
         asyncio.run(_handle_cli_hub(["capture", "lapis", "7"]))
 
@@ -158,6 +166,8 @@ def test_cli_capture_defaults_to_transcript_json_dispatch(tmp_path, capsys):
     assert capture.await_args.kwargs["lines"] == 7
     assert capture.await_args.kwargs["capture_format"] == "json"
     assert raw.await_count == 0
+
+    assert legacy_wrapper.await_count == 0
     output = capsys.readouterr().out
     assert "User: Question red" in output
     assert "Assistant: Answer ready!" in output
@@ -168,16 +178,20 @@ def test_cli_capture_defaults_to_transcript_json_dispatch(tmp_path, capsys):
 def test_cli_capture_raw_keeps_the_legacy_terminal_dispatch(tmp_path, capsys):
     socket_path = _write_presence(tmp_path, "lapis")
     capture = AsyncMock(return_value=({}, None))
-    raw = AsyncMock(return_value=["\x1b[31mraw terminal\x1b[0m", "second line"])
+    raw = AsyncMock(return_value=(["\x1b[31mraw terminal\x1b[0m", "second line"], None))
+    legacy_wrapper = AsyncMock(return_value=["unexpected wrapper call"])
 
     with (
         patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
         patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
-        patch("plugins.hub.messenger.AgentMessenger.request_output", raw),
+        patch("plugins.hub.messenger.AgentMessenger.request_output_diagnostic", raw),
+        patch("plugins.hub.messenger.AgentMessenger.request_output", legacy_wrapper),
     ):
         asyncio.run(_handle_cli_hub(["capture", "lapis", "--raw", "11"]))
 
     raw.assert_awaited_once_with(socket_path, lines=11)
+
+    legacy_wrapper.assert_not_awaited()
     assert capture.await_count == 0
     assert capsys.readouterr().out == "\x1b[31mraw terminal\x1b[0m\nsecond line\n"
 
@@ -200,7 +214,8 @@ def test_cli_main_parses_and_dispatches_capture_mode(
     socket_path = _write_presence(tmp_path, "lapis")
     payload = {"lines": normalize_records(_events()), "truncated": False}
     capture = AsyncMock(return_value=(payload, None))
-    raw_capture = AsyncMock(return_value=["raw terminal line"])
+    raw_capture = AsyncMock(return_value=(["raw terminal line"], None))
+    legacy_wrapper = AsyncMock(return_value=["unexpected wrapper call"])
     dispatched = []
     original_handler = cli_module._handle_cli_hub
 
@@ -226,7 +241,11 @@ def test_cli_main_parses_and_dispatches_capture_mode(
     with (
         patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
         patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
-        patch("plugins.hub.messenger.AgentMessenger.request_output", raw_capture),
+        patch(
+            "plugins.hub.messenger.AgentMessenger.request_output_diagnostic",
+            raw_capture,
+        ),
+        patch("plugins.hub.messenger.AgentMessenger.request_output", legacy_wrapper),
     ):
         cli_module.cli_main()
 
@@ -234,12 +253,15 @@ def test_cli_main_parses_and_dispatches_capture_mode(
     assert dispatched == [expected]
     if raw:
         raw_capture.assert_awaited_once_with(socket_path, lines=7)
+
+        legacy_wrapper.assert_not_awaited()
         assert capture.await_count == 0
         assert capsys.readouterr().out == "raw terminal line\n"
     else:
         capture.assert_awaited_once()
         assert capture.await_args.kwargs["capture_format"] == "json"
         assert raw_capture.await_count == 0
+        assert legacy_wrapper.await_count == 0
         assert "User: Question red" in capsys.readouterr().out
 
 
@@ -303,3 +325,136 @@ def test_hub_capture_tool_schema_documents_transcript_default():
     assert "'transcript' (default)" in format_parameter.description
     assert "'plain'" in format_parameter.description
     assert "'terminal'" in format_parameter.description
+
+
+def test_grouped_transcript_replaces_stream_chunks_with_final_response():
+    events = [
+        {"seq": 1, "type": "user_message", "text": "question"},
+        {
+            "seq": 2,
+            "type": "token",
+            "text": "partial ",
+            "request_id": "request-1",
+            "turn_id": "turn-1",
+        },
+        {
+            "seq": 3,
+            "type": "token",
+            "text": "answer",
+            "request_id": "request-1",
+            "turn_id": "turn-1",
+        },
+        {
+            "seq": 4,
+            "type": "response",
+            "text": "clean final answer",
+            "request_id": "request-1",
+            "turn_id": "turn-1",
+        },
+        {
+            "seq": 5,
+            "type": "token",
+            "text": "next ",
+            "request_id": "request-2",
+            "turn_id": "turn-2",
+        },
+        {
+            "seq": 6,
+            "type": "token",
+            "text": "turn",
+            "request_id": "request-2",
+            "turn_id": "turn-2",
+        },
+    ]
+
+    grouped = group_transcript_records(normalize_records(events))
+    assistant = [record for record in grouped if record.get("role") == "assistant"]
+
+    assert [
+        (record["kind"], record["text"], record["seq"]) for record in assistant
+    ] == [
+        ("message", "clean final answer", 4),
+        ("text", "next turn", 6),
+    ]
+
+    rendered = render_transcript({"lines": grouped})
+    assert "User: question" in rendered
+    assert "Assistant: clean final answer" in rendered
+    assert "Assistant: next turn" in rendered
+    assert "partial answer" not in rendered
+    assert rendered.count("Assistant:") == 2
+
+
+def test_hub_capture_limits_after_token_grouping_and_keeps_group_cursor():
+    events = [
+        {
+            "seq": seq,
+            "type": "token",
+            "text": chunk,
+            "request_id": "request-1",
+            "turn_id": "turn-1",
+        }
+        for seq, chunk in ((1, "complete "), (2, "assistant "), (3, "answer"))
+    ]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(limit=1, format="json", max_chars=10_000)
+    truncated_page = plugin._get_output_lines(limit=1, format="json", max_chars=10)
+
+    assert len(page["lines"]) == 1
+    assert page["lines"][0]["text"] == "complete assistant answer"
+    assert page["lines"][0]["seq"] == 3
+    assert truncated_page["truncated"] is True
+    assert truncated_page["next_cursor"] == "3"
+
+
+def test_hub_capture_reports_overwritten_display_ring_history():
+    events = [
+        {"seq": seq, "type": "status", "text": "working"} for seq in range(2, 202)
+    ]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(limit=50, format="json", max_chars=10_000)
+
+    assert page["truncated"] is True
+    assert page["next_cursor"] == str(page["lines"][-1]["seq"])
+
+
+def test_cli_capture_raw_surfaces_diagnostic_errors(tmp_path, capsys):
+    socket_path = _write_presence(tmp_path, "lapis")
+    diagnostic = AsyncMock(return_value=([], "timeout after 5s"))
+    legacy_wrapper = AsyncMock(return_value=None)
+
+    with (
+        patch("plugins.hub.presence.get_presence_dir", return_value=tmp_path),
+        patch(
+            "plugins.hub.messenger.AgentMessenger.request_output_diagnostic", diagnostic
+        ),
+        patch("plugins.hub.messenger.AgentMessenger.request_output", legacy_wrapper),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            asyncio.run(_handle_cli_hub(["capture", "lapis", "7", "--raw"]))
+
+    assert exc.value.code == 1
+    diagnostic.assert_awaited_once_with(socket_path, lines=7)
+    legacy_wrapper.assert_not_awaited()
+    assert "timeout after 5s" in capsys.readouterr().err
+
+
+def test_stale_sequence_cursor_after_restart_is_reset_and_marked_truncated():
+    events = [{"seq": 1, "type": "status", "text": "agent ready"}]
+    plugin = object.__new__(HubPlugin)
+    plugin._display_tap = SimpleNamespace(get_snapshot=lambda: events)
+
+    page = plugin._get_output_lines(
+        limit=1,
+        format="json",
+        max_chars=10_000,
+        cursor="900",
+    )
+
+    assert page["lines"][0]["text"] == "agent ready"
+    assert page["truncated"] is True
+    assert page["next_cursor"] == "1"

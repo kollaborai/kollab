@@ -36,6 +36,7 @@ from kollabor_events.models import (
 from kollabor_plugins import BasePlugin
 
 from .capture import (
+    group_transcript_records,
     normalize_records,
     normalize_text,
     paginate,
@@ -202,6 +203,18 @@ class _NetworkTurn:
     replies: int = 0  # hub_msgs already sent on its thread
     answer: str = ""  # text of the model's last response, if it ended the chain
     bound_ask: bool = False
+
+
+@dataclass(frozen=True)
+class _CaptureOutcome:
+    """Typed result for Hub capture command/tool dispatch."""
+
+    text: str
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -4593,48 +4606,85 @@ class HubPlugin(BasePlugin):
         )
 
     async def _handle_hub_capture_tool(self, tool_data: dict):
-        """Execute a hub_capture tool."""
+        """Execute a hub_capture tool with typed target, line, and format args."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        # Native normalization keeps the executor's canonical ``name`` as
-        # ``hub_capture``. Read provider arguments from the nested payload
-        # first, while retaining the legacy XML extractor keys.
+        tool_id = tool_data.get("id", "unknown")
         request = tool_data.get("input") or tool_data.get("arguments") or {}
         if not isinstance(request, dict):
             request = {}
-        cap_name = tool_data.get("cap_name", "") or request.get("name", "")
-        cap_lines = (
-            tool_data.get("cap_lines", "")
-            or request.get("lines", "")
-            or tool_data.get("lines", "")
-            or "50"
-        )
-        cap_format = (
-            str(request.get("format", "") or tool_data.get("cap_format", "") or "")
-            .strip()
-            .lower()
-        )
-        wants_raw = cap_format == "terminal" or bool(request.get("raw"))
-        args = cap_name.strip()
-        if cap_lines:
-            args += f" {cap_lines}"
-        if wants_raw:
-            args += " --raw"
-            result = await self._handle_capture_command(args)
-        elif cap_format == "plain":
-            result = await self._handle_capture_command(args, capture_format="plain")
+
+        def failure(message: str) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="hub_capture",
+                success=False,
+                error=message,
+            )
+
+        cap_name = tool_data.get("cap_name") or request.get("name") or ""
+        if not isinstance(cap_name, str) or not cap_name.strip():
+            return failure("hub_capture requires a non-empty agent name")
+        cap_name = cap_name.strip()
+
+        if tool_data.get("cap_lines") not in (None, ""):
+            raw_lines = tool_data["cap_lines"]
+        elif "lines" in request:
+            raw_lines = request["lines"]
+        elif "lines" in tool_data:
+            raw_lines = tool_data["lines"]
         else:
-            result = await self._handle_capture_command(args)
-        # Truncate per-agent capture to 10k chars (2000 was too low —
-        # oldest entries consumed the entire budget before recent work
-        # became visible).  Entries are already newest-first.
-        if len(result) > 10000:
-            result = result[:10000] + "\n... (truncated)"
+            raw_lines = 50
+        if isinstance(raw_lines, bool):
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if isinstance(raw_lines, int):
+            cap_lines = raw_lines
+        elif (
+            isinstance(raw_lines, str)
+            and raw_lines.strip().isascii()
+            and raw_lines.strip().isdigit()
+        ):
+            cap_lines = int(raw_lines.strip())
+        else:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if cap_lines < 1:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        cap_lines = min(cap_lines, 100)
+
+        raw_format = request.get(
+            "format", tool_data.get("format", tool_data.get("cap_format", "transcript"))
+        )
+        if raw_format in (None, ""):
+            raw_format = "transcript"
+        if not isinstance(raw_format, str):
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        cap_format = raw_format.strip().lower()
+        if cap_format not in {"transcript", "json", "plain", "terminal"}:
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        raw_flag = request.get("raw", tool_data.get("raw", False))
+        if not isinstance(raw_flag, bool):
+            return failure("hub_capture raw must be a boolean")
+        if raw_flag or cap_format == "terminal":
+            capture_format = "terminal"
+        elif cap_format == "plain":
+            capture_format = "plain"
+        else:
+            capture_format = "json"
+
+        outcome = await self._capture_target(
+            cap_name,
+            cap_lines,
+            capture_format=capture_format,
+        )
+        output = outcome.text
+        if len(output) > 10_000:
+            output = output[:10_000] + "\n... (truncated)"
         return ToolExecutionResult(
-            tool_id=tool_data.get("id", "unknown"),
+            tool_id=tool_id,
             tool_type="hub_capture",
-            success=True,
-            output=result,
+            success=outcome.success,
+            output=output,
+            error=outcome.error,
         )
 
     async def register_hooks(self) -> None:
@@ -11815,12 +11865,13 @@ class HubPlugin(BasePlugin):
         format: str = "terminal",
         max_chars: Any = None,
         cursor: Any = None,
-    ) -> Any:
+    ) -> _CaptureOutcome:
         """Capture output directly from a live hub peer via its socket."""
         if not peer.socket_path:
             if self._presence:
                 self._presence.cleanup_agent(peer)
-            return f"agent '{peer.identity}' has no socket path, cleaned up"
+            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            return _CaptureOutcome(message, error=message)
 
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
@@ -11836,12 +11887,20 @@ class HubPlugin(BasePlugin):
                 auth=dial_auth,
             )
             if capture_error:
-                return f"capture failed for '{peer.identity}': {capture_error}"
+                message = f"capture failed for '{peer.identity}': {capture_error}"
+                return _CaptureOutcome(message, error=message)
             if payload is None:
-                return f"no recent output from '{peer.identity}'"
+                return _CaptureOutcome(f"no recent output from '{peer.identity}'")
             if format == "json":
-                return payload
-            return self._render_plain_capture(peer.identity, payload)
+                text = render_transcript(
+                    payload,
+                    identity=peer.identity,
+                    max_lines=lines,
+                    max_chars=max_chars or 10_000,
+                )
+            else:
+                text = self._render_plain_capture(peer.identity, payload)
+            return _CaptureOutcome(text)
 
         output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
@@ -11850,12 +11909,13 @@ class HubPlugin(BasePlugin):
             auth=dial_auth,
         )
         if capture_error:
-            return f"capture failed for '{peer.identity}': {capture_error}"
+            message = f"capture failed for '{peer.identity}': {capture_error}"
+            return _CaptureOutcome(message, error=message)
         if not output_lines:
-            return f"no recent output from '{peer.identity}'"
+            return _CaptureOutcome(f"no recent output from '{peer.identity}'")
 
         header = f"[{peer.identity}]"
-        return header + "\n" + "\n".join(output_lines)
+        return _CaptureOutcome(header + "\n" + "\n".join(output_lines))
 
     @staticmethod
     def _render_plain_capture(identity: str, payload: Any) -> str:
@@ -12189,92 +12249,99 @@ class HubPlugin(BasePlugin):
 
         return msg
 
-    async def _handle_capture_command(
-        self, rest: str, *, capture_format: str = "json"
-    ) -> str:
-        """Handle /hub capture <identity|name|all> [lines] [--raw].
-
-        Hub identities use the shared transcript renderer by default. The
-        explicit ``plain`` format remains available to tool callers, while
-        --raw preserves the terminal capture path. Orchestrator session names
-        continue to route through agent_orchestrator.
-        """
-        args = rest.split() if rest.strip() else []
-        raw = "--raw" in args
-        args = [a for a in args if a != "--raw"]
-        if raw:
-            capture_format = "terminal"
-        if capture_format not in {"json", "plain", "terminal"}:
-            capture_format = "json"
-        refusal = self._remote_target_refusal(args[0] if args else "")
+    async def _capture_target(
+        self,
+        target: str,
+        lines: int,
+        *,
+        capture_format: str = "json",
+    ) -> _CaptureOutcome:
+        """Capture one validated target/line request without textual argument parsing."""
+        refusal = self._remote_target_refusal(target)
         if refusal:
-            return refusal
-        orch = self._get_orchestrator()
-        if not orch:
-            return "error: agent orchestrator not available"
-        if not args:
-            return "usage: /hub capture <identity|name|all> [lines] [--raw]"
-
-        target = args[0]
-        try:
-            lines = int(args[1]) if len(args) > 1 else 50
-        except (TypeError, ValueError):
-            lines = 50
-
-        # Resolve hub identity first. Not every live peer is an orchestrator-
-        # owned subprocess in this process, so capture over the hub socket when
-        # we have a presence record.
+            return _CaptureOutcome(refusal, error=refusal)
+        target_for_orchestrator = target
         if target.lower() != "all":
             own_identity = self._identity.identity if self._identity else ""
             if target.lower() == own_identity.lower():
-                return (
+                message = (
                     f"self-capture not supported for '{own_identity}' "
                     "(coordinator runs in the main process, not a "
                     "spawned session). capture a spawned agent instead."
                 )
+                return _CaptureOutcome(message, error=message)
 
             peer = self._get_peer_by_identity(target)
             if peer is not None:
-                if capture_format == "json":
-                    payload = await self._capture_peer_output(
-                        peer, lines, format="json", max_chars=10_000
-                    )
-                else:
-                    payload = await self._capture_peer_output(
-                        peer, lines, format=capture_format
-                    )
-                if capture_format == "json":
-                    return render_transcript(
-                        payload,
-                        identity=peer.identity,
-                        max_lines=lines,
-                        max_chars=10_000,
-                    )
-                return payload
+                return await self._capture_peer_output(
+                    peer,
+                    lines,
+                    format=capture_format,
+                    max_chars=10_000 if capture_format == "json" else None,
+                )
 
+        orchestrator = self._get_orchestrator()
+        if not orchestrator:
+            message = "error: agent orchestrator not available"
+            return _CaptureOutcome(message, error=message)
+        if target.lower() != "all":
             resolved = self._resolve_identity_to_agent_name(target)
             if resolved is not None:
-                args[0] = resolved
+                target_for_orchestrator = resolved
             else:
-                known_agent_names = []
                 try:
-                    known_agent_names = list(orch.orchestrator.get_all_agents().keys())
+                    known_names = list(
+                        orchestrator.orchestrator.get_all_agents().keys()
+                    )
                 except Exception:
-                    known_agent_names = []
+                    known_names = []
+                if target not in known_names:
+                    message = f"error: agent '{target}' not found"
+                    return _CaptureOutcome(message, error=message)
 
-                if target not in known_agent_names:
-                    return f"error: agent '{target}' not found"
-
-        result = await orch._cmd_capture(args)
+        result = await orchestrator._cmd_capture([target_for_orchestrator, str(lines)])
         message = str(result.message)
+        if getattr(result, "success", True) is False:
+            error = str(getattr(result, "error", None) or message)
+            return _CaptureOutcome(message, error=error)
         if capture_format == "json":
-            return render_transcript(
+            message = render_transcript(
                 message,
                 identity=target,
                 max_lines=lines,
                 max_chars=10_000,
             )
-        return message
+        return _CaptureOutcome(message)
+
+    async def _handle_capture_command(
+        self, rest: str, *, capture_format: str = "json"
+    ) -> str:
+        """Handle /hub capture <identity|name|all> [lines] [--raw].
+
+        Hub identities use the shared transcript renderer by default; --raw
+        preserves the terminal capture path. Tool callers use `_capture_target`
+        with validated identity and line arguments.
+        """
+        args = rest.split() if rest.strip() else []
+        if not args:
+            return "usage: /hub capture <identity|name|all> [lines] [--raw]"
+        if "--raw" in args:
+            capture_format = "terminal"
+            args = [arg for arg in args if arg != "--raw"]
+        if capture_format not in {"json", "plain", "terminal"}:
+            capture_format = "json"
+        target = args[0]
+        try:
+            lines = int(args[1]) if len(args) > 1 else 50
+        except (TypeError, ValueError):
+            lines = 50
+        return (
+            await self._capture_target(
+                target,
+                lines,
+                capture_format=capture_format,
+            )
+        ).text
 
     async def _handle_wake_command(self, rest: str) -> str:
         """Handle /hub wake <identity> — manually wake a waiting agent."""
@@ -14326,11 +14393,43 @@ class HubPlugin(BasePlugin):
                 return ["(no recent output)"]
             return [str(e.get("rendered", "")) for e in rendered_events[-limit:]]
 
-        semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"]
+        semantic = [
+            e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"
+        ]
         if not semantic:
-            semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") == "output"]
-        records = normalize_records(semantic[-limit:])
-        page, truncated, next_cursor = paginate(records, cursor=cursor, max_chars=max_chars)
+            semantic = [
+                e
+                for e in raw_events
+                if isinstance(e, dict) and e.get("type") == "output"
+            ]
+        records = group_transcript_records(normalize_records(semantic))
+        ring_truncated = False
+        latest_seq = 0
+        if raw_events:
+            try:
+                ring_truncated = int(raw_events[0].get("seq", 0)) > 1
+                latest_seq = max(int(event.get("seq", 0)) for event in raw_events)
+            except (AttributeError, TypeError, ValueError):
+                ring_truncated = False
+                latest_seq = 0
+        cursor_reset = False
+        if cursor is not None:
+            try:
+                cursor_seq = int(cursor)
+            except (TypeError, ValueError):
+                cursor = None
+                cursor_reset = True
+            else:
+                if latest_seq and cursor_seq > latest_seq:
+                    cursor = None
+                    cursor_reset = True
+        record_window = records[-limit:]
+        page, truncated, next_cursor = paginate(
+            record_window, cursor=cursor, max_chars=max_chars
+        )
+        truncated = truncated or ring_truncated or cursor_reset
+        if truncated and next_cursor is None and page:
+            next_cursor = str(page[-1].get("seq", "")) or None
         if format == "plain":
             return {
                 "format": "plain",

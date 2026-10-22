@@ -107,6 +107,7 @@ def _record(raw: Any, seq: int) -> dict[str, Any]:
         role = {
             "user_message": "user",
             "assistant_message": "assistant",
+            "response": "assistant",
             "token": "assistant",
         }.get(event_type)
     excluded = {
@@ -211,6 +212,126 @@ def _labelled_lines(label: str, value: Any) -> list[str]:
         return []
     lines = text.split("\n")
     return [f"{label} {lines[0]}", *(f"  {line}" for line in lines[1:])]
+
+
+def _record_sequence(record: dict[str, Any]) -> int:
+    try:
+        return int(record.get("seq", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _transcript_turn_key(record: dict[str, Any]) -> tuple[str, str] | None:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    request_id = record.get("request_id")
+    if request_id is None:
+        request_id = payload.get("request_id")
+    turn_id = record.get("turn_id")
+    if turn_id is None:
+        turn_id = payload.get("turn_id")
+    if request_id is None and turn_id is None:
+        return None
+    return (
+        _string_value(request_id) if request_id is not None else "",
+        _string_value(turn_id) if turn_id is not None else "",
+    )
+
+
+def _transcript_role(record: dict[str, Any]) -> str:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    return str(record.get("role") or payload.get("role") or "").lower()
+
+
+def group_transcript_records(
+    records: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group assistant stream chunks and prefer final responses for the same turn."""
+    ordered = sorted(
+        (record for record in records if isinstance(record, dict)),
+        key=lambda record: _record_sequence(record),
+    )
+
+    def is_response(record: dict[str, Any]) -> bool:
+        return (
+            record.get("kind") == "message"
+            and _transcript_role(record) == "assistant"
+        )
+
+    def is_token(record: dict[str, Any]) -> bool:
+        if record.get("kind") != "text" or _transcript_role(record) != "assistant":
+            return False
+        return record.get("event_type") not in {"thinking", "reasoning", "analysis"}
+
+    final_turns = set()
+    for record in ordered:
+        if not is_response(record):
+            continue
+        if not normalize_text(_string_value(record.get("text", ""))):
+            continue
+        turn_key = _transcript_turn_key(record)
+        if turn_key is not None:
+            final_turns.add(turn_key)
+
+    grouped: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    pending_key: tuple[str, str] | None = None
+
+    def flush_pending() -> None:
+        nonlocal pending, pending_key
+        if not pending:
+            return
+        turn_key = pending_key
+        if turn_key is None or turn_key not in final_turns:
+            text = "".join(
+                normalize_text(_string_value(record.get("text", "")))
+                for record in pending
+            )
+            combined = dict(pending[-1])
+            combined["seq"] = max(_record_sequence(record) for record in pending)
+            combined["kind"] = "text"
+            combined["role"] = "assistant"
+            combined["text"] = text
+            payload: dict[str, Any] = {}
+            payload_text_present = False
+            for record in pending:
+                source_payload = record.get("payload")
+                if not isinstance(source_payload, dict):
+                    continue
+                payload_text_present = payload_text_present or "text" in source_payload
+                for key, value in source_payload.items():
+                    if key != "text":
+                        payload.setdefault(key, value)
+            if payload_text_present:
+                payload["text"] = text
+            combined["payload"] = payload
+            grouped.append(combined)
+        pending = []
+        pending_key = None
+
+    for record in ordered:
+        if is_token(record):
+            turn_key = _transcript_turn_key(record)
+            if pending and turn_key != pending_key:
+                flush_pending()
+            if turn_key is not None and turn_key in final_turns:
+                continue
+            pending.append(record)
+            pending_key = turn_key
+            continue
+
+        if is_response(record) and _transcript_turn_key(record) is None:
+            if pending and pending_key is None:
+                pending = []
+                pending_key = None
+        flush_pending()
+        grouped.append(record)
+
+    flush_pending()
+    return grouped
 
 
 def _transcript_record_lines(record: dict[str, Any]) -> list[str]:
@@ -401,32 +522,12 @@ def render_transcript(
             empty_message=empty_message,
         )
 
+    records = group_transcript_records(records)
+
     lines: list[str] = []
-    assistant_tokens: list[str] = []
-
-    def flush_assistant() -> None:
-        if assistant_tokens:
-            lines.extend(_labelled_lines("Assistant:", "".join(assistant_tokens)))
-            assistant_tokens.clear()
-
     for record in records:
-        if not isinstance(record, dict):
-            continue
-        event_type = str(record.get("event_type") or "")
-        role = str(record.get("role") or "").lower()
-        if event_type in {"thinking", "reasoning", "analysis"}:
-            flush_assistant()
-            continue
-        if str(record.get("kind") or "") == "text" and (
-            event_type in {"token", "assistant_token"} or role == "assistant"
-        ):
-            token = normalize_text(_string_value(record.get("text", "")))
-            if token:
-                assistant_tokens.append(token)
-            continue
-        flush_assistant()
-        lines.extend(_transcript_record_lines(record))
-    flush_assistant()
+        if isinstance(record, dict):
+            lines.extend(_transcript_record_lines(record))
 
     return _bounded_transcript(
         lines,

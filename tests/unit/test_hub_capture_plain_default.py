@@ -142,11 +142,11 @@ class TestCaptureCommandTranscriptDefault(unittest.TestCase):
         plugin = _make_plugin()
         seen = {}
 
-        async def _fake(peer, lines, *, format="terminal"):
+        async def _fake(peer, lines, *, format="terminal", max_chars=None):
             seen["target"] = peer.identity
             seen["lines"] = lines
             seen["format"] = format
-            return "ok"
+            return SimpleNamespace(text="ok", error=None, success=True)
 
         plugin._get_peer_by_identity = MagicMock(return_value=_peer())
         plugin._capture_peer_output = _fake
@@ -262,62 +262,128 @@ class TestHubCaptureToolTranscriptDefault(unittest.TestCase):
 
     def test_tool_raw_bool_requests_raw(self):
         plugin = _make_plugin()
-        seen = {}
-
-        async def _fake_handle_capture_command(arg):
-            seen["args"] = arg
-            return "raw text"
-
-        plugin._handle_capture_command = _fake_handle_capture_command
-        result = _run(
-            plugin._handle_hub_capture_tool(
-                {"id": "capture-bool", "input": {"name": "lapis", "raw": True}}
-            )
+        plugin._get_peer_by_identity = MagicMock(return_value=_peer())
+        plain_patch, raw_patch, ctx = _patch_transport(
+            plain_payload={"format": "plain", "text": "plain"},
+            raw_lines=["\x1b[31mraw\x1b[0m"],
         )
+        with plain_patch, raw_patch:
+            result = _run(
+                plugin._handle_hub_capture_tool(
+                    {"id": "capture-bool", "input": {"name": "lapis", "raw": True}}
+                )
+            )
+
         self.assertTrue(result.success)
-        self.assertEqual(seen["args"], "lapis 50 --raw")
+        self.assertIn("\x1b[31mraw\x1b[0m", result.output)
+        ctx.raw.assert_awaited_once()
+        ctx.plain.assert_not_awaited()
 
     def test_tool_legacy_xml_format_attribute_requests_raw(self):
-        plugin = _make_plugin()
-        seen = {}
-
-        async def _fake_handle_capture_command(arg):
-            seen["args"] = arg
-            return "raw text"
-
-        plugin._handle_capture_command = _fake_handle_capture_command
-        result = _run(
-            plugin._handle_hub_capture_tool(
-                {
-                    "id": "capture-xml",
-                    "cap_name": "sapphire",
-                    "cap_lines": "25",
-                    "cap_format": "terminal",
-                }
-            )
+        plugin = _make_plugin(identity_name="coordinator")
+        plugin._get_peer_by_identity = MagicMock(return_value=_peer())
+        plain_patch, raw_patch, ctx = _patch_transport(
+            plain_payload={"format": "plain", "text": "plain"},
+            raw_lines=["\x1b[31mraw\x1b[0m"],
         )
+        with plain_patch, raw_patch:
+            result = _run(
+                plugin._handle_hub_capture_tool(
+                    {
+                        "id": "capture-xml",
+                        "cap_name": "sapphire",
+                        "cap_lines": "25",
+                        "cap_format": "terminal",
+                    }
+                )
+            )
         self.assertTrue(result.success)
-        self.assertEqual(seen["args"], "sapphire 25 --raw")
+        self.assertIn("\x1b[31mraw\x1b[0m", result.output)
+        self.assertEqual(ctx.raw.await_args.kwargs.get("lines"), 25)
+        ctx.plain.assert_not_awaited()
 
     def test_tool_explicit_plain_format_is_forwarded(self):
         plugin = _make_plugin()
         seen = {}
 
-        async def _fake_handle_capture_command(arg, *, capture_format="json"):
-            seen["args"] = arg
+        async def _fake_capture_target(target, lines, *, capture_format="json"):
+            seen["target"] = target
+            seen["lines"] = lines
             seen["capture_format"] = capture_format
-            return "plain text"
+            return SimpleNamespace(text="plain text", error=None, success=True)
 
-        plugin._handle_capture_command = _fake_handle_capture_command
+        plugin._capture_target = _fake_capture_target
         result = _run(
             plugin._handle_hub_capture_tool(
                 {"id": "capture-plain", "input": {"name": "lapis", "format": "plain"}}
             )
         )
         self.assertTrue(result.success)
-        self.assertEqual(seen["args"], "lapis 50")
+        self.assertEqual(
+            seen,
+            {"target": "lapis", "lines": 50, "capture_format": "plain"},
+        )
 
-        self.assertEqual(seen["capture_format"], "plain")
+
+class TestHubCaptureToolTypedFailures(unittest.TestCase):
+    def test_transport_timeout_is_a_tool_failure(self):
+        plugin = _make_plugin()
+        plugin._get_peer_by_identity = MagicMock(return_value=_peer())
+        plain_patch, raw_patch, ctx = _patch_transport(
+            plain_payload={"format": "json", "lines": [], "truncated": False},
+            raw_lines=["raw"],
+        )
+        ctx.plain.return_value = (None, "connection timed out")
+
+        with plain_patch, raw_patch:
+            result = _run(
+                plugin._handle_hub_capture_tool(
+                    {"id": "capture-timeout", "input": {"name": "lapis", "lines": 12}}
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("timed out", result.error)
+
+    def test_capture_lines_cannot_inject_a_raw_mode(self):
+        plugin = _make_plugin()
+        plugin._get_peer_by_identity = MagicMock(return_value=_peer())
+        plain_patch, raw_patch, ctx = _patch_transport(
+            plain_payload={"format": "json", "lines": [], "truncated": False},
+            raw_lines=["raw must not be requested"],
+        )
+
+        with plain_patch, raw_patch:
+            result = _run(
+                plugin._handle_hub_capture_tool(
+                    {
+                        "id": "capture-injection",
+                        "input": {"name": "lapis", "lines": "10 --raw"},
+                    }
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("integer", result.error.lower())
+        ctx.plain.assert_not_awaited()
+        ctx.raw.assert_not_awaited()
+
+    def test_agent_not_found_is_a_tool_failure(self):
+        plugin = _make_plugin()
+        plugin._get_peer_by_identity = MagicMock(return_value=None)
+        plugin._resolve_identity_to_agent_name = MagicMock(return_value=None)
+        orchestrator = MagicMock()
+        orchestrator.orchestrator.get_all_agents.return_value = {}
+        plugin._get_orchestrator = MagicMock(return_value=orchestrator)
+
+        result = _run(
+            plugin._handle_hub_capture_tool(
+                {"id": "capture-missing", "input": {"name": "missing-agent"}}
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("not found", result.error.lower())
 
 
 if __name__ == "__main__":

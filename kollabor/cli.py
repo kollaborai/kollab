@@ -1761,7 +1761,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
             sys.exit(1)
         if raw:
             # Keep the original terminal request/response path byte-for-byte.
-            lines = await AgentMessenger.request_output(socket_path, lines=num_lines)
+            lines, capture_error = await AgentMessenger.request_output_diagnostic(
+                socket_path, lines=num_lines
+            )
+            if capture_error:
+                print(
+                    f"capture failed for '{target}': {capture_error}", file=sys.stderr
+                )
+                sys.exit(1)
             if lines:
                 for line in lines:
                     print(line)
