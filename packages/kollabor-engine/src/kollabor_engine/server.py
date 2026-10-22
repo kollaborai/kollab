@@ -181,16 +181,20 @@ async def _engine_lifespan(app: FastAPI):
                         # be retried on the next engine start; never stop it here.
                         logger.exception("could not reown WebUI session %s", session_id)
         logger.info("Engine started")
-        try:
-            await app.state.phone_link.start()
-        except ValueError:
-            logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
+        phone_link = getattr(app.state, "phone_link", None)
+        if phone_link is not None:
+            try:
+                await phone_link.start()
+            except ValueError:
+                logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
-        try:
-            await app.state.phone_link.close()
-        except Exception:
-            logger.exception("PhoneLink close failed")
+        phone_link = getattr(app.state, "phone_link", None)
+        if phone_link is not None:
+            try:
+                await phone_link.close()
+            except Exception:
+                logger.exception("PhoneLink close failed")
         try:
             for session in list(_sessions.values()):
                 try:
