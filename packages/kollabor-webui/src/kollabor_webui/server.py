@@ -23,7 +23,6 @@ from .network_security import (
     host_is_allowed,
     interface_networks_for_hosts,
     is_forwarded_client_header,
-    networks_for_phone_peers,
     request_origin_is_safe,
     validate_bind_hosts,
 )
@@ -133,30 +132,6 @@ def create_app(
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
-    def current_client_networks():
-        networks = interface_networks
-        try:
-            from kollabor_engine.phone_access import get_phone_access
-
-            state = get_phone_access().view()
-            settings = state["settings"]
-            if state["peers"] and settings["endpoint"] and settings["server_public_key"]:
-                peer_networks = networks_for_phone_peers(state["peers"])
-                networks = tuple(
-                    sorted(
-                        set(networks) | set(peer_networks),
-                        key=lambda network: (
-                            network.version,
-                            int(network.network_address),
-                            network.prefixlen,
-                        ),
-                    )
-                )
-        except Exception as exc:
-            # A corrupt/unavailable phone state must not broaden network access.
-            logger.warning("phone access subnet unavailable: %s", type(exc).__name__)
-        return networks
-
     @app.middleware("http")
     async def private_webui_boundary(request: Request, call_next):
         path = request.url.path
@@ -184,7 +159,7 @@ def create_app(
                 "Forwarded client headers are unsupported; connect directly to Kollab.", 400
             )
         client_host = request.client.host if request.client else ""
-        if sensitive and not client_in_networks(client_host, current_client_networks()):
+        if sensitive and not client_in_networks(client_host, interface_networks):
             return deny("This Kollab WebUI is available only on configured private networks.")
         if sensitive and not request_origin_is_safe(request, trusted_hosts):
             return deny("API access must use the same allowed WebUI origin.")

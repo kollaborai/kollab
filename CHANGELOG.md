@@ -24,7 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
 ### Fixed
-- Web: PhoneLink and WireGuard QR codes scale to fit their panels without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+
+### Removed
+- Web: WireGuard phone access is removed; PhoneLink is the way to connect a
+  phone. The manual peer settings, engine routes, and host apply helper are
+  gone; old `KOLLAB_PHONE_ACCESS_*` environment settings and leftover state are
+  ignored.
 
 ## [0.18.0] - 2026-10-21
 
@@ -32,8 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: PhoneLink has its own Settings tab, expiring QR invitations, local phone
   approval and per-phone revocation over the existing `/connect` transport.
   The directory now includes a same-origin browser portal; its deployment is
-  checked before the app offers a QR. Manual WireGuard controls are collapsed
-  under Advanced Settings.
+  checked before the app offers a QR.
 - Web: Learn opens as a compact modal with ten reference topics, plain navigation, and an X to close. What's New has its own page and sidebar action.
 - Engine: Web UI-created agents survive engine and Web UI restarts, restoring the same conversation; use `/quit` or Web UI Delete to stop them. A Delete that stops an agent but cannot update its saved record keeps the agent listed with a retry hint instead of vanishing or stopping it twice; unreadable approval mode reports as unknown with a warning instead of guessing, and both the session panel and the delete error say what to do.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
@@ -53,7 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
 - Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
-- Web: Phone Access provisions one WireGuard peer per phone with a one-time QR and standalone home-screen portal. The operator configures the VPN endpoint, UDP forwarding, DNS, and host apply helper.
 
 ### Changed
 - ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and

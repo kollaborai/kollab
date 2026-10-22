@@ -1,10 +1,28 @@
 """Local-only PhoneLink pairing and revocation; never exposed in the phone bridge."""
 
+import ipaddress
+
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..phone_link import PhoneLinkError
-from .phone import _guard
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
+def _guard(request: Request) -> None:
+    socket_host = request.client.host if request.client else ""
+    if not _is_loopback(socket_host):
+        raise HTTPException(403, "PhoneLink management must use the local WebUI proxy")
+
 
 router = APIRouter(prefix="/phonelink", tags=["phonelink"])
 

@@ -218,9 +218,8 @@ requests and streamed responses. The engine token never leaves the computer.
 Native `/relay/v1/ws` continues to reject browser Origin headers. The directory
 capability endpoint must confirm support before a pairing QR can be created.
 
-The existing manual WireGuard flow is collapsed under **Advanced Settings**.
 See [`docs/features/phone-access.md`](../../docs/features/phone-access.md) for
-both contracts and their deployment/physical-phone verification gates.
+the contract and its deployment/physical-phone verification gates.
 
 ## Frontend development
 

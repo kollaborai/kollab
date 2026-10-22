@@ -39,6 +39,15 @@ test("Learn catalog keeps all eleven public topic IDs stable and useful", () => 
   assert.match(profileGuidance, /KOLLAB_<PROFILE>_API_KEY/);
 });
 
+
+test("PhoneLink lesson no longer advertises manual WireGuard setup", () => {
+  const phone = getLearnTopic("phone-access");
+  const guidance = [phone.summary, ...phone.howTo, phone.example, phone.note].join(" ");
+
+  assert.match(guidance, /pairing/i);
+  assert.doesNotMatch(guidance, /WireGuard|Advanced Settings/i);
+});
+
 test("voice lesson documents the Dream Model control without overstating voice impact", () => {
   const voice = getLearnTopic("voice");
   const guidance = [voice.summary, ...voice.howTo, voice.example, voice.note].join(" ");
