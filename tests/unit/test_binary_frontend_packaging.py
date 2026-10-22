@@ -16,6 +16,9 @@ from scripts.relay import build_service
 def frontend(tmp_path):
     frontend = tmp_path / "chosen-frontend"
     (frontend / "assets").mkdir(parents=True)
+    (frontend / "phonelink/loader").mkdir(parents=True)
+    (frontend / "phonelink/loader/loader.js").write_bytes(b"/* the only code a directory serves */")
+    (frontend / "phonelink/loader/index.html").write_bytes(b"<script src=./loader.js></script>")
     (frontend / "index.html").write_bytes(b'<script src="/assets/app.js"></script>')
     (frontend / "assets/app.js").write_bytes(b"/* chosen frontend */")
     return frontend
@@ -41,11 +44,13 @@ def test_binary_wheel_must_match_every_service_frontend_asset(tmp_path, frontend
             for member in service.getmembers()
             if member.name.startswith(prefix)
         }
-    assert assets == {
-        path.relative_to(frontend).as_posix(): path.read_bytes()
-        for path in frontend.rglob("*")
-        if path.is_file()
-    }
+    # The directory carries only the loader; the binary's wheel carries the whole frontend.
+    loader = frontend / "phonelink/loader"
+    def files(root):
+        return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    assert assets == files(loader)
+    assets = files(frontend)
     if mismatch == "changed":
         assets["assets/app.js"] = b"/* stale frontend with the same package version */"
     elif mismatch == "missing":
@@ -139,7 +144,8 @@ def test_service_packages_the_same_environment_selected_frontend(tmp_path, front
     archive = tmp_path / "environment-service.tar.gz"
     build_service.build(archive)
     with tarfile.open(archive) as service:
-        assert service.extractfile("plugins/hub/phone_static/assets/app.js").read() == b"/* chosen frontend */"
+        loader = service.extractfile("plugins/hub/phone_static/loader.js").read()
+        assert loader == b"/* the only code a directory serves */"
 
 
 def test_empty_frontend_environment_cannot_select_a_checkout_fallback(tmp_path, monkeypatch):

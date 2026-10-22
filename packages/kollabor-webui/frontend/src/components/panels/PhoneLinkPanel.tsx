@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronRight, QrCode } from "lucide-react";
+import { Check, ChevronRight, Copy, QrCode, Smartphone } from "lucide-react";
 import type { EngineApi, PhoneLinkOffer, PhoneLinkState } from "@/api";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { learnHref } from "@/learn/catalog";
+import { copyText } from "@/phonelink/copy-link";
 import { PhoneAccessSection } from "./PhoneAccessSection";
 
 type PhoneLinkPanelProps = {
@@ -29,6 +30,14 @@ export function PhoneLinkPanel(props: PhoneLinkPanelProps) {
   return <DesktopPhoneLinkPanel {...props} />;
 }
 
+function lastSeen(seconds: number, now: number) {
+  const minutes = Math.max(0, Math.round((now / 1000 - seconds) / 60));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+}
+
 /** Device-wide pairing. Unmounting drops the invitation QR and its secret. */
 function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
   const [state, setState] = useState<PhoneLinkState | null>(null);
@@ -37,6 +46,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState<"yes" | "failed" | "">("");
   const [now, setNow] = useState(Date.now());
   const epoch = useRef(0);
   const loading = useRef(false);
@@ -88,6 +98,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
       setBusy(false);
     }
   };
+  useEffect(() => setCopied(""), [offer?.id]);
   const expired = Boolean(offer && now / 1000 >= offer.expires_at);
   const phones = state?.phones ?? [];
   return (
@@ -110,8 +121,8 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                 <h4 className="text-sm font-medium">Create a QR Code</h4>
                 <p className="text-muted-foreground mt-1 text-sm">
                   Choose Link a Phone, then scan the code with your phone’s
-                  camera. Kollab opens in Safari or Chrome. No extra app to
-                  install.
+                  camera. Kollab opens in Safari or Chrome and loads its app
+                  from this computer. No extra app to install.
                 </p>
               </div>
               {!offer ? (
@@ -155,13 +166,65 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                         className="w-full max-w-56 rounded-lg bg-white p-2 [&_svg]:h-auto [&_svg]:w-full"
                         dangerouslySetInnerHTML={{ __html: offer.qr_svg }}
                       />
+                      <p className="text-xs">
+                        <span className="text-muted-foreground">
+                          Computer fingerprint:{" "}
+                        </span>
+                        <strong className="font-mono tracking-wide">
+                          {offer.fingerprint}
+                        </strong>
+                      </p>
                       <p className="text-muted-foreground text-xs">
-                        Expires in{" "}
+                        Your phone shows the same fingerprint. Expires in{" "}
                         {Math.max(
                           1,
                           Math.ceil((offer.expires_at - now / 1000) / 60),
                         )}{" "}
                         min. Keep this invitation private.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          asChild
+                          size="sm"
+                          className="focus-visible:ring-ring focus-visible:ring-[3px]"
+                        >
+                          <a href={offer.link} target="_blank" rel="noopener noreferrer">
+                            <Smartphone aria-hidden="true" />
+                            Open on This Phone
+                          </a>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="focus-visible:ring-ring focus-visible:ring-[3px]"
+                          onClick={() =>
+                            void copyText(navigator.clipboard, offer.link).then(
+                              (ok) => setCopied(ok ? "yes" : "failed"),
+                            )
+                          }
+                        >
+                          {copied === "yes" ? (
+                            <Check aria-hidden="true" />
+                          ) : (
+                            <Copy aria-hidden="true" />
+                          )}
+                          {copied === "yes" ? "Copied" : "Copy Link"}
+                        </Button>
+                      </div>
+                      {copied === "failed" ? (
+                        <input
+                          readOnly
+                          aria-label="Invitation link"
+                          value={offer.link}
+                          autoFocus
+                          onFocus={(event) => event.currentTarget.select()}
+                          className="border-input bg-background w-full min-w-0 rounded-md border px-2 py-1 font-mono text-xs"
+                        />
+                      ) : null}
+                      <p className="text-muted-foreground text-xs">
+                        This link works for 5 minutes. Only share it with
+                        yourself. Nobody gets in until you approve the pairing
+                        code on this computer.
                       </p>
                     </>
                   )}
@@ -209,7 +272,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
           <li className="min-w-0 pl-1">
             <h4 className="text-sm font-medium">Approve Your Phone</h4>
             <p className="text-muted-foreground mt-1 text-sm">
-              Compare the pairing code on both screens, then approve the phone
+              Compare the pairing code and fingerprint on both screens, then approve the phone
               on this computer.
             </p>
           </li>
@@ -217,8 +280,8 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
             <div>
               <h4 className="text-sm font-medium">Open Kollab</h4>
               <p className="text-muted-foreground mt-1 text-sm">
-                Bookmark Kollab to return in the same phone browser. Keep this
-                computer awake and online to use its agents from anywhere.
+                Bookmark Kollab or add it to your Home Screen to come back. Keep
+                this computer awake and online to use its agents from anywhere.
               </p>
             </div>
           </li>
@@ -256,7 +319,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       {phone.connected
                         ? "Connected"
                         : phone.linked
-                          ? "Offline"
+                          ? `Offline${phone.last_seen ? ` · Last seen ${lastSeen(phone.last_seen, now)}` : ""}`
                           : phone.expires_at < now / 1000
                             ? "Invitation Expired"
                             : "Waiting for Your Phone"}
@@ -266,12 +329,12 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                     size="sm"
                     variant="ghost"
                     disabled={busy}
-                    aria-label={`Remove ${phone.name}`}
+                    aria-label={`Revoke Access for ${phone.name}`}
                     onClick={() => {
                       if (
                         phone.linked &&
                         !window.confirm(
-                          `Remove ${phone.name}? This phone will lose access to Kollab.`,
+                          `Revoke access for ${phone.name}? This phone will lose access to Kollab.`,
                         )
                       )
                         return;
@@ -281,7 +344,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                       });
                     }}
                   >
-                    Remove
+                    Revoke
                   </Button>
                 </div>
                 {phone.pending.map((pending) => (
@@ -290,9 +353,12 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                     className="flex flex-wrap items-center gap-3 border-t pt-3"
                   >
                     <span className="text-muted-foreground flex-1 text-xs">
-                      Check this code on your phone:{" "}
+                      Check this code and fingerprint on your phone:{" "}
                       <strong className="text-foreground font-mono tracking-wider">
                         {pending.code}
+                      </strong>{" "}
+                      <strong className="text-foreground font-mono tracking-wide">
+                        {phone.fingerprint}
                       </strong>
                     </span>
                     <Button

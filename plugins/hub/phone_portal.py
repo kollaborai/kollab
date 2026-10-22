@@ -17,12 +17,16 @@ def static_directory() -> Path | None:
     bundled = Path(__file__).with_name("phone_static")
     if (bundled / "index.html").is_file():
         return bundled
+    # Only the small loader lives here. The phone app itself is served by the
+    # user's computer over the encrypted session and checked against its signature.
     try:
         from kollabor_webui.server import _assistant_static_dir
 
-        return _assistant_static_dir()
+        root = _assistant_static_dir()
     except ImportError:
         return None
+    loader = root / "phonelink" / "loader" if root else None
+    return loader if loader and (loader / "index.html").is_file() else None
 
 
 async def phone_capabilities(request: web.Request) -> web.Response:
@@ -57,7 +61,7 @@ async def phone_page(request: web.Request) -> web.StreamResponse:
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
         "Content-Security-Policy": (
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+            "default-src 'self'; script-src 'self' blob: 'wasm-unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
             "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; "
             "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"

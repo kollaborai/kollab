@@ -215,6 +215,10 @@ class RelayClient:
         self._control_lock = asyncio.Lock()
         self._control: tuple[str, tuple[str, object], asyncio.Future] | None = None
 
+    def sign(self, message: bytes) -> str:
+        """Sign with this room's device key (the host key a phone pinned from its QR)."""
+        return self._store.key.sign(message).signature.hex()
+
     def status(self) -> dict:
         return {
             "state": self._state,
