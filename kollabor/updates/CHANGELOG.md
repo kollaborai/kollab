@@ -73,8 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
 - Web: agent guidance covers sidebar workspace grouping and drag ordering. Learn no longer tracks completion or shows a progress counter. The Voice topic documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
 - Web: the main pane shares the sidebar's rounded inset frame; footer actions stay on one row or form two balanced rows. Wrapped changelog entries retain their full text.
-
-- Bound automatic compaction to recent live hub tasks, expose its pause/recovery state in the TUI and Web UI, and use OAuth model context-window metadata when available instead of an unrelated generic model limit.
+- Bound automatic compaction to recent live hub tasks, expose its pause/recovery state in the TUI, Web UI, and Learn, and use OAuth model context-window metadata when available instead of an unrelated generic model limit.
 
 ### Security
 - Restrict WebUI token bootstrap and phone APIs to exact private interface/phone-peer subnets; validate Host/Origin, disable forwarded-header trust, and never persist or redisclose client private keys.
