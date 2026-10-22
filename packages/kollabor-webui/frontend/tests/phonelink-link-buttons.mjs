@@ -40,15 +40,20 @@ const answer = (url, method) => {
   if (p.endsWith("/history")) return { history: [], source: "mirror", stale: false, last_turn_error: null };
   if (p.endsWith("/permissions")) return { pending_prompts: [], approval_mode: "trust_all" };
   if (p === "/profiles") return { active: "default", providers: [], profiles: [{ name: "default", provider: "openai_responses", model: "gpt-6-luna" }] };
-  if (p === "/phone") return { configured: false, peers: [], settings: {}, ready: false };
   return {};
 };
+const failures = [];
+const consoleErrors = [];
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
 for (const [name, width, height] of [["390", 390, 844], ["820", 820, 1180], ["1280", 1280, 860]]) {
   const context = await browser.newContext({ viewport: { width, height } });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
   await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
   const page = await context.newPage();
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(`${name}px: ${message.text()}`);
+  });
+  page.on("pageerror", (error) => consoleErrors.push(`${name}px: ${error.message}`));
   await page.route("**/*", (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -120,9 +125,17 @@ for (const [name, width, height] of [["390", 390, 844], ["820", 820, 1180], ["12
     }, label));
   }
   console.log(name, "focus ring vs page", JSON.stringify(rings));
+  for (const ring of rings) {
+    if (Number(ring.ring) < 3) {
+      failures.push(`${name}px: ${ring.label} focus-ring contrast ${ring.ring} < 3`);
+    }
+  }
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+  if (overflow) failures.push(`${name}px: horizontal overflow`);
   console.log(name, overflow ? "OVERFLOW" : "no horizontal overflow");
   await context.close();
 }
 await browser.close();
 server.close();
+assert.deepEqual(consoleErrors, [], `browser console errors: ${consoleErrors.join("; ")}`);
+assert.deepEqual(failures, [], `browser UI failures: ${failures.join("; ")}`);

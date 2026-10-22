@@ -152,9 +152,6 @@ credential setup or agent-network enrollment. Removing the phone withdraws its a
 The directory must include the PhoneLink portal; the UI checks this before
 issuing a QR. Code in a checkout does not establish public deployment.
 
-Manual WireGuard access remains optional under **Advanced Settings**; its
-operator prerequisites are in [PhoneLink](phone-access.md).
-
 ## What's New
 
 What's New is a separate `/whats-new` page, opened with the newspaper icon in the

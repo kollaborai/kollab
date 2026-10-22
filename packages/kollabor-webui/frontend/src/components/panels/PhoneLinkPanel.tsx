@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, ChevronRight, Copy, QrCode, Smartphone } from "lucide-react";
+import { Check, Copy, QrCode, Smartphone } from "lucide-react";
 import type { EngineApi, PhoneLinkOffer, PhoneLinkState } from "@/api";
 import { errorText } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { learnHref } from "@/learn/catalog";
 import { copyText } from "@/phonelink/copy-link";
-import { PhoneAccessSection } from "./PhoneAccessSection";
+import { responsiveQrSvg } from "@/utils/qr-svg";
 
 type PhoneLinkPanelProps = {
   api: EngineApi;
@@ -21,8 +21,7 @@ export function PhoneLinkPanel(props: PhoneLinkPanelProps) {
           Manage PhoneLink on Your Computer
         </h3>
         <p className="text-muted-foreground text-sm">
-          Open PhoneLink in Kollab on your computer to link or remove phones and
-          change advanced connection settings.
+          Open PhoneLink in Kollab on your computer to link or remove phones.
         </p>
       </section>
     );
@@ -164,7 +163,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                         role="img"
                         aria-label="PhoneLink pairing QR code"
                         className="w-full max-w-56 rounded-lg bg-white p-2 [&_svg]:h-auto [&_svg]:w-full"
-                        dangerouslySetInnerHTML={{ __html: offer.qr_svg }}
+                        dangerouslySetInnerHTML={{ __html: responsiveQrSvg(offer.qr_svg) }}
                       />
                       <p className="text-xs">
                         <span className="text-muted-foreground">
@@ -389,22 +388,6 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
             How It Works
           </a>
         </div>
-        <details className="group min-w-0 border-t pt-3">
-          <summary className="text-muted-foreground flex cursor-pointer list-none items-center gap-2 text-xs font-medium">
-            <ChevronRight
-              className="size-3.5 transition-transform group-open:rotate-90"
-              aria-hidden="true"
-            />
-            Advanced Settings
-          </summary>
-          <div className="mt-3 grid min-w-0 gap-3">
-            <p className="text-muted-foreground text-xs">
-              Use an existing WireGuard server for direct private-network
-              access. These settings are optional and separate from PhoneLink.
-            </p>
-            <PhoneAccessSection api={api} />
-          </div>
-        </details>
       </section>
     </div>
   );

@@ -317,28 +317,26 @@ Model, Setup, Network, Voice and Prompts. Most map to the terminal's `/config`,
 `/llm`, `/model`, `/setup`, `/connect` and `/voice config` screens; Prompts is
 browser-only (type `/prompts` in web chat to open it). See [web settings panels](https://github.com/kollaborai/kollab/blob/main/docs/features/web-settings-panels.md).
 
-### Private Phone Access
+### PhoneLink
 
-Open **Session Settings > Phone Access** to create a distinct WireGuard peer and
-one-time QR for each phone. The phone can then open the WebUI's private LAN
-address and add it to the home screen. To make the WebUI reachable from home
-Wi-Fi, bind it to a specific private host address:
+Open **Session Settings > PhoneLink** and choose **Link a Phone** to show an
+expiring QR invitation. Scan it with the phone camera, compare the pairing codes
+on both screens, and approve on the computer; revoke a phone any time. The phone
+controls the same Kollab over the existing connection, with no VPN or credential
+setup on the phone. To make the WebUI reachable from home Wi-Fi, bind it to a
+specific private host address:
 
 ```bash
 KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui
 ```
 
-Phone access is direct-bind only: wildcards, public interfaces, forwarded client
-headers and reverse proxies are rejected. Configure the WireGuard server endpoint,
-its UDP port-forward and DNS outside Kollab; install a host-admin peer apply helper
-for live add/revoke. Kollab never configures the router or edits the WireGuard
-base config; only the operator-owned helper applies generated phone peer snippets
-to the running server.
-See [Phone Access setup](docs/features/phone-access.md) before connecting a phone.
+The WebUI is direct-bind only: wildcards, public interfaces, forwarded client
+headers and reverse proxies are rejected.
+See [PhoneLink](docs/features/phone-access.md) before connecting a phone.
 
 The sidebar's **Learn** entry opens a guided tour of networks, devices, workspaces,
-agents, profiles, the koordinator, Hub messaging, voice, system prompts, and
-WireGuard phone access. Lesson progress is saved in this browser; **What's New**
+agents, profiles, the koordinator, Hub messaging, voice, and system prompts.
+Lesson progress is saved in this browser; **What's New**
 uses the canonical changelog. See the [Learn feature guide](docs/features/learn.md).
 
 ## Apps

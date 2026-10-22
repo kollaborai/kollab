@@ -216,24 +216,6 @@ Check `docs/providers/` for each provider's full env var list.
 
 Read these carefully. Setting them wrong weakens your security posture.
 
-### KOLLAB_PHONE_ACCESS_APPLY_COMMAND
-
-Trusted host-admin executable and fixed arguments used after a phone peer is
-added or revoked. The engine invokes it without a shell, appends the generated
-`peers.conf` path as its final argument, and also sets
-`KOLLAB_PHONE_ACCESS_PEERS_FILE`. The helper must reconcile only the managed
-phone peers, disconnect removed peers, preserve other server peers, and return
-zero only after the running WireGuard server has accepted the complete peer set.
-
-This variable is deliberately not editable through the WebUI/API. Only configure
-it locally for a reviewed, operator-owned helper. If unset or invalid, adding and
-revoking peers is disabled. A failed apply returns an error and restores the
-previous local peer file; inspect the server if a helper failed after a partial
-remote change.
-
-Default: unset (phone peer changes disabled)
-
-
 ### KOLLAB_ALLOW_PLAINTEXT_KEYS
 
 Store API keys as plaintext in `config.json` instead of the encrypted
@@ -355,7 +337,7 @@ DNS layer is still evolving and this var may be replaced or renamed.
 ## WebUI
 
 These settings control the bundled browser UI served by `kollab --web-ui`.
-Phone Access uses direct private binding and a same-host engine.
+The WebUI uses direct private binding and a same-host engine.
 
 ### KOLLAB_WEBUI_PORT
 
@@ -366,12 +348,11 @@ Default: `8080`
 ### KOLLAB_WEBUI_HOSTS
 
 Comma-separated literal interface IPs to bind besides `127.0.0.1`, such as the
-host's home-LAN or WireGuard address. Only loopback, RFC1918, IPv6 ULA, and
+host's home-LAN address. Only loopback, RFC1918, IPv6 ULA, and
 link-local IPs are accepted. Wildcard, unspecified, public, and hostname values
 fail at startup; a private address not assigned to an active interface is
-skipped with a warning. Phone access trusts the exact CIDR assigned to each bound interface plus each
-active phone peer's exact `/32` address; it does not trust the full WireGuard
-pool or arbitrary RFC1918 clients. Uvicorn forwarded-header
+skipped with a warning. The WebUI trusts the exact CIDR assigned to each bound
+interface; it does not trust arbitrary RFC1918 clients. Uvicorn forwarded-header
 rewriting is disabled, forwarded client chains are rejected, and Host/Origin are
 checked. This is direct private binding only; reverse proxies and public port
 forwarding to the WebUI are not supported. Every allowed page can receive the
@@ -381,9 +362,10 @@ Default: unset (127.0.0.1 only)
 
 ### KOLLAB_ENGINE_URL
 
-URL of the same-host `kollabor-engine` server that the WebUI connects to. Phone
-Access requires the engine to be reachable over loopback; remote engine/proxy
-phone-access deployments are not supported.
+URL of the same-host `kollabor-engine` server that the WebUI connects to. The
+engine must remain reachable over loopback; remote engine/proxy deployments are
+not supported. PhoneLink relays paired phone requests through the WebUI and does
+not expose the engine directly to the phone.
 
 Default: `http://127.0.0.1:7433`
 
