@@ -45,7 +45,14 @@ export type Session = {
   supports_vision?: boolean;
   agent?: string;
   workspace?: string | null;
-  approval_mode?: string;
+  approval_mode?: string | null;
+  /** Why the approval mode could not be read (it reports as unknown meanwhile). */
+  approval_mode_warning?: string | null;
+  /** Why this agent's saved details could not be updated (restart may restore older state). */
+  persistence_warning?: string | null;
+  /** Delete stopped the agent but its owner record is still present; retry Delete to clear it. */
+  deletion_pending?: boolean;
+  deletion_warning?: string | null;
   history_length?: number;
   active?: boolean;
   total_turns?: number;
@@ -1084,6 +1091,7 @@ export class EngineApi {
     return this.json<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(body),
+      headers: { "X-Kollab-Session-Source": "webui" },
     });
   }
 

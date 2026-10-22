@@ -33,7 +33,7 @@ koordinator starts three agents that build and test a change together. A second 
 - Run named agents on all your computers. They find each other, message `agent@device`, and keep their memory between sessions. Each machine dials out on port 443, so nothing needs an open port.
 - Bring Claude Code and Codex onto that network as named agents, and use Kollab from Zed and other ACP clients with `kollab acp`.
 - Add MCP servers, CLI tools, and skills from `/mcp` in the terminal or the Apps button in the browser UI.
-- Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone.
+- Open every agent in a browser UI (`kollab --web-ui`): a roster of this computer and your network, chat with tool and diff cards, and a layout that fits a phone. Agents created in the Web UI stay running across Web UI/engine restarts and return with their conversation; use Web UI Delete or send `/quit` to stop one.
 - Pick the model for each agent: Anthropic, OpenAI, Google Gemini, Azure OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint, with named loadouts for model, effort, and sampling. Switch with `/llm` without leaving the session.
 - Chat in a fast terminal UI, or run one-shot prompts and shell pipelines with `kollab -p`.
 - Gate shell, file, and MCP tool use through risk-aware approvals.

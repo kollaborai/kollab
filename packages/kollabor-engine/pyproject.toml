@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "sse-starlette>=2.1.0",
+    "psutil>=5.9",
     "cryptography>=43",
     "segno>=1.6",
     # The assistant transport adapter targets the 0.0.34 chunk/serializer
