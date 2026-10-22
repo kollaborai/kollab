@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 from kollabor_engine.voice_runtime_host import (
@@ -11,6 +12,7 @@ from kollabor_engine.voice_runtime_host import (
     RuntimeHostError,
 )
 from kollabor_engine.voice_types import (
+    AdmissionReceipt,
     CreateVoiceSessionRequest,
     JoinVoiceSessionRequest,
     RuntimeStatus,
@@ -469,3 +471,107 @@ async def test_shutdown_waits_for_pending_start_and_stops_late_handle():
     assert len(backend.stop_calls) == 1
     assert backend.stop_calls[0][0].generation == starting.generation
     assert backend.stop_calls[0][2] == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_admit_and_run_if_current_reject_forged_binding_identity():
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    binding = backend.start_calls[0]
+    forged_binding = binding.model_copy(update={"thread_id": "another-thread"})
+    operation_called = False
+
+    async def submit_turn():
+        nonlocal operation_called
+        operation_called = True
+        return AdmissionReceipt(
+            accepted=True,
+            request_id=str(uuid4()),
+            conversation_session_id=binding.conversation_session_id,
+            queued=True,
+            duplicate=False,
+        )
+
+    with pytest.raises(RuntimeHostError) as admit_error:
+        await host.admit_turn(forged_binding, str(uuid4()), submit_turn)
+    assert admit_error.value.code == "target_mismatch"
+    assert operation_called is False
+
+    async def cancel_turn():
+        nonlocal operation_called
+        operation_called = True
+
+    with pytest.raises(RuntimeHostError) as run_error:
+        await host.run_if_current(forged_binding, cancel_turn)
+    assert run_error.value.code == "target_mismatch"
+    assert operation_called is False
+    assert ready.voice_session_id == binding.voice_session_id
+
+
+@pytest.mark.asyncio
+async def test_slower_stale_resolver_cannot_replace_newer_service_lease():
+    class RacingResolver(FakeSessionResolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.call_count = 0
+
+        async def resolve(self, owner_id, control_session_id, selected_thread_id):
+            self.calls.append((owner_id, control_session_id, selected_thread_id))
+            self.call_count += 1
+            resolved_epoch = self.service_lease_epoch
+            if self.call_count == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return ResolvedVoiceTarget(
+                agent_id="agent-from-engine",
+                thread_id=selected_thread_id,
+                voice_provider_profile_id="voice-profile-1",
+                voice_prompt_revision="voice-prompt-r1",
+                service_lease_epoch=resolved_epoch,
+            )
+
+    backend = FakeRuntimeBackend()
+    resolver = RacingResolver()
+    host = _host(backend, resolver)
+    stale_create = asyncio.create_task(host.create_session("owner-1", "session-1", _request()))
+    await asyncio.wait_for(resolver.first_started.wait(), timeout=5)
+
+    resolver.service_lease_epoch = 8
+    current = await asyncio.wait_for(
+        host.create_session("owner-1", "session-1", _request()), timeout=5
+    )
+    await asyncio.wait_for(host.wait_for_background_tasks(), timeout=5)
+    resolver.release_first.set()
+    stale_result = await asyncio.wait_for(stale_create, timeout=5)
+    await asyncio.wait_for(host.wait_for_background_tasks(), timeout=5)
+
+    assert stale_result.voice_session_id == current.voice_session_id
+    assert [binding.service_lease_epoch for binding in backend.start_calls] == [8]
+    assert backend.stop_calls == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_surfaces_failed_backend_stop_and_allows_retry():
+    backend = FakeRuntimeBackend(fail_stop_count=1)
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    with pytest.raises(RuntimeHostError) as error:
+        await host.shutdown()
+
+    assert error.value.code == "runtime_unavailable"
+    failed = await host.get_status("owner-1", ready.voice_session_id)
+    assert failed.state == "error"
+    assert len(backend.stop_calls) == 1
+    assert backend.stop_calls[0][1] is not None
+
+    await host.shutdown()
+
+    stopped = await host.get_status("owner-1", ready.voice_session_id)
+    assert stopped.state == "stopped"
+    assert len(backend.stop_calls) == 2

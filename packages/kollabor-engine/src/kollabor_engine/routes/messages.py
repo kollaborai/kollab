@@ -50,6 +50,17 @@ def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[st
             and str(event.get("request_id") or "") not in request_ids)
 
 
+def _contains_reserved_voice_origin(value: Any) -> bool:
+    if isinstance(value, dict):
+        origin_context = value.get("origin_context")
+        if isinstance(origin_context, dict) and origin_context.get("source") == "livekit_voice":
+            return True
+        return any(_contains_reserved_voice_origin(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_reserved_voice_origin(item) for item in value)
+    return False
+
+
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
@@ -60,7 +71,9 @@ class MessageRequest(BaseModel):
 
 @router.post("/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
-    if body.origin_context and body.origin_context.get("source") == "livekit_voice":
+    if _contains_reserved_voice_origin(
+        {"origin_context": body.origin_context, "content": body.content}
+    ):
         raise HTTPException(
             status_code=403,
             detail="Voice origin context is reserved for the Engine voice session router",

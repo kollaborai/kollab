@@ -199,12 +199,24 @@ class EngineRuntimeHost:
             target.thread_id,
             target.voice_provider_profile_id,
         )
+        active_states = {"starting", "ready", "stopping", "error"}
         while True:
             async with self._lock:
                 self._raise_if_shutting_down()
                 existing_id = self._active_by_key.get(key)
                 existing = self._sessions.get(existing_id) if existing_id is not None else None
-                if existing is None or existing.state not in {"starting", "ready", "stopping", "error"}:
+                if existing is not None and target.service_lease_epoch < existing.binding.service_lease_epoch:
+                    if existing.state in active_states:
+                        # A slower resolver response must never regress an
+                        # already-published service lease.
+                        return _to_view(existing)
+                    raise RuntimeHostError(
+                        "target_mismatch",
+                        409,
+                        "Resolved voice target is older than the current service lease; retry creation.",
+                        retryable=True,
+                    )
+                if existing is None or existing.state not in active_states:
                     if existing_id is not None and self._active_by_key.get(key) == existing_id:
                         self._active_by_key.pop(key, None)
                     return self._create_session_locked(owner_id, control_session_id, target, key)
@@ -224,7 +236,16 @@ class EngineRuntimeHost:
                     if current is None:
                         self._active_by_key.pop(key, None)
                         return self._create_session_locked(owner_id, control_session_id, target, key)
-                    if current.state not in {"starting", "ready", "stopping", "error"}:
+                    if target.service_lease_epoch < current.binding.service_lease_epoch:
+                        if current.state in active_states:
+                            return _to_view(current)
+                        raise RuntimeHostError(
+                            "target_mismatch",
+                            409,
+                            "Resolved voice target is older than the current service lease; retry creation.",
+                            retryable=True,
+                        )
+                    if current.state not in active_states:
                         self._active_by_key.pop(key, None)
                         return self._create_session_locked(owner_id, control_session_id, target, key)
                     if current.binding.service_lease_epoch == target.service_lease_epoch:
@@ -408,11 +429,28 @@ class EngineRuntimeHost:
                     self._fence_record_locked(current, reason="shutdown")
 
         await self.wait_for_background_tasks()
+        async with self._lock:
+            failed_stops = tuple(
+                record
+                for record in self._sessions.values()
+                if record.state == "error" and record.handle is not None
+            )
+        if failed_stops:
+            raise RuntimeHostError(
+                "runtime_unavailable",
+                503,
+                f"Voice runtime shutdown could not stop {len(failed_stops)} session(s).",
+                retryable=True,
+            )
 
     async def wait_for_background_tasks(self) -> None:
         """Drain lifecycle tasks in tests and during Engine shutdown."""
         while self._background_tasks:
-            await asyncio.gather(*tuple(self._background_tasks))
+            tasks = tuple(self._background_tasks)
+            await asyncio.gather(*tasks)
+            # The task callbacks remove entries on the next loop tick. Discard
+            # completed tasks here too, avoiding a busy loop on finished tasks.
+            self._background_tasks.difference_update(task for task in tasks if task.done())
 
     def _raise_if_shutting_down(self) -> None:
         if self._shutting_down:
@@ -491,6 +529,8 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
             if record.binding.owner_id != binding.owner_id:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+            if record.binding != binding:
+                raise RuntimeHostError("target_mismatch", 409, "Voice binding does not match the host record.")
             operation_lock = record.operation_lock
 
         async with operation_lock:
@@ -498,6 +538,8 @@ class EngineRuntimeHost:
                 current = self._sessions.get(binding.voice_session_id)
                 if current is not record:
                     raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if current.binding != binding:
+                    raise RuntimeHostError("target_mismatch", 409, "Voice binding does not match the host record.")
                 if current.generation != binding.generation:
                     raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
                 self._raise_if_shutting_down()
@@ -511,7 +553,11 @@ class EngineRuntimeHost:
             if receipt.accepted:
                 async with self._lock:
                     current = self._sessions.get(binding.voice_session_id)
-                    if current is not record or current.generation != binding.generation:
+                    if current is not record:
+                        raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                    if current.binding != binding:
+                        raise RuntimeHostError("target_mismatch", 409, "Voice binding does not match the host record.")
+                    if current.generation != binding.generation:
                         raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
                     current.admitted_turns[turn_id] = receipt
             return receipt
@@ -520,6 +566,8 @@ class EngineRuntimeHost:
         self,
         binding: VoiceSessionBinding,
         operation: Callable[[], Awaitable[_T]],
+        *,
+        admitted_turn_id: TurnId | None = None,
     ) -> _T:
         """Serialize a short Engine admission with stop/generation fencing."""
         async with self._lock:
@@ -528,6 +576,8 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
             if record.binding.owner_id != binding.owner_id:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
+            if record.binding != binding:
+                raise RuntimeHostError("target_mismatch", 409, "Voice binding does not match the host record.")
             operation_lock = record.operation_lock
 
         async with operation_lock:
@@ -535,9 +585,13 @@ class EngineRuntimeHost:
                 current = self._sessions.get(binding.voice_session_id)
                 if current is not record:
                     raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+                if current.binding != binding:
+                    raise RuntimeHostError("target_mismatch", 409, "Voice binding does not match the host record.")
                 if current.generation != binding.generation:
                     raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
                 self._raise_if_shutting_down()
+                if admitted_turn_id is not None and admitted_turn_id not in current.admitted_turns:
+                    raise RuntimeHostError("target_mismatch", 409, "Voice turn was not admitted by this session.")
                 if current.state not in {"ready", "listening", "thinking", "speaking"}:
                     raise RuntimeHostError("session_busy", 409, "Voice session is not ready to admit a turn.")
             return await operation()

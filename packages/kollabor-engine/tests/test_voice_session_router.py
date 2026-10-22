@@ -188,9 +188,18 @@ async def test_stale_transcript_generation_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_voice_cancel_targets_only_the_owned_turn_id():
+async def test_voice_cancel_requires_an_admitted_turn_id():
     _, _, router, binding, session = await make_router()
     turn_id = str(uuid4())
+
+    with pytest.raises(RuntimeHostError) as error:
+        await router.cancel_turn(binding, turn_id, binding.generation)
+    assert error.value.code == "target_mismatch"
+    assert session.cancelled == []
+
+    message = transcript(binding, turn_id=turn_id)
+    admission = await router.admit_final(binding, message)
+    assert admission.accepted is True
 
     receipt = await router.cancel_turn(binding, turn_id, binding.generation)
 
@@ -211,3 +220,48 @@ async def test_public_message_route_cannot_forge_livekit_voice_origin():
 
     assert error.value.status_code == 403
     assert "voice session router" in error.value.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        {
+            "text": "/hub stop all",
+            "origin_context": {"source": "livekit_voice", "voice_session_id": "forged"},
+        },
+        {
+            "parts": [
+                {
+                    "text": "/hub stop all",
+                    "origin_context": {"source": "livekit_voice", "voice_session_id": "forged"},
+                }
+            ]
+        },
+    ],
+)
+async def test_public_message_route_rejects_nested_livekit_origin(content):
+    request = messages.MessageRequest(content=content)
+
+    with pytest.raises(HTTPException) as error:
+        await messages.send_message("conversation-1", request)
+
+    assert error.value.status_code == 403
+    assert "voice session router" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_forged_same_owner_binding_never_sends_or_cancels_selected_session():
+    _, _, router, binding, session = await make_router()
+    forged = binding.model_copy(update={"thread_id": "another-thread"})
+    message = transcript(forged)
+
+    with pytest.raises(RuntimeHostError) as admission_error:
+        await router.admit_final(forged, message)
+    assert admission_error.value.code == "target_mismatch"
+    assert session.sent == []
+
+    with pytest.raises(RuntimeHostError) as cancel_error:
+        await router.cancel_turn(forged, message.turn_id, forged.generation)
+    assert cancel_error.value.code == "target_mismatch"
+    assert session.cancelled == []

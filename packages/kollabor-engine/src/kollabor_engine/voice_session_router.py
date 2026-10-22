@@ -107,7 +107,11 @@ class EngineSessionRouter:
                 generation=generation,
             )
 
-        return await self._runtime_host.run_if_current(binding, cancel)
+        return await self._runtime_host.run_if_current(
+            binding,
+            cancel,
+            admitted_turn_id=turn_id,
+        )
 
     async def _get_session(self, binding: VoiceSessionBinding) -> EngineSessionForVoice:
         if binding.control_session_id != binding.conversation_session_id:
