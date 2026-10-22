@@ -15,11 +15,6 @@
       "description": "Run the host-side signature and last-seen tests"
     },
     {
-      "action": "wait_for",
-      "pattern": "PY_DONE",
-      "timeout": 120
-    },
-    {
       "action": "assert_contains",
       "pattern": "passed",
       "description": "host-side tests pass"
@@ -31,17 +26,12 @@
     },
     {
       "action": "shell",
-      "command": "(cd packages/kollabor-webui/frontend && node --test tests/phone-app-verify.test.ts 2>&1 | grep -E '^ℹ (pass|fail)'); echo JS_DONE",
+      "command": "(cd packages/kollabor-webui/frontend && node --test tests/phone-app-verify.test.ts 2>&1 | grep -E '^\u2139 (pass|fail)'); echo JS_DONE",
       "description": "Run the phone-side verifier tests"
     },
     {
-      "action": "wait_for",
-      "pattern": "JS_DONE",
-      "timeout": 60
-    },
-    {
       "action": "assert_contains",
-      "pattern": "ℹ fail 0",
+      "pattern": "\u2139 fail 0",
       "description": "phone-side verifier refuses every tampered case"
     },
     {
@@ -66,11 +56,6 @@
       "action": "shell",
       "command": "(cd packages/kollabor-webui/frontend && PATH=\"$PWD/../../../.venv/bin:$PATH\" timeout 110 node tests/phonelink-browser-e2e.mjs 2>&1 | grep -E 'PASS|Error' | head -3); echo E2E_DONE",
       "description": "Pair, load the signed app, relaunch, and refuse a tampered copy in Chromium"
-    },
-    {
-      "action": "wait_for",
-      "pattern": "E2E_DONE",
-      "timeout": 120
     },
     {
       "action": "assert_contains",

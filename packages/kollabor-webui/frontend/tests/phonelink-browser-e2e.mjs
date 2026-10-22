@@ -12,8 +12,16 @@ import { chromium } from "playwright-core";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../../../..");
 const shots = process.argv.includes("--shots") ? process.argv[process.argv.indexOf("--shots") + 1] : "";
-const relayPort = 18771;
-const controlPort = 18772;
+import net from "node:net";
+const freePort = () =>
+  new Promise((resolve) => {
+    const probe = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+const relayPort = await freePort();
+const controlPort = await freePort();
 const origin = "https://relay.example";
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "phonelink-e2e-"));
 const packages = ["", ...["ai", "tui", "events", "config", "agent", "plugins", "engine"].map((n) => `packages/kollabor-${n}/src`), "packages/kollabor-webui/src"];
