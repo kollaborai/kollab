@@ -543,7 +543,11 @@ class ContextCompactionPlugin(BasePlugin):
             handler=self._handle_compact_command,
             subcommands=[
                 SubcommandInfo("now", "", "Compact immediately, without asking the model"),
-                SubcommandInfo("status", "", "Show compaction profile and trigger info"),
+                SubcommandInfo(
+                    "status",
+                    "",
+                    "Show compaction profile, pause state, and next step",
+                ),
                 SubcommandInfo("preview", "", "Show what a compaction would remove"),
             ],
         )

@@ -653,6 +653,7 @@ Plugin entry points live under `plugins/`, and the plugin SDK lives in
 | `/login` | Run provider login flows |
 | `/mcp` | Open the MCP manager; `browse`, `search`, `add`, `remove` for MCP servers, CLI tools, and skills |
 | `/resume` | Resume a previous conversation |
+| `/compact` | Compact the conversation; `status` shows the pause state and the retry step |
 | `/config` | Open the settings editor |
 | `/updates` | Browse recent release notes in the terminal |
 | `/help` | Show available commands |
