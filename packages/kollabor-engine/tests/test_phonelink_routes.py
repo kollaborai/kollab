@@ -16,8 +16,9 @@ def make_app():
     return app
 
 
-def test_loopback_webui_can_read_phonelink_state():
-    with TestClient(make_app(), client=("127.0.0.1", 12345)) as client:
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+def test_loopback_webui_can_read_phonelink_state(host):
+    with TestClient(make_app(), client=(host, 12345)) as client:
         response = client.get("/phonelink")
 
     assert response.status_code == 200
@@ -25,7 +26,7 @@ def test_loopback_webui_can_read_phonelink_state():
     assert response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("host", ["192.0.2.10", "10.77.0.2"])
+@pytest.mark.parametrize("host", ["192.0.2.10", "10.77.0.2", "::ffff:192.0.2.10"])
 def test_non_loopback_cannot_manage_phonelink(host):
     with TestClient(make_app(), client=(host, 12345)) as client:
         response = client.get("/phonelink")
