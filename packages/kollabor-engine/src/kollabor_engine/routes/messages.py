@@ -60,6 +60,12 @@ class MessageRequest(BaseModel):
 
 @router.post("/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
+    if body.origin_context and body.origin_context.get("source") == "livekit_voice":
+        raise HTTPException(
+            status_code=403,
+            detail="Voice origin context is reserved for the Engine voice session router",
+        )
+
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
@@ -862,7 +868,12 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if option_id is None:
                         resolved = await session.resolve_permission(source_tool_id, decision, scope)
                     else:
-                        resolved = await session.resolve_permission(source_tool_id, decision, scope, option_id=str(option_id))
+                        resolved = await session.resolve_permission(
+                            source_tool_id,
+                            decision,
+                            scope,
+                            option_id=str(option_id),
+                        )
                     saw_action = True
                     if not resolved:
                         controller.add_error(
@@ -924,7 +935,11 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     add_streamed_text("reasoning", thinking)
                 elif event_type == "acp_update":
                     update = event.get("update") or {}
-                    if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                    if (
+                        not isinstance(update, dict)
+                        or update.get("sessionUpdate")
+                        not in {"tool_call", "tool_call_update"}
+                    ):
                         continue
                     tool_id = str(update.get("toolCallId") or "")
                     if not tool_id:
