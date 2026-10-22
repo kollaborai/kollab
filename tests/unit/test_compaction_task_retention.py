@@ -287,3 +287,27 @@ async def _empty_history():
 
 async def _empty_tokens():
     return 0
+
+
+def test_persistent_status_is_reannounced_on_next_turn() -> None:
+    plugin = _plugin()
+    plugin.renderer = object()
+    plugin._pending_compaction = None
+
+    with patch("plugins.context_compaction_plugin.publish_semantic") as publish:
+        # idle stays silent
+        asyncio.run(plugin._apply_pending_compaction({}, None))
+        publish.assert_not_called()
+
+        plugin._compaction_status = "failed"
+        plugin._compaction_status_message = "The summarizer returned too little content."
+        plugin._compaction_status_action = "Run /compact now."
+        asyncio.run(plugin._apply_pending_compaction({}, None))
+
+    publish.assert_called_once_with(
+        plugin.renderer,
+        "context_compaction_status",
+        status="failed",
+        message="The summarizer returned too little content.",
+        action="Run /compact now.",
+    )

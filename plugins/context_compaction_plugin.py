@@ -1498,6 +1498,21 @@ class ContextCompactionPlugin(BasePlugin):
         self, data: Dict[str, Any], event
     ) -> Dict[str, Any]:
         """LLM_REQUEST_PRE: apply staged compaction atomically."""
+        # Terminal compaction states can publish from a background task after
+        # the previous turn's event stream closed, so web clients that missed
+        # the original event never see the banner. Re-announce the persistent
+        # status at the start of every turn; the TUI widget reads this state
+        # directly, and this keeps the Web UI banner's lifetime aligned with it.
+        status = getattr(self, "_compaction_status", "idle")
+        if status != "idle":
+            publish_semantic(
+                getattr(self, "renderer", None),
+                "context_compaction_status",
+                status=status,
+                message=getattr(self, "_compaction_status_message", ""),
+                action=getattr(self, "_compaction_status_action", ""),
+            )
+
         if self._pending_compaction is None:
             return data
 
