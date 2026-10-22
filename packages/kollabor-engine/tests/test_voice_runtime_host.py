@@ -1,0 +1,277 @@
+"""Fake-only tests for Engine voice runtime session lifecycle fencing."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from kollabor_engine.voice_runtime_host import (
+    EngineRuntimeHost,
+    ResolvedVoiceTarget,
+    RuntimeHostError,
+)
+from kollabor_engine.voice_types import (
+    CreateVoiceSessionRequest,
+    RuntimeStatus,
+    StopVoiceSessionRequest,
+)
+
+
+class FakeSessionResolver:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def resolve(
+        self, owner_id: str, control_session_id: str, selected_thread_id: str | None
+    ) -> ResolvedVoiceTarget:
+        self.calls.append((owner_id, control_session_id, selected_thread_id))
+        return ResolvedVoiceTarget(
+            agent_id="agent-from-engine",
+            thread_id=selected_thread_id,
+            voice_provider_profile_id="voice-profile-1",
+            voice_prompt_revision="voice-prompt-r1",
+            service_lease_epoch=7,
+        )
+
+
+class FakeRuntimeBackend:
+    def __init__(
+        self,
+        *,
+        block_start: bool = False,
+        block_stop: bool = False,
+        fail_stop_count: int = 0,
+    ) -> None:
+        self.start_entered = asyncio.Event()
+        self.release_start = asyncio.Event()
+        self.stop_entered = asyncio.Event()
+        self.release_stop = asyncio.Event()
+        if not block_start:
+            self.release_start.set()
+        if not block_stop:
+            self.release_stop.set()
+        self.start_calls = []
+        self.stop_calls = []
+        self.fail_stop_count = fail_stop_count
+
+    async def prepare(self) -> RuntimeStatus:
+        return RuntimeStatus(
+            state="ready",
+            component="livekit_server",
+            progress=1.0,
+            detail="ready",
+            retryable=False,
+        )
+
+    async def get_status(self) -> RuntimeStatus:
+        return await self.prepare()
+
+    async def start_session(self, binding):
+        self.start_calls.append(binding)
+        self.start_entered.set()
+        await self.release_start.wait()
+        return {"room": f"room-{binding.voice_session_id}-{binding.generation}"}
+
+    async def stop_session(self, binding, handle, reason) -> None:
+        self.stop_calls.append((binding, handle, reason))
+        self.stop_entered.set()
+        if self.fail_stop_count:
+            self.fail_stop_count -= 1
+            raise RuntimeError("fake teardown failure")
+        await self.release_stop.wait()
+
+
+def _request(thread_id: str | None = "thread-1") -> CreateVoiceSessionRequest:
+    return CreateVoiceSessionRequest(selected_thread_id=thread_id)
+
+
+def _host(
+    backend: FakeRuntimeBackend,
+    resolver: FakeSessionResolver | None = None,
+    *,
+    platform_supported=lambda: True,
+) -> EngineRuntimeHost:
+    return EngineRuntimeHost(
+        session_resolver=resolver or FakeSessionResolver(),
+        runtime=backend,
+        platform_supported=platform_supported,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_is_idempotent_while_starting_and_ready():
+    backend = FakeRuntimeBackend(block_start=True)
+    resolver = FakeSessionResolver()
+    host = _host(backend, resolver)
+
+    starting = await host.create_session("owner-1", "session-1", _request())
+    duplicate = await host.create_session("owner-1", "session-1", _request())
+
+    assert starting.state == "starting"
+    assert duplicate.voice_session_id == starting.voice_session_id
+    assert duplicate.generation == 1
+    assert resolver.calls == [
+        ("owner-1", "session-1", "thread-1"),
+        ("owner-1", "session-1", "thread-1"),
+    ]
+    await backend.start_entered.wait()
+    assert len(backend.start_calls) == 1
+    binding = backend.start_calls[0]
+    assert binding.owner_id == "owner-1"
+    assert binding.control_session_id == binding.conversation_session_id == "session-1"
+    assert binding.agent_id == "agent-from-engine"
+    assert binding.thread_id == "thread-1"
+    assert binding.generation == 1
+
+    backend.release_start.set()
+    await host.wait_for_background_tasks()
+    ready = await host.get_status("owner-1", starting.voice_session_id)
+    assert ready.state == "ready"
+    repeated = await host.create_session("owner-1", "session-1", _request())
+    assert repeated.voice_session_id == starting.voice_session_id
+    assert len(backend.start_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_fences_a_late_start_before_backend_teardown():
+    backend = FakeRuntimeBackend(block_start=True)
+    host = _host(backend)
+    starting = await host.create_session("owner-1", "session-1", _request())
+    await backend.start_entered.wait()
+
+    stopping = await asyncio.wait_for(
+        host.stop_session(
+            "owner-1",
+            starting.voice_session_id,
+            StopVoiceSessionRequest(generation=1, reason="session_switch"),
+        ),
+        timeout=0.1,
+    )
+    assert stopping.state == "stopping"
+    assert stopping.generation == 2
+    assert backend.stop_calls == []
+
+    backend.release_start.set()
+    await host.wait_for_background_tasks()
+    stopped = await host.get_status("owner-1", starting.voice_session_id)
+    assert stopped.state == "stopped"
+    assert stopped.generation == 2
+    assert len(backend.stop_calls) == 1
+    assert backend.stop_calls[0][0].generation == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_acknowledges_before_slow_teardown_and_rejects_stale_generation():
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    assert (await host.get_status("owner-1", ready.voice_session_id)).state == "ready"
+
+    backend.release_stop.clear()
+    stopping = await asyncio.wait_for(
+        host.stop_session(
+            "owner-1",
+            ready.voice_session_id,
+            StopVoiceSessionRequest(generation=1, reason="user"),
+        ),
+        timeout=0.1,
+    )
+    assert stopping.state == "stopping"
+    assert stopping.generation == 2
+    await backend.stop_entered.wait()
+
+    with pytest.raises(RuntimeHostError) as error:
+        await host.stop_session(
+            "owner-1",
+            ready.voice_session_id,
+            StopVoiceSessionRequest(generation=1, reason="user"),
+        )
+    assert error.value.code == "stale_generation"
+
+    backend.release_stop.set()
+    await host.wait_for_background_tasks()
+    stopped = await host.get_status("owner-1", ready.voice_session_id)
+    assert stopped.state == "stopped"
+    assert stopped.generation == 2
+    assert len(backend.stop_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_is_scoped_to_voice_session_id_and_owner_is_enforced():
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    second = await host.create_session("owner-1", "session-2", _request())
+    await host.wait_for_background_tasks()
+
+    assert first.voice_session_id != second.voice_session_id
+    assert first.generation == second.generation == 1
+    with pytest.raises(RuntimeHostError) as error:
+        await host.stop_session(
+            "owner-2",
+            first.voice_session_id,
+            StopVoiceSessionRequest(generation=1, reason="user"),
+        )
+    assert error.value.code == "forbidden"
+
+    stopped = await host.stop_session(
+        "owner-1",
+        first.voice_session_id,
+        StopVoiceSessionRequest(generation=1, reason="user"),
+    )
+    await host.wait_for_background_tasks()
+    assert stopped.generation == 2
+    assert (await host.get_status("owner-1", second.voice_session_id)).generation == 1
+    assert (await host.get_status("owner-1", second.voice_session_id)).state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_platform_fails_before_runtime_start():
+    backend = FakeRuntimeBackend()
+    resolver = FakeSessionResolver()
+    host = _host(backend, resolver, platform_supported=lambda: False)
+
+    with pytest.raises(RuntimeHostError) as error:
+        await host.create_session("owner-1", "session-1", _request())
+
+    assert error.value.code == "unsupported_platform"
+    assert error.value.status_code == 422
+    assert resolver.calls == []
+    assert backend.start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_teardown_keeps_idempotency_and_handle_for_retry():
+    backend = FakeRuntimeBackend(fail_stop_count=1)
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+
+    await host.stop_session(
+        "owner-1",
+        ready.voice_session_id,
+        StopVoiceSessionRequest(generation=1, reason="user"),
+    )
+    await host.wait_for_background_tasks()
+    failed = await host.get_status("owner-1", ready.voice_session_id)
+    assert failed.state == "error"
+    assert failed.generation == 2
+    assert failed.retryable is True
+
+    retry_create = await host.create_session("owner-1", "session-1", _request())
+    assert retry_create.voice_session_id == ready.voice_session_id
+    assert retry_create.state == "error"
+    assert len(backend.start_calls) == 1
+
+    stopping = await host.stop_session(
+        "owner-1",
+        ready.voice_session_id,
+        StopVoiceSessionRequest(generation=2, reason="user"),
+    )
+    assert stopping.generation == 3
+    await host.wait_for_background_tasks()
+    stopped = await host.get_status("owner-1", ready.voice_session_id)
+    assert stopped.state == "stopped"
+    assert stopped.generation == 3
+    assert len(backend.stop_calls) == 2
