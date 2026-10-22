@@ -32,7 +32,7 @@ function screen(message: string, extra: { code?: string; fingerprint?: string; r
     box.append(text("small", "Both screens should show the same code and fingerprint.", "color:#aab0b8;max-width:300px"));
   }
   if (extra.retry) {
-    const button = text("button", "Try Again", "padding:10px 18px;border-radius:8px;border:1px solid #444;background:none;color:inherit;font-size:14px");
+    const button = text("button", "Try Again", "padding:10px 18px;border-radius:8px;border:1px solid #8a9099;background:none;color:inherit;font-size:14px");
     button.onclick = () => location.reload();
     box.append(button);
   }
