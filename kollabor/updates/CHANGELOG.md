@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifier channel. Undelivered worker nudges surface there too instead of
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
+### Changed
+- Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
+
 ### Fixed
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
 
