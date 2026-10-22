@@ -183,7 +183,11 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                         min. Keep this invitation private.
                       </p>
                       <div className="flex flex-wrap gap-2">
-                        <Button asChild size="sm">
+                        <Button
+                          asChild
+                          size="sm"
+                          className="focus-visible:ring-ring focus-visible:ring-[3px]"
+                        >
                           <a href={offer.link} target="_blank" rel="noopener noreferrer">
                             <Smartphone aria-hidden="true" />
                             Open on This Phone
@@ -192,6 +196,7 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
                         <Button
                           size="sm"
                           variant="outline"
+                          className="focus-visible:ring-ring focus-visible:ring-[3px]"
                           onClick={() =>
                             void copyText(navigator.clipboard, offer.link).then(
                               (ok) => setCopied(ok ? "yes" : "failed"),

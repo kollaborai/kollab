@@ -17,7 +17,11 @@ tab of the current browser and **Copy Link** copies it (with a visible, selectab
 fallback when the browser blocks the clipboard), for linking the phone you are
 already holding. It is the exact link the QR encodes, so it carries no extra
 secret, works five minutes and still needs approval of the pairing code on the
-computer. Only share it with yourself.
+computer. Only share it with yourself. Both buttons work from the keyboard (Tab,
+Enter or Space) with a visible focus ring; screenshots at
+[390](../screenshots/phone-access/phonelink-link-390.png),
+[820](../screenshots/phone-access/phonelink-link-820.png) and
+[1280](../screenshots/phone-access/phonelink-link-1280.png).
 
 The computer and its engine must remain running and online. The selected
 `/connect` directory must serve the PhoneLink browser portal. Source support is
