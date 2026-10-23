@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
@@ -655,6 +655,7 @@ class HubPlugin(BasePlugin):
         self._supervisor_alerts: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        self._email_task: Optional[asyncio.Task] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
         # graceful and forced paths can execute the replacement only once.
         self._self_restart_watchdog_task: Optional[asyncio.Task] = None
@@ -758,6 +759,12 @@ class HubPlugin(BasePlugin):
                     "bridge_user_id": "",
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
+                    "email_enabled": False,
+                    "email_imap_host": "imap.gmail.com",
+                    "email_address": "",
+                    "email_app_password": "",
+                    "email_filter": "category:primary",
+                    "email_target_agent": "",
                     "route_untagged_to_coordinator": True,
                     # Who wakes for a model call when an agent comes online:
                     # "all", "koordinator" (only the folder's coordinator) or
@@ -1020,6 +1027,48 @@ class HubPlugin(BasePlugin):
                     "max_value": 30,
                     "step": 1,
                     "help": "Seconds between polls for incoming messages",
+                },
+                # --- Email Wake ---
+                {
+                    "type": "checkbox",
+                    "label": "Email Wake",
+                    "config_path": "plugins.hub.email_enabled",
+                    "help": "New mail in the inbox wakes an agent (IMAP IDLE; mail stays unread)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Address",
+                    "config_path": "plugins.hub.email_address",
+                    "placeholder": "you@gmail.com",
+                    "help": "Mailbox to watch",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email App Password",
+                    "config_path": "plugins.hub.email_app_password",
+                    "placeholder": "Gmail app password",
+                    "help": "App password, not the account password (myaccount.google.com/apppasswords)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email IMAP Host",
+                    "config_path": "plugins.hub.email_imap_host",
+                    "placeholder": "imap.gmail.com",
+                    "help": "IMAP server of the mailbox",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Filter",
+                    "config_path": "plugins.hub.email_filter",
+                    "placeholder": "every new message",
+                    "help": "Gmail search new mail must match, e.g. category:primary",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Target Agent",
+                    "config_path": "plugins.hub.email_target_agent",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by new mail; that agent runs the watcher",
                 },
                 # --- Routing ---
                 {
@@ -5521,6 +5570,8 @@ class HubPlugin(BasePlugin):
             # when multiple agents poll the same bot token)
             if bridge_enabled and self._identity.is_coordinator:
                 self._bridge_task = asyncio.create_task(self._messaging_bridge_loop())
+            if self._runs_email_watch():
+                self._email_task = asyncio.create_task(self._email_inbox_loop())
 
             # Start cron loop (always -- jobs are added at runtime)
             self._cron_task = asyncio.create_task(self._cron_loop())
@@ -6581,7 +6632,76 @@ class HubPlugin(BasePlugin):
             return
 
         self._bridge = bridge
+        try:
+            await self._run_bridge_inbox(
+                bridge,
+                lock_key=f"{platform}:{token}",
+                poll_interval=poll_interval,
+                target=self.config.get("plugins.hub.bridge_target_agent", ""),
+                set_polling=self._set_bridge_polling,
+            )
+        finally:
+            self._bridge = None
 
+    async def _email_inbox_loop(self) -> None:
+        """Watch the configured inbox; each new email wakes this agent.
+
+        Runs only on the agent named by ``email_target_agent`` (or the
+        coordinator when it is empty), so the wake is a local delivery. The
+        machine-global poll lock keeps one watcher per mailbox.
+        """
+        if not self.config or not self._identity:
+            return
+        from .email_bridge import EmailBridge
+
+        address = self.config.get("plugins.hub.email_address", "")
+        password = self.config.get(
+            "plugins.hub.email_app_password", ""
+        ) or os.environ.get("KOLLAB_HUB_EMAIL_APP_PASSWORD", "")
+        if not address or not password:
+            logger.warning("email_enabled=True but email_address/email_app_password not set")
+            return
+        bridge = EmailBridge(
+            address,
+            password,
+            host=self.config.get("plugins.hub.email_imap_host", "imap.gmail.com"),
+            search=self.config.get("plugins.hub.email_filter", ""),
+        )
+        if not await bridge.connect():
+            return
+        await self._run_bridge_inbox(
+            bridge,
+            lock_key=f"email:{address.lower()}",
+            poll_interval=1,
+            target=self._identity.identity,
+        )
+
+    def _runs_email_watch(self) -> bool:
+        if not self.config or not self._identity:
+            return False
+        if not self.config.get("plugins.hub.email_enabled", False):
+            return False
+        target = self.config.get("plugins.hub.email_target_agent", "")
+        if target:
+            return target == self._identity.identity
+        return self._identity.is_coordinator
+
+    def _set_bridge_polling(self, polling: bool) -> None:
+        self._bridge_polling = polling
+
+    async def _run_bridge_inbox(
+        self,
+        bridge: MessagingBridge,
+        lock_key: str,
+        poll_interval: float,
+        target: str,
+        set_polling: Callable[[bool], None] = lambda _polling: None,
+    ) -> None:
+        """Own one bridge's inbox: poll it and route what arrives to ``target``.
+
+        Shared by the messaging bridge and the email watcher. Disconnects the
+        bridge when cancelled.
+        """
         # Machine-global poll lock keyed on the token (see BridgePollLock).
         # The hub elects a coordinator per project, so multiple kollab sessions
         # in different repos each elect their own coordinator and would each
@@ -6590,7 +6710,8 @@ class HubPlugin(BasePlugin):
         # to take over on holder death) while still able to send.
         from kollabor_config.config_utils import get_config_directory
 
-        poll_lock = BridgePollLock(f"{platform}:{token}", get_config_directory())
+        platform = bridge.name
+        poll_lock = BridgePollLock(lock_key, get_config_directory())
         standby_interval = max(int(poll_interval), 15)
         conflict_logged = False
         was_standby = False
@@ -6613,7 +6734,7 @@ class HubPlugin(BasePlugin):
                                 f"retry every {standby_interval}s"
                             )
                             was_standby = True
-                        self._bridge_polling = False
+                        set_polling(False)
                         await asyncio.sleep(standby_interval)
                         continue
 
@@ -6623,12 +6744,12 @@ class HubPlugin(BasePlugin):
                             f"polling every {poll_interval}s"
                         )
                         was_standby = False
-                    self._bridge_polling = True
+                    set_polling(True)
 
                     messages = await bridge.poll()
                     conflict_logged = False
                     for msg in messages:
-                        await self._handle_bridge_incoming(msg)
+                        await self._handle_bridge_incoming(msg, target)
                     # poll() already blocks via long-polling (30s for telegram).
                     # Only add extra sleep if no messages came back (backoff)
                     # or if the platform doesn't do long-polling.
@@ -6656,12 +6777,11 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError:
             pass
         finally:
-            self._bridge_polling = False
+            set_polling(False)
             poll_lock.release()
             await bridge.disconnect()
-            self._bridge = None
 
-    async def _handle_bridge_incoming(self, msg: IncomingMessage) -> None:
+    async def _handle_bridge_incoming(self, msg: IncomingMessage, target: str = "") -> None:
         """Route an incoming bridge message as a hub message.
 
         The message arrives from an external platform (e.g. Telegram)
@@ -6670,9 +6790,6 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        target = ""
-        if self.config:
-            target = self.config.get("plugins.hub.bridge_target_agent", "")
         if not target:
             target = self._identity.identity
 
@@ -6691,10 +6808,9 @@ class HubPlugin(BasePlugin):
             },
         )
 
-        logger.info(
-            f"bridge incoming ({msg.platform}): "
-            f"{msg.sender_name} -> {target}: {msg.text[:80]}"
-        )
+        # Email bodies and subjects stay out of the log; the uid identifies it.
+        preview = f"uid {msg.sender_id}" if msg.platform == "email" else msg.text[:80]
+        logger.info(f"bridge incoming ({msg.platform}): {msg.sender_name} -> {target}: {preview}")
 
         # Route through the standard message handler
         await self._on_message_received(hub_msg)
@@ -15178,12 +15294,13 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError:
                 pass
 
-        if self._bridge_task:
-            self._bridge_task.cancel()
-            try:
-                await self._bridge_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._bridge_task, self._email_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # Announce departure to peers before removing presence.
         # Each peer gets a unique HubMessage (unique id) so that
