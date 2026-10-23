@@ -719,6 +719,246 @@ class TestQueueProcessor(unittest.TestCase):
         ]
         self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
 
+    def test_model_first_compaction_resumes_once_after_staging(self):
+        """The same user turn resumes only after the staged swap is applied."""
+        from kollabor_events import EventType
+        from plugins.context_compaction_plugin import ContextCompactionPlugin
+
+        history = self.conversation_history
+        history.extend(
+            ConversationMessage(
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"prior message {index}",
+            )
+            for index in range(12)
+        )
+        compact_values = {
+            "plugins.context_compaction.keep_recent": 2,
+            "plugins.context_compaction.max_summary_tokens": 2000,
+        }
+        compact_config = MagicMock()
+        compact_config.get = lambda key, default=None: compact_values.get(key, default)
+        plugin = ContextCompactionPlugin(
+            "test", MagicMock(), MagicMock(), compact_config
+        )
+        plugin._llm_service = SimpleNamespace(
+            conversation_history=history,
+            session_stats=self.session_stats,
+            is_processing=False,
+            _pending_agent_hud=[],
+        )
+        plugin._conversation_logger = SimpleNamespace(session_id="session-1")
+        plugin._awaiting_model = True
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+
+        summary_started = asyncio.Event()
+        release_summary = asyncio.Event()
+
+        async def summarize(*_args, **_kwargs):
+            summary_started.set()
+            await release_summary.wait()
+            return "S" * 200
+
+        plugin._call_summarization_llm = AsyncMock(side_effect=summarize)
+        applied_swaps = []
+
+        async def emit_with_hooks(*args, **kwargs):
+            event_type = args[0] if args else kwargs["event_type"]
+            data = args[1] if len(args) > 1 else kwargs.get("data", {})
+            if event_type == EventType.LLM_REQUEST_PRE:
+                had_pending_compaction = plugin._pending_compaction is not None
+                data = await plugin._apply_pending_compaction(data, MagicMock())
+                if had_pending_compaction:
+                    applied_swaps.append(list(history))
+            return data
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=emit_with_hooks)
+        llm_call_count = 0
+        request_snapshots = []
+        llm_responses = [
+            "Preparing the requested work. <compact>task: continue</compact>",
+            "The original response is complete.",
+        ]
+
+        async def call_llm(*_args, **_kwargs):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            request_snapshots.append(
+                [
+                    (message.role, message.content, dict(message.metadata or {}))
+                    for message in history
+                ]
+            )
+            return llm_responses[llm_call_count - 1]
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = (
+            "[compact] history staged"
+        )
+
+        async def execute_compact(tool_data, *_args, **_kwargs):
+            return await plugin._handle_compact_tool(tool_data)
+
+        self.tool_executor.execute_tool = AsyncMock(side_effect=execute_compact)
+        self.response_parser.parse_response.side_effect = [
+            {
+                "content": "Preparing the requested work.",
+                "components": {},
+                "turn_completed": False,
+            },
+            {
+                "content": "The original response is complete.",
+                "components": {},
+                "turn_completed": True,
+            },
+        ]
+        self.response_parser.get_all_tools.side_effect = [
+            [
+                {
+                    "id": "compact_1",
+                    "type": "compact",
+                    "notes": "task: continue",
+                    "_position": 29,
+                }
+            ],
+            [],
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            side_effect=[
+                ("Preparing the requested work.", False, False),
+                ("The original response is complete.", False, False),
+            ]
+        )
+        self.renderer.get_service = MagicMock(return_value=MagicMock())
+
+        def append_message(message, **_kwargs):
+            history.append(message)
+
+        self.add_message_fn.side_effect = append_message
+        parent_uuid = ["parent-uuid"]
+        late_message = ConversationMessage(
+            role="user", content="arrived while compaction was running"
+        )
+        batch_inputs = []
+        turn_complete_calls = []
+        turn_complete_at_batch_return = []
+        continuation_calls = 0
+
+        def capture_semantic(_renderer, event_type, **_payload):
+            if event_type == "turn_complete":
+                turn_complete_calls.append(llm_call_count)
+
+        async def process_batch(messages):
+            batch_inputs.append(list(messages))
+            turn = asyncio.create_task(
+                self.processor.process_message_batch(messages, parent_uuid[0])
+            )
+            try:
+                await asyncio.wait_for(summary_started.wait(), timeout=2)
+                history.append(late_message)
+            finally:
+                release_summary.set()
+            parent_uuid[0] = await turn
+            turn_complete_at_batch_return.append(len(turn_complete_calls))
+
+        async def continue_turn():
+            nonlocal continuation_calls
+            continuation_calls += 1
+            parent_uuid[0] = await self.processor.continue_conversation(
+                parent_uuid[0]
+            )
+
+        async def run_queue():
+            await self.processor.enqueue("original user request")
+            await asyncio.wait_for(
+                self.processor.process_queue(
+                    MagicMock(), process_batch, continue_turn
+                ),
+                timeout=5,
+            )
+
+        try:
+            with patch(
+                "kollabor_agent.queue_processor.publish_semantic",
+                side_effect=capture_semantic,
+            ):
+                self.loop.run_until_complete(run_queue())
+        finally:
+            release_summary.set()
+            pending_tasks = tuple(plugin._compaction_tasks)
+            if pending_tasks:
+                self.loop.run_until_complete(
+                    asyncio.gather(*pending_tasks, return_exceptions=True)
+                )
+
+        self.assertEqual(batch_inputs, [["original user request"]])
+        self.assertEqual(turn_complete_at_batch_return, [0])
+        self.assertEqual(turn_complete_calls, [2])
+        self.assertEqual(continuation_calls, 1)
+        self.assertEqual(self.streaming_handler.call_llm.await_count, 2)
+        self.tool_executor.execute_tool.assert_awaited_once()
+        self.assertEqual(len(applied_swaps), 1)
+        self.assertIsNone(plugin._pending_compaction)
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertEqual(sum(message is late_message for message in history), 1)
+
+        self.assertEqual(len(request_snapshots), 2)
+        first_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[0]
+            if role == "user" and content == "original user request"
+        ]
+        second_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == "original user request"
+        ]
+        self.assertEqual(len(first_request_users), 1)
+        self.assertLessEqual(len(second_request_users), 1)
+        late_in_resumed_request = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == late_message.content
+        ]
+        self.assertEqual(len(late_in_resumed_request), 1)
+        compact_summaries = [
+            content
+            for _role, content, metadata in request_snapshots[1]
+            if metadata.get("context_compaction")
+        ]
+        self.assertEqual(len(compact_summaries), 1)
+
+        tool_batches = [
+            message for message in history if message.metadata.get("tool_output_batch")
+        ]
+        self.assertEqual(len(tool_batches), 1)
+        self.assertEqual(len(tool_batches[0].metadata["xml_tool_results"]), 1)
+        final_responses = [
+            message
+            for message in history
+            if message.role == "assistant"
+            and message.content == "The original response is complete."
+        ]
+        self.assertEqual(len(final_responses), 1)
+
+
     def test_native_and_xml_results_log_display_data_without_changing_model_calls(self):
         native = SimpleNamespace(id="native-one", name="file_edit", input={"file": "owned.txt"})
         diffs = [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]

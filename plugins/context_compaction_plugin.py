@@ -1412,31 +1412,107 @@ class ContextCompactionPlugin(BasePlugin):
         tool_executor.register_plugin_handler("compact", self._handle_compact_tool)
 
     async def _handle_compact_tool(self, tool_data: Dict[str, Any]):
-        """<compact>: the model is ready, keep its notes and compact now."""
+        """Stage model-requested compaction before continuing the same turn."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
         tool_id = tool_data.get("id", "unknown")
+
+        def failure(
+            message: str,
+            action: str = "",
+            *,
+            clear_model_notes: bool = False,
+        ):
+            self._awaiting_model = False
+            if clear_model_notes:
+                self._model_notes = None
+            if action and action not in message:
+                message = f"{message} Next step: {action}"
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="compact",
+                success=False,
+                error=message,
+            )
+
         if self._compaction_in_progress:
-            return ToolExecutionResult(
-                tool_id=tool_id, tool_type="compact", success=False,
-                error="compaction already running",
+            return failure(
+                "Compaction is already running; this request was not retried.",
+                "Wait for the running compaction to finish.",
             )
-        notes = tool_data.get("notes", "")
-        if notes:
-            self._model_notes = notes
+        if not self.config.get("plugins.context_compaction.enabled", True):
+            return failure(
+                "Compaction is disabled by configuration.",
+                "Enable the context-compaction plugin, then start a new request.",
+                clear_model_notes=True,
+            )
+        if self._disabled_for_session:
+            return failure(
+                "Compaction is disabled for this session after repeated failures.",
+                "Start a new session after checking the summarizer provider.",
+                clear_model_notes=True,
+            )
+
+        notes = tool_data.get("notes") or ""
+        self._model_notes = notes or None
+        pending_before = self._pending_compaction
         if not self._start_compaction():
-            return ToolExecutionResult(
-                tool_id=tool_id, tool_type="compact", success=False,
-                error="compaction is disabled for this session",
+            return failure(
+                self._compaction_status_message
+                or "Compaction could not start; no history was changed.",
+                self._compaction_status_action
+                or "Check the compaction status and run /compact now.",
+                clear_model_notes=True,
             )
-        # End the turn: the swap lands before the next request, nothing to
-        # follow up on.
+
+        compaction_task = self._compaction_task
+        if compaction_task is None:
+            self._compaction_in_progress = False
+            return failure(
+                "Compaction did not start its staging task; no history was changed.",
+                "Check the compaction status before retrying.",
+                clear_model_notes=True,
+            )
+
+        try:
+            # Do not return an end_turn result here. The queue must issue the
+            # next request, whose LLM_REQUEST_PRE hook applies the staged swap.
+            # Awaiting this task ensures staging finishes before that request.
+            await compaction_task
+        except asyncio.CancelledError:
+            if self._pending_compaction is pending_before:
+                self._model_notes = None
+            raise
+        except Exception as exc:
+            if self._pending_compaction is pending_before:
+                logger.exception("Model-first compaction failed before staging")
+                return failure(
+                    f"Compaction failed and was not applied: {exc}",
+                    "Check the log, then run /compact now.",
+                    clear_model_notes=True,
+                )
+            logger.exception(
+                "Model-first compaction staged history but failed final bookkeeping"
+            )
+
+        if self._pending_compaction is pending_before:
+            return failure(
+                self._compaction_status_message
+                or "Compaction did not stage a replacement history; no history was changed.",
+                self._compaction_status_action
+                or "Check the compaction status, then run /compact now.",
+                clear_model_notes=True,
+            )
+
         return ToolExecutionResult(
             tool_id=tool_id,
             tool_type="compact",
             success=True,
-            output=f"[compact] compacting, {len(notes)} chars of notes kept verbatim",
-            metadata={"end_turn": True},
+            output=(
+                f"[compact] history staged; continuing this request with compacted "
+                f"context ({len(notes)} chars of notes kept verbatim)"
+            ),
+            metadata={},
         )
 
     def _remote_state(self):
@@ -1961,9 +2037,16 @@ class ContextCompactionPlugin(BasePlugin):
 
     async def _run_compaction(self) -> None:
         """Background task: summarize old messages and stage compaction."""
+        staged = False
         try:
             history = self._get_conversation_history()
             if not history:
+                self._set_compaction_status(
+                    "failed",
+                    "Compaction could not run because conversation history is empty; "
+                    "no history was changed.",
+                    action="Start a new request before compacting.",
+                )
                 return
             history_snapshot = list(history)
             snapshot_len = len(history_snapshot)
@@ -2136,6 +2219,8 @@ class ContextCompactionPlugin(BasePlugin):
             self._pre_compaction_len = snapshot_len
             self._pending_session_id = snapshot_session_id
             self._pending_compaction = compacted
+            staged = True
+
             self._compaction_round += 1
             self._consecutive_failures = 0
             self._model_notes = None
@@ -2191,17 +2276,38 @@ class ContextCompactionPlugin(BasePlugin):
 
         except asyncio.CancelledError:
             logger.info("Compaction cancelled")
+            if staged:
+                self._set_compaction_status(
+                    "ready_to_retry",
+                    "Compaction was staged before cancellation and will be applied "
+                    "before the next model request.",
+                    action="Start a new request to apply the staged history.",
+                )
+            else:
+                self._set_compaction_status(
+                    "failed",
+                    "Compaction was cancelled before staging; no history was changed.",
+                    action="Retry /compact now after the cancelled turn ends.",
+                )
             raise
         except Exception as e:
             logger.error(f"Compaction failed: {e}", exc_info=True)
-            self._consecutive_failures += 1
-            self._check_failure_threshold()
-            self._set_compaction_status(
-                "failed",
-                "Compaction failed and was not applied. The failed request was not "
-                "retried automatically; check the log and run /compact now.",
-                action="Run /compact now after checking the displayed error.",
-            )
+            if staged:
+                self._set_compaction_status(
+                    "ready_to_retry",
+                    "Compaction was staged and will be applied before the next model "
+                    "request, but final bookkeeping failed.",
+                    action="Continue with the next request and check the log.",
+                )
+            else:
+                self._consecutive_failures += 1
+                self._check_failure_threshold()
+                self._set_compaction_status(
+                    "failed",
+                    "Compaction failed and was not applied. The failed request was not "
+                    "retried automatically; check the log and run /compact now.",
+                    action="Run /compact now after checking the displayed error.",
+                )
         finally:
             self._compaction_in_progress = False
 
