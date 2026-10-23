@@ -969,7 +969,7 @@ class QueueProcessor:
         cache holds). A new session (epoch), or a history that compaction has
         emptied of them, gets them again.
         """
-        from kollabor_voice.observer import VOICE_RULES_MARK
+        from kollabor_voice.voice_context import VOICE_RULES_MARK
 
         for message in reversed(self.conversation_history):
             sent = (getattr(message, "metadata", None) or {}).get("voice")
@@ -1021,7 +1021,7 @@ class QueueProcessor:
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
         if self.active_voice:
-            from kollabor_voice.observer import voice_preamble
+            from kollabor_voice.voice_context import voice_preamble
 
             combined_message = prepend_text(
                 voice_preamble(

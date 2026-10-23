@@ -89,6 +89,11 @@ Preference boundary is a prerequisite, not a cleanup detail:
   preference APIs remain in place until classifier surfaces are removed.
 - [x] `packages/kollabor-voice/tests`: 152 passed on Python 3.14.7;
   Ruff check passed. This is a local task-branch checkpoint, not a pushed build.
+- [x] Extracted `voice_preamble`, `strip_voice_preamble`,
+  `turn_display_texts`, and `VOICE_RULES_MARK` to `voice_context.py` and
+  migrated Engine/Agent/history/resume callers. `observer.py` remains for
+  classifier/audio/admission behavior; no observer code was deleted. The 73
+  targeted root/voice tests passed on Python 3.14.7; Ruff and Black checks pass.
 - [ ] LiveKit transport/Engine integration and classifier removal remain
   pending. Browser end-to-end acceptance is blocked because browser-control
   tooling is unavailable; do not substitute live audio or services.
