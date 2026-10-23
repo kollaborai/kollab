@@ -27,6 +27,7 @@ from typing import Any, Callable, List
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -2774,6 +2775,14 @@ class LocalStateService(StateService):
         instead of acknowledging a turn that never entered the pipeline.
         """
         metadata = message if isinstance(message, dict) else {}
+        input_context = origin_context or metadata.get("origin_context")
+        claims_voice_origin = (
+            isinstance(input_context, dict)
+            and input_context.get("source") == "livekit_voice"
+        )
+        is_voice_origin = validate_voice_admission_context(input_context)
+        if claims_voice_origin and not is_voice_origin:
+            return {"accepted": False, "reason": "invalid voice admission capability"}
         text = content_to_text(message).strip()
         if not text:
             return {"accepted": False, "reason": "empty message"}
@@ -2786,7 +2795,7 @@ class LocalStateService(StateService):
         # control subcommands must stay available while a turn is
         # processing, and image-bearing /goal input must still reach
         # command parsing with its attachments promoted durably.
-        goal_handled = self._try_goal_command(text, message)
+        goal_handled = None if is_voice_origin else self._try_goal_command(text, message)
         if goal_handled is not None:
             return goal_handled
 
@@ -2802,7 +2811,9 @@ class LocalStateService(StateService):
         # the syntax in the chat composer so messaging an online agent is as
         # direct as typing ``@lapis message here`` or ``@broadcast hello``.
         hub_mention = (
-            parse_hub_mention(text) if not contains_image_content(message) else None
+            parse_hub_mention(text)
+            if not is_voice_origin and not contains_image_content(message)
+            else None
         )
         if hub_mention is not None:
             target, content = hub_mention
@@ -2827,7 +2838,8 @@ class LocalStateService(StateService):
             except Exception:
                 parser = executor = None
         if (
-            not contains_image_content(message)
+            not is_voice_origin
+            and not contains_image_content(message)
             and parser is not None
             and executor is not None
             and callable(getattr(parser, "is_slash_command", None))
@@ -2847,9 +2859,8 @@ class LocalStateService(StateService):
                 submit_kwargs["request_id"] = request_id or metadata["request_id"]
             if thread_id is not None or metadata.get("thread_id") is not None:
                 submit_kwargs["thread_id"] = thread_id or metadata["thread_id"]
-            context = origin_context or metadata.get("origin_context")
-            if context is not None:
-                submit_kwargs["origin_context"] = dict(context)
+            if input_context is not None:
+                submit_kwargs["origin_context"] = dict(input_context)
             submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)

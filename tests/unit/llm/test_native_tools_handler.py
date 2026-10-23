@@ -42,10 +42,12 @@ class DisabledMcpConfig:
 class CapturingToolExecutor:
     def __init__(self):
         self.calls = []
+        self.execution_contexts = []
         self.plugin_handlers = {"state_update": object()}
 
-    async def execute_tool(self, tool_data):
+    async def execute_tool(self, tool_data, *, execution_context=None):
         self.calls.append(tool_data)
+        self.execution_contexts.append(execution_context)
         return SimpleNamespace(success=True, output="ok", error="")
 
 
@@ -76,6 +78,35 @@ async def test_plugin_native_tool_does_not_fall_back_to_mcp():
     assert tool_call["name"] == "state_update"
     assert tool_call["state"] == "done"
     assert tool_call["arguments"] == {"state": "done"}
+
+
+@pytest.mark.asyncio
+async def test_native_tool_executor_receives_livekit_execution_context():
+    api_service = FakeApiService(
+        [
+            SimpleNamespace(
+                id="call_state",
+                name="state_update",
+                input={"state": "voice"},
+            )
+        ]
+    )
+    handler = NativeToolsHandler(
+        mcp_integration=SimpleNamespace(tool_registry={}),
+        profile_manager=FakeProfileManager(),
+        api_service=api_service,
+        config=FakeConfig(),
+    )
+    executor = CapturingToolExecutor()
+    from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+    origin_context = make_voice_origin_context("turn-1")
+
+    await handler.execute_tool_calls(executor, execution_context=origin_context)
+
+    assert executor.calls[0]["type"] == "state_update"
+    assert executor.execution_contexts == [origin_context]
+
 
 
 @pytest.mark.asyncio

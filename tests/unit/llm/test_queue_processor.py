@@ -281,6 +281,57 @@ class TestQueueProcessor(unittest.TestCase):
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
 
+    def test_livekit_origin_survives_tool_continuation(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+        self.processor.turn_completed = False
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent-uuid")
+        queued = QueuedInput("show status", {}, origin_context=origin_context)
+
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([queued], "parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+        self.processor._execute_llm_turn.reset_mock()
+        self.processor.turn_completed = False
+
+        self.loop.run_until_complete(
+            self.processor.continue_conversation("parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+
+
+    def test_mixed_voice_turn_provenance_fails_closed(self):
+        from kollabor_agent.queue_processor import (
+            QueuedInput,
+            merge_livekit_origin_contexts,
+        )
+        from kollabor_agent.voice_admission import validate_voice_admission_context
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        voice_context = make_voice_origin_context("turn-1")
+        merged = merge_livekit_origin_contexts(
+            [
+                QueuedInput("voice text", {}, origin_context=voice_context),
+                "typed input",
+            ]
+        )
+
+        self.assertEqual(merged["source"], "livekit_voice")
+        self.assertEqual(merged["voice_tool_policy"], "invalid")
+        self.assertFalse(validate_voice_admission_context(voice_context))
+
+
     def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
         from kollabor_agent.queue_processor import QueuedInput
         self.processor._execute_llm_turn = AsyncMock(return_value="parent")

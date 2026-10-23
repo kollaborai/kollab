@@ -15,8 +15,14 @@ from kollabor.user_input_source import UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
-from kollabor_agent.queue_processor import CancellationOrigin, QueuedInput, QueueProcessor
+from kollabor_agent.queue_processor import (
+    CancellationOrigin,
+    QueuedInput,
+    QueueProcessor,
+    merge_livekit_origin_contexts,
+)
 from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai import (
     ConversationManager,
     KollaborConversationLogger,
@@ -1675,12 +1681,19 @@ class LLMService:
         """Process a batch of messages. Delegates to QueueProcessor."""
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            merged_origin_context = merge_livekit_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, QueuedInput) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
             messages = [
-                QueuedInput(combined, voice_inputs[-1].voice) if voice_inputs else combined
+                QueuedInput(
+                    combined,
+                    voice_inputs[-1].voice,
+                    merged_origin_context,
+                )
+                if voice_inputs
+                else combined
             ]
         self.current_parent_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
@@ -1861,7 +1874,11 @@ class LLMService:
         await self._native_tools.load_tools()
 
     async def process_user_input(
-        self, message: MessageContent, pre_displayed: bool = False, voice: dict | None = None
+        self,
+        message: MessageContent,
+        pre_displayed: bool = False,
+        voice: dict | None = None,
+        origin_context: dict | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1871,6 +1888,8 @@ class LLMService:
             message: User's input message
             pre_displayed: Whether the user message was already echoed to the UI
                 before startup gating released.
+            origin_context: Trusted internal provenance for a voice-originated
+                turn. Public messages cannot set the reserved source.
 
         Returns:
             Status information about processing
@@ -1902,7 +1921,16 @@ class LLMService:
                 "reason": f"model '{self.api_service.model}' does not accept image input",
             }
 
-        if voice and self._queue_processor.processing_queue.full():
+        claims_voice_origin = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
+        )
+        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+            return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+        trusted_origin_context = (
+            dict(origin_context) if claims_voice_origin else None
+        )
+        if (voice or trusted_origin_context) and self._queue_processor.processing_queue.full():
             return {"status": "rejected", "reason": "Agent input queue is full"}
 
         # Display user message using MessageDisplayService (DRY refactoring)
@@ -1928,7 +1956,9 @@ class LLMService:
 
         # Add to processing queue with overflow handling
         await self._enqueue_with_overflow_strategy(
-            QueuedInput(normalized_message, voice) if voice else normalized_message
+            QueuedInput(normalized_message, voice or {}, trusted_origin_context)
+            if voice or trusted_origin_context
+            else normalized_message
         )
 
         # Start processing if not already running
