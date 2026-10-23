@@ -1,20 +1,22 @@
 ---
 title: "Manual WireGuard phone access: removal review"
 created: 2026-10-21
-status: proposed, awaiting Marco's review
+status: historical snapshot; removal landed in release/0.18.0 (fb952f10)
 ---
 
 # Manual WireGuard phone access: removal review
 
-This is an inventory and proposed change list, not an implementation. No feature
-code, screenshots, saved phone state, VPN configuration or running processes have
-been removed or changed by this audit. Only this review document is being added.
+This is a historical inventory and proposed change list for the audited checkout,
+not an implementation. Since this review, manual WireGuard phone access has been
+removed from the 0.18.0 release line by `fb952f10`. No feature code, screenshots,
+saved phone state, VPN configuration or running processes were removed or changed
+by this audit; only this review document was added to the audited checkout.
 
 Audited checkout: `main` at `13e939037afb2a7efed2953480b3f4820c58bee3`.
 Three Luna agents independently covered UI/docs, backend/security, and history/
 host state. Their findings were reconciled against current source and read-only
-host checks. Implementation and every proposed deletion wait for Marco's review
-and explicit approval.
+host checks. At that time, implementation and every proposed deletion were
+pending Marco's review and explicit approval.
 
 ## What was added, and where
 
@@ -28,7 +30,7 @@ store phone public peer records, and ask a host-admin helper to apply those peer
 It did not install a WireGuard server or configure the router, DNS, firewall or
 the operator's base VPN configuration. The helper and server were prerequisites.
 
-The current manual path is:
+At the audited checkout, the manual path was:
 
 - `PhoneLinkPanel.tsx` imports `PhoneAccessSection.tsx` and mounts it under
   **Advanced Settings** (lines 369–384).
