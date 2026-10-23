@@ -101,9 +101,7 @@ def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
 def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None:
     active = SimpleNamespace(id="active", assignee="sapphire", status="active")
     paused = SimpleNamespace(id="paused", assignee="sapphire", status="paused")
-    qa_review = SimpleNamespace(
-        id="qa-review", assignee="sapphire", status="qa_review"
-    )
+    qa_review = SimpleNamespace(id="qa-review", assignee="sapphire", status="qa_review")
     queued_for_sapphire = SimpleNamespace(
         id="open-sapphire", assignee="", status="open", directive="sapphire: do work"
     )
@@ -135,7 +133,12 @@ def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None
     plugin = _plugin()
     plugin.event_bus = EventBus()
 
-    assert plugin._get_live_task_ids() == {"active", "paused", "qa-review", "open-sapphire"}
+    assert plugin._get_live_task_ids() == {
+        "active",
+        "paused",
+        "qa-review",
+        "open-sapphire",
+    }
 
 
 def test_coordination_extraction_does_not_restore_archived_task_messages() -> None:
@@ -167,13 +170,18 @@ def test_context_overflow_forces_one_compaction_past_the_shrink_floor() -> None:
     plugin._disabled_for_session = False
     plugin._shrink_floor = 450_000
     plugin._compaction_just_applied = True
-    plugin._get_conversation_history = lambda: [Message(content="old"), Message(content="new")]
+    plugin._get_conversation_history = lambda: [
+        Message(content="old"),
+        Message(content="new"),
+    ]
     plugin._keep_recent_count = lambda: 1
     plugin._find_split_point = lambda history, keep_recent: 2
     starts = []
     statuses = []
     plugin._start_compaction = lambda reason="threshold": starts.append(reason) or True
-    plugin._set_compaction_status = lambda status, message, action="": statuses.append(status)
+    plugin._set_compaction_status = lambda status, message, action="": statuses.append(
+        status
+    )
 
     asyncio.run(
         plugin._on_llm_request_error(
@@ -236,7 +244,9 @@ def test_failed_compaction_action_is_visible_in_compact_status() -> None:
     plugin._disabled_for_session = False
     plugin._compaction_status = "failed"
     plugin._compaction_status_message = "Compaction failed before shrinking context."
-    plugin._compaction_status_action = "Run /compact now or start a smaller conversation."
+    plugin._compaction_status_action = (
+        "Run /compact now or start a smaller conversation."
+    )
 
     result = asyncio.run(
         plugin._handle_compact_command(SimpleNamespace(args=["status"]))
@@ -299,7 +309,9 @@ def test_persistent_status_is_reannounced_on_next_turn() -> None:
         publish.assert_not_called()
 
         plugin._compaction_status = "failed"
-        plugin._compaction_status_message = "The summarizer returned too little content."
+        plugin._compaction_status_message = (
+            "The summarizer returned too little content."
+        )
         plugin._compaction_status_action = "Run /compact now."
         asyncio.run(plugin._apply_pending_compaction({}, None))
 
@@ -368,3 +380,84 @@ def test_150_live_tasks_stay_bounded_across_repeated_compaction_rounds() -> None
             == 1
         )
         assert plugin._estimate_history_tokens(history) < 272_000
+
+
+def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
+    """Exercise live TaskLedger retention through the real compaction path."""
+    from unittest.mock import AsyncMock
+
+    task_ids = [f"live-task-{index}" for index in range(30)]
+    cards = [
+        SimpleNamespace(id=task_id, status="active", assignee="peridot")
+        for task_id in task_ids
+    ]
+
+    class Ledger:
+        def get_active_for(self, identity):
+            assert identity == "peridot"
+            return cards
+
+        def get_all(self, status=None):
+            return []
+
+        def get_open(self):
+            return []
+
+    hub_plugin = SimpleNamespace(
+        _task_ledger=Ledger(),
+        _identity=SimpleNamespace(identity="peridot"),
+    )
+    event_bus = SimpleNamespace(
+        get_service=lambda name: hub_plugin if name == "hub_plugin" else None
+    )
+    config_values = {
+        "plugins.context_compaction.keep_recent": 2,
+        "plugins.context_compaction.max_summary_tokens": 2000,
+        "plugins.context_compaction.log_compaction_events": False,
+    }
+    config = SimpleNamespace(
+        get=lambda key, default=None: config_values.get(key, default)
+    )
+    plugin = ContextCompactionPlugin(
+        "context_compaction", event_bus, SimpleNamespace(), config
+    )
+    history = [Message(role="system", content="Synthetic system prompt")]
+    history.extend(
+        _task_message(task_id, "assignment body " + "x" * 6_000) for task_id in task_ids
+    )
+    history.extend(
+        [
+            Message(role="user", content="Recent user turn"),
+            Message(role="assistant", content="Recent assistant turn"),
+        ]
+    )
+    plugin._llm_service = SimpleNamespace(conversation_history=history)
+    plugin._call_summarization_llm = AsyncMock(
+        return_value="Synthetic summary of the remaining task history. " * 5
+    )
+    plugin._set_compaction_status = lambda *_args, **_kwargs: None
+    plugin._log_compaction_event = AsyncMock()
+
+    with patch("plugins.context_compaction_plugin.logger.info") as info:
+        asyncio.run(plugin._run_compaction())
+
+    compacted = plugin._pending_compaction
+    assert compacted is not None
+    preserved = [
+        message
+        for message in compacted
+        if message.metadata.get("context_compaction_task_excerpt")
+    ]
+    assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
+    assert [message.metadata["task_id"] for message in preserved] == task_ids[-24:]
+    assert all(
+        len(message.content) <= MAX_PRESERVED_HUB_TASK_CHARS for message in preserved
+    )
+    assert plugin._estimate_history_tokens(compacted) < 272_000
+    assert plugin._call_summarization_llm.await_count == 1
+    assert plugin._log_compaction_event.await_args.kwargs["tasks_preserved"] == 24
+    assert any(
+        call.args[0].startswith("Task extraction: preserved ")
+        and call.args[1] == MAX_PRESERVED_HUB_TASK_MESSAGES
+        for call in info.call_args_list
+    )

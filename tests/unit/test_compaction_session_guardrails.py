@@ -112,7 +112,9 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
             return data
 
         plugin._get_prompt_tokens = lambda: prompt_tokens["value"]
-        plugin._get_token_threshold = lambda: 272_000
+        plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
+        self.assertEqual(plugin._get_token_threshold(), 150_000)
+        self.assertEqual(plugin._get_hard_cap_threshold(), 272_000)
         plugin._start_compaction = start_compaction
         plugin._apply_pending_compaction = AsyncMock(side_effect=apply_pending)
 
@@ -138,6 +140,72 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         self.assertEqual(prompt_tokens["value"], 190_000)
         self.assertEqual(plugin._apply_pending_compaction.await_count, 1)
         self.assertEqual(plugin._turn_count, 91)
+
+    async def test_coordination_deferral_still_hard_caps_338181_prompt(self):
+        plugin, _event_bus, llm_service = _plugin(prompt_tokens=338_181)
+        plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
+        self.assertEqual(plugin._get_token_threshold(), 150_000)
+        self.assertEqual(plugin._get_hard_cap_threshold(), 272_000)
+        plugin._compaction_status = "paused"
+        plugin._coordination_pending = MagicMock(return_value=True)
+        plugin._should_compact = MagicMock(return_value=True)
+        plugin._start_compaction = MagicMock(return_value=False)
+
+        await plugin._on_llm_turn_complete({}, SimpleNamespace())
+
+        self.assertEqual(plugin._coordination_deferrals, 1)
+        plugin._start_compaction.assert_not_called()
+
+        original_history = list(llm_service.conversation_history)
+        compacted_history = [
+            original_history[0],
+            _message("user", "[Previous Context Summary] task is still active"),
+            *original_history[-2:],
+        ]
+        prompt_tokens = {"value": 338_181}
+
+        async def run_compaction():
+            plugin._compaction_round += 1
+            plugin._pending_compaction = compacted_history
+            plugin._pending_session_id = "session-410k"
+            plugin._pre_compaction_len = len(original_history)
+            plugin._compaction_status = "ready_to_retry"
+            plugin._compaction_in_progress = False
+
+        def start_compaction(reason="threshold", **_kwargs):
+            plugin._compaction_reason = reason
+            plugin._compaction_in_progress = True
+            task = asyncio.create_task(run_compaction())
+            plugin._compaction_task = task
+            plugin._compaction_tasks.add(task)
+            task.add_done_callback(plugin._compaction_task_done)
+            return True
+
+        async def apply_pending(data, _event):
+            llm_service.conversation_history = list(plugin._pending_compaction)
+            plugin._pending_compaction = None
+            plugin._pending_session_id = None
+            plugin._compaction_status = "applied"
+            plugin._compaction_in_progress = False
+            # This is safe under the 272K hard cap, though above the 150K
+            # automatic trigger. The boundary must not immediately retry.
+            prompt_tokens["value"] = 260_000
+            llm_service.session_stats["input_tokens"] = prompt_tokens["value"]
+            return data
+
+        plugin._get_prompt_tokens = lambda: prompt_tokens["value"]
+        plugin._start_compaction = start_compaction
+        plugin._apply_pending_compaction = AsyncMock(side_effect=apply_pending)
+
+        result = await plugin._on_tool_call_pre(
+            {"tool_data": {"tool_name": "terminal", "arguments": {}}},
+            SimpleNamespace(),
+        )
+
+        self.assertFalse((result or {}).get("cancelled", False))
+        self.assertEqual(prompt_tokens["value"], 260_000)
+        self.assertEqual(plugin._apply_pending_compaction.await_count, 1)
+        self.assertEqual(plugin._turn_count, 1)
 
     def test_manual_threshold_cannot_exceed_model_percentage(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=410_000)
@@ -185,6 +253,24 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         status = plugin.get_status_lines()["C"][0]
         self.assertIn("warning", status)
         self.assertIn("91/90t", status)
+
+    def test_session_turn_budget_defaults_disabled_and_invalid_values_stay_disabled(
+        self,
+    ):
+        plugin, _event_bus, _llm_service = _plugin(prompt_tokens=100_000)
+        key = "plugins.context_compaction.max_session_turns"
+        plugin.config.values.pop(key, None)
+
+        self.assertEqual(plugin._get_session_turn_budget(), 0)
+        plugin_defaults = ContextCompactionPlugin.get_default_config()["plugins"][
+            "context_compaction"
+        ]
+        self.assertEqual(plugin_defaults["max_session_turns"], 0)
+
+        plugin.config.values[key] = "invalid"
+        self.assertEqual(plugin._get_session_turn_budget(), 0)
+        plugin.config.values[key] = "90"
+        self.assertEqual(plugin._get_session_turn_budget(), 90)
 
     async def test_compaction_failures_roll_over_with_recovery_summary(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=410_000)
@@ -326,7 +412,9 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
 
     def test_paused_budget_is_visible_in_widget_and_alert(self):
         plugin, _event_bus, _llm_service = _plugin(prompt_tokens=410_000)
-        plugin._get_token_threshold = lambda: 272_000
+        plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
+        self.assertEqual(plugin._get_token_threshold(), 150_000)
+        self.assertEqual(plugin._get_hard_cap_threshold(), 272_000)
 
         plugin._set_compaction_status(
             "paused",
@@ -397,7 +485,9 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
             return data
 
         plugin._get_prompt_tokens = lambda: prompt_tokens["value"]
-        plugin._get_token_threshold = lambda: 272_000
+        plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
+        self.assertEqual(plugin._get_token_threshold(), 150_000)
+        self.assertEqual(plugin._get_hard_cap_threshold(), 272_000)
         plugin._start_compaction = start_compaction
         plugin._apply_pending_compaction = AsyncMock(side_effect=apply_pending)
         await plugin.register_hooks()

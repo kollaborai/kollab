@@ -53,12 +53,12 @@ Under `plugins.context_compaction`:
 - `ask_user_confirm_drops`: bool, default `false` (future UI hook)
 
 Current cross-strategy guardrail settings:
-- `token_threshold_k`: optional lower token threshold in thousands; it cannot
-  raise the effective safety budget.
-- `compaction_ratio`: fraction of the active provider context window to use as
-  the prompt budget (default `0.75`).
-- `max_session_turns`: log and visibly warn after this many model turns
-  (default `90`; `0` disables the warning).
+- `token_threshold_k`: optional lower automatic compaction trigger in thousands;
+  it cannot raise the trigger above the provider percentage.
+- `compaction_ratio`: fraction of the active provider context window for the
+  automatic compaction trigger (default `0.75`).
+- `max_session_turns`: optional visible/logged warning after this many model
+  turns (default `0`, which disables the warning).
 - `summarization_model`: optional compaction-only model override.
 - `hard_cap_compaction_attempts`: bounded synchronous retries at a hard-cap
   boundary (default `2`).
@@ -142,14 +142,14 @@ Event fields:
 
 These guards apply to both the basic and forked strategies:
 
-- The hard prompt budget is the minimum of the active provider's
-  `context_window * compaction_ratio`, the optional `token_threshold_k`
-  override, and the existing 272K automatic cost/latency ceiling. A manual
-  threshold may lower the safety budget, never raise it above the provider
-  percentage.
-- Enforce the budget before executing `TOOL_CALL_PRE` and again before the next
-  model request. A no-shrink pause is advisory for ordinary background
-  compaction only; it must not bypass a hard-cap boundary.
+- The automatic compaction trigger uses the active provider's
+  `context_window * compaction_ratio`; an optional `token_threshold_k` can
+  lower it but cannot raise it above the provider percentage. The boundary hard
+  cap is separate: `min(context_window, 272K)`, or 100K when the provider window
+  is unknown. The hard cap is not lowered by the automatic trigger settings.
+- Enforce the hard cap before executing `TOOL_CALL_PRE` and again before the
+  next model request. A no-shrink pause or coordination deferral may delay
+  ordinary background compaction, but neither bypasses a hard-cap boundary.
 - At a boundary, await an in-progress round, apply its staged history, and
   retry forced compaction up to `hard_cap_compaction_attempts`. If provider
   summarization still fails, roll the old prefix into a deterministic recovery
@@ -157,8 +157,9 @@ These guards apply to both the basic and forked strategies:
   recent turns, and at most 24 active-task excerpts of 4,000 characters each.
   If even that cannot fit, cancel the tool/request with a visible recovery
   action instead of sending an oversized prompt.
-- A session turn budget is a visible/logged warning, not an automatic stop. Its
-  turn count and start time persist with session stats, restore on resume, and
+- `max_session_turns` is a visible/logged warning, not an automatic stop. Its
+  default is `0` (disabled); a positive configured value enables the warning.
+  Turn count and start time persist with session stats, restore on resume, and
   reset when the session ID changes.
 - Summarization model precedence is plugin `summarization_model`, shared
   `kollabor.llm.fast_model`, then the active session model. A configured

@@ -187,7 +187,7 @@ class ContextCompactionPlugin(BasePlugin):
                     "log_compaction_events": True,
                     "ask_model_first": True,
                     "summarization_model": None,
-                    "max_session_turns": 90,
+                    "max_session_turns": 0,
                     "hard_cap_compaction_attempts": 2,
                 }
             }
@@ -592,6 +592,11 @@ class ContextCompactionPlugin(BasePlugin):
         budget_status = status in {"paused", "failed", "warning", "rolled_over"} or (
             status == "compacting" and "context budget reached" in status_message.lower()
         )
+        if status in {"paused", "failed", "rolled_over"} or (
+            status == "compacting" and "context budget reached" in status_message.lower()
+        ):
+            threshold = self._get_hard_cap_threshold()
+            thresh_k = f"{threshold / 1000:.0f}K"
         if budget_status:
             limit = self._get_session_turn_budget()
             turn_label = (
@@ -747,7 +752,8 @@ class ContextCompactionPlugin(BasePlugin):
             f"  provider:       {provider}",
             f"  model:          {model}",
             f"  context window: {ctx_str}",
-            f"  threshold:      {threshold // 1000}K [{source}]",
+            f"  auto trigger:   {threshold // 1000}K [{source}]",
+            f"  hard cap:       {self._get_hard_cap_threshold() // 1000}K",
             f"  prompt tokens:  {prompt_tokens // 1000}K{pct}",
             "",
             f"  keep recent:    {keep_str}",
@@ -993,12 +999,12 @@ class ContextCompactionPlugin(BasePlugin):
     def _get_session_turn_budget(self) -> int:
         """Return a validated per-session warning budget; zero disables it."""
         raw_limit = self.config.get(
-            "plugins.context_compaction.max_session_turns", 90
+            "plugins.context_compaction.max_session_turns", 0
         )
         try:
             return max(0, int(raw_limit))
         except (TypeError, ValueError, OverflowError):
-            return 90
+            return 0
 
     def _get_hard_cap_compaction_attempts(self) -> int:
         """Return the bounded number of forced compaction attempts."""
@@ -1137,28 +1143,42 @@ class ContextCompactionPlugin(BasePlugin):
         )
 
 
-    def _get_token_threshold(self) -> int:
-        """Return a safe prompt budget from the configured ratio and hard cap.
+    def _get_context_window_tokens(self) -> int:
+        """Return a validated context-window size, or zero when unknown."""
+        raw_context_window = self._resolve_context_window()
+        try:
+            if isinstance(raw_context_window, bool):
+                return 0
+            if isinstance(raw_context_window, (int, float)):
+                if isinstance(raw_context_window, float) and not math.isfinite(
+                    raw_context_window
+                ):
+                    return 0
+                context_window = int(raw_context_window)
+            elif isinstance(raw_context_window, str):
+                context_window = int(raw_context_window)
+            else:
+                return 0
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(0, context_window)
 
-        A manual token threshold can lower the budget, but cannot override the
-        model safety percentage or the 272K cost/latency ceiling. Unknown model
+    def _get_hard_cap_threshold(self) -> int:
+        """Return the absolute boundary cap, distinct from auto-compaction."""
+        context_window = self._get_context_window_tokens()
+        if context_window <= 0:
+            return min(AUTO_THRESHOLD_CAP, 100_000)
+        return min(context_window, AUTO_THRESHOLD_CAP)
+
+    def _get_token_threshold(self) -> int:
+        """Return the lower automatic trigger from ratio, manual value, and cap.
+
+        A manual token threshold can lower the automatic trigger, but cannot
+        override the model safety percentage or 272K ceiling. The hard boundary
+        guard uses ``_get_hard_cap_threshold`` independently. Unknown model
         windows retain the conservative 100K automatic fallback.
         """
-        raw_context_window = self._resolve_context_window()
-        if isinstance(raw_context_window, bool):
-            context_window = 0
-        elif isinstance(raw_context_window, (int, float)):
-            context_window = int(raw_context_window)
-        elif isinstance(raw_context_window, str):
-            try:
-                context_window = int(raw_context_window)
-            except (TypeError, ValueError, OverflowError):
-                context_window = 0
-        else:
-            context_window = 0
-        if context_window < 0:
-            context_window = 0
-
+        context_window = self._get_context_window_tokens()
         raw_ratio = self.config.get(
             "plugins.context_compaction.compaction_ratio", 0.75
         )
@@ -1884,10 +1904,10 @@ class ContextCompactionPlugin(BasePlugin):
         never authorize sending another oversized prompt after a tool result or
         continuing a long tool chain.
         """
-        threshold = self._get_token_threshold()
+        hard_cap = self._get_hard_cap_threshold()
         history = self._get_conversation_history() or []
         current_tokens = self._effective_prompt_tokens()
-        if current_tokens < threshold:
+        if current_tokens < hard_cap:
             return True
 
         signature = self._history_signature(history)
@@ -1899,19 +1919,21 @@ class ContextCompactionPlugin(BasePlugin):
             return True
 
         agent, hub_identity = self._get_agent_labels()
-        used_k, threshold_k = current_tokens // 1000, threshold // 1000
+        used_k, hard_cap_k = current_tokens // 1000, hard_cap // 1000
         message = (
-            f"Context budget reached ({used_k}K/{threshold_k}K); compacting before "
-            f"the next {boundary}."
+            f"Context budget reached ({used_k}K/{hard_cap_k}K hard cap); "
+            f"compacting before the next {boundary}."
         )
         logger.warning(
             "[context_compaction][agent=%s][hub=%s] hard_cap_boundary=%s "
-            "prompt_tokens=%s threshold_tokens=%s turns=%s status=%s",
+            "prompt_tokens=%s hard_cap_tokens=%s auto_trigger_tokens=%s "
+            "turns=%s status=%s",
             agent,
             hub_identity,
             boundary,
             current_tokens,
-            threshold,
+            hard_cap,
+            self._get_token_threshold(),
             self._turn_count,
             self._compaction_status,
         )
@@ -1996,7 +2018,7 @@ class ContextCompactionPlugin(BasePlugin):
             if after_signature != before_signature:
                 self._token_usage_stale_after_compaction = True
             current_tokens = self._effective_prompt_tokens()
-            if current_tokens < threshold:
+            if current_tokens < hard_cap:
                 self._last_hard_cap_guard_turn = self._turn_count
                 self._last_hard_cap_guard_signature = after_signature
                 self._set_compaction_status(
@@ -2018,13 +2040,13 @@ class ContextCompactionPlugin(BasePlugin):
 
             logger.warning(
                 "[context_compaction][agent=%s][hub=%s] hard-cap attempt=%s/%s "
-                "still_over budget current_tokens=%s threshold_tokens=%s",
+                "still_over budget current_tokens=%s hard_cap_tokens=%s",
                 agent,
                 hub_identity,
                 attempt,
                 attempts,
                 current_tokens,
-                threshold,
+                hard_cap,
             )
 
         try:
@@ -2044,13 +2066,13 @@ class ContextCompactionPlugin(BasePlugin):
         if rolled_over:
             history = self._get_conversation_history() or []
             current_tokens = self._effective_prompt_tokens()
-            if current_tokens < threshold:
+            if current_tokens < hard_cap:
                 self._last_hard_cap_guard_turn = self._turn_count
                 self._last_hard_cap_guard_signature = self._history_signature(history)
                 self._set_compaction_status(
                     "rolled_over",
                     f"Compaction failed; context rolled over with a recovery summary "
-                    f"({current_tokens // 1000}K/{threshold_k}K).",
+                    f"({current_tokens // 1000}K/{hard_cap_k}K).",
                     action="Continue from the recovery summary; the previous transcript remains in session logs.",
                 )
                 return True
@@ -2058,7 +2080,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._set_compaction_status(
             "failed",
             f"Context remains above the safe budget ({current_tokens // 1000}K/"
-            f"{threshold_k}K) after compaction and recovery-summary attempts.",
+            f"{hard_cap_k}K) after compaction and recovery-summary attempts.",
             action="Run /compact now or start a new session before continuing.",
         )
         return False
@@ -3556,6 +3578,11 @@ class ContextCompactionPlugin(BasePlugin):
         hard_cap_active = state in {"paused", "failed", "warning", "rolled_over"} or (
             state == "compacting" and "context budget reached" in status_message.lower()
         )
+        if state in {"paused", "failed", "rolled_over"} or (
+            state == "compacting" and "context budget reached" in status_message.lower()
+        ):
+            threshold = self._get_hard_cap_threshold()
+            thresh_k = f"{threshold / 1000:.0f}K"
 
         if hard_cap_active:
             limit = self._get_session_turn_budget()

@@ -616,7 +616,7 @@ class ConfigLoader:
                     "summarization_profile": None,
                     "summarization_model": None,
                     "max_summary_tokens": 2000,
-                    "max_session_turns": 90,
+                    "max_session_turns": 0,
                     "hard_cap_compaction_attempts": 2,
                     "ask_model_first": True,
                     "log_compaction_events": True,
