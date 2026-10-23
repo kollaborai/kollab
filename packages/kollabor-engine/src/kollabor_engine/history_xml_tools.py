@@ -64,7 +64,7 @@ def web_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The history the web renders: XML tool turns in the native shape, voice
     turns as screens show them. A history with neither is the same list.
     """
-    from kollabor_voice.observer import turn_display_texts
+    from kollabor_voice.voice_context import turn_display_texts
 
     shaped = _xml_tool_turns(history)
     shown = turn_display_texts(shaped)

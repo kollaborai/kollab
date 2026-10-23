@@ -2065,7 +2065,7 @@ class LLMService:
             if voice:
                 # A mic turn carries the voice rules, as on the native path, and
                 # its reply is spoken when the turn ends (acp.voice_turns).
-                from kollabor_voice.observer import voice_preamble
+                from kollabor_voice.voice_context import voice_preamble
 
                 epoch = voice.get("epoch")
                 message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message

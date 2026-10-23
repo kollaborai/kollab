@@ -16,8 +16,9 @@ from kollabor_voice.classifiers import (
     save_context_lines,
 )
 from kollabor_voice.control import VoiceError
-from kollabor_voice.observer import parse_decision, voice_preamble
+from kollabor_voice.observer import parse_decision
 from kollabor_voice.store import utc
+from kollabor_voice.voice_context import voice_preamble
 
 from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
 from plugins.voice_plugin import VoicePlugin

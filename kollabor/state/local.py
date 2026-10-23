@@ -3198,7 +3198,7 @@ class LocalStateService(StateService):
         except Exception as e:
             raise ValueError(f"ConversationMessage import failed: {e}")
 
-        from kollabor_voice.observer import turn_display_texts
+        from kollabor_voice.voice_context import turn_display_texts
 
         loaded_messages: list[Any] = []
         display_messages: list[dict[str, Any]] = []

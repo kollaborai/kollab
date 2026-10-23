@@ -971,7 +971,7 @@ class ResumeConversationPlugin:
         loaded_messages = []
         display_messages: List[tuple] = [("system", header, {})]
 
-        from kollabor_voice.observer import turn_display_texts
+        from kollabor_voice.voice_context import turn_display_texts
 
         for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
@@ -1028,7 +1028,7 @@ class ResumeConversationPlugin:
         loaded_messages = []
         messages_for_display = [{"role": "system", "content": header}]
 
-        from kollabor_voice.observer import turn_display_texts
+        from kollabor_voice.voice_context import turn_display_texts
 
         for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
