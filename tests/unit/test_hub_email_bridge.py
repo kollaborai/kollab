@@ -214,3 +214,64 @@ async def test_new_mail_is_a_direct_message_to_the_agent(caplog):
     assert hub_msg.scope == "direct"
     assert hub_msg.from_agent == "bridge:email"
     assert hub_msg.content == "New email"
+
+
+# --- messaging bridge (Telegram) target --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target, identity, coordinator, runs",
+    [
+        ("lapis", "lapis", False, True),
+        ("lapis", "ruby", True, False),
+        ("", "ruby", True, True),
+        ("", "lapis", False, False),
+    ],
+)
+def test_bridge_runs_on_the_target_agent_only(target, identity, coordinator, runs):
+    plugin = _plugin(
+        identity,
+        coordinator,
+        {"plugins.hub.bridge_enabled": True, "plugins.hub.bridge_target_agent": target},
+    )
+    assert plugin._runs_inbox("bridge") is runs
+
+
+@pytest.mark.asyncio
+async def test_bridge_message_for_another_agent_is_routed_to_it():
+    # A bridge turned on with /hub bridge on in ruby, target lapis: ruby's own
+    # handler only shows a message for lapis as observed, so it must be sent on.
+    plugin = _plugin("ruby", True, {})
+    plugin._on_message_received = AsyncMock()
+    plugin._route_message = AsyncMock(return_value=[])
+    await plugin._handle_bridge_incoming(
+        IncomingMessage(platform="telegram", sender_id="7", sender_name="Marco", text="ping"), "lapis"
+    )
+    plugin._on_message_received.assert_not_awaited()
+    hub_msg = plugin._route_message.await_args.args[0]
+    assert (hub_msg.to, hub_msg.scope, hub_msg.content) == ("lapis", "direct", "ping")
+
+
+def _history_plugin(history):
+    plugin = _plugin("lapis", False, {})
+    llm = SimpleNamespace(conversation_history=history)
+    plugin.event_bus = SimpleNamespace(get_service=lambda name: llm if name == "llm_service" else None)
+    return plugin
+
+
+def _user(metadata=None):
+    return SimpleNamespace(role="user", metadata=metadata)
+
+
+@pytest.mark.parametrize(
+    "history, answers",
+    [
+        ([_user({"bridge_platform": "telegram"})], True),
+        ([_user({"bridge_platform": "telegram"}), SimpleNamespace(role="assistant", metadata=None)], True),
+        ([_user({"bridge_platform": "telegram"}), _user({"hub": True})], False),
+        ([_user()], False),
+        ([], False),
+    ],
+)
+def test_answers_bridge_message_reads_the_newest_user_message(history, answers):
+    assert _history_plugin(history)._answers_bridge_message() is answers

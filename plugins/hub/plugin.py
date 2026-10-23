@@ -1016,8 +1016,8 @@ class HubPlugin(BasePlugin):
                     "type": "text_input",
                     "label": "Bridge Target Agent",
                     "config_path": "plugins.hub.bridge_target_agent",
-                    "placeholder": "auto (self)",
-                    "help": "Identity to route incoming bridge messages to",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by bridge messages; that agent runs the bridge",
                 },
                 {
                     "type": "slider",
@@ -5562,13 +5562,9 @@ class HubPlugin(BasePlugin):
                 )
                 self._notify_task = asyncio.create_task(self._notifier.run())
 
-            # Start messaging bridge loop if enabled
-            bridge_enabled = False
-            if self.config:
-                bridge_enabled = self.config.get("plugins.hub.bridge_enabled", False)
-            # Only coordinator runs the bridge (avoids 409 conflict
-            # when multiple agents poll the same bot token)
-            if bridge_enabled and self._identity.is_coordinator:
+            # Each inbox runs on the agent it wakes, so its messages are a
+            # local delivery and its replies go out through its own bridge.
+            if self._runs_inbox("bridge"):
                 self._bridge_task = asyncio.create_task(self._messaging_bridge_loop())
             if self._runs_email_watch():
                 self._email_task = asyncio.create_task(self._email_inbox_loop())
@@ -6677,11 +6673,19 @@ class HubPlugin(BasePlugin):
         )
 
     def _runs_email_watch(self) -> bool:
+        return self._runs_inbox("email")
+
+    def _runs_inbox(self, kind: str) -> bool:
+        """True when this agent runs the ``bridge`` or ``email`` inbox.
+
+        That is the agent named by ``<kind>_target_agent``, or the coordinator
+        when it is empty.
+        """
         if not self.config or not self._identity:
             return False
-        if not self.config.get("plugins.hub.email_enabled", False):
+        if not self.config.get(f"plugins.hub.{kind}_enabled", False):
             return False
-        target = self.config.get("plugins.hub.email_target_agent", "")
+        target = self.config.get(f"plugins.hub.{kind}_target_agent", "")
         if target:
             return target == self._identity.identity
         return self._identity.is_coordinator
@@ -6812,8 +6816,13 @@ class HubPlugin(BasePlugin):
         preview = f"uid {msg.sender_id}" if msg.platform == "email" else msg.text[:80]
         logger.info(f"bridge incoming ({msg.platform}): {msg.sender_name} -> {target}: {preview}")
 
-        # Route through the standard message handler
-        await self._on_message_received(hub_msg)
+        if target == self._identity.identity:
+            await self._on_message_received(hub_msg)
+            return
+        # Another agent's inbox (a bridge turned on here with /hub bridge on):
+        # receiving it here would only show it as observed, so send it on.
+        for recipient, reason in await self._route_message(hub_msg):
+            logger.warning(f"bridge incoming ({msg.platform}) not delivered to {recipient}: {reason}")
 
     async def bridge_send(self, text: str) -> bool:
         """Send a message through the active bridge (if connected).
@@ -6830,6 +6839,14 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"bridge_send failed: {e}")
             return False
+
+    def _answers_bridge_message(self) -> bool:
+        """True when the newest user message came in through the bridge."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        for msg in reversed(getattr(llm, "conversation_history", None) or []):
+            if msg.role == "user":
+                return bool((getattr(msg, "metadata", None) or {}).get("bridge_platform"))
+        return False
 
     async def _bridge_forward(self, text: str) -> None:
         """Forward a message to the bridge if connected. Truncates to 500 chars.
@@ -9902,8 +9919,12 @@ class HubPlugin(BasePlugin):
         # Hub messages from this agent are already forwarded at send time,
         # so only forward the cleaned text that remains after tag stripping
         # (the "natural language" part of the response).
+        # A reply to a bridge message goes out whole: it is the answer.
         if cleaned and not has_pending_tool_work:
-            await self._bridge_forward(cleaned)
+            if self._answers_bridge_message():
+                await self.bridge_send(cleaned)
+            else:
+                await self._bridge_forward(cleaned)
 
         # Route untagged responses to coordinator if enabled. This path is
         # only for terminal/final summaries from worker agents. Native tool

@@ -1786,9 +1786,6 @@ class QueueProcessor:
                         )
                         await asyncio.sleep(0)
 
-            # Step 8: Bridge relay
-            await self._bridge_relay(clean_response)
-
             # First apply the per-result spill boundary, then pack the whole
             # native/XML batch against the remaining request budget. This is
             # deliberately before history append: once oversized content has
@@ -2388,28 +2385,3 @@ class QueueProcessor:
                         )
 
         return clean_response, suppress_display, turn_complete
-
-    async def _bridge_relay(self, clean_response: str) -> None:
-        """Send response to external platform if last user message was from bridge."""
-        if not clean_response or not self.event_bus:
-            return
-        try:
-            hub = self.event_bus.get_service("hub_plugin")
-            if hub and getattr(hub, "_bridge", None):
-                history = getattr(
-                    self.event_bus.get_service("llm_service"),
-                    "conversation_history",
-                    [],
-                )
-                for msg in reversed(history):
-                    if msg.role == "user" and getattr(msg, "metadata", None):
-                        if msg.metadata.get("bridge_platform"):
-                            logger.info(
-                                "Bridge relay: sending response to external platform"
-                            )
-                            await hub.bridge_send(clean_response)
-                            break
-                    elif msg.role == "user":
-                        break
-        except Exception as e:
-            logger.debug(f"Bridge relay check: {e}")
