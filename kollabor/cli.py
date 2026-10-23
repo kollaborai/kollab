@@ -40,7 +40,7 @@ from kollabor_ai.profile_manager import EFFORT_LEVELS
 from .application import TerminalLLMChat, UnknownLLMError
 from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
-from .version import __version__
+from .version import __version__, get_build_provenance
 
 STOP_GRACE_SECONDS = 1.5
 STOP_TERM_SECONDS = 1.0
@@ -377,12 +377,17 @@ Telegram bridge setup (run inside interactive mode):
         help="Show this help message and exit",
     )
 
+    build_provenance = get_build_provenance()
+
     parser.add_argument(
         "-v",
         "--version",
         action="version",
-        version=f"%(prog)s {__version__}",
-        help="Show version number and exit",
+        version=(
+            f"Build: {build_provenance.display.replace('%', '%%')}\n"
+            f"%(prog)s {__version__}"
+        ),
+        help="Show version number and build provenance and exit",
     )
 
     parser.add_argument(

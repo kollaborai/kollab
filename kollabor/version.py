@@ -5,6 +5,25 @@ from importlib.metadata import version as get_version
 from pathlib import Path
 from typing import Optional
 
+from .build_info import (
+    BuildProvenance,
+    normalize_branch,
+    normalize_sha,
+    resolve_build_provenance,
+)
+
+try:
+    from ._build_info import BUILD_BRANCH as _EMBEDDED_BUILD_BRANCH
+    from ._build_info import BUILD_SHA as _EMBEDDED_BUILD_SHA
+except ModuleNotFoundError as error:
+    if error.name != f"{__package__}._build_info":
+        raise
+    _EMBEDDED_PROVENANCE: BuildProvenance | None = None
+else:
+    _EMBEDDED_PROVENANCE = BuildProvenance(
+        normalize_branch(_EMBEDDED_BUILD_BRANCH), normalize_sha(_EMBEDDED_BUILD_SHA)
+    )
+
 
 def _get_version_from_pyproject() -> Optional[str]:
     """Read version from pyproject.toml for development mode."""
@@ -45,6 +64,14 @@ def get_kollabor_version() -> str:
         return get_version("kollab")
     except PackageNotFoundError:
         return "0.0.0-installed"
+
+
+def get_build_provenance() -> BuildProvenance:
+    """Return the identity captured for this artifact or source checkout."""
+
+    if _EMBEDDED_PROVENANCE is not None:
+        return _EMBEDDED_PROVENANCE
+    return resolve_build_provenance()
 
 
 __version__ = get_kollabor_version()

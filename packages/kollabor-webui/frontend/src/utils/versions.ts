@@ -1,21 +1,40 @@
 import type { EngineConfig } from "@/api";
 
-export type VersionRow = { label: string; value: string };
+export type BuildIdentity = { branch: string; sha: string };
+export type VersionRow = { label: string; value: string; title?: string };
 
 /**
- * Rows for the settings Versions block. `bundle` is the frontend's own build
- * version (__APP_VERSION__); the rest come from GET /api/config. A version the
- * server could not read shows "unknown" rather than a blank.
+ * Rows for Settings > Versions. Package versions come from GET /api/config;
+ * build identity is embedded in the Vite bundle so the signed PhoneLink app
+ * does not need access to the token-bearing config response.
  */
-export function versionRows(config: EngineConfig | null, bundle: string): VersionRow[] {
-  const show = (version?: string) => {
+export function versionRows(
+  config: EngineConfig | null,
+  bundle: string,
+  build: BuildIdentity,
+): VersionRow[] {
+  const showVersion = (version?: string) => {
     const value = (version || "").trim();
     return value ? `v${value}` : "unknown";
   };
+  const showIdentity = (value: string) => {
+    const normalized = value.trim();
+    return normalized && normalized !== "unknown" ? normalized : "unknown";
+  };
+
+  const branch = showIdentity(build.branch);
+  const sha = showIdentity(build.sha);
+  const shortSha = sha === "unknown" ? sha : sha.slice(0, 8);
+
   return [
-    { label: "Kollab", value: show(config?.kollab_version) },
-    { label: "Engine", value: show(config?.engine_version) },
-    { label: "Web UI Server", value: show(config?.server_version) },
-    { label: "Frontend Bundle", value: show(bundle) },
+    { label: "Kollab", value: showVersion(config?.kollab_version) },
+    { label: "Engine", value: showVersion(config?.engine_version) },
+    { label: "Web UI Server", value: showVersion(config?.server_version) },
+    { label: "Frontend Bundle", value: showVersion(bundle) },
+    {
+      label: "Build",
+      value: `${branch} @ ${shortSha}`,
+      title: `${branch} @ ${sha}`,
+    },
   ];
 }

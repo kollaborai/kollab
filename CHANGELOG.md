@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the computer's fingerprint beside a longer 12-character pairing code, each
   phone shows when it was last seen, and Revoke removes a phone in one tap.
   The loader is installable to the Home Screen and opens its verified copy.
+- Build: `kollab --version` shows the source branch and short SHA before the
+  version line. The Web UI and signed PhoneLink app show the same identity;
+  Python wheels and binaries embed the full SHA.
 - Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
 - Hub: the idle supervisor now proves its wakes work. Wakes that produce no
   completed coordinator turn are counted; once enough land while the
