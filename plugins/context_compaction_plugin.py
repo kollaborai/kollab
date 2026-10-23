@@ -33,6 +33,7 @@ MAX_PRESERVED_HUB_TASK_MESSAGES = 24
 MAX_PRESERVED_HUB_TASK_CHARS = 4000
 MAX_PRESERVED_COORDINATION_MESSAGES = 32
 MAX_PRESERVED_COORDINATION_CHARS = 16000
+MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS = 8000
 
 
 def _load_model_registry() -> Dict[str, Any]:
@@ -2248,24 +2249,99 @@ class ContextCompactionPlugin(BasePlugin):
         return cloned
 
     def _build_emergency_summary(
-        self, messages: List[ConversationMessage], max_chars: int = 8000
+        self,
+        messages: List[ConversationMessage],
+        max_chars: int = MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS,
     ) -> str:
-        """Build a short recovery note without another provider request."""
+        """Build a bounded recovery note, prioritizing the latest user request.
+
+        ``max_chars`` is the cap on the final injected message, including its
+        framing. Live hub tasks are represented separately by TaskLedger-selected
+        excerpts, so raw task assignments (including closed or superseded ones)
+        must not consume the recovery note or reappear as active work.
+        """
+        wrapper_chars = len(SUMMARY_INJECTION_PREFIX) + len(SUMMARY_INJECTION_SUFFIX)
+        body_limit = max(0, max_chars - wrapper_chars)
         lines = [
-            "Automatic context rollover: the summarization provider failed at the hard prompt budget.",
-            "The transcript remains available in the session log; this note preserves the latest user intent.",
+            "Automatic context rollover: the summarization provider failed at "
+            "the hard prompt budget.",
+            "The transcript remains available in the session log; this note "
+            "preserves the latest user intent.",
         ]
-        for message in messages[-8:]:
+        body_length = len("\n".join(lines))
+        if body_length >= body_limit:
+            return "\n".join(lines)[:body_limit]
+
+        eligible_messages = []
+        for index, message in enumerate(messages):
+            metadata = getattr(message, "metadata", None) or {}
+            if (
+                metadata.get("context_compaction")
+                or metadata.get("compaction_task_reminder")
+                or metadata.get("context_compaction_task_excerpt")
+            ):
+                continue
+
             role = getattr(message, "role", "message")
             if role not in {"user", "assistant"}:
                 continue
+
             content = getattr(message, "content", "") or ""
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, default=str)
             content = content.strip()
-            if content:
-                lines.append(f"[{role}] {content[:1200]}")
-        return "\n".join(lines)[:max_chars]
+            if not content:
+                continue
+
+            # Active task excerpts are added independently by
+            # _build_compacted_history. Do not replay raw closed, superseded,
+            # or duplicate hub assignments from the old prefix.
+            is_hub_task = bool(
+                metadata.get("hub_task_id")
+                or (metadata.get("task_id") and metadata.get("hub_is_intended"))
+            )
+            if not is_hub_task:
+                try:
+                    is_hub_task = self._is_hub_task(message)
+                except (AttributeError, TypeError):
+                    is_hub_task = False
+            if is_hub_task:
+                continue
+
+            eligible_messages.append((index, role, content))
+
+        recent_messages = eligible_messages[-8:]
+        latest_user = next(
+            (
+                item
+                for item in reversed(eligible_messages)
+                if item[1] == "user"
+            ),
+            None,
+        )
+        latest_user_index = latest_user[0] if latest_user is not None else None
+        ordered_messages = []
+        if latest_user is not None:
+            ordered_messages.append(latest_user)
+        ordered_messages.extend(
+            item
+            for item in reversed(recent_messages)
+            if item[0] != latest_user_index
+        )
+
+        for message_index, role, content in ordered_messages:
+            prefix = f"[{role}] "
+            remaining = body_limit - body_length - 1
+            if remaining <= len(prefix):
+                break
+            content_limit = remaining - len(prefix)
+            if message_index != latest_user_index:
+                content_limit = min(1200, content_limit)
+            line = prefix + content[:content_limit]
+            lines.append(line)
+            body_length += len(line) + 1
+
+        return "\n".join(lines)
 
     async def _apply_pending_compaction(
         self, data: Dict[str, Any], event

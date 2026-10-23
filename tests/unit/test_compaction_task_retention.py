@@ -13,8 +13,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.context_compaction_plugin import (  # noqa: E402
+    MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS,
     MAX_PRESERVED_HUB_TASK_CHARS,
     MAX_PRESERVED_HUB_TASK_MESSAGES,
+    SUMMARY_INJECTION_PREFIX,
+    SUMMARY_INJECTION_SUFFIX,
     ContextCompactionPlugin,
 )
 
@@ -461,3 +464,109 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
         and call.args[1] == MAX_PRESERVED_HUB_TASK_MESSAGES
         for call in info.call_args_list
     )
+
+
+def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None:
+    plugin = _plugin()
+    filler_tasks = [
+        _task_message(f"live-{index:02}", f"active task {index} " + ("x" * 6_000))
+        for index in range(22)
+    ]
+    superseded = _task_message("live-22", "SUPERSEDED_TASK_CANARY " + ("s" * 6_000))
+    current_version = _task_message(
+        "live-22", "CURRENT_TASK_VERSION_CANARY " + ("c" * 6_000)
+    )
+    closed = _task_message("closed-task", "CLOSED_TASK_CANARY " + ("d" * 6_000))
+    old_summary = Message(
+        role="user",
+        content="OLD_COMPACTION_SUMMARY_CANARY",
+        metadata={"context_compaction": True},
+    )
+    old_reminder = Message(
+        role="user",
+        content="OLD_TASK_REMINDER_CANARY",
+        metadata={"compaction_task_reminder": True},
+    )
+    request_marker = "LATEST_USER_REQUEST_CANARY"
+    latest_request = Message(
+        role="user",
+        content=request_marker + " q" * 1_500 + " REQUEST_END_CANARY",
+    )
+    calls = [
+        {"id": f"call-{index}", "function": {"name": "read", "arguments": "{}"}}
+        for index in range(5)
+    ]
+    assistant = Message(role="assistant", content="", metadata={"tool_calls": calls})
+    tool_results = [
+        Message(role="tool", content="result", metadata={"tool_call_id": call["id"]})
+        for call in calls
+    ]
+    history = [
+        Message(role="system", content="system prompt"),
+        *filler_tasks,
+        superseded,
+        current_version,
+        closed,
+        old_summary,
+        old_reminder,
+        latest_request,
+        assistant,
+        *tool_results,
+    ]
+
+    split_point = plugin._find_split_point(history, keep_recent=4)
+    assert history[split_point:] == [assistant, *tool_results]
+    recovery_text = plugin._build_emergency_summary(history[1:split_point])
+
+    assert request_marker in recovery_text
+    assert "REQUEST_END_CANARY" in recovery_text
+    assert "SUPERSEDED_TASK_CANARY" not in recovery_text
+    assert "CLOSED_TASK_CANARY" not in recovery_text
+    assert "OLD_COMPACTION_SUMMARY_CANARY" not in recovery_text
+    assert "OLD_TASK_REMINDER_CANARY" not in recovery_text
+
+    live_ids = {f"live-{index:02}" for index in range(22)} | {"live-22"}
+    preserved, _ = plugin._extract_preservable_messages(
+        history, live_task_ids=live_ids
+    )
+    current_excerpt = next(
+        message for message in preserved if message.metadata["task_id"] == "live-22"
+    )
+    assert "CURRENT_TASK_VERSION_CANARY" in current_excerpt.content
+    assert "SUPERSEDED_TASK_CANARY" not in current_excerpt.content
+
+    compacted = plugin._build_compacted_history(
+        system_msg=history[0],
+        summary_text=recovery_text,
+        to_keep=history[split_point:],
+        preserved_tasks=preserved,
+        compaction_round=1,
+        pre_message_count=len(history),
+    )
+    summary_message = next(
+        message for message in compacted if message.metadata.get("context_compaction")
+    )
+    assert request_marker in summary_message.content
+    assert "CLOSED_TASK_CANARY" not in summary_message.content
+    assert len(summary_message.content) <= MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS
+    tool_call_message = next(
+        message for message in compacted if message.metadata.get("tool_calls")
+    )
+    assert len(tool_call_message.metadata["tool_calls"]) == 5
+    assert sum(message.role == "tool" for message in compacted) == 5
+
+
+def test_emergency_summary_bound_includes_injection_wrapper() -> None:
+    plugin = _plugin()
+    messages = [
+        Message(role="user", content=f"turn-{index} " + ("x" * 2_400))
+        for index in range(12)
+    ]
+
+    recovery_text = plugin._build_emergency_summary(messages)
+    injected_message = (
+        SUMMARY_INJECTION_PREFIX + recovery_text + SUMMARY_INJECTION_SUFFIX
+    )
+
+    assert "turn-11" in recovery_text
+    assert len(injected_message) <= MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS

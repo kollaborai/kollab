@@ -156,11 +156,16 @@ These guards apply to both the basic and forked strategies:
   summary while preserving the system message, complete tool-call groups,
   recent turns, and at most 24 active-task excerpts of 4,000 characters each.
   If even that cannot fit, cancel the tool/request with a visible recovery
-  action instead of sending an oversized prompt.
+  action instead of sending an oversized prompt. The 8,000-character limit
+  includes the complete injected recovery message and its framing. The latest
+  non-task user request is prioritized; raw hub task assignments are excluded
+  because active work is represented by TaskLedger-selected excerpts above.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
-  reset when the session ID changes.
+  reset when the session ID changes. Elapsed age is informational only: no
+  maximum-age duration or age-trigger action is defined. A maximum-age limit
+  requires an operator-specified duration and behavior before enforcement.
 - Summarization model precedence is plugin `summarization_model`, shared
   `kollabor.llm.fast_model`, then the active session model. A configured
   `summarization_profile` supplies credentials; it does not silently replace
