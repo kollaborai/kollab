@@ -154,6 +154,9 @@ class AltViewCommandIntegrator:
             from kollabor_tui.altview.base import AltView
 
             module_name = f"plugins.altview.{plugin_file.stem}"
+            parent_name, _, child_name = module_name.rpartition(".")
+            parent_package = importlib.import_module(parent_name)
+
             # Reuse an already-imported module so callers retain class identity.
             # Re-executing the same file creates a distinct class object and makes
             # isinstance checks fail when a slash command opens the view.
@@ -166,6 +169,10 @@ class AltViewCommandIntegrator:
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[module_name] = module
                 spec.loader.exec_module(module)
+
+            # Match normal import semantics: dynamic loading alone only updates
+            # sys.modules, not the child attribute on its parent package.
+            setattr(parent_package, child_name, module)
 
             # Find AltView subclass (skip the base class itself)
             for attr_name in dir(module):

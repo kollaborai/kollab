@@ -8,6 +8,7 @@ required positional arguments`; the knock screen keeps that fixed.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import inspect
 import logging
@@ -69,11 +70,59 @@ def test_every_altview_class_builds_with_no_arguments(cls):
 @pytest.fixture
 def restore_altview_modules():
     """Discovery re-executes each plugin file under its real module name."""
+    package = importlib.import_module("plugins.altview")
     saved = {k: v for k, v in sys.modules.items() if k.startswith("plugins.altview.")}
+    saved_package_modules = {
+        name: value
+        for name, value in vars(package).items()
+        if getattr(value, "__name__", "").startswith("plugins.altview.")
+    }
     yield
     for key in [k for k in sys.modules if k.startswith("plugins.altview.")]:
         del sys.modules[key]
     sys.modules.update(saved)
+    for name, value in list(vars(package).items()):
+        if getattr(value, "__name__", "").startswith("plugins.altview."):
+            delattr(package, name)
+    for name, module in saved_package_modules.items():
+        setattr(package, name, module)
+
+
+@pytest.mark.parametrize("preload", [False, True], ids=["fresh", "cached"])
+def test_loader_binds_module_on_parent_package(preload):
+    package = importlib.import_module("plugins.altview")
+    module_name = "plugins.altview.connect_altview"
+    module_attribute = "connect_altview"
+    plugin_file = PLUGINS / "altview" / f"{module_attribute}.py"
+    missing = object()
+    saved_module = sys.modules.get(module_name, missing)
+    saved_attribute = getattr(package, module_attribute, missing)
+    cached_module = None
+
+    try:
+        sys.modules.pop(module_name, None)
+        package.__dict__.pop(module_attribute, None)
+        if preload:
+            cached_module = importlib.import_module(module_name)
+            package.__dict__.pop(module_attribute, None)
+
+        integrator = AltViewCommandIntegrator(MagicMock(), MagicMock(), MagicMock())
+        plugin_class = integrator._load_plugin_class(plugin_file)
+
+        assert plugin_class is not None
+        assert getattr(package, module_attribute) is sys.modules[module_name]
+        if preload:
+            assert sys.modules[module_name] is cached_module
+    finally:
+        if saved_module is missing:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = saved_module
+        if saved_attribute is missing:
+            package.__dict__.pop(module_attribute, None)
+        else:
+            setattr(package, module_attribute, saved_attribute)
+
 
 
 def test_discovery_logs_no_error_for_any_altview(caplog, restore_altview_modules):
