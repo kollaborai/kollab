@@ -21,9 +21,8 @@ import time
 import zlib
 from pathlib import Path
 
-from .classifiers import load_preferences
 from .control import manifest
-from .speech_settings import speech_key
+from .speech_settings import load_speech_preferences, speech_key
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class SpeechCache:
         if producer_id not in PRODUCERS:
             return None
         try:
-            voice = dict(speech_key(load_preferences(self.root)))
+            voice = dict(speech_key(load_speech_preferences(self.root)))
             if voice.get("vibevoice_prompt"):
                 # A custom voice can be recorded again under the same file name.
                 stat = Path(voice["vibevoice_prompt"]).expanduser().stat()

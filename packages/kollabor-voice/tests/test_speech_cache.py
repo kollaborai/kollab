@@ -10,9 +10,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from kollabor_voice.classifiers import save_preferences
 from kollabor_voice.output import SpeechQueue
 from kollabor_voice.speech_cache import KEEP_S, SpeechCache
+from kollabor_voice.speech_settings import save_speech_preferences as save_preferences
 
 LINE = "Sorry, was that for me?"
 

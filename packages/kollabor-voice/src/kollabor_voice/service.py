@@ -655,9 +655,9 @@ class VoiceService:
             return None
 
     def apply_capture_preferences(self):
-        from .classifiers import load_preferences
+        from .speech_settings import load_speech_preferences
 
-        preferences = load_preferences(self.root)
+        preferences = load_speech_preferences(self.root)
         self.gate.configure(preferences)
         self.prepare_gate()
         self.echo_cancellation = preferences["echo_cancellation"]
@@ -741,15 +741,14 @@ class VoiceService:
                 if self.speech and (
                     self.speech_prepare_task is None or self.speech_prepare_task.done()
                 ):
-                    from .classifiers import load_preferences
-                    from .speech_settings import speech_key
+                    from .speech_settings import load_speech_preferences, speech_key
 
                     revision = self._preferences_revision()
                     changed = revision != self._speech_preferences_revision
                     self._speech_preferences_revision = revision
                     if (
                         changed
-                        and speech_key(load_preferences(self.root)) != self.speech.key
+                        and speech_key(load_speech_preferences(self.root)) != self.speech.key
                     ):
                         self.speech_prepare_task = asyncio.create_task(
                             self.prepare_speech(), name="speech-prepare"
