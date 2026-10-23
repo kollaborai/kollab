@@ -25,6 +25,7 @@ import html
 import imaplib
 import logging
 import re
+import socket
 import time
 from email.message import EmailMessage
 from email.policy import default as default_policy
@@ -121,8 +122,13 @@ class EmailBridge(MessagingBridge):
         imap, self._imap = self._imap, None
         if imap is None:
             return
-        # shutdown() closes the socket, which ends a worker thread blocked in
-        # IDLE; logout() would wait for that thread's command to finish.
+        # A worker thread blocked in IDLE holds the reader's lock, so close the
+        # raw socket first: its read returns and imap.shutdown() (which closes
+        # that reader) cannot wait out the IDLE. logout() would wait too.
+        try:
+            imap.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
         try:
             imap.shutdown()
         except Exception:
