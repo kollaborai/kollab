@@ -2256,9 +2256,9 @@ class ContextCompactionPlugin(BasePlugin):
         """Build a bounded recovery note, prioritizing the latest user request.
 
         ``max_chars`` is the cap on the final injected message, including its
-        framing. Live hub tasks are represented separately by TaskLedger-selected
-        excerpts, so raw task assignments (including closed or superseded ones)
-        must not consume the recovery note or reappear as active work.
+        framing. Hub messages and standalone agent HUD updates are coordination
+        context, not human intent; raw task assignments are represented separately
+        by TaskLedger-selected excerpts and must not reappear as active work.
         """
         wrapper_chars = len(SUMMARY_INJECTION_PREFIX) + len(SUMMARY_INJECTION_SUFFIX)
         body_limit = max(0, max_chars - wrapper_chars)
@@ -2284,6 +2284,16 @@ class ContextCompactionPlugin(BasePlugin):
 
             role = getattr(message, "role", "message")
             if role not in {"user", "assistant"}:
+                continue
+
+            # These are separate user-role records injected by the hub or HUD
+            # queue, not human requests. Exclude them before latest-user
+            # prioritization so a later status notice cannot displace the ask.
+            if (
+                metadata.get("hub_message")
+                or metadata.get("agent_hud")
+                or metadata.get("agent_hud_sources")
+            ):
                 continue
 
             content = getattr(message, "content", "") or ""

@@ -556,6 +556,32 @@ def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None
     assert sum(message.role == "tool" for message in compacted) == 5
 
 
+def test_emergency_summary_excludes_later_hub_and_agent_hud_records() -> None:
+    plugin = _plugin()
+    human_request = Message(
+        role="user",
+        content="REAL_HUMAN_REQUEST_CANARY: finish the requested analysis.",
+    )
+    ordinary_hub_notice = Message(
+        role="user",
+        content="NON_TASK_HUB_NOTICE_CANARY: peer status update.",
+        metadata={"hub_message": True, "hub_is_intended": False},
+    )
+    hud_notice = Message(
+        role="user",
+        content="STANDALONE_AGENT_HUD_CANARY: pending status.",
+        metadata={"agent_hud": True, "agent_hud_sources": ["hub"]},
+    )
+
+    recovery_text = plugin._build_emergency_summary(
+        [human_request, ordinary_hub_notice, hud_notice]
+    )
+
+    assert "REAL_HUMAN_REQUEST_CANARY" in recovery_text
+    assert "NON_TASK_HUB_NOTICE_CANARY" not in recovery_text
+    assert "STANDALONE_AGENT_HUD_CANARY" not in recovery_text
+
+
 def test_emergency_summary_bound_includes_injection_wrapper() -> None:
     plugin = _plugin()
     messages = [

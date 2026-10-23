@@ -158,8 +158,10 @@ These guards apply to both the basic and forked strategies:
   If even that cannot fit, cancel the tool/request with a visible recovery
   action instead of sending an oversized prompt. The 8,000-character limit
   includes the complete injected recovery message and its framing. The latest
-  non-task user request is prioritized; raw hub task assignments are excluded
-  because active work is represented by TaskLedger-selected excerpts above.
+  human request is prioritized; separate `hub_message` and `agent_hud` user
+  records (including non-task notices) are excluded from the recovery summary.
+  Raw hub task assignments are also excluded because active work is represented
+  by TaskLedger-selected excerpts above.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
