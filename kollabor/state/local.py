@@ -27,6 +27,7 @@ from typing import Any, Callable, List
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -2775,10 +2776,13 @@ class LocalStateService(StateService):
         """
         metadata = message if isinstance(message, dict) else {}
         input_context = origin_context or metadata.get("origin_context")
-        is_voice_origin = (
+        claims_voice_origin = (
             isinstance(input_context, dict)
             and input_context.get("source") == "livekit_voice"
         )
+        is_voice_origin = validate_voice_admission_context(input_context)
+        if claims_voice_origin and not is_voice_origin:
+            return {"accepted": False, "reason": "invalid voice admission capability"}
         text = content_to_text(message).strip()
         if not text:
             return {"accepted": False, "reason": "empty message"}

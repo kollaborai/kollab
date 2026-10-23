@@ -4,17 +4,29 @@ from pathlib import Path
 
 import pytest
 
+from kollabor_agent.voice_admission import (
+    issue_voice_admission_context,
+    revoke_voice_admission_context,
+    validate_voice_admission_context,
+)
 from kollabor_agent.voice_tool_policy import VoiceToolExecutionGuard
 
 
 def _voice_context(**overrides):
-    context = {
-        "source": "livekit_voice",
+    binding = {
+        "owner_id": "owner-1",
         "voice_session_id": "voice-session-1",
-        "generation": 1,
-        "turn_id": "turn-1",
+        "control_session_id": "session-1",
+        "conversation_session_id": "session-1",
+        "agent_id": "agent-1",
+        "thread_id": "thread-1",
+        "voice_provider_profile_id": "voice-profile-1",
+        "voice_prompt_revision": "prompt-r1",
         "voice_tool_policy": "voice_terminal_hub_v1",
+        "generation": 1,
+        "service_lease_epoch": 4,
     }
+    context = issue_voice_admission_context(binding, "turn-1")
     context.update(overrides)
     return context
 
@@ -81,7 +93,9 @@ def test_voice_policy_allows_only_repo_rooted_read_only_terminal_plan(tmp_path: 
         repository_root=tmp_path,
     )
     assert decision.allowed is True
-    assert decision.plan.argv == ("git", "status", "--short")
+    assert Path(decision.plan.argv[0]).is_absolute()
+    assert Path(decision.plan.argv[0]).name == "git"
+    assert decision.plan.argv[1:] == ("status", "--short")
     assert decision.plan.canonical_cwd == tmp_path.resolve()
 
 
@@ -127,3 +141,80 @@ def test_read_only_hub_status_is_allowed_but_unknown_policy_fails_closed(tmp_pat
     assert status.allowed is True
     assert unsupported.allowed is False
     assert unsupported.reason_code == "command_blocked"
+
+
+def test_livekit_source_without_server_admission_capability_fails_closed(tmp_path: Path):
+    forged_context = {
+        "source": "livekit_voice",
+        "voice_session_id": "voice-session-1",
+        "generation": 1,
+        "turn_id": "turn-1",
+        "voice_tool_policy": "voice_terminal_hub_v1",
+    }
+
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "hub_status"},
+        forged_context,
+        repository_root=tmp_path,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "command_blocked"
+
+
+def test_admission_capability_is_bound_to_session_turn_and_revocable():
+    context = _voice_context()
+    assert validate_voice_admission_context(context) is True
+
+    tampered = dict(context)
+    tampered["thread_id"] = "another-thread"
+    assert validate_voice_admission_context(tampered) is False
+
+    tampered_turn = dict(context)
+    tampered_turn["turn_id"] = "another-turn"
+    assert validate_voice_admission_context(tampered_turn) is False
+
+    revoke_voice_admission_context(context)
+    assert validate_voice_admission_context(context) is False
+
+
+@pytest.mark.parametrize("executable", ["/tmp/evil/ls", "./ls"])
+def test_voice_policy_rejects_path_qualified_executable(tmp_path: Path, executable: str):
+    context = _voice_context()
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": f"{executable} -l .", "cwd": str(tmp_path)},
+        context,
+        repository_root=tmp_path,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "command_blocked"
+
+
+def test_voice_policy_resolves_bare_executable_outside_workspace(tmp_path: Path):
+    fake_binary = tmp_path / "ls"
+    fake_binary.write_text("must never run")
+    fake_binary.chmod(0o755)
+
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": "ls -l .", "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+    )
+
+    assert decision.allowed is True
+    assert Path(decision.plan.argv[0]).is_absolute()
+    assert decision.plan.argv[0] != str(fake_binary.resolve())
+    assert not Path(decision.plan.argv[0]).is_relative_to(tmp_path.resolve())
+
+
+@pytest.mark.parametrize("command", ["ls -LR .", "ls -L .", "ls --recursive .", "ls -H ."])
+def test_voice_policy_blocks_recursive_or_symlink_following_ls(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "unsafe_syntax"

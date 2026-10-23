@@ -9,12 +9,17 @@ connected.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+from .voice_admission import validate_voice_admission_context
 
 VOICE_TOOL_POLICY_ID = "voice_terminal_hub_v1"
 MAX_VOICE_COMMAND_BYTES = 8 * 1024
@@ -23,6 +28,12 @@ MAX_VOICE_COMMAND_SECONDS = 60
 
 _ALLOWED_VOICE_TOOL_TYPES = frozenset(
     {"terminal", "hub_status", "hub_capture", "hub_msg"}
+)
+_TRUSTED_TERMINAL_EXECUTABLES = frozenset(
+    {"cat", "git", "grep", "head", "ls", "pwd", "rg", "tail"}
+)
+_LS_DEREFERENCE_FLAGS = frozenset(
+    {"--dereference", "--dereference-command-line", "--follow-symlinks", "--recursive"}
 )
 _SHELL_OPERATOR_CHARS = frozenset(";|&<>$`\n\r")
 _READ_ONLY_GIT_COMMANDS = frozenset({"status", "diff", "log", "show"})
@@ -110,6 +121,8 @@ class VoiceToolExecutionGuard:
     ) -> VoiceToolDecision:
         if not isinstance(execution_context, Mapping) or execution_context.get("source") != "livekit_voice":
             return VoiceToolDecision(allowed=True)
+        if not validate_voice_admission_context(execution_context):
+            return self._deny("command_blocked", "Voice origin lacks a valid server admission capability.")
         if not self._has_valid_binding_context(execution_context):
             return self._deny("command_blocked", "Voice tool context is incomplete or unsupported.")
 
@@ -168,6 +181,11 @@ class VoiceToolExecutionGuard:
             return self._deny("unsafe_syntax", "Voice terminal command could not be parsed safely.")
         if not argv or any(not part or "\\" in part for part in argv):
             return self._deny("unsafe_syntax", "Voice terminal command contains unsupported escaping.")
+        if _is_path_qualified_executable(argv[0]):
+            return self._deny(
+                "command_blocked",
+                "Voice terminal executables must use a trusted bare command name.",
+            )
 
         root = Path(repository_root or Path.cwd()).expanduser().resolve()
         requested_cwd = Path(str(tool_data.get("cwd") or root)).expanduser()
@@ -179,6 +197,11 @@ class VoiceToolExecutionGuard:
             return self._deny("unsafe_syntax", "Voice terminal working directory is invalid.")
         if not _is_relative_to(canonical_cwd, root):
             return self._deny("unsafe_syntax", "Voice terminal working directory must stay inside the project.")
+        if _has_unsafe_ls_flags(argv):
+            return self._deny(
+                "unsafe_syntax",
+                "Recursive or symlink-dereferencing ls options are not allowed for voice commands.",
+            )
 
         if _is_hard_blocked(argv):
             return self._deny(
@@ -192,12 +215,19 @@ class VoiceToolExecutionGuard:
                 "This terminal action requires an explicit voice confirmation before execution.",
             )
 
+        trusted_executable = _resolve_trusted_executable(argv[0], root)
+        if trusted_executable is None:
+            return self._deny(
+                "command_blocked",
+                "Voice terminal executable is unavailable in the fixed trusted command path.",
+            )
+        normalized_argv = (str(trusted_executable), *argv[1:])
         plan_material = {
             "voice_session_id": context["voice_session_id"],
             "generation": context["generation"],
             "turn_id": context["turn_id"],
             "cwd": str(canonical_cwd),
-            "argv": argv,
+            "argv": normalized_argv,
         }
         digest = sha256(
             json.dumps(plan_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -206,7 +236,7 @@ class VoiceToolExecutionGuard:
             plan_id=f"voice-plan-{digest[:20]}",
             digest=digest,
             classification="read_only",
-            argv=argv,
+            argv=normalized_argv,
             canonical_cwd=canonical_cwd,
         )
         return VoiceToolDecision(allowed=True, plan=plan)
@@ -222,6 +252,51 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_path_qualified_executable(executable: str) -> bool:
+    return (
+        Path(executable).name != executable
+        or "/" in executable
+        or "\\\\" in executable
+    )
+
+
+def _has_unsafe_ls_flags(argv: Sequence[str]) -> bool:
+    if not argv or Path(argv[0]).name.lower() != "ls":
+        return False
+    for argument in argv[1:]:
+        lowered = argument.lower()
+        if lowered in _LS_DEREFERENCE_FLAGS:
+            return True
+        if argument.startswith("-") and not argument.startswith("--"):
+            if any(flag in argument[1:] for flag in "RLH"):
+                return True
+    return False
+
+
+def _resolve_trusted_executable(executable: str, repository_root: Path) -> Path | None:
+    if _is_path_qualified_executable(executable):
+        return None
+    if executable not in _TRUSTED_TERMINAL_EXECUTABLES:
+        return None
+    # os.defpath is a fixed system search path, not the user/session PATH; it
+    # cannot prefer a repository-local or /tmp executable placed earlier in PATH.
+    resolved = shutil.which(executable, path=os.defpath)
+    if not resolved:
+        return None
+    try:
+        canonical = Path(resolved).resolve(strict=True)
+        if not canonical.is_file() or not os.access(canonical, os.X_OK):
+            return None
+        if _is_relative_to(canonical, repository_root):
+            return None
+        for parent in (canonical, *canonical.parents):
+            if parent.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return None
+    except (OSError, RuntimeError):
+        return None
+    return canonical
 
 
 def _is_hard_blocked(argv: Sequence[str]) -> bool:

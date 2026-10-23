@@ -22,6 +22,7 @@ from kollabor_agent.queue_processor import (
     merge_livekit_origin_contexts,
 )
 from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai import (
     ConversationManager,
     KollaborConversationLogger,
@@ -1680,7 +1681,7 @@ class LLMService:
         """Process a batch of messages. Delegates to QueueProcessor."""
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
-            merged_origin_context = merge_livekit_origin_contexts(voice_inputs)
+            merged_origin_context = merge_livekit_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, QueuedInput) else m for m in messages]
             )
@@ -1920,11 +1921,14 @@ class LLMService:
                 "reason": f"model '{self.api_service.model}' does not accept image input",
             }
 
-        trusted_origin_context = (
-            dict(origin_context)
-            if isinstance(origin_context, dict)
+        claims_voice_origin = (
+            isinstance(origin_context, dict)
             and origin_context.get("source") == "livekit_voice"
-            else None
+        )
+        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+            return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+        trusted_origin_context = (
+            dict(origin_context) if claims_voice_origin else None
         )
         if (voice or trusted_origin_context) and self._queue_processor.processing_queue.full():
             return {"status": "rejected", "reason": "Agent input queue is full"}

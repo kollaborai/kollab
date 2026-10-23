@@ -66,13 +66,9 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_livekit_destructive_command_is_blocked_before_permission_or_spawn(self):
-        origin_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
         tool_data = {
             "type": "terminal",
             "id": "voice-terminal-1",
@@ -94,13 +90,9 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         terminal_command.assert_not_awaited()
 
     async def test_livekit_read_only_terminal_keeps_permission_hook_and_uses_argv(self):
-        origin_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
         self.executor.shell_executor.run_argv = AsyncMock(
             return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
         )
@@ -116,6 +108,27 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.event_bus.emit_with_hooks.assert_awaited()
         self.executor.shell_executor.run_argv.assert_awaited_once()
         terminal_command.assert_not_awaited()
+
+
+    async def test_livekit_path_qualified_executable_never_reaches_process(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("path-escape-turn")
+        self.executor.shell_executor.run_argv = AsyncMock()
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "voice-path-escape",
+                "command": "./ls -l .",
+            },
+            execution_context=origin_context,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.metadata["reason_code"], "command_blocked")
+        self.event_bus.emit_with_hooks.assert_not_awaited()
+        self.executor.shell_executor.run_argv.assert_not_awaited()
 
 
     async def test_execute_terminal_command_success(self):

@@ -33,6 +33,10 @@ from .tool_output_budget import (
     build_tool_output_store,
     pack_tool_history_and_results,
 )
+from .voice_admission import (
+    revoke_voice_admission_context,
+    validate_voice_admission_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +52,28 @@ class QueuedInput:
     origin_context: dict[str, Any] | None = None
 
 
-def merge_livekit_origin_contexts(queued_inputs: List[QueuedInput]) -> dict[str, Any] | None:
+def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
     contexts = [
         item.origin_context
-        for item in queued_inputs
-        if isinstance(item.origin_context, dict)
+        for item in messages
+        if isinstance(item, QueuedInput)
+        and isinstance(item.origin_context, dict)
         and item.origin_context.get("source") == "livekit_voice"
     ]
     if not contexts:
         return None
-    if len(contexts) != len(queued_inputs):
+
+    def fail_closed() -> dict[str, Any]:
+        for context in contexts:
+            revoke_voice_admission_context(context)
         return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+
+    # Any plain or untrusted item mixed into the batch invalidates voice
+    # authority for the combined LLM turn.
+    if len(contexts) != len(messages):
+        return fail_closed()
+    if any(not validate_voice_admission_context(context) for context in contexts):
+        return fail_closed()
 
     signatures = {
         (
@@ -70,9 +85,14 @@ def merge_livekit_origin_contexts(queued_inputs: List[QueuedInput]) -> dict[str,
         for context in contexts
     }
     if len(signatures) != 1:
-        # A mixed voice batch has no single authority scope; fail closed.
-        return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
-    return dict(contexts[-1])
+        return fail_closed()
+
+    selected_context = dict(contexts[-1])
+    selected_capability = selected_context.get("admission_capability")
+    for context in contexts[:-1]:
+        if context.get("admission_capability") != selected_capability:
+            revoke_voice_admission_context(context)
+    return selected_context
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -978,7 +998,25 @@ class QueueProcessor:
         """
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
-        self.active_origin_context = merge_livekit_origin_contexts(voice_inputs)
+        merged_origin_context = merge_livekit_origin_contexts(messages)
+        previous_origin_context = self.active_origin_context
+        if (
+            isinstance(previous_origin_context, dict)
+            and previous_origin_context.get("source") == "livekit_voice"
+            and (
+                not isinstance(merged_origin_context, dict)
+                or merged_origin_context.get("admission_capability")
+                != previous_origin_context.get("admission_capability")
+            )
+        ):
+            revoke_voice_admission_context(previous_origin_context)
+            if isinstance(merged_origin_context, dict):
+                revoke_voice_admission_context(merged_origin_context)
+            merged_origin_context = {
+                "source": "livekit_voice",
+                "voice_tool_policy": "invalid",
+            }
+        self.active_origin_context = merged_origin_context
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -2091,6 +2129,7 @@ class QueueProcessor:
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
             self.active_voice = None
+            revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0

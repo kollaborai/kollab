@@ -141,13 +141,9 @@ class TestLLMServiceIntegration(unittest.TestCase):
         from kollabor_agent.queue_processor import QueuedInput
 
         message = "show status"
-        origin_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
         with (
             patch.object(self.service, "conversation_logger") as mock_logger,
             patch.object(self.service, "_process_queue"),

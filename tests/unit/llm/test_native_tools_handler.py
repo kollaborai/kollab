@@ -98,13 +98,9 @@ async def test_native_tool_executor_receives_livekit_execution_context():
         config=FakeConfig(),
     )
     executor = CapturingToolExecutor()
-    origin_context = {
-        "source": "livekit_voice",
-        "voice_session_id": "voice-session-1",
-        "generation": 1,
-        "turn_id": "turn-1",
-        "voice_tool_policy": "voice_terminal_hub_v1",
-    }
+    from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+    origin_context = make_voice_origin_context("turn-1")
 
     await handler.execute_tool_calls(executor, execution_context=origin_context)
 

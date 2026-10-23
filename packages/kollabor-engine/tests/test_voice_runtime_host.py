@@ -575,3 +575,28 @@ async def test_shutdown_surfaces_failed_backend_stop_and_allows_retry():
     stopped = await host.get_status("owner-1", ready.voice_session_id)
     assert stopped.state == "stopped"
     assert len(backend.stop_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_host_generation_fence_revokes_voice_admission_capability():
+    from kollabor_agent.voice_admission import (
+        issue_voice_admission_context,
+        validate_voice_admission_context,
+    )
+
+    backend = FakeRuntimeBackend()
+    host = _host(backend)
+    ready = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    binding = backend.start_calls[0]
+    context = issue_voice_admission_context(binding, str(uuid4()))
+    assert validate_voice_admission_context(context) is True
+
+    await host.stop_session(
+        "owner-1",
+        ready.voice_session_id,
+        StopVoiceSessionRequest(generation=ready.generation, reason="user"),
+    )
+    await host.wait_for_background_tasks()
+
+    assert validate_voice_admission_context(context) is False

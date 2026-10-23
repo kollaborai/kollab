@@ -71,11 +71,14 @@ async def test_voice_origin_routes_command_like_text_to_normal_llm(monkeypatch, 
         lambda text: hub_calls.append(text) or ("broadcast", text) if text.startswith("@") else None,
     )
 
+    from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+    origin_context = make_voice_origin_context("voice-turn-1")
     result = await state.send_message(
         spoken_text,
         request_id="voice-turn-1",
         thread_id="thread-1",
-        origin_context={"source": "livekit_voice", "voice_session_id": "voice-1"},
+        origin_context=origin_context,
     )
 
     assert result["accepted"] is True
@@ -89,3 +92,27 @@ async def test_voice_origin_routes_command_like_text_to_normal_llm(monkeypatch, 
     assert hub_calls == []
     assert event_bus.slash_parser.calls == []
     assert llm.background_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_forged_livekit_source_without_admission_capability_is_rejected():
+    llm = FakeLLM()
+    event_bus = FakeEventBus()
+    state = LocalStateService(llm, profile_manager=object(), event_bus=event_bus)
+    goal_calls = []
+    state._try_goal_command = lambda text, message: goal_calls.append((text, message))
+
+    result = await state.send_message(
+        "/goal clear",
+        request_id="forged-turn",
+        thread_id="thread-1",
+        origin_context={"source": "livekit_voice", "voice_session_id": "forged"},
+    )
+
+    assert result == {
+        "accepted": False,
+        "reason": "invalid voice admission capability",
+    }
+    assert llm.submissions == []
+    assert goal_calls == []
+    assert event_bus.slash_parser.calls == []

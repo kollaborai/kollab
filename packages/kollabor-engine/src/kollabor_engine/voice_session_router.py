@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from kollabor_agent.voice_admission import (
+    issue_voice_admission_context,
+    revoke_voice_admission_context,
+)
+
 from .voice_runtime_host import EngineRuntimeHost, RuntimeHostError
 from .voice_types import (
     AdmissionReceipt,
@@ -67,24 +72,43 @@ class EngineSessionRouter:
         ).model_dump(mode="json")
 
         async def submit() -> AdmissionReceipt:
-            result = await session.send_message(
-                transcript.display_text,
-                request_id=transcript.turn_id,
-                thread_id=binding.thread_id,
-                origin_context=context,
+            # This callback runs only after RuntimeHost checks the stored
+            # binding, generation, ownership, and turn admission fence.
+            admitted_context = issue_voice_admission_context(
+                binding,
+                transcript.turn_id,
+                base_context=context,
             )
-            if not isinstance(result, dict) or result.get("accepted") is not True:
-                raise RuntimeHostError("session_busy", 409, "The selected Engine session did not admit the voice turn.")
-            accepted_request_id = result.get("request_id") or result.get("turn_id")
-            if accepted_request_id is not None and accepted_request_id != transcript.turn_id:
-                raise RuntimeHostError("admission_mismatch", 409, "Engine admitted a different request identifier.")
-            return AdmissionReceipt(
-                accepted=True,
-                request_id=transcript.turn_id,
-                conversation_session_id=binding.conversation_session_id,
-                queued=bool(result.get("queued", True)),
-                duplicate=False,
-            )
+            try:
+                result = await session.send_message(
+                    transcript.display_text,
+                    request_id=transcript.turn_id,
+                    thread_id=binding.thread_id,
+                    origin_context=admitted_context,
+                )
+                if not isinstance(result, dict) or result.get("accepted") is not True:
+                    raise RuntimeHostError(
+                        "session_busy",
+                        409,
+                        "The selected Engine session did not admit the voice turn.",
+                    )
+                accepted_request_id = result.get("request_id") or result.get("turn_id")
+                if accepted_request_id is not None and accepted_request_id != transcript.turn_id:
+                    raise RuntimeHostError(
+                        "admission_mismatch",
+                        409,
+                        "Engine admitted a different request identifier.",
+                    )
+                return AdmissionReceipt(
+                    accepted=True,
+                    request_id=transcript.turn_id,
+                    conversation_session_id=binding.conversation_session_id,
+                    queued=bool(result.get("queued", True)),
+                    duplicate=False,
+                )
+            except BaseException:
+                revoke_voice_admission_context(admitted_context)
+                raise
 
         # RuntimeHost serializes this short enqueue against stop/generation
         # changes and caches the accepted turn ID for idempotent retries.
@@ -98,9 +122,8 @@ class EngineSessionRouter:
     ) -> CancelReceipt:
         if generation != binding.generation:
             raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
-        session = await self._get_session(binding)
-
         async def cancel() -> CancelReceipt:
+            session = await self._get_session(binding)
             result = await session.cancel_owned_turn(turn_id)
             return CancelReceipt(
                 cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,

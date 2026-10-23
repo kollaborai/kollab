@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Protocol, TypeVar
 from uuid import uuid4
 
+from kollabor_agent.voice_admission import (
+    revoke_voice_admissions_for_generation,
+    revoke_voice_admissions_for_turn,
+)
+
 from .voice_types import (
     AdmissionReceipt,
     AgentId,
@@ -371,6 +376,10 @@ class EngineRuntimeHost:
                 old_binding = record.binding
                 old_handle = record.handle
                 old_state = record.state
+                revoke_voice_admissions_for_generation(
+                    old_binding.voice_session_id,
+                    record.generation,
+                )
                 record.generation += 1
                 record.state = "stopping"
                 record.detail = None
@@ -490,6 +499,10 @@ class EngineRuntimeHost:
         old_binding = record.binding
         old_handle = record.handle
         old_state = record.state
+        revoke_voice_admissions_for_generation(
+            old_binding.voice_session_id,
+            record.generation,
+        )
         record.generation += 1
         record.state = "stopping"
         record.detail = None
@@ -549,8 +562,15 @@ class EngineRuntimeHost:
                 if previous is not None:
                     return previous.model_copy(update={"duplicate": True})
 
-            receipt = await operation()
-            if receipt.accepted:
+            try:
+                receipt = await operation()
+                if not receipt.accepted:
+                    revoke_voice_admissions_for_turn(
+                        binding.voice_session_id,
+                        binding.generation,
+                        turn_id,
+                    )
+                    return receipt
                 async with self._lock:
                     current = self._sessions.get(binding.voice_session_id)
                     if current is not record:
@@ -560,7 +580,14 @@ class EngineRuntimeHost:
                     if current.generation != binding.generation:
                         raise RuntimeHostError("stale_generation", 409, "Voice session generation is stale.")
                     current.admitted_turns[turn_id] = receipt
-            return receipt
+                return receipt
+            except BaseException:
+                revoke_voice_admissions_for_turn(
+                    binding.voice_session_id,
+                    binding.generation,
+                    turn_id,
+                )
+                raise
 
     async def run_if_current(
         self,
@@ -569,7 +596,7 @@ class EngineRuntimeHost:
         *,
         admitted_turn_id: TurnId | None = None,
     ) -> _T:
-        """Serialize a short Engine admission with stop/generation fencing."""
+        """Serialize an Engine operation against stop/generation changes."""
         async with self._lock:
             record = self._sessions.get(binding.voice_session_id)
             if record is None:
@@ -594,6 +621,13 @@ class EngineRuntimeHost:
                     raise RuntimeHostError("target_mismatch", 409, "Voice turn was not admitted by this session.")
                 if current.state not in {"ready", "listening", "thinking", "speaking"}:
                     raise RuntimeHostError("session_busy", 409, "Voice session is not ready to admit a turn.")
+            if admitted_turn_id is not None:
+                # Revoke before cancellation can fail or race with tool execution.
+                revoke_voice_admissions_for_turn(
+                    binding.voice_session_id,
+                    binding.generation,
+                    admitted_turn_id,
+                )
             return await operation()
 
     async def _start_session(self, binding: VoiceSessionBinding) -> None:

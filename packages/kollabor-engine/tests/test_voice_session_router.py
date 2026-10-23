@@ -131,20 +131,18 @@ async def test_final_transcript_is_submitted_to_selected_engine_session():
     assert receipt.conversation_session_id == binding.conversation_session_id
     assert receipt.queued is True
     assert receipt.duplicate is False
-    assert session.sent == [
-        {
-            "message": message.display_text,
-            "request_id": message.turn_id,
-            "thread_id": binding.thread_id,
-            "origin_context": {
-                "source": "livekit_voice",
-                "voice_session_id": binding.voice_session_id,
-                "voice_provider_profile_id": binding.voice_provider_profile_id,
-                "voice_prompt_revision": binding.voice_prompt_revision,
-                "voice_tool_policy": binding.voice_tool_policy,
-            },
-        }
-    ]
+    from kollabor_agent.voice_admission import validate_voice_admission_context
+
+    assert len(session.sent) == 1
+    sent = session.sent[0]
+    assert sent["message"] == message.display_text
+    assert sent["request_id"] == message.turn_id
+    assert sent["thread_id"] == binding.thread_id
+    assert sent["origin_context"]["source"] == "livekit_voice"
+    assert sent["origin_context"]["voice_session_id"] == binding.voice_session_id
+    assert sent["origin_context"]["voice_tool_policy"] == binding.voice_tool_policy
+    assert sent["origin_context"]["admission_capability"]
+    assert validate_voice_admission_context(sent["origin_context"]) is True
 
 
 @pytest.mark.asyncio
@@ -197,15 +195,60 @@ async def test_voice_cancel_requires_an_admitted_turn_id():
     assert error.value.code == "target_mismatch"
     assert session.cancelled == []
 
+    from kollabor_agent.voice_admission import validate_voice_admission_context
+
     message = transcript(binding, turn_id=turn_id)
     admission = await router.admit_final(binding, message)
     assert admission.accepted is True
+    origin_context = session.sent[-1]["origin_context"]
+    assert validate_voice_admission_context(origin_context) is True
 
+    with pytest.raises(RuntimeHostError) as wrong_cancel:
+        await router.cancel_turn(binding, "not-admitted", binding.generation)
+    assert wrong_cancel.value.code == "target_mismatch"
+    assert validate_voice_admission_context(origin_context) is True
+
+    original_lookup = router._session_lookup.get_owned_session
+
+    async def lookup_after_revocation(owner_id, session_id):
+        assert validate_voice_admission_context(origin_context) is False
+        return await original_lookup(owner_id, session_id)
+
+    router._session_lookup.get_owned_session = lookup_after_revocation
+
+    async def cancel_and_check_revocation(request_id):
+        assert validate_voice_admission_context(origin_context) is False
+        session.cancelled.append(request_id)
+        return {"cancelled": True}
+
+    session.cancel_owned_turn = cancel_and_check_revocation
     receipt = await router.cancel_turn(binding, turn_id, binding.generation)
 
     assert receipt.cancelled is True
     assert receipt.generation == binding.generation
     assert session.cancelled == [turn_id]
+    assert validate_voice_admission_context(origin_context) is False
+
+
+@pytest.mark.asyncio
+async def test_failed_cancel_revokes_voice_capability_before_callback():
+    _, _, router, binding, session = await make_router()
+    from kollabor_agent.voice_admission import validate_voice_admission_context
+
+    turn_id = str(uuid4())
+    await router.admit_final(binding, transcript(binding, turn_id=turn_id))
+    origin_context = session.sent[-1]["origin_context"]
+    assert validate_voice_admission_context(origin_context) is True
+
+    async def cancel_and_fail(_request_id):
+        assert validate_voice_admission_context(origin_context) is False
+        raise RuntimeError("cancel transport failed")
+
+    session.cancel_owned_turn = cancel_and_fail
+    with pytest.raises(RuntimeError, match="cancel transport failed"):
+        await router.cancel_turn(binding, turn_id, binding.generation)
+
+    assert validate_voice_admission_context(origin_context) is False
 
 
 @pytest.mark.asyncio

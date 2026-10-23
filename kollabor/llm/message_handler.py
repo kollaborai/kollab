@@ -15,6 +15,7 @@ from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
 )
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
 
 if TYPE_CHECKING:
@@ -165,10 +166,13 @@ class MessageHandler:
                 return {"status": "startup_hold", "requeued": True}
 
         origin_context = data.get("origin_context")
-        if not (
+        claims_voice_origin = (
             isinstance(origin_context, dict)
             and origin_context.get("source") == "livekit_voice"
-        ):
+        )
+        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+            return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+        if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
 

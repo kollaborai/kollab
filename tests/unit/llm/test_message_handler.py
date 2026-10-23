@@ -116,13 +116,9 @@ class TestMessageHandler(unittest.TestCase):
         self.assertEqual(result, {"status": "processed"})
 
     def test_handle_livekit_input_forwards_trusted_origin_context(self):
-        origin_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
 
         self.loop.run_until_complete(
             self.handler.handle_user_input(

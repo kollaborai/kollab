@@ -283,14 +283,9 @@ class TestQueueProcessor(unittest.TestCase):
 
     def test_livekit_origin_survives_tool_continuation(self):
         from kollabor_agent.queue_processor import QueuedInput
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
 
-        origin_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        origin_context = make_voice_origin_context("turn-1")
         self.processor.turn_completed = False
         self.processor._execute_llm_turn = AsyncMock(return_value="parent-uuid")
         queued = QueuedInput("show status", {}, origin_context=origin_context)
@@ -321,23 +316,20 @@ class TestQueueProcessor(unittest.TestCase):
             QueuedInput,
             merge_livekit_origin_contexts,
         )
+        from kollabor_agent.voice_admission import validate_voice_admission_context
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
 
-        voice_context = {
-            "source": "livekit_voice",
-            "voice_session_id": "voice-session-1",
-            "generation": 1,
-            "turn_id": "turn-1",
-            "voice_tool_policy": "voice_terminal_hub_v1",
-        }
+        voice_context = make_voice_origin_context("turn-1")
         merged = merge_livekit_origin_contexts(
             [
                 QueuedInput("voice text", {}, origin_context=voice_context),
-                QueuedInput("other voice text", {}),
+                "typed input",
             ]
         )
 
         self.assertEqual(merged["source"], "livekit_voice")
         self.assertEqual(merged["voice_tool_policy"], "invalid")
+        self.assertFalse(validate_voice_admission_context(voice_context))
 
 
     def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
