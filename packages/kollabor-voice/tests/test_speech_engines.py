@@ -9,10 +9,17 @@ import pytest
 
 np = pytest.importorskip("numpy", reason="Run audio backend checks with the isolated audio runtime")
 
-from kollabor_voice.classifiers import load_preferences, save_preferences
-from kollabor_voice.output import SpeechQueue
-from kollabor_voice.speech import SpeechEngine
-from kollabor_voice.speech_settings import speech_key
+from kollabor_voice.classifiers import load_preferences as load_classifier_preferences  # noqa: E402
+from kollabor_voice.classifiers import save_preferences as save_classifier_preferences  # noqa: E402
+from kollabor_voice.output import SpeechQueue  # noqa: E402
+from kollabor_voice.speech import SpeechEngine  # noqa: E402
+from kollabor_voice.speech_settings import (  # noqa: E402
+    load_speech_preferences as load_preferences,
+)
+from kollabor_voice.speech_settings import (  # noqa: E402
+    save_speech_preferences as save_preferences,
+)
+from kollabor_voice.speech_settings import speech_key  # noqa: E402
 
 
 @pytest.fixture
@@ -51,9 +58,12 @@ def test_kokoro_preferences_reach_synthesis(root):
     synth.assert_called_with("Hello again.", voice="bf_emma", speed=1.2)
 
 
-def test_switching_engines_closes_only_owned_worker_and_preserves_other_preferences(root, monkeypatch):
+def test_switching_engines_closes_only_owned_worker_and_preserves_other_preferences(
+    root, monkeypatch
+):
     monkeypatch.setattr("kollabor_voice.speech.VibeVoiceWorker", FakeVibe)
-    save_preferences({"tts_engine": "vibevoice", "vibevoice_voice": "Emma", "context_lines": 23}, root)
+    save_preferences({"tts_engine": "vibevoice", "vibevoice_voice": "Emma"}, root)
+    save_classifier_preferences({"context_lines": 23}, root)
     engine = SpeechEngine(root, Mock(return_value=(np.ones(10), 24000)))
     audio, rate = say(engine, "Use the selected voice.")
     assert rate == 24000 and len(audio) == 2400
@@ -63,7 +73,7 @@ def test_switching_engines_closes_only_owned_worker_and_preserves_other_preferen
     save_preferences({"tts_engine": "kokoro"}, root)
     say(engine, "Switch back to Kokoro.")
     assert worker.closed and engine.worker is None
-    assert load_preferences(root)["context_lines"] == 23
+    assert load_classifier_preferences(root)["context_lines"] == 23
 
 
 @pytest.mark.parametrize("changes", [
@@ -73,7 +83,7 @@ def test_switching_engines_closes_only_owned_worker_and_preserves_other_preferen
     {"tts_engine": "vibevoice", "vibevoice_model": "/no/such/model"},
 ])
 def test_invalid_speech_update_is_atomic(root, changes):
-    save_preferences({"context_lines": 23}, root)
+    save_preferences({"kokoro_voice": "af_bella"}, root)
     before = (root / "preferences.json").read_bytes()
     with pytest.raises(ValueError):
         save_preferences(changes, root)

@@ -16,8 +16,13 @@ np = pytest.importorskip(
 )
 
 from kollabor_voice import speech_settings, transcription  # noqa: E402
-from kollabor_voice.classifiers import load_preferences, save_preferences  # noqa: E402
 from kollabor_voice.control import manifest  # noqa: E402
+from kollabor_voice.speech_settings import (  # noqa: E402
+    load_speech_preferences as load_preferences,
+)
+from kollabor_voice.speech_settings import (  # noqa: E402
+    save_speech_preferences as save_preferences,
+)
 from kollabor_voice.transcription import (  # noqa: E402
     ParakeetWorker,
     TranscriptionEngine,

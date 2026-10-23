@@ -79,6 +79,20 @@ Preference boundary is a prerequisite, not a cleanup detail:
 5. Finish regression, lifecycle, import-residue, latency, and product-readiness
    gates; update final user-facing documentation.
 
+## Implementation progress
+
+- [x] In the #301 lane, general speech-preference persistence now lives in
+  `speech_settings.py` through `load_speech_preferences` and
+  `save_speech_preferences`. Reads expose only speech settings; locked atomic
+  writes preserve unrelated stored keys. Speech engine, transcription, cache,
+  and service preference-watch callers use the speech-only API. Classifier
+  preference APIs remain in place until classifier surfaces are removed.
+- [x] `packages/kollabor-voice/tests`: 152 passed on Python 3.14.7;
+  Ruff check passed. This is a local task-branch checkpoint, not a pushed build.
+- [ ] LiveKit transport/Engine integration and classifier removal remain
+  pending. Browser end-to-end acceptance is blocked because browser-control
+  tooling is unavailable; do not substitute live audio or services.
+
 ## Validation and latency plan
 
 - Unit/integration coverage: room lifecycle and failure handling; Parakeet
