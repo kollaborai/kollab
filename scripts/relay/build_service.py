@@ -17,6 +17,7 @@ FILES = (
     "pyproject.toml",
     "kollabor/__init__.py",
     "kollabor/version.py",
+    "kollabor/build_info.py",
     "kollabor/binary.py",
     "plugins/__init__.py",
     "plugins/hub/__init__.py",
