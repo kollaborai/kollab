@@ -221,14 +221,27 @@ HTTP exchanges. Each encrypted inner packet has a monotonic sequence number.
 Neither method enters the agent messaging or config-sync handler.
 
 `phone_http` carries bounded start/write/run/read/cancel operations. Bodies are
-limited to 8 MiB, chunks to 8 KiB, 16 outstanding HTTP exchanges per phone, and
-16 queued output events per exchange. Relay limits remain in force. Headers
+limited to 8 MiB; negotiated chunks are at most 160 KiB, while legacy peers
+retain 8 KiB. The host coalesces headers with the first body read only when the
+phone advertises that capability. Each phone has 16 outstanding HTTP exchanges
+and 16 queued output events per exchange. Relay limits remain in force. Headers
 are restricted to content-type and accept; the engine supplies its token only
 inside its own ASGI call. Only the engine's app API roots are callable; phone
 management, WebUI bootstrap, absolute URLs and arbitrary destination hosts are
 refused. Responses stream through bounded queues. Forty-five seconds without
 consumer activity cancels an abandoned exchange. Closing a stream preserves the
 engine's existing rule that cancelling agent work requires explicit Stop.
+
+The `phone_session` payload may negotiate `frame_compression`, `max_chunk`,
+`coalesce_reads`, and `zero_body_autorun`. The host returns the accepted
+capabilities and chunk size. Missing or unsupported capabilities retain the
+legacy 8 KiB, uncompressed protocol and separate start/run/read sequence. When
+negotiated, an inner JSON packet is prefixed `KLPZ1` and gzip-compressed only if
+that makes it smaller; either peer rejects decompressed packets above 256 KiB.
+The maximum negotiated HTTP chunk is 160 KiB. PhoneLink application payloads
+are bounded at 320 KiB, relay ciphertext at 448 KiB, and relay frames at 512
+KiB. Ordinary relay application messages remain limited to 24 KiB.
+
 
 Deployment requires the directory's existing HTTPS proxy to forward this whole
 prefix, including WS upgrades, and its artifact to carry the built browser

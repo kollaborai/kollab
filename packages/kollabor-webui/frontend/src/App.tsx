@@ -41,6 +41,9 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+
+  HISTORY_PAGE_SIZE,
+  type HistoryPage,
   type AgentBundleEntry,
   type AgentNetwork,
   type OfflineAgent,
@@ -59,6 +62,14 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
+
+import {
+  historyPageCache,
+  loadLatestHistoryPage,
+
+  loadOlderHistoryPage,
+  mergeOlderHistoryPage,
+} from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
@@ -138,6 +149,10 @@ function RuntimeShell({
   view,
   onViewChange: setView,
   locked,
+  historyStatus,
+  onLoadOlder,
+  onRetryHistory,
+  historyStartIndex,
 }: {
   session: Session;
   profiles: Profile[];
@@ -162,6 +177,10 @@ function RuntimeShell({
   onViewChange: (view: SessionView) => void;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked: string;
+  historyStatus: { kind: string; message: string } | undefined;
+  onLoadOlder: () => Promise<void>;
+  onRetryHistory: () => void;
+  historyStartIndex: number;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
@@ -285,6 +304,11 @@ function RuntimeShell({
                 workspace={session.workspace ?? ""}
                 device={session.device ?? ""}
                 locked={locked}
+
+                historyStatus={historyStatus}
+                onLoadOlder={onLoadOlder}
+                onRetryHistory={onRetryHistory}
+                historyStartIndex={historyStartIndex}
               />
             ) : (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -416,6 +440,23 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // the chat that was open, so the reason shows under the row clicked.
   const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
+
+  const [historyStatus, setHistoryStatus] = useState<{
+    sessionId: string;
+    kind: "loading" | "loading-older" | "error" | "empty";
+    message: string;
+  } | null>(null);
+  const historyPagesRef = useRef(new Map<string, HistoryPage>());
+  type PendingPermissions = NonNullable<Parameters<typeof buildInitialState>[3]>;
+  const historyContextRef = useRef(new Map<string, {
+    sessions: Session[];
+    pendingPermissions: PendingPermissions;
+  }>());
+  const olderLoadRef = useRef(new Set<string>());
+
+  const olderLoadQueuedRef = useRef(new Set<string>());
+  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
+  const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
@@ -550,28 +591,150 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[]) => {
-      // Opening never waits on the daemon: the engine answers from its warm
-      // mirror or the disk seed at once, reconciles in the background, and
-      // the history_updated event lands here as a reload. A prompt that
-      // arrives later comes as an event anyway.
-      const [history, permissions] = await Promise.all([
-        api.getHistory(sessionId),
-        api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
-      ]);
-      // The daemon's answer comes as history_updated, which can fire before
-      // the stream below is open; see followEvents.
-      if (history.stale) staleHistoryRef.current.add(sessionId);
-      else staleHistoryRef.current.delete(sessionId);
-      return buildInitialState(
-        sessionId,
-        nextSessions,
-        history.history || [],
-        permissions.pending_prompts || [],
-        history.last_turn_error ?? null,
-      );
+      setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+      try {
+        const [loaded, permissions] = await Promise.all([
+          loadLatestHistoryPage(sessionId, api, historyPageCache),
+          api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
+        ]);
+        const page = loaded.page;
+        const pendingPermissions = permissions.pending_prompts || [];
+        historyPagesRef.current.set(sessionId, page);
+        historyContextRef.current.set(sessionId, { sessions: nextSessions, pendingPermissions });
+        if (loaded.error) {
+          staleHistoryRef.current.add(sessionId);
+          setHistoryStatus({
+            sessionId,
+            kind: "error",
+            message: "Couldn't refresh history; showing the saved conversation. Retry to update.",
+          });
+        } else if (page.stale) {
+          staleHistoryRef.current.add(sessionId);
+          setHistoryStatus({
+            sessionId,
+            kind: "loading",
+            message: "Saved history is still syncing with the engine…",
+          });
+        } else {
+          staleHistoryRef.current.delete(sessionId);
+          setHistoryStatus(page.history.length ? null : {
+            sessionId,
+            kind: "empty",
+            message: "No conversation messages yet.",
+          });
+        }
+        return buildInitialState(
+          sessionId,
+          nextSessions,
+          page.history,
+          pendingPermissions,
+          page.last_turn_error ?? null,
+          page.start_index,
+        );
+      } catch (reason) {
+        setHistoryStatus({
+          sessionId,
+          kind: "error",
+          message: "Couldn't load conversation history. Check the connection and retry.",
+        });
+        throw reason;
+      }
     },
     [],
   );
+
+  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false) => {
+    if (olderLoadRef.current.has(sessionId)) {
+      if (!prefetch) olderLoadQueuedRef.current.add(sessionId);
+      return;
+    }
+    const current = historyPagesRef.current.get(sessionId);
+    if (!current || !current.has_more_older) return;
+    olderLoadRef.current.add(sessionId);
+    if (!prefetch && activeIdRef.current === sessionId) {
+      setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
+    }
+    try {
+      const older = await loadOlderHistoryPage(
+        sessionId,
+        current,
+        api,
+        historyPageCache,
+      );
+      if (!older) {
+        throw new Error("History paging cursor is missing. Retry loading the conversation.");
+      }
+      if (!older.history.length) {
+        const exhausted = { ...current, has_more_older: false, older_cursor: null };
+        historyPagesRef.current.set(sessionId, exhausted);
+        if (!prefetch && activeIdRef.current === sessionId) setHistoryStatus(null);
+        return;
+      }
+      if (prefetch) return;
+
+      const updated = mergeOlderHistoryPage(current, older);
+      if (updated.start_index >= current.start_index) {
+        throw new Error("The engine returned no older history messages.");
+      }
+      historyPagesRef.current.set(sessionId, updated);
+      await historyPageCache.store(sessionId, updated);
+      const context = historyContextRef.current.get(sessionId);
+      if (context && activeIdRef.current === sessionId) {
+        const nextState = buildInitialState(
+          sessionId,
+          context.sessions,
+          updated.history,
+          context.pendingPermissions,
+          updated.last_turn_error ?? null,
+          updated.start_index,
+        );
+        setInitialState((previous) =>
+          previous?.sessionId === sessionId ? nextState : previous,
+        );
+      }
+      if (activeIdRef.current === sessionId) setHistoryStatus(null);
+    } catch {
+      if (!prefetch && activeIdRef.current === sessionId) {
+        setHistoryStatus({
+          sessionId,
+          kind: "error",
+          message: "Couldn't load older messages. Scroll up or retry to try again.",
+        });
+      }
+    } finally {
+      olderLoadRef.current.delete(sessionId);
+      if (
+        olderLoadQueuedRef.current.delete(sessionId) &&
+        activeIdRef.current === sessionId
+      ) {
+        void loadOlderHistoryRef.current?.(sessionId, false);
+      }
+    }
+  }, []);
+  loadOlderHistoryRef.current = loadOlderHistory;
+
+  const retryHistory = useCallback(() => {
+    const sessionId = activeIdRef.current;
+    if (!sessionId) return;
+    void loadState(sessionId, sessions).then((nextState) => {
+      if (activeIdRef.current === sessionId) setInitialState(nextState);
+    }).catch(() => {});
+  }, [loadState, sessions]);
+
+
+  useEffect(() => {
+    if (!activeId || initialState?.sessionId !== activeId) return;
+    const page = historyPagesRef.current.get(activeId);
+    if (!page?.history.length || !page.has_more_older) return;
+    const key = `${activeId}:${page.start_index}:${page.end_index}:${page.older_cursor ?? "end"}`;
+    if (historyPrefetchRef.current.has(key)) return;
+    historyPrefetchRef.current.add(key);
+    const frame = window.requestAnimationFrame(() => {
+      void loadOlderHistory(activeId, true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeId, initialState?.sessionId, initialState?.synced?.history, initialState?.synced?.start, loadOlderHistory]);
+
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1220,6 +1383,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 view={sessionView}
                 onViewChange={setSessionView}
                 locked={busy ? busyMessage || "Loading…" : ""}
+
+                historyStatus={historyStatus?.sessionId === activeSession.session_id
+                  ? { kind: historyStatus.kind, message: historyStatus.message }
+                  : undefined}
+                onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
+                onRetryHistory={retryHistory}
+                historyStartIndex={initialState.synced?.start ?? 0}
               />
             </EngineRuntimeProvider>
           ) : (

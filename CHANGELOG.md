@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
 ### Changed
+- Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
+  history pages locally, loads older messages on scroll, and fetches full tool
+  output only after Show more. Negotiated compressed PhoneLink frames carry the
+  150 KB first-page budget within the three-round-trip synthetic relay check.
+
 - Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed

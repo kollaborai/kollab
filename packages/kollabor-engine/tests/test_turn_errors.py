@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from kollabor_engine import history_paging
 from kollabor_engine.session import EngineSession  # type: ignore[import-not-found]
 
 
@@ -108,7 +109,9 @@ async def test_clearing_the_history_clears_the_turn_error(client, session):
 
 
 @pytest.mark.asyncio
-async def test_history_route_defaults_to_bounded_newest_page(client, session):
+async def test_history_route_defaults_to_bounded_newest_page(client, session, monkeypatch):
+    monkeypatch.setattr(history_paging, "_CURSOR_SECRET", b"x" * 32)
+
     # Entirely synthetic: 219 ordinary messages plus one huge tool result make
     # an approximately 1.8 MB session without reading any real conversation.
     history = [
@@ -149,3 +152,10 @@ async def test_history_route_defaults_to_bounded_newest_page(client, session):
     assert body["has_more_older"] is True
     assert body["older_cursor"]
     assert body["newer_cursor"]
+
+    output_response = await client.get(
+        f"/sessions/{session.session_id}/history/output",
+        params={"ref": tool_message["metadata"]["history_output_ref"]},
+    )
+    assert output_response.status_code == 200
+    assert output_response.json()["content"] == history[-1]["content"]
