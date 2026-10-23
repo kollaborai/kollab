@@ -9,7 +9,7 @@ import {
 
   PHONE_RELAY_MAX_CIPHERTEXT_CHARS,
   supportsPhoneFrameCompression,
-} from "./phone-frame";
+} from "./phone-frame.ts";
 
 
 const PROTOCOL = "kollab-relay/1";
