@@ -1,12 +1,24 @@
 import sodium from "libsodium-wrappers";
 
+import {
+  decodePhoneFrame,
+  encodePhoneFrame,
+  PHONE_FRAME_CHUNK_BYTES,
+
+  PHONE_RELAY_MAX_FRAME_BYTES,
+
+  PHONE_RELAY_MAX_CIPHERTEXT_CHARS,
+  supportsPhoneFrameCompression,
+} from "./phone-frame.ts";
+
+
 const PROTOCOL = "kollab-relay/1";
 const PHONE_PROTOCOL = "kollab-phonelink/1";
 const KEY = /^[0-9a-f]{64}$/;
 const ID = /^[0-9a-f]{32}$/;
 const STORAGE = "kollab.phonelink.identity.v1";
 const PENDING = "kollab.phonelink.pending.v1";
-const CHUNK = 8192;
+const LEGACY_CHUNK = 8192;
 const MAX_BODY = 8 * 1024 * 1024;
 type Json = Record<string, any>;
 export type PhoneIdentity = {
@@ -161,6 +173,10 @@ export class PhoneTransport {
   private opening: Promise<void> | null = null;
   private incoming: Uint8Array | null = null;
   private outgoing: Uint8Array | null = null;
+
+  private frameCompression = false;
+  private chunkSize = LEGACY_CHUNK;
+  private zeroBodyAutorun = false;
   private sent = 0;
   private received = -1;
   private active = 0;
@@ -237,7 +253,7 @@ export class PhoneTransport {
       }, 15000);
       socket.onmessage = (event) => {
         try {
-          if (typeof event.data !== "string" || event.data.length > 65536)
+          if (typeof event.data !== "string" || event.data.length > PHONE_RELAY_MAX_FRAME_BYTES)
             throw lost();
           const frame = JSON.parse(event.data);
           if (frame.type === "challenge") {
@@ -328,6 +344,10 @@ export class PhoneTransport {
         }
         if (this.socket !== socket) return;
         this.incoming = this.outgoing = null;
+
+        this.frameCompression = false;
+        this.chunkSize = LEGACY_CHUNK;
+        this.zeroBodyAutorun = false;
         for (const request of this.pending.values()) request.reject(lost());
         this.pending.clear();
         if (!this.closed) {
@@ -354,7 +374,14 @@ export class PhoneTransport {
       try {
         response = await this.request(
           "phone_session",
-          { public_key: hex(ephemeral.publicKey) },
+          {
+            public_key: hex(ephemeral.publicKey),
+            frame_compression: supportsPhoneFrameCompression(),
+            max_chunk: PHONE_FRAME_CHUNK_BYTES,
+
+            coalesce_reads: true,
+            zero_body_autorun: true,
+          },
           undefined,
           this.identity.approved ? 15000 : 3000,
         );
@@ -370,6 +397,16 @@ export class PhoneTransport {
     }
     if (response.protocol !== PHONE_PROTOCOL || !KEY.test(response.public_key))
       throw lost();
+
+    this.frameCompression =
+      supportsPhoneFrameCompression() && response.frame_compression === true;
+    this.chunkSize =
+      Number.isSafeInteger(response.chunk_size) &&
+      response.chunk_size >= LEGACY_CHUNK &&
+      response.chunk_size <= PHONE_FRAME_CHUNK_BYTES
+        ? response.chunk_size
+        : LEGACY_CHUNK;
+    this.zeroBodyAutorun = response.zero_body_autorun === true;
     const shared = sodium.crypto_box_beforenm(
       sodium.from_hex(response.public_key),
       ephemeral.privateKey,
@@ -405,7 +442,7 @@ export class PhoneTransport {
       frame.session !== this.hostSession ||
       !ID.test(frame.id) ||
       typeof frame.ciphertext !== "string" ||
-      frame.ciphertext.length > 49152
+      frame.ciphertext.length > PHONE_RELAY_MAX_CIPHERTEXT_CHARS
     )
       throw lost();
     const encrypted = unbase64(frame.ciphertext);
@@ -491,14 +528,15 @@ export class PhoneTransport {
         if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         if (socket !== this.socket || socket?.readyState !== WebSocket.OPEN)
           throw lost();
-        socket.send(
-          JSON.stringify({
-            type: "send",
-            to: this.identity.host,
-            id,
-            ciphertext,
-          }),
-        );
+        const frame = JSON.stringify({
+          type: "send",
+          to: this.identity.host,
+          id,
+          ciphertext,
+        });
+        if (frame.length > PHONE_RELAY_MAX_FRAME_BYTES)
+          throw new Error("PhoneLink relay frame exceeds its 512 KiB limit.");
+        socket.send(frame);
         this.lastSend = performance.now();
       });
     this.sending = job;
@@ -557,8 +595,9 @@ export class PhoneTransport {
   private async packet(data: Json, signal?: AbortSignal) {
     if (!this.outgoing || !this.incoming) throw lost();
     const nonce = sodium.randombytes_buf(24);
-    const encoded = sodium.from_string(
-      JSON.stringify({ ...data, seq: this.sent++ }),
+    const encoded = await encodePhoneFrame(
+      sodium.from_string(JSON.stringify({ ...data, seq: this.sent++ })),
+      this.frameCompression,
     );
     const response = await this.request(
       "phone_http",
@@ -573,15 +612,13 @@ export class PhoneTransport {
       signal,
     );
     const raw = unbase64(response.packet);
-    const result = JSON.parse(
-      sodium.to_string(
-        sodium.crypto_secretbox_open_easy(
-          raw.slice(24),
-          raw.slice(0, 24),
-          this.incoming,
-        ),
-      ),
+    const decrypted = sodium.crypto_secretbox_open_easy(
+      raw.slice(24),
+      raw.slice(0, 24),
+      this.incoming,
     );
+    const decoded = await decodePhoneFrame(decrypted, this.frameCompression);
+    const result = JSON.parse(sodium.to_string(decoded));
     if (!Number.isSafeInteger(result.seq) || result.seq <= this.received)
       throw lost();
     this.received = result.seq;
@@ -613,17 +650,18 @@ export class PhoneTransport {
         },
         signal,
       );
-      for (let offset = 0; offset < body.length; offset += CHUNK)
+      for (let offset = 0; offset < body.length; offset += this.chunkSize)
         await this.packet(
           {
             op: "write",
             id,
             offset,
-            data: base64(body.slice(offset, offset + CHUNK)),
+            data: base64(body.slice(offset, offset + this.chunkSize)),
           },
           signal,
         );
-      await this.packet({ op: "run", id }, signal);
+      if (body.length > 0 || !this.zeroBodyAutorun)
+        await this.packet({ op: "run", id }, signal);
       let first: Json;
       do {
         first = await this.packet({ op: "read", id }, signal);
@@ -631,15 +669,28 @@ export class PhoneTransport {
       if (first.type !== "headers") throw lost();
       const transport = this;
       const cleanup = () => signal?.removeEventListener("abort", cancel);
+      const initialData = typeof first.data === "string" ? unbase64(first.data) : null;
       const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (initialData?.byteLength) controller.enqueue(initialData);
+          if (first.end === true) {
+            cleanup();
+            controller.close();
+          }
+        },
         async pull(controller) {
           try {
             let event: Json;
             do {
               event = await transport.packet({ op: "read", id }, signal);
             } while (event.type === "waiting");
-            if (event.type === "data") controller.enqueue(unbase64(event.data));
-            else if (event.type === "end") {
+            if (event.type === "data") {
+              controller.enqueue(unbase64(event.data));
+              if (event.end === true) {
+                cleanup();
+                controller.close();
+              }
+            } else if (event.type === "end") {
               cleanup();
               controller.close();
             } else throw new Error(event.error ?? "The app request failed.");

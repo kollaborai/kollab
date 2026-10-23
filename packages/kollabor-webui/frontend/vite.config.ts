@@ -97,8 +97,12 @@ const mainConfig = defineConfig({
     },
   },
   test: {
-    // The System Prompts page suite; the older tests stay on `node --test`.
-    include: ["tests/prompts-page.test.ts"],
+    // Vitest suites; Node's built-in test runner remains for older tests.
+    include: [
+      "tests/prompts-page.test.ts",
+      "tests/history-cache.test.ts",
+      "tests/phone-frame.test.ts",
+    ],
     environment: "node",
   },
 });

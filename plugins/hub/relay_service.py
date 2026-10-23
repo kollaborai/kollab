@@ -67,8 +67,8 @@ PROTOCOLS = (PROTOCOL,)
 PROTOCOLS_HEADER = "X-Kollab-Relay-Protocols"
 HEALTH_PATH = "/relay/v1/health"
 WEBSOCKET_PATH = "/relay/v1/ws"
-MAX_FRAME_BYTES = 64 * 1024
-MAX_CIPHERTEXT_CHARS = 48 * 1024
+MAX_FRAME_BYTES = 512 * 1024
+MAX_CIPHERTEXT_CHARS = 448 * 1024
 # The client rejects a peers snapshot longer than this; linked devices only fill what
 # the room leaves.
 MAX_SNAPSHOT_PEERS = 256
@@ -1565,7 +1565,7 @@ def _parse_send_shape(frame: dict[str, Any]) -> tuple[str, str, str]:
         or len(ciphertext) > MAX_CIPHERTEXT_CHARS
         or len(ciphertext) % 4 != 0
     ):
-        raise ValueError("ciphertext must be at most 48 KiB of standard base64")
+        raise ValueError("ciphertext must be at most 448 KiB of standard base64")
     try:
         base64.b64decode(ciphertext, validate=True)
     except (binascii.Error, ValueError) as exc:

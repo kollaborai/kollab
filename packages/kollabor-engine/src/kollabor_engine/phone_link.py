@@ -10,13 +10,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import gzip
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
@@ -38,8 +41,12 @@ from .hub_bridge import network_daemons
 
 PHONE_PROTOCOL = "kollab-phonelink/1"
 MAX_PHONES = 8
-CHUNK = 8192
-APP_CHUNK = 12288  # the relay caps one payload at 24 KiB after two layers of base64
+LEGACY_CHUNK = 8192
+CHUNK = 160 * 1024
+APP_CHUNK = CHUNK
+PHONE_FRAME_MAX_BYTES = 256 * 1024
+_PHONE_FRAME_MAGIC = b"KLPZ1"
+_PHONE_FRAME_COMPRESSION_THRESHOLD = 512
 MAX_BODY = 8 * 1024 * 1024
 API_ROOTS = frozenset(
     {
@@ -50,6 +57,37 @@ API_ROOTS = frozenset(
 APP_PROTOCOL = "kollab-phonelink-app/1"
 APP_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 SEEN_SAVE_SECONDS = 60
+
+
+def encode_phone_frame(raw: bytes) -> bytes:
+    """Compress a phone protocol JSON packet when gzip meaningfully shrinks it."""
+    if not isinstance(raw, bytes) or len(raw) > PHONE_FRAME_MAX_BYTES:
+        raise ValueError("PhoneLink packet exceeds the maximum frame size.")
+    if len(raw) < _PHONE_FRAME_COMPRESSION_THRESHOLD:
+        return raw
+    compressed = gzip.compress(raw, mtime=0)
+    if len(compressed) + len(_PHONE_FRAME_MAGIC) >= len(raw):
+        return raw
+    return _PHONE_FRAME_MAGIC + compressed
+
+
+def decode_phone_frame(raw: bytes) -> bytes:
+    """Decode a marked gzip frame without allowing an unbounded expansion."""
+    if not isinstance(raw, bytes) or len(raw) > PHONE_FRAME_MAX_BYTES + len(_PHONE_FRAME_MAGIC):
+        raise ValueError("PhoneLink packet exceeds the maximum frame size.")
+    if not raw.startswith(_PHONE_FRAME_MAGIC):
+        if len(raw) > PHONE_FRAME_MAX_BYTES:
+            raise ValueError("PhoneLink packet exceeds the maximum frame size.")
+        return raw
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw[len(_PHONE_FRAME_MAGIC):])) as stream:
+            decoded = stream.read(PHONE_FRAME_MAX_BYTES + 1)
+            if len(decoded) > PHONE_FRAME_MAX_BYTES or stream.read(1):
+                raise ValueError("Decompressed PhoneLink packet exceeds its size limit.")
+            return decoded
+    except (gzip.BadGzipFile, EOFError, OSError, zlib.error) as error:
+        raise ValueError("Invalid compressed PhoneLink packet.") from error
+
 
 
 def pairing_code(key: str) -> str:
@@ -141,6 +179,11 @@ class PhoneSession:
     host_session: str
     phone_session: str
     received: int = -1
+    frame_compression: bool = False
+    chunk_size: int = LEGACY_CHUNK
+    coalesce_reads: bool = False
+    zero_body_autorun: bool = False
+
     sent: int = 0
     used: float = field(default_factory=time.monotonic)
 
@@ -152,6 +195,9 @@ class HttpExchange:
     headers: list
     size: int
     body: bytearray = field(default_factory=bytearray)
+    chunk_size: int = LEGACY_CHUNK
+    coalesce_headers: bool = False
+
     events: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=16))
     pending: dict | None = None
     static: tuple[str, bytes] | None = None
@@ -543,10 +589,34 @@ class PhoneLink:
             shared = Box(private, PublicKey(bytes.fromhex(payload["public_key"]))).shared_key()
             incoming, outgoing = session_keys(shared, host_session, phone_session)
             self._invalidate(identifier)
-            self.sessions[identifier] = PhoneSession(
-                SecretBox(incoming), SecretBox(outgoing), host_session, phone_session
+            frame_compression = payload.get("frame_compression") is True
+            coalesce_reads = payload.get("coalesce_reads") is True
+            zero_body_autorun = payload.get("zero_body_autorun") is True
+            requested_chunk = payload.get("max_chunk")
+            chunk_size = (
+                requested_chunk
+                if type(requested_chunk) is int and LEGACY_CHUNK <= requested_chunk <= CHUNK
+                else LEGACY_CHUNK
             )
-            return {"public_key": private.public_key.encode().hex(), "name": row["name"], "protocol": PHONE_PROTOCOL}
+            self.sessions[identifier] = PhoneSession(
+                SecretBox(incoming),
+                SecretBox(outgoing),
+                host_session,
+                phone_session,
+                frame_compression=frame_compression,
+                chunk_size=chunk_size,
+                coalesce_reads=coalesce_reads,
+                zero_body_autorun=zero_body_autorun,
+            )
+            return {
+                "public_key": private.public_key.encode().hex(),
+                "name": row["name"],
+                "protocol": PHONE_PROTOCOL,
+                "frame_compression": frame_compression,
+                "chunk_size": chunk_size,
+                "coalesce_reads": coalesce_reads,
+                "zero_body_autorun": zero_body_autorun,
+            }
         session = self.sessions.get(identifier)
         if (
             method != "phone_http"
@@ -556,7 +626,10 @@ class PhoneLink:
             raise RelayError("phone session is unavailable")
         try:
             raw = base64.b64decode(payload["packet"], validate=True)
-            request = strict_json(session.incoming.decrypt(raw), limit=16384)
+            packet = session.incoming.decrypt(raw)
+            if not session.frame_compression and packet.startswith(_PHONE_FRAME_MAGIC):
+                raise ValueError("compressed frames were not negotiated")
+            request = strict_json(decode_phone_frame(packet), limit=PHONE_FRAME_MAX_BYTES)
             sequence = request.pop("seq")
             if type(sequence) is not int or sequence <= session.received:
                 raise ValueError()
@@ -566,17 +639,26 @@ class PhoneLink:
         session.used = time.monotonic()
         self._touch(row)
         try:
-            result = await self._http(identifier, request)
+            result = await self._http(
+                identifier,
+                request,
+                chunk_size=session.chunk_size,
+                coalesce_headers=session.coalesce_reads,
+                zero_body_autorun=session.zero_body_autorun,
+            )
         except PhoneLinkError as exc:
             result = {"error": str(exc)}
         if self.sessions.get(identifier) is not session:
             raise RelayError("phone session changed")
         result["seq"] = session.sent
         session.sent += 1
+        response_packet = json.dumps(result, separators=(",", ":")).encode()
+        if len(response_packet) > PHONE_FRAME_MAX_BYTES:
+            raise RelayError("phone session response exceeds its frame limit")
+        if session.frame_compression:
+            response_packet = encode_phone_frame(response_packet)
         return {
-            "packet": base64.b64encode(
-                session.outgoing.encrypt(json.dumps(result, separators=(",", ":")).encode())
-            ).decode()
+            "packet": base64.b64encode(session.outgoing.encrypt(response_packet)).decode()
         }
 
     def _touch(self, row: dict) -> None:
@@ -601,7 +683,15 @@ class PhoneLink:
             raise PhoneLinkError("That phone app file does not exist.")
         return "application/octet-stream", (directory / name).read_bytes()
 
-    async def _http(self, phone: str, request: dict) -> dict:
+    async def _http(
+        self,
+        phone: str,
+        request: dict,
+        *,
+        chunk_size: int = LEGACY_CHUNK,
+        coalesce_headers: bool = False,
+        zero_body_autorun: bool = False,
+    ) -> dict:
         operation = request.get("op")
         identifier = request.get("id")
         if not isinstance(identifier, str) or not ID.fullmatch(identifier):
@@ -642,7 +732,14 @@ class PhoneLink:
                     raise PhoneLinkError("Invalid app headers.")
                 if entry[0].lower() in {"content-type", "accept"}:
                     clean_headers.append(entry)
-            exchange = self.exchanges[key] = HttpExchange(method, path, clean_headers, size)
+            exchange = self.exchanges[key] = HttpExchange(
+                method,
+                path,
+                clean_headers,
+                size,
+                chunk_size=chunk_size,
+                coalesce_headers=coalesce_headers,
+            )
             if decoded.split("/")[1] == "phone-app":
                 if method != "GET" or size:
                     self.exchanges.pop(key, None)
@@ -652,6 +749,10 @@ class PhoneLink:
                 except PhoneLinkError:
                     self.exchanges.pop(key, None)
                     raise
+            if size == 0 and zero_body_autorun:
+                serve = self._serve_static if exchange.static else self._serve
+                exchange.task = asyncio.create_task(serve(exchange), name="kollab-phone-http")
+
             return {"ok": True}
         if exchange is None:
             raise PhoneLinkError("This app request has ended. Try again.")
@@ -664,7 +765,7 @@ class PhoneLink:
             if (
                 exchange.task
                 or request.get("offset") != len(exchange.body)
-                or len(chunk) > CHUNK
+                or len(chunk) > exchange.chunk_size
                 or len(exchange.body) + len(chunk) > exchange.size
             ):
                 raise PhoneLinkError("Upload changed or exceeded its limit.")
@@ -690,26 +791,73 @@ class PhoneLink:
                     event = await asyncio.wait_for(exchange.events.get(), timeout=15)
             except TimeoutError:
                 return {"type": "waiting"}
-            if event.get("type") == "data":
-                # Drain queued token events into one bounded packet. One relay
-                # round trip per token would make fast chat streams fall behind.
-                body = bytearray(base64.b64decode(event["data"]))
-                limit = APP_CHUNK if exchange.static else CHUNK
-                while len(body) < limit:
+            event_type = event.get("type")
+            if (event_type == "headers" and exchange.coalesce_headers) or event_type == "data":
+                # Piggyback initial headers with the first body bytes. A short
+                # bounded wait lets the ASGI sender queue the body and end marker
+                # without turning streaming responses into an unbounded poll.
+                body = bytearray(
+                    base64.b64decode(event["data"]) if event_type == "data" else b""
+                )
+                expected_length = None
+                if event_type == "headers":
+                    for name, value in event.get("headers", []):
+                        if str(name).lower() == "content-length":
+                            try:
+                                expected_length = max(0, int(value))
+                            except (TypeError, ValueError):
+                                expected_length = None
+                            break
+                target = (
+                    min(exchange.chunk_size, expected_length)
+                    if expected_length is not None
+                    else exchange.chunk_size
+                )
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 0.02 if event_type == "headers" else loop.time()
+                ended = expected_length == 0
+                while not ended and len(body) < target:
                     try:
                         extra = exchange.events.get_nowait()
                     except asyncio.QueueEmpty:
+                        remaining = deadline - loop.time()
+                        if event_type != "headers" or remaining <= 0:
+                            break
+                        try:
+                            extra = await asyncio.wait_for(exchange.events.get(), timeout=remaining)
+                        except asyncio.TimeoutError:
+                            break
+                    if extra.get("type") == "end":
+                        if exchange.coalesce_headers:
+                            ended = True
+                        else:
+                            exchange.pending = extra
                         break
                     if extra.get("type") != "data":
                         exchange.pending = extra
                         break
                     chunk = base64.b64decode(extra["data"])
-                    if len(body) + len(chunk) > limit:
+                    if len(body) + len(chunk) > exchange.chunk_size:
                         exchange.pending = extra
                         break
                     body.extend(chunk)
-                event = {"type": "data", "data": base64.b64encode(body).decode()}
-            if event.get("type") in ("end", "error"):
+                if expected_length is not None and len(body) >= expected_length:
+                    ended = True
+                    try:
+                        trailing = exchange.events.get_nowait()
+                    except asyncio.QueueEmpty:
+                        trailing = None
+                    if trailing is not None and trailing.get("type") != "end":
+                        exchange.pending = trailing
+                if body:
+                    encoded_body = base64.b64encode(body).decode()
+                    if event_type == "headers":
+                        event["data"] = encoded_body
+                    else:
+                        event = {"type": "data", "data": encoded_body}
+                if ended:
+                    event["end"] = True
+            if event.get("type") in ("end", "error") or event.get("end") is True:
                 self.exchanges.pop(key, None)
             return event
         raise PhoneLinkError("Unknown app request.")
@@ -717,9 +865,9 @@ class PhoneLink:
     async def _serve_static(self, exchange: HttpExchange) -> None:
         content_type, body = exchange.static
         await exchange.events.put({"type": "headers", "status": 200, "headers": [["content-type", content_type]]})
-        for offset in range(0, len(body), APP_CHUNK):
+        for offset in range(0, len(body), exchange.chunk_size):
             await exchange.events.put(
-                {"type": "data", "data": base64.b64encode(body[offset : offset + APP_CHUNK]).decode()}
+                {"type": "data", "data": base64.b64encode(body[offset : offset + exchange.chunk_size]).decode()}
             )
         await exchange.events.put({"type": "end"})
 
@@ -769,9 +917,9 @@ class PhoneLink:
                 )
             elif message["type"] == "http.response.body":
                 body = message.get("body", b"")
-                for offset in range(0, len(body), CHUNK):
+                for offset in range(0, len(body), exchange.chunk_size):
                     await exchange.events.put(
-                        {"type": "data", "data": base64.b64encode(body[offset : offset + CHUNK]).decode()}
+                        {"type": "data", "data": base64.b64encode(body[offset : offset + exchange.chunk_size]).decode()}
                     )
                 if not message.get("more_body", False):
                     await exchange.events.put({"type": "end"})

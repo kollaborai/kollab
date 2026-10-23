@@ -7,6 +7,7 @@ stub engine. Nothing here touches the real ~/.kollab, engine, or web UI.
 """
 
 import asyncio
+import base64
 import json
 import secrets
 import shutil
@@ -17,7 +18,8 @@ from pathlib import Path
 from aiohttp import web
 from fastapi import FastAPI
 from kollabor_engine import phone_link
-from kollabor_engine.phone_link import PhoneLink
+from kollabor_engine.history_paging import build_history_page, resolve_history_output
+from kollabor_engine.phone_link import PhoneLink, decode_phone_frame
 
 from plugins.hub import phone_portal, relay_service
 from plugins.hub.relay_client import RelayClient
@@ -35,10 +37,80 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     phone_portal.static_directory = lambda: DIST / "loader"
 
     engine = FastAPI()
+    synthetic_session_id = "synthetic-phone-history"
+    synthetic_history = [
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"synthetic-history-{index:03d} " + ("fixture-data-" * 220),
+        }
+        for index in range(219)
+    ]
+    synthetic_history.append({
+        "role": "tool",
+        "tool_call_id": "synthetic-tool-219",
+        "metadata": {"tool_call_id": "synthetic-tool-219"},
+        "content": (
+            "SYNTHETIC_TOOL_OUTPUT_START"
+            + "x" * 1_200_000
+            + "SYNTHETIC_TOOL_OUTPUT_END"
+        ),
+    })
+    metrics = {
+        "phone_sessions": 0,
+        "history_starts": [],
+        "history_reads": [],
+        "history_output_ref": False,
+        "tool_output_reads": [],
+    }
+    exchange_paths = {}
 
     @engine.get("/sessions")
     async def sessions():
-        return {"sessions": []}
+        return {
+            "sessions": [{
+                "session_id": synthetic_session_id,
+                "name": "Synthetic PhoneLink History",
+                "history_length": len(synthetic_history),
+                "updated_at": "2026-01-01T00:00:00Z",
+                "active": False,
+            }],
+            "network": {"device": "scratch", "remote": []},
+            "offline": [],
+            "hidden": [],
+            "order": [synthetic_session_id],
+            "order_revision": 0,
+        }
+
+    @engine.get("/sessions/{session_id}/history")
+    async def history_page(
+        session_id: str,
+        limit: int = 50,
+        before: str | None = None,
+        after: str | None = None,
+    ):
+        if session_id != synthetic_session_id:
+            return {"error": "unknown synthetic session"}
+        return build_history_page(
+            session_id,
+            synthetic_history,
+            limit=limit,
+            before=before,
+            after=after,
+        )
+
+    @engine.get("/sessions/{session_id}/history/output")
+    async def history_output(session_id: str, ref: str):
+        if session_id != synthetic_session_id:
+            return {"error": "unknown synthetic session"}
+        return {
+            "session_id": session_id,
+            "content": resolve_history_output(session_id, synthetic_history, ref),
+        }
+
+    @engine.get("/sessions/{session_id}/permissions")
+    async def permissions(session_id: str):
+        return {"pending_prompts": [], "approval_mode": "trust_all"}
+
 
     @engine.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def anything(path: str):
@@ -46,6 +118,53 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
 
     manager = PhoneLink(engine, scratch / "phones")
     await manager.start()
+
+    async def handle_phone_request(identifier, peer, method, payload):
+        session = manager.sessions.get(identifier)
+        request_info = None
+        if method == "phone_session":
+            metrics["phone_sessions"] += 1
+        if method == "phone_http" and session:
+            raw = session.incoming.decrypt(base64.b64decode(payload["packet"]))
+            if session.frame_compression:
+                raw = decode_phone_frame(raw)
+            request_info = json.loads(raw)
+            if request_info.get("op") == "start":
+                path = request_info.get("path", "")
+                exchange_paths[(identifier, str(request_info.get("id")))] = path
+                if "/history" in path and "/output" not in path:
+                    metrics["history_starts"].append(path)
+        response = await manager._receive(identifier, peer, method, payload)
+        if method == "phone_http" and session and request_info and request_info.get("op") == "read":
+            raw = session.outgoing.decrypt(base64.b64decode(response["packet"]))
+            if session.frame_compression:
+                raw = decode_phone_frame(raw)
+            event = json.loads(raw)
+            path = exchange_paths.get((identifier, str(request_info.get("id"))), "")
+            body_chunk = base64.b64decode(event["data"]) if isinstance(event.get("data"), str) else b""
+            size = len(body_chunk)
+            if "/history" in path and "/output" not in path:
+                try:
+                    page_data = json.loads(body_chunk) if body_chunk else {}
+                    history_items = len(page_data.get("history", []))
+                    metrics["history_output_ref"] = metrics["history_output_ref"] or any(
+                        message.get("metadata", {}).get("history_output_ref")
+                        for message in page_data.get("history", [])
+                        if isinstance(message.get("metadata"), dict)
+                    )
+                except (json.JSONDecodeError, AttributeError):
+                    history_items = None
+                metrics["history_reads"].append({
+                    "path": path,
+                    "bytes": size,
+                    "items": history_items,
+                    "end": event.get("end") is True or event.get("type") == "end",
+                })
+            if "/history/output" in path:
+                metrics["tool_output_reads"].append({"path": path, "bytes": size})
+        return response
+
+
 
     async def network():
         return {"origin": ORIGIN, "network": "scratch", "device": "scratch"}
@@ -63,7 +182,7 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     async def offer(_request):
         identifier = secrets.token_hex(16)
         host = RelayClient(scratch, state_dir=scratch / "host" / identifier)
-        host.set_request_handler(lambda peer, method, payload: manager._receive(identifier, peer, method, payload))
+        host.set_request_handler(lambda peer, method, payload: handle_phone_request(identifier, peer, method, payload))
         host.add_peer_session_listener(lambda _: manager._invalidate(identifier))
         manager.records[identifier] = {
             "origin": ORIGIN, "name": "Scratch Phone", "key": "", "host": host.public_key, "seen": 0,
@@ -103,6 +222,10 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
     async def status(_request):
         return web.json_response(await manager.status())
 
+
+    async def measurements(_request):
+        return web.json_response(metrics)
+
     async def approve(_request):
         for phone in (await manager.status())["phones"]:
             for pending in phone["pending"]:
@@ -113,8 +236,13 @@ async def main(relay_port: int, control_port: int, scratch: Path) -> None:
         return web.json_response(await manager.revoke(request.match_info["id"]))
 
     control = web.Application()
-    control.add_routes([web.post("/offer", offer), web.get("/status", status), web.post("/approve", approve),
-                        web.delete("/phones/{id}", revoke)])
+    control.add_routes([
+        web.post("/offer", offer),
+        web.get("/status", status),
+        web.get("/metrics", measurements),
+        web.post("/approve", approve),
+        web.delete("/phones/{id}", revoke),
+    ])
     control_runner = web.AppRunner(control)
     await control_runner.setup()
     await web.TCPSite(control_runner, "127.0.0.1", control_port).start()

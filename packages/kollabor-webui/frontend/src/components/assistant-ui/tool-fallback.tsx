@@ -27,7 +27,11 @@ import { formatContent } from "@/utils/format-content";
 import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
+import { EngineApi } from "@/api";
+
 const ANIMATION_DURATION = 200;
+
+const historyOutputApi = new EngineApi();
 
 const pressable = "active:scale-[0.98]";
 
@@ -319,6 +323,54 @@ function ToolFallbackArgs({
   );
 }
 
+function HistoryOutputResult({
+  sessionId,
+  reference,
+  preview,
+}: {
+  sessionId: string;
+  reference: string;
+  preview: unknown;
+}) {
+  const [content, setContent] = useState<unknown>();
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const showMore = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await historyOutputApi.getHistoryOutput(sessionId, reference);
+      setContent(response.content);
+      setLoaded(true);
+    } catch {
+      setError("Full tool output could not be loaded. Check the connection and retry.");
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, reference, sessionId]);
+
+  return (
+    <div data-slot="history-output-preview" className="mt-1 space-y-2">
+      <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+        {formatContent(loaded ? content : preview)}
+      </pre>
+      {!loaded ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" variant="outline" onClick={() => void showMore()} disabled={loading}>
+            {loading ? <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+            {loading ? "Loading output…" : "Show more"}
+          </Button>
+          {error ? <span role="alert" className="text-destructive text-xs">{error}</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
 function ToolFallbackResult({
   result,
   isError,
@@ -329,6 +381,26 @@ function ToolFallbackResult({
   isError?: boolean;
 }) {
   if (result === undefined) return null;
+
+  const historyOutput = asRecord(result);
+  if (
+    historyOutput?.kind === "history-output-preview" &&
+    typeof historyOutput.sessionId === "string" &&
+    typeof historyOutput.reference === "string"
+  ) {
+    return (
+      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
+        <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
+          Output preview:
+        </p>
+        <HistoryOutputResult
+          sessionId={historyOutput.sessionId}
+          reference={historyOutput.reference}
+          preview={historyOutput.preview}
+        />
+      </div>
+    );
+  }
   const card = harnessCard(result);
   // Typed card content can include a diff beside rawOutput. Keep that richer
   // representation intact instead of flattening the result envelope to JSON.

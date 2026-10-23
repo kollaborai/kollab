@@ -218,6 +218,11 @@ requests and streamed responses. The engine token never leaves the computer.
 Native `/relay/v1/ws` continues to reject browser Origin headers. The directory
 capability endpoint must confirm support before a pairing QR can be created.
 
+Phone chats open with the newest 50 messages, fetch older pages as you scroll
+back, and keep a bounded IndexedDB cache so reopening requests only new messages.
+Large historical tool results are fetched only after Show more.
+
+
 See [`docs/features/phone-access.md`](../../docs/features/phone-access.md) for
 the contract and its deployment/physical-phone verification gates.
 

@@ -13,7 +13,15 @@ import pytest_asyncio
 import segno
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from kollabor_engine.phone_link import CHUNK, PhoneLink, PhoneLinkError, pairing_code, session_keys
+from kollabor_engine.phone_link import (
+    CHUNK,
+    PhoneLink,
+    PhoneLinkError,
+    decode_phone_frame,
+    encode_phone_frame,
+    pairing_code,
+    session_keys,
+)
 from nacl.public import Box, PrivateKey, PublicKey
 from nacl.secret import SecretBox
 
@@ -29,6 +37,13 @@ async def setup_link(tmp_path, monkeypatch):
     @app.get("/sessions")
     async def sessions(request: Request):
         return {"sessions": [], "authenticated": request.headers["authorization"] == "Bearer host-only-token"}
+
+
+    @app.get("/sessions/history-page")
+    async def history_page():
+        prefix, suffix = b'{"history":"', b'"}'
+        body = prefix + b"x" * (150_000 - len(prefix) - len(suffix)) + suffix
+        return StreamingResponse(iter([body]), media_type="application/json")
 
     @app.post("/sessions/echo")
     async def echo(request: Request):
@@ -90,22 +105,45 @@ async def setup_link(tmp_path, monkeypatch):
     await wire.close()
 
 
-async def secure_phone(setup_link):
+async def secure_phone(
+    setup_link,
+    *,
+    frame_compression=False,
+    max_chunk=None,
+    coalesce_reads=False,
+    zero_body_autorun=False,
+):
     manager, offer, host, phone, *_ = setup_link
     await manager.approve(offer["id"], phone.public_key)
     private = PrivateKey.generate()
-    response = await phone.request(host.public_key, "phone_session", {"public_key": private.public_key.encode().hex()})
+    capabilities = {
+        "public_key": private.public_key.encode().hex(),
+        "frame_compression": frame_compression,
+
+        "coalesce_reads": coalesce_reads,
+        "zero_body_autorun": zero_body_autorun,
+    }
+    if max_chunk is not None:
+        capabilities["max_chunk"] = max_chunk
+    response = await phone.request(host.public_key, "phone_session", capabilities)
     shared = Box(private, PublicKey(bytes.fromhex(response["public_key"]))).shared_key()
     outgoing, incoming = session_keys(shared, host._session_id, phone._session_id)
+    negotiated_compression = response.get("frame_compression") is True
     sequence = 0
 
     async def packet(**data):
         nonlocal sequence
         data["seq"] = sequence
         sequence += 1
-        encrypted = SecretBox(outgoing).encrypt(json.dumps(data).encode())
+        raw = json.dumps(data).encode()
+        if negotiated_compression:
+            raw = encode_phone_frame(raw)
+        encrypted = SecretBox(outgoing).encrypt(raw)
         response = await phone.request(host.public_key, "phone_http", {"packet": base64.b64encode(encrypted).decode()})
-        return json.loads(SecretBox(incoming).decrypt(base64.b64decode(response["packet"])))
+        raw = SecretBox(incoming).decrypt(base64.b64decode(response["packet"]))
+        if negotiated_compression:
+            raw = decode_phone_frame(raw)
+        return json.loads(raw)
 
     return packet
 
@@ -167,7 +205,11 @@ async def test_approved_phone_streams_authenticated_app_without_engine_token(set
 @pytest.mark.asyncio
 @pytest.mark.parametrize("width", [128, CHUNK // 2 + 1])
 async def test_stream_packets_are_bounded_and_coalesce_small_events(setup_link, width):
-    packet = await secure_phone(setup_link)
+    packet = await secure_phone(
+        setup_link,
+        frame_compression=True,
+        max_chunk=CHUNK,
+    )
     identifier = secrets.token_hex(16)
     await packet(op="start", id=identifier, method="GET", path=f"/sessions/burst?width={width}", headers=[], size=0)
     await packet(op="run", id=identifier)
@@ -210,7 +252,11 @@ async def test_another_phone_can_be_revoked_during_a_connection_attempt(setup_li
 
 @pytest.mark.asyncio
 async def test_upload_chunks_and_local_only_paths(setup_link):
-    packet = await secure_phone(setup_link)
+    packet = await secure_phone(
+        setup_link,
+        frame_compression=True,
+        max_chunk=CHUNK,
+    )
     for path in (
         "/phonelink",
         "/phone",
