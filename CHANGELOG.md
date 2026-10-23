@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hub: Dream Model selects a provider-supported model for dreaming. A blank
   override uses the shared fast model, then the active session model.
 
+- Hub capture commands show a bounded readable transcript by default; `--raw`
+  keeps the previous terminal output.
+
 ### Fixed
 - Web: disconnecting or revoking a phone closes buffered assistant streams without leaving event subscriptions running. Explicit Stop still cancels the agent turn.
 - Build: one selected frontend is reused by CLI, desktop, service and Python packages. Invalid selections and failed source builds stop instead of silently serving older UI.

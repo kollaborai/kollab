@@ -203,8 +203,9 @@ spawn, monitor, and manage agents on the hub:
 
   <hub_spawn name="type">task</hub_spawn>         spawn a new agent
   <hub_agents/>                                  list all online agents
-  <hub_capture name="agent-name" />              view an agent's recent output
-  <hub_capture name="agent-name" lines="100" />  view more lines of output
+  <hub_capture name="agent-name" />              view a recent readable transcript
+  <hub_capture name="agent-name" lines="100" />  include more recent transcript records
+  <hub_capture name="agent-name" format="terminal" />  view raw terminal output
 
 ### work queue
 

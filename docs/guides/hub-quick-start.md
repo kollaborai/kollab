@@ -104,8 +104,11 @@ kollab --hub status
 # Send a message to an agent
 kollab --hub msg lapis "refactor the database layer"
 
-# View the last 100 lines of an agent's output
+# View a readable transcript from an agent
 kollab --hub capture lapis 100
+
+# Keep the previous terminal rendering for debugging
+kollab --hub capture lapis 100 --raw
 
 # Attach interactively to a live agent
 kollab --attach lapis
@@ -279,7 +282,7 @@ directory when you want to customize it without editing the installation.
 | `/hub broadcast <text>` | Message all agents |
 | `/hub stop <agent\|all>` | Remote shutdown (`kill` is an alias) |
 | `/hub spawn <name> <task>` | Spawn a sub-agent |
-| `/hub capture <name> [lines]` | View agent output |
+| `/hub capture <name> [lines] [--raw]` | Read transcript; `--raw` keeps terminal output |
 | `/hub stop <name\|all>` | Stop agent(s) |
 | `/hub agents` | List all active agents |
 | `/hub cron add <target> <interval> <msg>` | Schedule recurring message |
@@ -301,7 +304,7 @@ directory when you want to customize it without editing the installation.
 |---|---|
 | `kollab --hub status` | List online agents (no TUI) |
 | `kollab --hub msg <agent> <text>` | Send message (no TUI) |
-| `kollab --hub capture <agent> [n]` | View agent output (no TUI) |
+| `kollab --hub capture <agent> [n] [--raw]` | Read transcript; `--raw` keeps terminal output (no TUI) |
 | `kollab --hub kill <agent>` | Remote shutdown (no TUI) |
 | `kollab --attach <identity>` | Interactive TUI proxy to a live agent |
 | `kollab --agent <bundle>` | Launch with a behavior bundle |
