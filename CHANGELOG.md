@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
 ### Changed
+- Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
+  install. The host-side helper that shows stored voice turns as screens draw them
+  (`turn_display_texts`) now lives in `kollabor_ai.response_channels`, and a voice-package
+  test fails if a service module imports a host package. Fixes #301.
 - Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
   history pages locally, loads older messages on scroll, and fetches full tool
   output only after Show more. Negotiated compressed PhoneLink frames carry the
