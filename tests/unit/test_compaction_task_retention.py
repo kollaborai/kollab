@@ -86,7 +86,6 @@ def test_preservation_has_a_hard_cap_even_if_many_tasks_are_live() -> None:
     assert summarizable == messages[:-MAX_PRESERVED_HUB_TASK_MESSAGES]
 
 
-
 def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
     message = _task_message("large-task", "x" * 20_000)
 
@@ -311,3 +310,61 @@ def test_persistent_status_is_reannounced_on_next_turn() -> None:
         message="The summarizer returned too little content.",
         action="Run /compact now.",
     )
+
+
+def test_150_live_tasks_stay_bounded_across_repeated_compaction_rounds() -> None:
+    """The 24 x 4K live-task budget must stay below the 272K prompt cap."""
+    plugin = _plugin()
+    system = Message(role="system", content="system instructions")
+    history = [system, Message(role="user", content="initial request")]
+    summary = "summary of earlier work " * 300
+    rounds = 3
+
+    for round_number in range(rounds):
+        round_tasks = [
+            _task_message(
+                f"round-{round_number}-task-{task_number}",
+                f"task detail {task_number} " + ("x" * 5_000),
+            )
+            for task_number in range(180)
+        ]
+        history.extend(round_tasks)
+        live_ids = {
+            message.metadata["task_id"]
+            for message in history
+            if message.metadata.get("task_id")
+        }
+
+        preserved, _summarizable = plugin._extract_preservable_messages(
+            history, live_task_ids=live_ids
+        )
+        assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
+        assert all(
+            len(message.content) <= MAX_PRESERVED_HUB_TASK_CHARS
+            for message in preserved
+        )
+        assert [message.metadata["task_id"] for message in preserved] == [
+            f"round-{round_number}-task-{task_number}"
+            for task_number in range(180 - MAX_PRESERVED_HUB_TASK_MESSAGES, 180)
+        ]
+
+        history = plugin._build_compacted_history(
+            system_msg=system,
+            summary_text=summary,
+            to_keep=[],
+            preserved_tasks=preserved,
+            compaction_round=round_number + 1,
+            pre_message_count=len(history),
+        )
+        assert (
+            sum(bool(message.metadata.get("task_id")) for message in history)
+            <= MAX_PRESERVED_HUB_TASK_MESSAGES
+        )
+        assert (
+            sum(
+                bool(message.metadata.get("compaction_task_reminder"))
+                for message in history
+            )
+            == 1
+        )
+        assert plugin._estimate_history_tokens(history) < 272_000
