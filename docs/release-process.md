@@ -167,11 +167,11 @@ scripts/docker-runtime.sh smoke
    Unsigned macOS users must use Finder's Control-click > Open flow on first
    launch (see `desktop/README.md`). Apple signing/notarization preparation
    remains available without changing the unsigned release default.
-   Windows is built by the provisional `desktop-windows` job (a tag or a manual
-   run, never a pull request): a native runtime, an NSIS installer and its
-   `.sha256`, unsigned (SmartScreen: More info, then Run anyway). It never
-   blocks a release, and its installer is attached only when the job passed its
-   agent check (`build_binary.py --agent-smoke`), which the native runtime fails
+   Windows is built by the provisional `desktop-windows` job, on a manual run
+   only until the native port lands (a release tag never runs it): a native
+   runtime, an NSIS installer and its `.sha256`, unsigned (SmartScreen: More
+   info, then Run anyway). No release waits on it, and its installer is
+   published only after promotion, once the job passes its agent check (`build_binary.py --agent-smoke`), which the native runtime fails
    until the port in [docs/specs/windows-desktop.md](specs/windows-desktop.md)
    lands. `desktop_release.py verify` accepts the installer pair or none of it,
    never half; promote it to the required 22-file manifest with `--windows

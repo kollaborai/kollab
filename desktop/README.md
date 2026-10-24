@@ -144,8 +144,8 @@ checks the native package/window lifecycle; it does not prove a live model turn.
 ## Windows
 
 Windows is built by the provisional `desktop-windows` job in
-`.github/workflows/binaries.yml`, on a tag or a manual run only (never on a pull
-request): it builds the native runtime (`kollab-windows-x86_64.exe`, a pex scie
+`.github/workflows/binaries.yml`, on a manual run only until the native port
+lands (a release tag never runs it, and it never runs on a pull request): it builds the native runtime (`kollab-windows-x86_64.exe`, a pex scie
 like the other platforms), stages it as `runtime\kollab.exe` and builds an NSIS
 installer, `Kollab_X.Y.Z_x64-setup.exe`, per user with no administrator prompt.
 

@@ -9,9 +9,9 @@ name: Binaries
 # release/X.Y.Z before tagging). Pull requests and branch pushes build nothing
 # here: PR CI was waiting on this matrix.
 #
-# desktop-windows is provisional (docs/specs/windows-desktop.md): a failure there
-# never blocks a release, and its installer is released only when every check in
-# the job passed, the agent check included.
+# desktop-windows is provisional (docs/specs/windows-desktop.md): until the
+# native port lands it runs only by hand (workflow_dispatch). A release tag never
+# runs it or waits on it, and no Windows asset is published.
 on:
   # No tags trigger: publish.yml calls this for every release tag. A tags trigger
   # here built every binary and desktop app twice per release.
@@ -309,11 +309,12 @@ jobs:
 
   # Windows builds its own runtime here instead of taking one from `build`: the
   # scie is no release asset (install.sh and /upgrade know no Windows binary), so
-  # it lives only in the installer. continue-on-error keeps a red job from
-  # blocking the release until it has passed once on a real runner; then remove
-  # it and verify with `--windows required` (docs/specs/windows-desktop.md).
+  # it lives only in the installer. Manual runs only until the native port lands:
+  # the agent check fails until then, and a release must not wait on a job that
+  # is known to fail. Promotion is in docs/specs/windows-desktop.md.
   desktop-windows:
     name: desktop/windows-x86_64
+    if: github.event_name == 'workflow_dispatch'
     needs: frontend
     runs-on: windows-2025
     continue-on-error: true
@@ -408,7 +409,7 @@ jobs:
 
   release-manifest:
     name: release/manifest
-    needs: [build, desktop, desktop-linux, desktop-windows]
+    needs: [build, desktop, desktop-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -423,9 +424,9 @@ jobs:
           path: dist/bin
           merge-multiple: true
 
-      # The Windows installer pair is optional (desktop-windows may have failed
-      # without blocking) but never half there. Add `--windows required` once the
-      # Windows job is a required one.
+      # The Windows installer pair is optional (desktop-windows is not part of a
+      # release yet) but never half there. Add `--windows required` once the
+      # Windows job is promoted.
       - name: Verify all CLI, macOS and Linux release assets, and Windows if built
         env:
           VERSION: ${{ inputs.version }}

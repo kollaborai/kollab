@@ -89,15 +89,18 @@ non-release artifact `windows-desktop-unverified`; the job fails with "the
 installer is not released", and the release artifact `kollab-desktop-windows-x86_64`
 is uploaded only when every step, the gate included, passed.
 
-`desktop-windows` has `continue-on-error: true`, so a red job never blocks a
-tag. `desktop_release.py verify` treats the installer pair as optional but never
+`desktop-windows` runs only on a manual run (`workflow_dispatch`) until the
+port lands: a release tag never runs it or waits on it, and `release-manifest`
+does not need it. `continue-on-error: true` also keeps a red manual run from
+failing the whole workflow. `desktop_release.py verify` treats the installer pair as optional but never
 half there (a changed installer or a missing checksum still fails).
 
 ### Promotion
 
 After the port, on a manual run (`gh workflow run binaries.yml --ref release/X.Y.Z`)
-where `desktop-windows` is green: remove its `continue-on-error`, and pass
-`--windows required` to `desktop_release.py verify` in `binaries.yml` and
+where `desktop-windows` is green: remove its `if: github.event_name ==
+'workflow_dispatch'` and its `continue-on-error`, add it back to
+`release-manifest`'s `needs`, and pass `--windows required` to `desktop_release.py verify` in `binaries.yml` and
 `publish.yml`. The manifest becomes 22 files and eleven checksum pairs; update
 the counts in `docs/release-process.md` and `desktop/README.md`.
 
