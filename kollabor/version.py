@@ -7,22 +7,14 @@ from typing import Optional
 
 from .build_info import (
     BuildProvenance,
-    normalize_branch,
-    normalize_sha,
+    read_embedded_provenance,
     resolve_build_provenance,
 )
 
-try:
-    from ._build_info import BUILD_BRANCH as _EMBEDDED_BUILD_BRANCH
-    from ._build_info import BUILD_SHA as _EMBEDDED_BUILD_SHA
-except ModuleNotFoundError as error:
-    if error.name != f"{__package__}._build_info":
-        raise
-    _EMBEDDED_PROVENANCE: BuildProvenance | None = None
-else:
-    _EMBEDDED_PROVENANCE = BuildProvenance(
-        normalize_branch(_EMBEDDED_BUILD_BRANCH), normalize_sha(_EMBEDDED_BUILD_SHA)
-    )
+# Read as data, never imported: the generated module is parsed by the AST literal reader.
+_EMBEDDED_PROVENANCE: BuildProvenance | None = read_embedded_provenance(
+    Path(__file__).with_name("_build_info.py")
+)
 
 
 def _get_version_from_pyproject() -> Optional[str]:
