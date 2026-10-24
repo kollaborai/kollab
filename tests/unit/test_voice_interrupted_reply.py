@@ -362,3 +362,84 @@ async def test_a_resumed_cut_turn_is_a_valid_anthropic_request(tmp_path, monkeyp
     for message in sent:
         blocks = message["content"]
         assert blocks and all(b.get("text") for b in blocks if b.get("type") == "text")
+
+
+async def test_the_log_is_cut_off_the_loop_and_an_append_meanwhile_threads_past_it(
+    tmp_path, monkeypatch
+):
+    """A big log takes long to cut (67 MB: ~0.7 s): the loop keeps running, an append
+    made meanwhile waits for the rewrite, and one under the dropped answer threads
+    under that answer's parent."""
+    import asyncio
+    import json
+    import threading
+    from pathlib import Path
+
+    llm, log, call = await logged_tool_turn(tmp_path, monkeypatch)
+    answer, release, rewrite = llm.current_parent_uuid, threading.Event(), log._rewrite_voice_turn
+
+    def big_log(*args):
+        release.wait(2)
+        return rewrite(*args)
+
+    monkeypatch.setattr(log, "_rewrite_voice_turn", big_log)
+    cut = asyncio.create_task(service(llm).record_interrupted_voice_reply("turn-1", "Let me check"))
+    await asyncio.sleep(0.05)  # the loop runs while the log is rewritten
+    late = asyncio.create_task(log.log_user_message("and tomorrow?", parent_uuid=answer))
+    await asyncio.sleep(0.05)
+    assert not cut.done() and not late.done()  # the append waits for the rewrite
+    release.set()
+    assert (await cut)["replaced"]
+    await late
+    records = [json.loads(line) for line in Path(log.session_file).read_text().splitlines()]
+    assert answer not in [r.get("uuid") for r in records]
+    [tomorrow] = [r for r in records if r.get("type") == "user" and "tomorrow" in json.dumps(r)]
+    assert tomorrow["parentUuid"] == call  # under the reply that stays, not the dropped answer
+
+
+async def test_what_compaction_writes_while_the_log_is_cut_is_kept(tmp_path, monkeypatch):
+    """Compaction appends its records straight to the file, past the logger's lock:
+    a record it writes while the cut runs, and one it was halfway through when the
+    cut read the log, are both in the log the cut leaves."""
+    import asyncio
+    import json
+    import threading
+    from pathlib import Path
+
+    llm, log, call = await logged_tool_turn(tmp_path, monkeypatch)
+    path, rewrite = Path(log.session_file), log._rewrite_voice_turn
+    read, release = threading.Event(), threading.Event()
+
+    def read_then_wait(*args):
+        result = rewrite(*args)
+        read.set()
+        release.wait(2)
+        return result
+
+    monkeypatch.setattr(log, "_rewrite_voice_turn", read_then_wait)
+    with open(path, "a") as f:
+        f.write('{"type": "compaction_checkpoint", "uuid": "c1"')  # still being written
+    cut = asyncio.create_task(service(llm).record_interrupted_voice_reply("turn-1", "Let me check"))
+    assert await asyncio.to_thread(read.wait, 2)  # the cut has read the log
+    with open(path, "a") as f:
+        f.write(', "round": 1}\n{"type": "context_compaction", "uuid": "c2"}\n')
+    release.set()
+    assert (await cut)["replaced"]
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    compaction = {r["uuid"]: r for r in records if "compaction" in r.get("type", "")}
+    assert list(compaction) == ["c1", "c2"] and compaction["c1"]["round"] == 1
+    [reply] = [r for r in records if r.get("type") == "assistant"]
+    assert reply["message"]["content"][0]["text"] == "Let me check"
+
+
+async def test_a_cut_queued_before_a_resume_never_lands_in_the_resumed_conversation():
+    """/resume or a new session swaps the conversation while the cut waits for its
+    turn: that turn is not in the new one, so nothing is cut or added there."""
+    llm = FakeLLM()
+    llm.conversation_logger.session_id = "before"
+    llm._queue_processor = turns = Turns(open_turn="turn-1")
+    assert await service(llm).record_interrupted_voice_reply("turn-1", "So the build") == PENDING
+    llm.conversation_logger.session_id = "resumed"  # the resume moved the log on
+    turns._open_voice_turn = None
+    await turns.next_round()
+    assert llm.conversation_history == [] and llm.conversation_logger.logged == []

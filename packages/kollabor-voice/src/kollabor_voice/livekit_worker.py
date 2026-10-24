@@ -390,8 +390,8 @@ class KollabAgent(Agent):
         if not text or worker.stopping.is_set():
             return
         turn = self.turn = worker.begin_turn(text, greeting)
+        await worker.cuts_sent()  # a reply this turn talked over is cut first
         worker.keep_played_text(turn, _SpeechHandleContextVar.get(None))
-        await worker.drain()  # a talked-over reply's cut reaches the Engine first
         try:
             async with contextlib.aclosing(worker.turns.stream(turn.body)) as sentences:
                 async for sentence in sentences:
@@ -497,6 +497,8 @@ class Worker:
         self.session_options: dict = {}
         self.session = self.agent = self.greeting_task = self.pump = None
         self.outbox: asyncio.Queue = asyncio.Queue()
+        self.cuts: set[asyncio.Task] = set()  # talk-over cuts on their way (cuts_sent)
+        self.last_reply = None  # the newest reply's SpeechHandle (cuts_sent)
         self.stt_ms = self.language = None  # last utterance, joins the next turn
         self.user_speaking, self.agent_state, self.shown = False, "idle", None
 
@@ -526,9 +528,33 @@ class Worker:
             finally:
                 self.outbox.task_done()
 
+    def cut(self, turn_id: str, text: str) -> None:
+        """Post a talk-over's cut on its own: a turn waits for cuts, never for events."""
+        task = asyncio.create_task(
+            self.poster.post(f"turns/{turn_id}/interrupted", {"text": text})
+        )
+        self.cuts.add(task)
+        task.add_done_callback(self.cuts.discard)
+
+    async def cuts_sent(self, timeout: float = 5.0) -> None:
+        """Wait, bounded, until the Engine has the cut of every reply talked over.
+
+        LiveKit can start the next reply a few loop turns before a talked-over
+        reply's handle is done (it marks the generation done first and the
+        scheduler moves on), and that handle's done callback sends the cut, so wait
+        for both. The Engine answers a cut once the daemon has it queued.
+        """
+        reply = self.last_reply
+        if reply is not None and reply.interrupted and not reply.done():
+            playout = asyncio.ensure_future(reply.wait_for_playout())
+            await asyncio.wait({playout}, timeout=timeout)
+        if self.cuts:
+            await asyncio.wait(set(self.cuts), timeout=timeout)
+
     async def drain(self, timeout: float = 5.0) -> None:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.outbox.join(), timeout)
+        await self.cuts_sent(timeout)
 
     def state(self, state: str, detail: str = "", **extra) -> None:
         self.event("voice.state", {"state": state, "detail": detail, **extra})
@@ -692,11 +718,13 @@ class Worker:
         """A talk-over leaves the reply cut short: tell the Engine the part that was played.
 
         `speech` is the reply's own SpeechHandle (the context var is set where its
-        task is created). The next turn can start before this one's interrupted
-        message exists, so the turn id is bound here, never read off `self.turn`.
+        task is created). Its done callback can come after the next turn began
+        (`cuts_sent` holds that turn until the cut is out), so the turn id is bound
+        here, never read off `self.turn`.
         """
         if speech is None:
             return
+        self.last_reply = speech
 
         def done(handle) -> None:
             if not handle.interrupted or self.stopping.is_set():  # closing is no talk-over
@@ -704,13 +732,10 @@ class Worker:
             for item in reversed(handle.chat_items):
                 if item.type == "message" and item.role == "assistant":
                     if item.interrupted:
-                        self.send(
-                            f"turns/{turn.id}/interrupted",
-                            {"text": (item.text_content or "").strip()},
-                        )
+                        self.cut(turn.id, (item.text_content or "").strip())
                     return  # not interrupted: it was all played
             # LiveKit adds no message when nothing was played: nothing was heard.
-            self.send(f"turns/{turn.id}/interrupted", {"text": ""})
+            self.cut(turn.id, "")
 
         speech.add_done_callback(done)
 

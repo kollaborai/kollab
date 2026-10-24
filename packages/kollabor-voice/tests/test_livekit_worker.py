@@ -531,8 +531,8 @@ def test_a_talk_over_posts_the_played_text_once_with_its_own_turn_id():
 
 
 def test_the_next_turn_goes_out_after_the_talked_over_replys_cut():
-    """The cut rides the event outbox, the next turn its own request: the turn waits
-    for the outbox, so the daemon has the cut before the next model call."""
+    """The cut is its own post, the next turn its own request: the turn waits for
+    the cut, so the daemon has it before the next model call."""
 
     async def scenario():
         async with Rig(
@@ -561,6 +561,100 @@ def test_the_next_turn_goes_out_after_the_talked_over_replys_cut():
         return order
 
     assert run(scenario()) == ["is the build green", "cut", "stop that"]
+
+
+class Turns:
+    """The Engine's /turns as the next turn sees it: the request is the order entry."""
+
+    def __init__(self, order):
+        self.order = order
+
+    async def stream(self, body):
+        self.order.append("turn")
+        yield "Okay."
+
+
+def next_turn(worker):
+    chat_ctx = llm.ChatContext()
+    chat_ctx.add_message(role="user", content="what about now")
+    reply = lw.KollabAgent(worker).llm_node(chat_ctx, [], None)
+    return asyncio.ensure_future(reply.__anext__())
+
+
+def test_a_turn_waits_for_a_talked_over_reply_still_finishing_and_its_cut():
+    """LiveKit marks a talked-over reply's generation done a few loop turns before
+    its handle, and can start the next reply in between: that turn waits for the
+    handle, whose done callback sends the cut, and then for the cut."""
+
+    class Speech:  # talked over, playout stopped, the handle not done yet
+        interrupted = True
+
+        def __init__(self):
+            self.finished, self.callbacks = asyncio.Event(), []
+            self.chat_items = [
+                llm.ChatMessage(role="assistant", content=["So the"], interrupted=True)
+            ]
+
+        def done(self):
+            return self.finished.is_set()
+
+        def add_done_callback(self, callback):
+            self.callbacks.append(callback)
+
+        async def wait_for_playout(self):
+            await self.finished.wait()
+
+        def finish(self):
+            self.finished.set()
+            for callback in self.callbacks:
+                callback(self)
+
+    async def scenario():
+        order = []
+
+        class Poster(Recorder):
+            async def post(self, path, body):
+                if path.endswith("/interrupted"):
+                    await asyncio.sleep(0.2)  # an Engine slow to take the cut
+                    order.append(f"cut {body['text']}")
+                return await super().post(path, body)
+
+        worker = lw.Worker(CONFIG, FakeRoom(), FakeAdapter(), Poster(), Turns(order))
+        old = Speech()
+        worker.keep_played_text(lw.Turn("old-turn", 0.0), old)
+        sentence = next_turn(worker)
+        await asyncio.sleep(0.3)
+        assert order == []  # nothing goes out while the old reply is finishing
+        old.finish()
+        assert await sentence == "Okay."
+        return order
+
+    assert run(scenario()) == ["cut So the", "turn"]
+
+
+def test_a_turn_never_waits_for_the_events_ahead_of_it():
+    """States and metrics ride their own queue: an Engine slow on events (here, the
+    stt metric begin_turn sends just before the turn) holds no turn up."""
+
+    async def scenario():
+        order, gate = [], asyncio.Event()
+
+        class Poster(Recorder):
+            async def post(self, path, body):
+                if path == "events":
+                    await gate.wait()  # the Engine has not answered the events yet
+                return await super().post(path, body)
+
+        worker = lw.Worker(CONFIG, FakeRoom(), FakeAdapter(), Poster(), Turns(order))
+        worker.state("listening")
+        worker.stt_ms = 120
+        sentence = await asyncio.wait_for(next_turn(worker), 1)
+        gate.set()
+        await worker.drain()
+        return sentence, order, [b["payload"].get("stage") for _, b in worker.poster.posts]
+
+    # the state and the stt metric were queued ahead of the turn, and posted after it
+    assert run(scenario()) == ("Okay.", ["turn"], [None, "stt", "llm_first_token"])
 
 
 def test_the_played_text_keeps_the_space_between_sentences():

@@ -953,9 +953,9 @@ class QueueProcessor:
 
         finally:
             self.is_processing = False  # ends the chain (note_chain_end)
-            # ponytail: a drain that dies here leaves queued after-turn work (a
-            # talk-over cut) to the next round's start; a flush task if that bites.
             self._open_voice_turn = None
+            if self._after_turn:  # a drain that died: its turn's cut lands once the lock is free
+                self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
             self.current_processing_tokens = 0
             self.processing_start_time = None
 
@@ -1158,6 +1158,8 @@ class QueueProcessor:
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                if self._after_turn:  # queued while this round ran: lands once the lock is free
+                    self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
                 raise
             await self._run_after_turn()  # and what was queued while this round ran
             return parent_uuid
@@ -2220,8 +2222,9 @@ class QueueProcessor:
         A turn writes its tool calls and their results under the lock, so a
         history edit made in `work` never lands between them. Never waits: the
         work is queued, holding nothing, and runs as the round holding the lock
-        ends, as its own turn ends, or first thing in the next round; with no
-        round running, right after this returns. No later round starts before it.
+        ends (one that raised leaves it to a task, once the lock is free), as its
+        own turn ends, or first thing in the next round; with no round running,
+        right after this returns. No later round starts before it.
         """
         self._after_turn.append((voice_turn, work))
         if self._open_voice_turn != voice_turn and not self._turn_lock.locked():
@@ -2232,14 +2235,15 @@ class QueueProcessor:
             await self._run_after_turn()
 
     async def _run_after_turn(self) -> None:
-        """The queued work whose turn has no round left (under the turn lock)."""
-        due = [work for turn, work in self._after_turn if turn != self._open_voice_turn]
-        self._after_turn = [item for item in self._after_turn if item[0] == self._open_voice_turn]
-        for work in due:
-            try:
-                await work()
-            except Exception:
-                logger.exception("work queued after a turn failed")
+        """The queued work whose turn has no round left (under the turn lock),
+        with what is queued while it runs: nothing starts a flush meanwhile."""
+        while due := [work for turn, work in self._after_turn if turn != self._open_voice_turn]:
+            self._after_turn = [item for item in self._after_turn if item[0] == self._open_voice_turn]
+            for work in due:
+                try:
+                    await work()
+                except Exception:
+                    logger.exception("work queued after a turn failed")
 
     async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.

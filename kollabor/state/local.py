@@ -3206,7 +3206,14 @@ class LocalStateService(StateService):
         if queue is None:
             return await self._cut_voice_reply(llm, turn_id, text)
 
+        def conversation():  # the live one: /resume and a new session change it
+            return getattr(getattr(llm, "conversation_logger", None), "session_id", None)
+
+        session = conversation()
+
         async def cut() -> None:
+            if conversation() != session:
+                return  # the talked-over turn is not in this conversation
             if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
                 from kollabor_tui.display_tap import publish_semantic
 
@@ -3250,7 +3257,7 @@ class LocalStateService(StateService):
             rewrite = getattr(llm.conversation_logger, "rewrite_voice_turn", None)
             if edits and callable(rewrite):
                 try:  # /resume and the engine's disk-seeded history read the log
-                    dropped = rewrite(turn_id, len(said), edits) or {}
+                    dropped = await rewrite(turn_id, len(said), edits) or {}
                 except Exception:
                     logger.warning("could not log a voice talk-over cut", exc_info=True)
                     dropped = {}

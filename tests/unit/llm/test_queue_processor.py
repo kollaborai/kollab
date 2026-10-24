@@ -417,11 +417,12 @@ class TestQueueProcessor(unittest.TestCase):
             await self.processor.process_queue(
                 MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
             )
+            return reply.content
 
-        self.loop.run_until_complete(scenario())
+        # then the cut landed, as the turn ended: before the drain returned
+        self.assertEqual(self.loop.run_until_complete(scenario()), "Let me")
         self.assertEqual(answers, [{"recorded": False, "pending": True}])
         self.assertEqual(seen, ["Let me check.", "Let me check."])  # its last round ran uncut
-        self.assertEqual(reply.content, "Let me")  # then the cut landed
         self.assertIsNone(self.processor._open_voice_turn)
         self.assertEqual(self.processor._after_turn, [])
 
@@ -502,6 +503,84 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(self.loop.run_until_complete(scenario()), {"recorded": False, "pending": True})
         self.assertEqual(seen, ["Let me"])  # and it landed before that round's model call
+
+    def test_a_cut_queued_while_a_flush_runs_lands_in_that_flush(self):
+        """A flush holds the lock while it runs a cut, so one queued meanwhile starts
+        no flush of its own: the running flush takes it too, not the next round."""
+        ran, gate = [], asyncio.Event()
+
+        async def first():
+            await gate.wait()  # a big log being cut
+            ran.append("first")
+
+        async def second():
+            ran.append("second")
+
+        async def scenario():
+            self.processor.after_turn("turn-8", first)  # no round running: a flush starts
+            await asyncio.sleep(0)
+            self.assertTrue(self.processor._turn_lock.locked())  # and is cutting
+            self.processor.after_turn("turn-9", second)
+            gate.set()
+            await self.processor._after_turn_flush
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(ran, ["first", "second"])
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_round_that_raises_leaves_its_cut_to_a_task_once_the_lock_is_free(self):
+        """A round that raises skips its end-of-round flush (here a pre-request hook
+        cancels it): a cut queued during it lands from a task, not at the next round."""
+        reply, state, seen = self._talk_over_turns()
+
+        async def hooks(*args, **kwargs):
+            if not self.processor._after_turn:  # talked over while the round runs
+                await state.record_interrupted_voice_reply("turn-9", "Let me")
+            return {"cancelled": True}
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=hooks)
+
+        async def scenario():
+            with self.assertRaises(asyncio.CancelledError):
+                await self.processor._execute_llm_turn(True, "parent")
+            await asyncio.wait_for(self.processor._after_turn_flush, 1)
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_drain_that_dies_leaves_its_turns_cut_to_a_task(self):
+        """The cut waits for its voice turn to end; a drain cancelled before then
+        ends the turn in its finally, and a task lands the cut."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        queued = asyncio.Event()
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            await state.record_interrupted_voice_reply("turn-9", "Let me")  # turn-9 is open
+            queued.set()
+            await asyncio.Event().wait()  # the drain dies here
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            drain = asyncio.create_task(self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            ))
+            await queued.wait()
+            self.assertEqual(reply.content, "Let me check.")  # never cut under its turn
+            drain.cancel()
+            try:
+                await drain
+            except asyncio.CancelledError:
+                pass
+            await asyncio.wait_for(self.processor._after_turn_flush, 1)
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
 
     def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
         """The reply joins history after its tools; a Stop in between kept nothing."""

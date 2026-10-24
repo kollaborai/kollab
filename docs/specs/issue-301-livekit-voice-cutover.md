@@ -57,8 +57,24 @@ them, and no voice screen shows classifier controls, status or decisions.
   the turn lock as soon as no round of that turn is left, always before the next
   model call. A cut that lands late publishes `voice_reply_cut` and open windows
   reload.
-- The worker drains its event outbox before it posts the next turn, so the
-  daemon has the cut first.
+- The worker posts each cut on its own, apart from its states and metrics. The
+  next turn waits, bounded at 5 s, for the talked-over reply's handle to finish
+  and for its cut to be answered (the Engine answers once the daemon has it), and
+  never for an event. LiveKit starts the next reply only after it has interrupted
+  the current one, except in the few loop turns between a talked-over reply's
+  generation ending and its handle finishing; the wait covers those.
+- The cut rewrites the conversation log off the event loop, under the logger's
+  append lock (on the loop it held the daemon 15 ms at 1.6 MB, ~0.1 s at 11 MB,
+  ~0.7 s at 67 MB). An append whose parent the cut dropped threads under that
+  record's parent. Records written past the logger while it runs (compaction's
+  checkpoint and summary records) are copied into the new file at the swap.
+- A cut still queued when `/resume` or a new session swaps the conversation is
+  dropped: its turn is not in the new one.
+- Known limits, accepted for 0.18: a daemon that dies with a cut still queued
+  loses it (the history and the log keep the uncut reply), and a typed message
+  that reaches the daemon in the moment between a talk-over and its cut (the
+  worker's post and the Engine's call, right after the audio stops) goes to the
+  model before the cut, which lands after that round.
 
 ## Logs
 
