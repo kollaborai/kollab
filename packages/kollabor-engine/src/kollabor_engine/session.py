@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.snapshots import ProfileSnapshot
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
 from kollabor_config.config_utils import get_conversations_dir
@@ -820,14 +821,46 @@ class EngineSession:
         origin_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        result = await self.state.send_message(
-            content,
-            request_id=request_id,
-            thread_id=thread_id,
-            origin_context=origin_context,
+        voice_turn = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
         )
+        if voice_turn:
+            # The capability was issued in this process; the daemon checks its own,
+            # so mirror it there, but only while this process still holds it.
+            if not validate_voice_admission_context(origin_context):
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+            admitted = await self.voice_admission("admit", context=origin_context)
+            if admitted.get("admitted") is not True:
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+        try:
+            result = await self.state.send_message(
+                content,
+                request_id=request_id,
+                thread_id=thread_id,
+                origin_context=origin_context,
+            )
+        except BaseException:
+            if voice_turn:
+                await self.voice_admission("revoke", context=origin_context)
+            raise
+        if voice_turn and not (isinstance(result, dict) and result.get("accepted")):
+            await self.voice_admission("revoke", context=origin_context)
         if thread_id and isinstance(result, dict) and result.get("accepted"):
             self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
+        return result
+
+    async def voice_admission(self, action: str, **params: Any) -> Dict[str, Any]:
+        """Admit or revoke a voice capability in this session's daemon."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_admission", {"action": action, **params}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_admission expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
         return result
 
     def cancel_turn(self) -> None:
