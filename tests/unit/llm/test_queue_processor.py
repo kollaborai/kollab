@@ -454,6 +454,50 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(seen, ["Let me check.", "Let me"])  # turn-10's first round: cut
         self.assertEqual(self.processor._after_turn, [])
 
+    def test_a_stopped_voice_turn_leaves_the_next_turn_its_own_grant(self):
+        """A Stop, a talk-over or an error while a voice turn's tool runs ends that
+        turn. The next turn, spoken or typed, never runs on the ended turn's grant:
+        an invalid one refused all its tools and left its reply no voice turn id."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        seen = []
+        invalid = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+        # Input that cuts in while the turn still has a round to run fails closed.
+        cases = (("stop", True, "own"), ("stop", False, None), ("error", True, "own"), ("new input", True, invalid))
+        for ended_by, said, expected in cases:
+            with self.subTest(ended_by=ended_by, said=said):
+                seen.clear()
+                spoken = make_voice_origin_context("turn-2")  # a turn's end revokes its grant
+                after = QueuedInput("and the blue one", {}, origin_context=spoken) if said else "and the blue one"
+                expected = spoken if expected == "own" else expected
+
+                async def turn(**kwargs):
+                    seen.append(kwargs.get("execution_context"))
+                    self.processor.turn_completed = len(seen) > 1
+                    if len(seen) == 1 and ended_by == "stop":  # its tool runs, the Stop lands
+                        self.processor.request_cancellation(origin="human")
+                    return "parent"
+
+                async def next_round():  # the turn's next round
+                    if ended_by == "error":
+                        raise RuntimeError("the model went away")
+                    await self.processor.enqueue(after)  # the input arrives as it runs
+
+                self.processor._execute_llm_turn = turn
+                drain = lambda: self.processor.process_queue(  # noqa: E731
+                    MagicMock(), lambda m: self.processor.process_message_batch(m, "parent"), next_round
+                )
+                self.loop.run_until_complete(self.processor.enqueue(QueuedInput(
+                    "is it green", {}, origin_context=make_voice_origin_context("turn-1")
+                )))
+                self.loop.run_until_complete(drain())
+                if ended_by != "new input":
+                    self.processor.cancel_processing = False  # the next message clears the latch
+                    self.loop.run_until_complete(self.processor.enqueue(after))
+                    self.loop.run_until_complete(drain())
+                self.assertEqual(seen[1], expected)
+                self.assertIsNone(self.processor.active_origin_context)
+
     def test_a_cut_queued_during_another_round_lands_as_that_round_ends(self):
         """A hub wake's round holds the lock when the talk-over comes: the cut
         waits for it, then lands with no next turn needed."""

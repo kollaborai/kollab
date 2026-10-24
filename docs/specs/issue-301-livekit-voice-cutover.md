@@ -75,6 +75,10 @@ them, and no voice screen shows classifier controls, status or decisions.
   `LLMService.cancel_current_request`): the tool does not run, every window
   closes the prompt and the turn ends, so the cut lands before the next turn. A
   prompt asked while the turn is stopping is answered cancelled without showing.
+- A Stop or a talk-over ends the voice turn's grant with it
+  (`QueueProcessor._drain_queue`): the next turn, spoken or typed, runs on its own,
+  so its tools run and a talk-over can cut its reply. Input that cuts in while a
+  voice turn still has a round to run gets no grant (fail closed).
 - Known limits, accepted for 0.18: a daemon that dies with a cut still queued
   loses it (the history and the log keep the uncut reply), and a typed message
   that reaches the daemon in the moment between a talk-over and its cut (the

@@ -939,6 +939,11 @@ class QueueProcessor:
 
                 # Done, cancelled or cut off by new input: no round of it is left.
                 self._open_voice_turn = None
+                if self.turn_completed or self.cancel_processing:
+                    # Its grant ends with it. Only a turn cut off by new input
+                    # carries on, merged fail-closed in process_message_batch.
+                    revoke_voice_admission_context(self.active_origin_context)
+                    self.active_origin_context = None
                 if self._after_turn:
                     async with self._turn_lock:
                         await self._run_after_turn()
