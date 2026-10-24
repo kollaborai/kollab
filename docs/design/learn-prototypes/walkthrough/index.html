@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Kollab — Start a session</title>
+  <style>
+    :root {
+      --page: oklch(.145 0 0); --chrome: oklch(.18 0 0); --panel: oklch(.205 0 0);
+      --pop: oklch(.269 0 0); --hover: oklch(.33 0 0); --text: oklch(.985 0 0); --muted: oklch(.708 0 0);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px; color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--text); font-size: .875rem; line-height: 1.5; }
+    button, input, textarea { font: inherit; color: inherit; border: 0; outline: none; }
+    button { cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color 130ms, color 130ms, transform 100ms; }
+    button:active { transform: translateY(1px); }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 0 0 0 3px #7778; }
+    button:disabled { cursor: default; opacity: .45; }
+    button, h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 1.125rem; line-height: 1.3; font-weight: 600; outline: none; }
+    h2 { font-size: 1.0625rem; line-height: 1.4; font-weight: 600; }
+    h3 { font-size: .875rem; font-weight: 600; }
+    svg { display: block; width: 1rem; height: 1rem; flex: none; }
+    [hidden] { display: none !important; }
+    .background-app { height: 100dvh; padding: .625rem; display: grid; grid-template-columns: 14rem minmax(0,1fr); gap: .625rem; }
+    .background-sidebar { background: var(--chrome); border-radius: .875rem; padding: 1rem; display: flex; flex-direction: column; color: #666; }
+    .background-sidebar .logo { color: #aaa; width: 2.5rem; height: 1.5rem; margin-bottom: 2rem; }
+    .background-sidebar p { margin-bottom: .875rem; }
+    .reopen { margin-top: auto; background: var(--panel); padding: .5rem .75rem; border-radius: .5rem; color: var(--muted); text-align: left; }
+    .background-main { background: #101010; border-radius: .875rem; }
+    dialog { margin: auto; padding: 0; border: 0; border-radius: 1rem; background: var(--page); color: var(--text); width: min(73rem,calc(100vw - 2rem)); height: min(620px,calc(100dvh - 2rem)); max-width: none; max-height: none; box-shadow: 0 22px 90px #0008; overflow: hidden; }
+    dialog::backdrop { background: #0009; }
+    dialog[open] { display: flex; flex-direction: column; animation: arrive 170ms ease-out; }
+    .modal-header { display: flex; flex: none; align-items: center; gap: .75rem; padding: 1.25rem 1.5rem 1.125rem; }
+    .modal-header h1 { margin-right: auto; }
+    .text-button { padding: .4rem .65rem; border-radius: .4rem; background: transparent; color: var(--muted); }
+    .text-button:hover { color: var(--text); background: var(--pop); }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: .5rem; background: transparent; color: var(--muted); flex: none; }
+    .icon-button:hover { background: var(--pop); color: var(--text); }
+    .close { margin-right: -.5rem; }
+    .walk-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0,1fr) 14.25rem; gap: 1.5rem; padding: 0 1.5rem; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #444 transparent; }
+    .workspace-shell { position: relative; min-height: 28.75rem; display: grid; grid-template-columns: 10.5rem minmax(0,1fr); gap: .375rem; padding: .375rem; background: #090909; border-radius: .875rem; overflow: hidden; }
+    .mini-sidebar { min-width: 0; background: #121212; border-radius: .625rem; display: flex; flex-direction: column; }
+    .mini-toolbar { display: flex; align-items: center; gap: .125rem; height: 3.125rem; padding: .25rem .5rem; flex: none; }
+    .logo { width: 2.35rem; height: 1.45rem; color: #d1d1d1; }
+    .mini-toolbar .plus { margin-left: auto; background: #202020; color: #ddd; }
+    .mini-toolbar .plus:hover { background: #333; }
+    .mini-toolbar .options-toggle { color: #aaa; }
+    .mini-toolbar .options-toggle[aria-expanded="true"] { background: #303030; color: #eee; }
+    .mini-scope { padding: .75rem .75rem .5rem; font-size: .75rem; color: #a4a4a4; }
+    .mini-folder { color: #858585; font-size: .75rem; padding: .125rem .75rem .5rem; overflow-wrap: anywhere; }
+    .mini-empty { color: #686868; padding: .25rem .75rem; font-size: .75rem; }
+    .mini-session { display: flex; align-items: center; width: calc(100% - .625rem); gap: .5rem; padding: .625rem .375rem; margin: 0 .3125rem; background: #202020; border-radius: .5rem; text-align: left; }
+    .mini-session span:last-child { min-width: 0; }
+    .mini-session strong { font-size: .8125rem; font-weight: 500; display: block; }
+    .mini-session small { display: block; font-size: .6875rem; color: #8f8f8f; }
+    .mini-utilities { margin-top: auto; padding: .5rem; display: flex; gap: .125rem; }
+    .mini-utilities .icon-button { color: #777; }
+    .mini-chat { position: relative; min-width: 0; border-radius: .625rem; background: #111; display: flex; flex-direction: column; overflow: hidden; }
+    .mini-chat-header { display: flex; align-items: center; gap: .5rem; padding: .875rem 1rem; min-height: 3.125rem; color: #c9c9c9; font-size: .8125rem; }
+    .mini-chat-header > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .mini-chat-header small { margin-left: auto; font-size: .6875rem; color: #777; white-space: nowrap; }
+    .mobile-toolbar { display: none; }
+    .mini-thread { flex: 1; min-height: 0; overflow-y: auto; padding: .5rem 1.25rem 1rem; scrollbar-width: thin; scrollbar-color: #333 transparent; }
+    .empty-thread { display: flex; height: 100%; min-height: 11rem; flex-direction: column; align-items: center; justify-content: center; padding-bottom: 1rem; }
+    .avatar { position: relative; display: inline-block; width: 2.5rem; height: 2.5rem; overflow: hidden; border-radius: 50%; flex: none; }
+    .avatar img { width: 166.7%; height: 166.7%; max-width: none; position: absolute; left: 50%; bottom: -2%; transform: translateX(-50%); object-fit: contain; }
+    .avatar.small { width: 1.4rem; height: 1.4rem; }
+    .avatar.menu { width: 2.5rem; height: 2.5rem; }
+    .avatar.hero { width: 6rem; height: 6.5rem; border-radius: 1.5rem; }
+    .empty-thread h2 { margin-top: .625rem; font-size: 1.125rem; color: #e2e2e2; }
+    .empty-thread p { font-size: .75rem; color: #6c6c6c; margin-top: .3rem; }
+    .composer-wrap { flex: none; padding: 0 1rem 1rem; }
+    .composer-label { font-size: .6875rem; color: #747474; padding: 0 .25rem .375rem; }
+    .mini-composer { background: #202020; border-radius: .875rem; padding: .5rem .5rem .5rem .75rem; display: flex; align-items: flex-end; gap: .5rem; transition: background 150ms; }
+    .mini-composer:focus-within { background: #292929; }
+    .mini-composer textarea { flex: 1; min-width: 0; width: 100%; height: 4.5rem; max-height: 7.5rem; resize: vertical; background: transparent; padding: .25rem 0; line-height: 1.6; font-size: .8125rem; box-shadow: none; }
+    .mini-composer textarea::placeholder { color: #717171; }
+    .mini-composer .send { width: 2rem; height: 2rem; border-radius: 50%; color: #151515; background: #d1d1d1; }
+    .mini-composer .send:disabled { color: #777; background: #303030; opacity: 1; }
+    .no-session-composer { color: #5e5e5e; font-size: .8125rem; background: #191919; padding: .875rem 1rem; border-radius: .875rem; }
+    .example-message-label { font-size: .6875rem; color: #777; margin: .75rem 0 .375rem; text-align: right; }
+    .example-message { max-width: 90%; padding: .875rem 1rem; margin-left: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #272727; border-radius: .875rem .875rem .25rem .875rem; font-size: .8125rem; color: #d6d6d6; line-height: 1.65; }
+    .message-footnote { color: #777; font-size: .75rem; margin: 1.25rem auto 0; max-width: 23rem; text-align: center; line-height: 1.6; }
+    .session-options { position: absolute; z-index: 4; left: 7.5rem; top: 3.375rem; width: 21rem; max-width: calc(100% - 1.5rem); background: #252525; box-shadow: 0 14px 38px #0008; border-radius: .75rem; animation: reveal 160ms ease-out; }
+    .options-heading { display: flex; align-items: center; gap: .75rem; padding: .875rem 1rem; border-radius: .75rem .75rem 0 0; background: #2a2a2a; }
+    .options-heading p { font-size: .875rem; font-weight: 500; }
+    .options-heading small { font-size: .75rem; color: #aaa; }
+    .options-heading .icon-button { margin-left: auto; width: 1.5rem; height: 1.5rem; }
+    .options-fields { display: grid; grid-template-columns: 4.25rem minmax(0,1fr); align-items: center; gap: .75rem .625rem; padding: 1rem; }
+    .field-label { font-size: .75rem; color: #aaa; }
+    .field-button { display: flex; align-items: center; gap: .45rem; width: 100%; min-height: 2.125rem; padding: .375rem .625rem; background: #333; border-radius: .4rem; font-size: .75rem; text-align: left; }
+    .field-button:hover, .field-button[aria-expanded="true"] { background: #454545; }
+    .field-button[data-current="true"] { background: #484848; }
+    .field-button > span:not(.avatar) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .field-button .chevron { margin-left: auto; color: #999; width: .875rem; height: .875rem; }
+    .options-footer { display: flex; align-items: center; justify-content: space-between; padding: .625rem .75rem; background: #2a2a2a; border-radius: 0 0 .75rem .75rem; gap: .5rem; }
+    .options-footer .text-button { font-size: .75rem; }
+    .start-button { display: inline-flex; align-items: center; gap: .375rem; padding: .5rem .75rem; background: #ddd; color: #161616; border-radius: .4rem; font-size: .75rem; font-weight: 500; }
+    .start-button:hover { background: #fff; }
+    .start-button svg { width: .875rem; height: .875rem; }
+    .choice-menu { position: absolute; z-index: 7; top: 6.875rem; left: 5.2rem; width: 19rem; max-width: calc(100% - 1rem); padding: .375rem; background: #343434; border-radius: .625rem; box-shadow: 0 14px 35px #0009; animation: reveal 140ms ease-out; }
+    .choice-menu[data-field="type"] { top: 5rem; }
+    .choice-menu[data-field="profile"] { top: 12.625rem; }
+    .choice-menu[data-field="workspace"] { top: auto; bottom: 4.625rem; left: 2.25rem; width: 20rem; }
+    .choice-menu p { font-size: .6875rem; color: #aaa; padding: .375rem .5rem .5rem; }
+    .choice-row { display: flex; align-items: center; gap: .625rem; padding: .625rem .5rem; width: 100%; text-align: left; background: transparent; border-radius: .375rem; }
+    .choice-row:hover { background: #474747; }
+    .choice-row[aria-selected="true"] { background: #424242; }
+    .choice-row > span:not(.avatar) { min-width: 0; }
+    .choice-row strong { display: block; font-size: .8125rem; font-weight: 500; }
+    .choice-row small { display: block; font-size: .6875rem; color: #aaa; margin-top: .125rem; overflow-wrap: anywhere; }
+    .choice-row > svg:last-child { margin-left: auto; width: .875rem; height: .875rem; color: #ddd; }
+    .profile-sheet { position: absolute; z-index: 6; inset: 3.375rem 1rem 1rem 7.5rem; padding: 1rem; background: #262626; border-radius: .75rem; box-shadow: 0 14px 38px #0008; overflow-y: auto; animation: reveal 140ms ease-out; }
+    .sheet-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+    .sheet-top h3 { font-weight: 500; }
+    .profile-tabs { display: flex; gap: .25rem; background: #1e1e1e; border-radius: .4rem; padding: .25rem; margin-bottom: 1rem; }
+    .profile-tabs button { padding: .4rem .625rem; background: transparent; border-radius: .25rem; color: #aaa; font-size: .75rem; }
+    .profile-tabs button[aria-selected="true"] { background: #3b3b3b; color: #eee; }
+    .profile-details { margin: 0; display: grid; grid-template-columns: 5.25rem minmax(0,1fr); gap: .75rem .625rem; font-size: .75rem; }
+    .profile-details dt { color: #999; }
+    .profile-details dd { margin: 0; color: #ddd; overflow-wrap: anywhere; }
+    .profile-details code { font-size: .6875rem; }
+    .sheet-note { font-size: .75rem; color: #999; line-height: 1.6; margin-top: 1.25rem; }
+    .annotation { display: flex; min-width: 0; flex-direction: column; padding-top: .875rem; padding-bottom: 1rem; }
+    .annotation-label { font-size: .75rem; color: var(--muted); margin-bottom: .75rem; }
+    .annotation h2 { max-width: 14rem; }
+    .annotation-copy { margin-top: .875rem; color: #a2a2a2; line-height: 1.7; }
+    .annotation-copy p + p { margin-top: .875rem; }
+    .annotation strong { color: #ddd; font-weight: 500; }
+    .annotation-hint { margin-top: 1.25rem; color: #d1d1d1; line-height: 1.65; }
+    .annotation .reference-link { align-self: flex-start; margin: 1rem 0 0 -.65rem; font-size: .75rem; }
+    .annotation-note { margin-top: auto; padding-top: 1.75rem; color: #6f6f6f; font-size: .75rem; line-height: 1.6; }
+    .walk-caption { display: flex; flex: none; align-items: center; gap: 1rem; padding: .875rem 1.5rem 1rem; color: #777; font-size: .75rem; }
+    .walk-caption .text-button { font-size: .75rem; margin-left: auto; margin-right: -.65rem; white-space: nowrap; }
+    .reference-body { padding: 0 1.5rem 1.5rem; overflow-y: auto; min-height: 0; flex: 1; scrollbar-width: thin; scrollbar-color: #444 transparent; }
+    .topic-search { width: 100%; height: 2.75rem; border-radius: .5rem; background: var(--panel); padding: .625rem .875rem; margin-bottom: 1rem; }
+    .topic-search::placeholder { color: #888; }
+    .topic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .375rem 1rem; }
+    .topic-button { display: block; width: 100%; padding: .875rem 1rem; text-align: left; background: var(--panel); border-radius: .625rem; font-size: .875rem; }
+    .topic-button:hover { background: var(--pop); }
+    .topic-button small { display: block; font-size: .75rem; color: #999; margin-top: .25rem; }
+    .reference-copy { max-width: 49rem; margin: 0 auto; color: #aaa; line-height: 1.75; }
+    .reference-copy h2 { font-size: .875rem; color: #ddd; margin-top: 1.5rem; margin-bottom: .75rem; }
+    .reference-copy ul { margin: 0; padding-left: 1.25rem; }
+    .reference-copy li + li { margin-top: .625rem; }
+    .reference-example { background: var(--panel); border-radius: .625rem; padding: 1rem; }
+    .reference-note { font-size: .8125rem; color: #8f8f8f; margin-top: 1rem; }
+    .back-button { display: inline-flex; align-items: center; gap: .375rem; margin-left: -.625rem; margin-right: .125rem; font-size: .75rem; }
+    .view-enter { animation: reveal 160ms ease-out; }
+    @keyframes arrive { from { opacity: 0; transform: translateY(5px) scale(.992); } to { opacity: 1; transform: none; } }
+    @keyframes reveal { from { opacity: .2; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+    @media (pointer: fine) { html { font-size: 90%; } }
+    @media (max-width: 950px) {
+      .walk-body { grid-template-columns: minmax(0,1fr) 12rem; gap: 1rem; padding: 0 1rem; }
+      .workspace-shell { grid-template-columns: 9.5rem minmax(0,1fr); }
+      .session-options { left: 5.5rem; width: 20rem; }
+      .profile-sheet { left: 5.5rem; }
+      .mini-chat-header small { display: none; }
+      .annotation h2 { font-size: 1rem; }
+    }
+    @media (max-width: 720px) {
+      dialog { width: calc(100vw - 1.5rem); height: min(640px,calc(100dvh - 1.5rem)); }
+      .modal-header { padding: 1rem; gap: .375rem; }
+      .walk-body { display: block; padding: 0 .75rem; }
+      .workspace-shell { display: flex; min-height: 25.5rem; height: 25.5rem; }
+      .mini-sidebar { display: none; }
+      .mini-chat { width: 100%; }
+      .mobile-toolbar { display: flex; }
+      .mini-chat-header { display: none; }
+      .mini-toolbar.mobile-toolbar { background: #171717; }
+      .session-options { left: .875rem; top: 3.375rem; width: 20.25rem; max-width: calc(100% - 1.75rem); }
+      .choice-menu { width: 17rem; left: 1.25rem; max-width: calc(100% - 1.5rem); }
+      .choice-menu[data-field="workspace"] { width: 18rem; left: .75rem; }
+      .profile-sheet { inset: 3.375rem .875rem .875rem; }
+      .annotation { padding: 1.25rem .5rem .5rem; }
+      .annotation-label { margin-bottom: .5rem; }
+      .annotation h2 { max-width: none; }
+      .annotation-copy { margin-top: .5rem; }
+      .annotation-copy p + p { margin-top: .5rem; }
+      .annotation-hint { margin-top: .75rem; }
+      .annotation-note { display: none; }
+      .annotation .reference-link { margin-top: .625rem; }
+      .walk-caption { padding: .625rem 1rem .75rem; font-size: .6875rem; gap: .5rem; align-items: flex-start; }
+      .walk-caption p { max-width: 65%; }
+      .walk-caption .text-button { font-size: .6875rem; }
+      .reference-body { padding: 0 1rem 1rem; }
+      .topic-grid { grid-template-columns: 1fr; }
+      .background-app { grid-template-columns: 1fr; }
+      .background-sidebar { display: none; }
+      .mobile-reopen { display: block !important; position: absolute; top: 1rem; left: 1rem; margin: 0; }
+      .empty-thread { min-height: 7rem; }
+      .avatar.hero { width: 5rem; height: 5.5rem; }
+      .mini-thread { padding: .25rem .875rem .5rem; }
+      .composer-wrap { padding: 0 .75rem .75rem; }
+    }
+    @media (max-width: 720px) and (pointer: coarse) { textarea, input { font-size: 16px !important; } .icon-button { min-width: 2.5rem; min-height: 2.5rem; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <div class="background-app"><div class="background-sidebar"><svg class="logo" viewBox="150 423 1200 654.02" fill="currentColor" aria-label="Kollab"><path d="M150 903.46 821.26 423H1350L623.56 813.8l263.22 263.22H685.63L384.48 903.46Z"/><path d="m297.89 726.61 359.29-257.16H375.29Z"/></svg><p>This Computer</p><p>kollab</p><button class="reopen" type="button">Learn</button></div><div class="background-main"></div></div>
+  <button class="reopen mobile-reopen" type="button" hidden>Learn</button>
+  <dialog id="walkthrough" aria-labelledby="modal-title"></dialog>
+  <script id="topic-data" type="application/json">[{"id":"networks","title":"Kollab networks","summary":"A Kollab network lets trusted Kollab installs find one another and share agent presence. It is a Kollab peer mesh, not a VPN or a public chat room.","howTo":["On the computer that will invite another device, open the Network settings or enter /connect in chat.","Create a one-time invite code and share it only with the person who should join.","Accept the invite on the other trusted Kollab install, then check that both devices appear in the sidebar.","Open a device to browse its available workspaces and agents."],"example":"Invite a second computer with a one-time code, then use the sidebar to reach an agent running on that computer.","note":"Treat invite codes as private. Do not post them in a public channel or include them in screenshots."},{"id":"devices","title":"Devices","summary":"A device is one computer running Kollab. The sidebar shows which computers are in your network and lets you browse their available work.","howTo":["Expand Networks in the sidebar.","Choose the computer you want to use.","Open one of that device's workspaces, then select an agent or session.","If a computer is missing, confirm that Kollab is running there and that it joined the same network."],"example":"Keep a build agent on your workstation and open that device from a laptop when you want to review its work."},{"id":"workspaces","title":"Workspaces","summary":"A workspace is a project folder. Choosing a folder keeps its sessions, local agents, and project context together.","howTo":["Use the workspace picker to select a project folder.","Choose an agent that is available in that folder.","Start a session; new work is created in the selected workspace.","Switch folders from the same picker when you move to another project."],"example":"Use one workspace for the Kollab repository and another for a customer project so their sessions and local agents stay separate."},{"id":"agents","title":"Agents","summary":"Agents are named collaborators with their own instructions and optional skills. Rosters group agents; teams can start several agents together. In the sidebar, local agents are grouped under their workspace so you can tell which project each one works in.","howTo":["Open Agents to see the rosters and teams available in the selected workspace.","Choose a single agent for a focused task, or a team when the work needs parallel roles.","Give the agent a concrete result to produce and how you will verify it.","Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.","Drag past the sidebar edge and release on the Release to hide cue to tuck an agent into Hidden Agents. You can restore it there; hiding does not stop or delete it.","If another device changed the order at the same time, the sidebar refreshes and asks you to retry; your change is not silently lost.","Review its output and tests before using the result."],"example":"Ask a coding agent to add a small feature, name the relevant files, and require it to run the focused tests before reporting back. Then move its workspace row to the top so the next session starts there."},{"id":"profiles","title":"Provider profiles","summary":"A profile chooses the provider, base URL/endpoint, model, and reasoning effort for a session. The name is only a label; the endpoint is where requests go. A profile is separate from the agent's role and instructions.","howTo":["Choose a saved profile; review its provider, base URL/endpoint, model, and reasoning effort before starting a session.","When copying a profile, check the provider and endpoint shown in the copy form. Stored fields the form does not show, including an ACP command, are preserved.","Keyring-backed credentials and sign-in profiles remain stored, but environment-sourced or provisioned keys do not move to the copy. Set its KOLLAB_\u003cPROFILE>_API_KEY or sign in separately.","Select the profile before starting a session. It does not change the chosen agent."],"example":"Copy an ACP-backed profile and confirm its command remains available. If its source key came from KOLLAB_\u003cPROFILE>_API_KEY or KOLLAB_API_KEY, set a profile-specific key for the copy or authenticate again.","note":"Profile names do not guarantee the provider endpoint. Verify the base URL, and never paste key values into prompts or Hub messages."},{"id":"koordinator","title":"Koordinator","summary":"The koordinator keeps a multi-agent effort organized: it tracks assignments, asks for progress, and routes work to the right agent.","howTo":["Start or join the hub that owns the work.","Give the koordinator a bounded goal, acceptance checks, and any no-go constraints.","Check the task board and ask for a report when an assignment finishes.","Review the delivered changes and test evidence yourself before accepting them."],"example":"Split a feature into one UI task and one test task, then ask the koordinator to report both results and the integration check.","note":"A coordinator organizes work; it does not replace review or make an untested change safe to ship."},{"id":"hub-messaging","title":"Hub messaging","summary":"Hub messages coordinate agents across a shared channel. Messages are visible to the hub, so they are not private direct messages.","howTo":["Address a message to the agent's identity, not its general agent type.","State the task, relevant context, and the evidence you want back.","Use the shared channel for coordination that other hub members should see.","Never send passwords, API keys, private keys, or one-time access codes in hub chat."],"example":"Send `hub_msg to=\"lapis\"` with a short request such as “check the Learn links and report any broken routes.”","note":"Hub messages are visible to other members; do not assume a message is private."},{"id":"voice","title":"Voice mode","summary":"Voice mode lets you speak to the active chat. The microphone is not enabled just by opening Kollab; you turn voice mode on explicitly.","howTo":["Open the Voice controls or enter /voice status to check the current state.","Enter /voice on when you are ready to speak.","Talk to the active chat and wait for its response.","Enter /voice off when you are done to release the microphone."],"example":"Say “summarize the last answer in three steps,” then use /voice off when the conversation is finished.","note":"Opening Learn never turns on the microphone. Use /voice status if you are unsure whether voice is active. Separately, /config > Hub > Dream Model picks a cheaper model ID (supported by your active provider) for background agent dreaming only; blank falls back to the shared kollabor.llm.fast_model, then the active session model, reusing your active profile's endpoint and credentials. Dream Model does not change voice replies: the fast voice-responder call path is not wired yet."},{"id":"system-prompts","title":"System prompts","summary":"An agent's system prompt describes how it should work. Project agent files can include reusable sections with Kollab's prompt renderer.","howTo":["Open the System Prompts settings to review the prompt used by the current agent.","For a project agent, edit its system_prompt.md in that workspace's .kollab/agents/\u003cagent-name>/ folder.","Keep reusable prompt fragments in that agent's sections/ folder and include them with a supported \u003ctrender> include.","Restart or reload the agent when its startup prompt changes, then verify the rendered result."],"example":"Add a short “verify before reporting” section and include it with `\u003ctrender type=\"include\" path=\"sections/verify.md\" />`.","note":"Prompt sections are not Agent Skills. Skills use their own SKILL.md directory contract."},{"id":"phone-access","title":"PhoneLink","summary":"Open the same Kollab app on your phone through your existing Kollab connection. Scan a QR code, approve the phone on your computer, and continue in its browser.","howTo":["Connect this computer to your Kollab network with /connect or Settings > Network.","Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.","Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed.","Check that the pairing codes match, then approve the phone on your computer. The invitation expires after five minutes and links one phone.","Bookmark Kollab to return in the same phone browser. Remove a phone in PhoneLink to withdraw its access."],"example":"Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.","note":"Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. Existing WireGuard access is optional under Advanced Settings."}]</script>
+  <script>
+    "use strict";
+    const topics = JSON.parse(document.getElementById("topic-data").textContent);
+    const topicById = Object.fromEntries(topics.map(topic => [topic.id, topic]));
+    const dialog = document.getElementById("walkthrough");
+    const paths = {
+      close: '<path d="m6 6 12 12M6 18 18 6"/>',
+      plus: '<path d="M12 5v14M5 12h14"/>',
+      options: '<path d="M4 7h6m4 0h6M4 17h10m4 0h2M10 4v6m4 4v6"/>',
+      chevron: '<path d="m8 10 4 4 4-4"/>',
+      check: '<path d="m5 12 4 4L19 6"/>',
+      send: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+      back: '<path d="m12 5-7 7 7 7M5 12h14"/>',
+      folder: '<path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/>',
+      users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.87M15 3.13a4 4 0 0 1 0 7.75"/><circle cx="9" cy="7" r="4"/>',
+      book: '<path d="M12 7v14M3 3h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5v15h-5a4 4 0 0 0-4 3 4 4 0 0 0-4-3H3Z"/>'
+    };
+    function icon(name, cls = "") { return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`; }
+    function logo() { return '<svg class="logo" viewBox="150 423 1200 654.02" fill="currentColor" aria-label="Kollab"><path d="M150 903.46 821.26 423H1350L623.56 813.8l263.22 263.22H685.63L384.48 903.46Z"/><path d="m297.89 726.61 359.29-257.16H375.29Z"/></svg>'; }
+    const agents = {
+      koordinator: { name: "Koordinator", role: "Organizes multi-agent work", type: "Koordinator", image: "koordinator.png" },
+      backend: { name: "Backend", role: "Focused implementation work", type: "Coder", image: "backend.png" }
+    };
+    const profiles = {
+      local: { name: "Local", model: "Local model", provider: "Ollama", endpoint: "http://localhost:11434/v1", effort: "Default" },
+      cloud: { name: "Cloud", model: "Cloud model", provider: "OpenAI-compatible", endpoint: "https://provider.example/v1", effort: "Default" }
+    };
+    const workspaces = { kollab: "/projects/kollab", website: "/projects/website" };
+    const typeDescriptions = { Koordinator: "Organizes assignments and agent coordination", Coder: "Instructions for implementation and verification", Research: "Instructions for research and source checking" };
+    const defaultRequest = "Review the contact form in this workspace. Find where submissions are handled and suggest one small fix. Show the relevant files; don’t change them yet.";
+    let state = { agent: "koordinator", type: "Koordinator", profile: "local", workspace: "kollab", options: true, field: null, profiles: false, started: false, session: null, sent: false, request: defaultRequest, message: "", focus: "options", page: "walkthrough", topic: null, topicReturn: "topics", query: "" };
+    const params = new URLSearchParams(window.location.search);
+    if (agents[params.get("agent")]) { state.agent = params.get("agent"); state.type = agents[state.agent].type; }
+    if (profiles[params.get("profile")]) state.profile = params.get("profile");
+    if (workspaces[params.get("workspace")]) state.workspace = params.get("workspace");
+    if (["agent","type","profile","workspace"].includes(params.get("control"))) { state.field = params.get("control"); state.focus = state.field; }
+    if (["chat","message"].includes(params.get("view"))) {
+      state.session = { agent: state.agent, type: state.type, profile: state.profile, workspace: state.workspace };
+      state.started = true; state.options = false; state.field = null; state.focus = "composer";
+      if (params.get("view") === "message") { state.sent = true; state.message = defaultRequest; state.request = ""; state.focus = "sent"; }
+    }
+    if (params.get("view") === "topics") state.page = "topics";
+    if (topicById[params.get("topic")]) { state.page = "topic"; state.topic = params.get("topic"); state.topicReturn = "walkthrough"; }
+    function esc(value) { return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char])); }
+    function inline(value) { return esc(value).replace(/`([^`]+)`/g, "<code>$1</code>"); }
+    function avatar(id, cls = "") { return `<span class="avatar ${cls}"><img src="../assets/${agents[id].image}" alt="${agents[id].name}" draggable="false"></span>`; }
+    function toolbar(mobile = false) {
+      return `<div class="mini-toolbar ${mobile ? "mobile-toolbar" : ""}">${logo()}<button class="icon-button plus" type="button" data-action="new-session" aria-label="New Session" title="New Session with the current picks">${icon("plus")}</button><button class="icon-button options-toggle" type="button" data-action="options" aria-label="Session Options" title="Session Options" aria-expanded="${state.options}">${icon("options")}</button></div>`;
+    }
+    function sidebar() {
+      return `<aside class="mini-sidebar" aria-label="Example sidebar">${toolbar()}<p class="mini-scope">This Computer</p>${state.started ? `<p class="mini-folder">${state.session.workspace}</p><button class="mini-session" type="button" data-action="session">${avatar(state.session.agent)}<span><strong>${agents[state.session.agent].name}</strong><small>Example session</small></span></button>` : '<p class="mini-empty">No sessions yet.</p>'}<div class="mini-utilities"><button type="button" class="icon-button" data-action="topics" aria-label="Browse reference topics" title="Learn topics">${icon("book")}</button></div></aside>`;
+    }
+    function chat() {
+      const active = state.session || state;
+      const name = agents[active.agent].name;
+      return `<section class="mini-chat" aria-label="Example chat">${toolbar(true)}<div class="mini-chat-header"><span>${state.started ? name : "New Session"}</span><small>${state.started ? "Example conversation" : ""}</small></div><div class="mini-thread">${state.sent ? `<p class="example-message-label">Example message · You</p><div class="example-message">${esc(state.message)}</div><p class="message-footnote">This example stops at the request.<br>No agent or model received it.</p>` : `<div class="empty-thread">${avatar(active.agent,"hero")}<h2>${name}</h2><p>${state.started ? "Example conversation" : ""}</p></div>`}</div><div class="composer-wrap">${state.started ? `<p class="composer-label">Example request</p><form class="mini-composer"><textarea id="example-request" rows="3" aria-label="Example request for ${name}" placeholder="Give ${name} a task…">${esc(state.request)}</textarea><button type="submit" class="icon-button send" aria-label="Preview example message" title="Preview example message" ${state.request.trim() ? "" : "disabled"}>${icon("send")}</button></form>` : `<div class="no-session-composer">Message ${name}…</div>`}</div></section>`;
+    }
+    function fieldButton(field, text, prefix = "") {
+      return `<button type="button" class="field-button" data-field="${field}" data-current="${state.focus === field}" aria-expanded="${state.field === field}" aria-label="${field === "profile" ? "Model" : field.charAt(0).toUpperCase() + field.slice(1)}: ${esc(text)}">${prefix}<span>${esc(text)}</span>${icon("chevron","chevron")}</button>`;
+    }
+    function choices() {
+      if (!state.field) return "";
+      const field = state.field;
+      const label = field === "agent" ? "Agents in this example" : field === "workspace" ? "Recent folders in this example" : field === "profile" ? "Example model profiles" : "Agent types";
+      const list = field === "agent" ? Object.entries(agents).map(([id, agent]) => ({ id, name: agent.name, detail: agent.role, prefix: avatar(id,"menu") })) : field === "workspace" ? Object.entries(workspaces).map(([id, path]) => ({ id, name: id, detail: path, prefix: icon("folder") })) : field === "profile" ? Object.entries(profiles).map(([id, profile]) => ({ id, name: `${profile.model} · ${profile.name}`, detail: profile.provider, prefix: "" })) : Object.entries(typeDescriptions).map(([id, description]) => ({ id, name: id, detail: description, prefix: "" }));
+      const selected = field === "profile" ? state.profile : state[field];
+      return `<div class="choice-menu" data-field="${field}" role="listbox" aria-label="${label}"><p>${label}</p>${list.map(item => `<button type="button" class="choice-row" role="option" aria-selected="${item.id === selected}" data-choice="${field}" data-value="${esc(item.id)}">${item.prefix}<span><strong>${esc(item.name)}</strong><small>${esc(item.detail)}</small></span>${item.id === selected ? icon("check") : ""}</button>`).join("")}</div>`;
+    }
+    function options() {
+      if (!state.options) return "";
+      return `<section class="session-options" aria-label="New Session options"><div class="options-heading">${avatar(state.agent)}<div><p>New Session</p><small>${agents[state.agent].name} · ${profiles[state.profile].name}</small></div><button type="button" class="icon-button" data-action="close-options" aria-label="Close Session Options">${icon("close")}</button></div><div class="options-fields"><span class="field-label">Agent</span>${fieldButton("agent",agents[state.agent].name,avatar(state.agent,"small"))}<span class="field-label">Type</span>${fieldButton("type",state.type)}<span class="field-label">Model</span>${fieldButton("profile",`${profiles[state.profile].model} · ${profiles[state.profile].name}`)}<span class="field-label">Workspace</span>${fieldButton("workspace",state.workspace,icon("folder"))}</div><div class="options-footer"><button type="button" class="text-button" data-action="profiles">Manage Profiles</button><button type="button" class="start-button" data-action="start">${icon("plus")}Start Session</button></div>${choices()}</section>`;
+    }
+    function profileSheet() {
+      if (!state.profiles) return "";
+      const profile = profiles[state.profile];
+      return `<section class="profile-sheet" aria-label="Example profiles"><div class="sheet-top"><h3>Profiles</h3><button class="icon-button" type="button" data-action="close-profiles" aria-label="Back to Session Options">${icon("close")}</button></div><div class="profile-tabs" role="tablist" aria-label="Example profiles">${Object.entries(profiles).map(([id, item]) => `<button type="button" role="tab" aria-selected="${id === state.profile}" data-profile="${id}">${item.name}</button>`).join("")}</div><dl class="profile-details"><dt>Provider</dt><dd>${profile.provider}</dd><dt>Endpoint</dt><dd><code>${esc(profile.endpoint)}</code></dd><dt>Model</dt><dd>${profile.model}</dd><dt>Effort</dt><dd>${profile.effort}</dd></dl><p class="sheet-note">Example profiles for exploring this control. No credentials are stored and no endpoint is contacted.</p></section>`;
+    }
+    function annotation() {
+      const name = agents[state.agent].name;
+      const data = {
+        options: ["Session Options", "A session has four picks.", `<p><strong>Agent</strong> is who you work with. <strong>Type</strong> supplies its instructions. <strong>Model</strong> chooses a provider profile. <strong>Workspace</strong> is the project folder.</p>`, "Try the Agent control, then choose a workspace.", "agents"],
+        agent: ["Agent", "Choose who does the work.", `<p>Pick <strong>Backend</strong> for a focused coding task, or <strong>Koordinator</strong> to organize several agents.</p><p>Each agent brings its own Type. The model profile and folder remain separate choices.</p>`, "Choose either agent in the menu.", "agents"],
+        "agent-chosen": ["Agent", `${name} is selected.`, `<p>Its Type is <strong>${state.type}</strong>. Changing the named agent brings that agent’s instructions along.</p><p>Your model profile is still <strong>${profiles[state.profile].name}</strong>.</p>`, "Choose the Workspace control to set the project folder.", "agents"],
+        type: ["Type", "Instructions, separate from identity.", `<p>The Type supplies the way an agent should work. <strong>${name}</strong> is the named collaborator; <strong>${state.type}</strong> is the instruction bundle.</p><p>You can choose a different Type without changing the model profile.</p>`, "Try Coder or Research and watch which field changes.", "system-prompts"],
+        profile: ["Model", "Change the model, keep the agent.", `<p>This field chooses a saved provider profile: its provider, endpoint, model, and reasoning effort.</p><p>Switch <strong>Local</strong> to <strong>Cloud</strong>. ${name} and the workspace stay the same.</p>`, "Use Manage Profiles to inspect the example endpoint.", "profiles"],
+        workspace: ["Workspace", "Give the work a home.", `<p>A workspace is a project folder. Its sessions, local agents, and project context stay together.</p><p>Choose <strong>website</strong> for the contact-form example.</p>`, "Then use Start Session inside the illustrated UI.", "workspaces"],
+        ready: ["New Session", "These picks travel together.", `<p><strong>${name}</strong> will use the <strong>${state.type}</strong> instructions and the <strong>${profiles[state.profile].name}</strong> model profile in <strong>${state.workspace}</strong>.</p>`, "Use Start Session to open the example chat.", "workspaces"],
+        composer: ["Message input", "Give it a concrete result.", `<p>Name the work, the relevant context, and the evidence you want back.</p><p>The example asks for a review before any edits. You can change the request in the composer.</p>`, "Use the send arrow to preview the example message.", "agents"],
+        sent: ["The request", "This is where the work begins.", `<p>In Kollab, sending the message hands the task to the selected agent. Review its output and test evidence before accepting changes.</p><p>Here, only your example message is displayed. Nothing was sent to an agent.</p>`, "Open Session Options to explore another setup.", "agents"],
+        profiles: ["Provider profiles", "The endpoint decides where it goes.", `<p>A profile name is a label. Its endpoint is where provider requests go.</p><p>These example values let you compare the fields without connecting to a provider.</p>`, "Switch profiles here, then return to Session Options.", "profiles"]
+      }[state.focus] || null;
+      const item = data || ["Session Options", "Explore the session controls.", "<p>Open Session Options to choose an agent, type, model profile, and workspace.</p>", "The + uses the current picks immediately.", "agents"];
+      return `<aside class="annotation" aria-live="polite"><p class="annotation-label">${item[0]}</p><h2>${esc(item[1])}</h2><div class="annotation-copy">${item[2]}</div><p class="annotation-hint">${esc(item[3])}</p><button class="text-button reference-link" type="button" data-topic="${item[4]}">Read about ${item[4] === "profiles" ? "provider profiles" : item[4] === "system-prompts" ? "system prompts" : item[4]}</button><p class="annotation-note">Session Options changes the next session. It does not rewrite a chat already open.</p></aside>`;
+    }
+    function modalHeader(title, back = false) {
+      return `<header class="modal-header">${back ? `<button class="text-button back-button" type="button" data-action="back">${icon("back")}<span>${state.page === "topic" && state.topicReturn !== "walkthrough" ? "Topics" : "Walkthrough"}</span></button>` : ""}<h1 id="modal-title" tabindex="-1">${esc(title)}</h1>${!back ? '<button class="text-button" type="button" data-action="topics">Topics</button>' : ""}<button class="icon-button close" type="button" data-action="close" aria-label="Close Learn" title="Close Learn">${icon("close")}</button></header>`;
+    }
+    function walkthrough() {
+      return `${modalHeader("Start a session")}<div class="walk-body"><div class="workspace-shell" aria-label="Interactive example of Kollab">${sidebar()}${chat()}${options()}${profileSheet()}</div>${annotation()}</div><footer class="walk-caption"><p>Interactive example. Nothing is started or sent.</p><button type="button" class="text-button" data-action="reset">Reset example</button></footer>`;
+    }
+    function topicResults(query) {
+      const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+      const found = topics.filter(topic => words.every(word => [topic.title,topic.summary,...topic.howTo,topic.example,topic.note || ""].join(" ").toLowerCase().includes(word)));
+      return found.length ? `<div class="topic-grid">${found.map(topic => `<button class="topic-button" type="button" data-topic="${topic.id}">${esc(topic.title)}<small>${esc(topic.id === "phone-access" ? "Pair a phone and continue in its browser" : topic.id === "profiles" ? "Providers, endpoints, models, and credentials" : topic.id === "agents" ? "Named collaborators, teams, and sidebar controls" : topic.id === "workspaces" ? "Project folders and session context" : topic.id === "networks" ? "Connect trusted Kollab installs" : topic.id === "devices" ? "Find another computer and its work" : topic.id === "koordinator" ? "Organize a multi-agent effort" : topic.id === "hub-messaging" ? "Coordinate in a shared channel" : topic.id === "voice" ? "Use the microphone explicitly" : "Agent instructions and reusable sections")}</small></button>`).join("")}</div>` : `<p class="reference-note">No topics match “${esc(query)}”.</p>`;
+    }
+    function reference() {
+      if (state.page === "topics") return `${modalHeader("Topics",true)}<div class="reference-body"><input type="search" class="topic-search" id="topic-search" value="${esc(state.query)}" placeholder="Find a reference topic" aria-label="Search reference topics"><div id="topic-results">${topicResults(state.query)}</div></div>`;
+      const topic = topicById[state.topic];
+      return `${modalHeader(topic.title,true)}<article class="reference-body view-enter"><div class="reference-copy"><p>${inline(topic.summary)}</p><h2>How to get started</h2><ul>${topic.howTo.map(step => `<li>${inline(step)}</li>`).join("")}</ul><h2>Example</h2><p class="reference-example">${inline(topic.example)}</p>${topic.note ? `<p class="reference-note">${inline(topic.note)}</p>` : ""}</div></article>`;
+    }
+    function render(focus = null) {
+      const previousBody = dialog.querySelector(".walk-body");
+      const scroll = previousBody ? previousBody.scrollTop : 0;
+      dialog.innerHTML = state.page === "walkthrough" ? walkthrough() : reference();
+      const body = dialog.querySelector(".walk-body");
+      if (body) body.scrollTop = scroll;
+      if (focus) dialog.querySelector(focus)?.focus({ preventScroll: true });
+    }
+    function startExample() {
+      state.session = { agent: state.agent, type: state.type, profile: state.profile, workspace: state.workspace };
+      if (!state.request.trim()) state.request = defaultRequest;
+      state.options = false; state.field = null; state.profiles = false; state.started = true; state.sent = false; state.message = ""; state.focus = "composer";
+      render("#example-request");
+    }
+    function choose(field, value) {
+      if (field === "agent") { state.agent = value; state.type = agents[value].type; state.focus = "agent-chosen"; }
+      else { state[field] = value; state.focus = field === "workspace" ? "ready" : field; }
+      state.field = null; render(`[data-field="${field}"]`);
+    }
+    function openField(field) {
+      state.options = true; state.profiles = false; state.field = state.field === field ? null : field; state.focus = field;
+      render(state.field ? ".choice-row" : `[data-field="${field}"]`);
+    }
+    function openLearn() { if (!dialog.open) dialog.showModal(); render("#modal-title"); }
+    dialog.addEventListener("click", event => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      if (button.dataset.choice) { choose(button.dataset.choice,button.dataset.value); return; }
+      if (button.dataset.field) { openField(button.dataset.field); return; }
+      if (button.dataset.profile) { state.profile = button.dataset.profile; render(`[data-profile="${state.profile}"]`); return; }
+      if (button.dataset.topic) { state.topicReturn = state.page; state.page = "topic"; state.topic = button.dataset.topic; render("#modal-title"); return; }
+      const action = button.dataset.action;
+      if (action === "close") { dialog.close(); return; }
+      if (action === "start" || action === "new-session") { startExample(); return; }
+      if (action === "options") { state.options = !state.options; state.field = null; state.profiles = false; state.focus = state.options ? "options" : state.started ? "composer" : "closed"; render(); return; }
+      if (action === "close-options") { state.options = false; state.field = null; state.focus = state.started ? "composer" : "closed"; render(); return; }
+      if (action === "profiles") { state.profiles = true; state.options = false; state.field = null; state.focus = "profiles"; render(); return; }
+      if (action === "close-profiles") { state.profiles = false; state.options = true; state.focus = "profile"; render(); return; }
+      if (action === "session") { state.options = false; state.field = null; state.focus = state.sent ? "sent" : "composer"; render("#example-request"); return; }
+      if (action === "topics") { state.page = "topics"; render("#modal-title"); return; }
+      if (action === "back") { state.page = state.page === "topic" ? state.topicReturn : "walkthrough"; render("#modal-title"); return; }
+      if (action === "reset") { state = { agent: "koordinator", type: "Koordinator", profile: "local", workspace: "kollab", options: true, field: null, profiles: false, started: false, session: null, sent: false, request: defaultRequest, message: "", focus: "options", page: "walkthrough", topic: null, topicReturn: "topics", query: "" }; render("#modal-title"); }
+    });
+    dialog.addEventListener("input", event => {
+      if (event.target.id === "example-request") { state.request = event.target.value; const button = dialog.querySelector(".send"); button.disabled = !state.request.trim(); if (state.focus !== "composer") { state.focus = "composer"; const old = dialog.querySelector(".annotation"); if (old) old.outerHTML = annotation(); } }
+      if (event.target.id === "topic-search") { state.query = event.target.value; dialog.querySelector("#topic-results").innerHTML = topicResults(state.query); }
+    });
+    dialog.addEventListener("submit", event => {
+      if (!event.target.matches(".mini-composer")) return;
+      event.preventDefault();
+      if (!state.request.trim()) return;
+      state.message = state.request.trim(); state.request = ""; state.sent = true; state.focus = "sent"; render("#example-request");
+    });
+    dialog.addEventListener("keydown", event => {
+      if (event.key === "Escape" && (state.field || state.options || state.profiles)) {
+        event.preventDefault(); state.field = null; state.options = false; state.profiles = false; state.focus = state.started ? "composer" : "closed"; render();
+      }
+      if (event.key === "Enter" && !event.shiftKey && event.target.id === "example-request") { event.preventDefault(); event.target.closest("form").requestSubmit(); }
+    });
+    dialog.addEventListener("click", event => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+    });
+    document.querySelectorAll(".reopen").forEach(button => button.addEventListener("click", openLearn));
+    render(); dialog.showModal(); dialog.querySelector("#modal-title").focus({ preventScroll: true });
+  </script>
+</body>
+</html>
