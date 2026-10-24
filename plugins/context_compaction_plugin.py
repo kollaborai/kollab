@@ -3538,6 +3538,7 @@ class ContextCompactionPlugin(BasePlugin):
           [task reminder]        -- synthetic system note listing active tasks
           [to_keep messages]     -- recent messages kept intact
         """
+        base_summary = summary_text  # each drop retry starts from this, so one note
         if _dropped_preserved:
             # Issue #279: say what was dropped so the model knows the
             # preserved record is incomplete.
@@ -3655,7 +3656,7 @@ class ContextCompactionPlugin(BasePlugin):
         ):
             return self._build_compacted_history(
                 system_msg,
-                summary_text,
+                base_summary,
                 to_keep,
                 preserved_tasks[1:],
                 ledger_handled=ledger_handled,

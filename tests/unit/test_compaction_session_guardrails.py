@@ -295,6 +295,8 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         self.assertGreater(dropped, 0)
         drop_notes = [m for m in compacted if "[Dropped " in m.content]
         self.assertEqual(len(drop_notes), 1)
+        # one note, not one per dropped task
+        self.assertEqual(drop_notes[0].content.count("[Dropped "), 1)
         self.assertIn(
             f"[Dropped {dropped} oldest preserved task", drop_notes[0].content
         )
