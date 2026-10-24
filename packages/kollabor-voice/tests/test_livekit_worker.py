@@ -11,6 +11,7 @@ import re
 import signal
 import socket
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,12 +120,15 @@ class FakeEngine:
 class FakeAdapter:
     """SpeechAdapter stand-in: scripted transcripts, paced synthetic audio."""
 
-    def __init__(self, utterances=(), states=None, tts_chunks=100, tts_pace=0.03):
+    def __init__(
+        self, utterances=(), states=None, tts_chunks=100, tts_pace=0.03, tts_lead=0
+    ):
         self.utterances, self.tts_chunks, self.tts_pace = (
             list(utterances),
             tts_chunks,
             tts_pace,
         )
+        self.tts_lead = tts_lead  # silent 40 ms frames first, like VibeVoice
         self.states = states or itertools.repeat(SpeechReadiness("ready"))
         self.heard, self.spoken, self.finalized = [], [], []
         self.fenced = self.released = None
@@ -157,10 +161,11 @@ class FakeAdapter:
     async def synthesize(self, binding, text, cancel):
         self.spoken.append(text)
         try:
-            for i in range(self.tts_chunks):
+            for i in range(self.tts_lead + self.tts_chunks):
                 if cancel.is_set():
                     return
-                yield AudioFrame(i + 1, 24000, np.full(960, 0.05, np.float32))  # 40 ms
+                level = 0.0 if i < self.tts_lead else 0.05
+                yield AudioFrame(i + 1, 24000, np.full(960, level, np.float32))  # 40 ms
                 await asyncio.sleep(self.tts_pace)
         finally:
             self.finalized.append(text)
@@ -643,6 +648,40 @@ def test_rebatch_and_resample():
 
     assert run(collect()) == [1600, 1600, 300]
     assert len(lw.resample(np.zeros(16000, np.float32), 16000, 24000)) == 24000
+
+
+def test_edge_trim_keeps_a_breath_of_a_clips_silence():
+    rate = lw.PLAY_RATE
+    quiet, word = np.zeros(rate // 2, np.float32), np.full(rate // 5, 0.3, np.float32)
+    pause = quiet[: rate * 3 // 10]
+    trim = lw._EdgeTrim()
+    # 1.5 s of lead-in over three chunks, a word, a pause, a word, 0.6 s of tail
+    chunks = [quiet, quiet, np.concatenate([quiet, word])]
+    chunks += [np.concatenate([pause, word, quiet]), quiet[: rate // 10]]
+    out = np.concatenate([trim.push(chunk) for chunk in chunks] + [trim.end()])
+    loud = np.flatnonzero(out)
+    assert loud[0] == lw.LEAD_KEEP
+    assert out.size - 1 - loud[-1] == lw.TAIL_KEEP
+    assert out.size == lw.LEAD_KEEP + 2 * word.size + pause.size + lw.TAIL_KEEP
+
+    silent = lw._EdgeTrim()
+    assert silent.push(quiet).size == 0 and silent.end().size == lw.LEAD_KEEP
+
+
+def test_a_clip_plays_its_voice_after_a_breath_not_its_lead_in():
+    # 0.8 s of silence, then 0.4 s of voice: what plays is 0.1 s, then the voice
+    adapter = FakeAdapter(tts_chunks=10, tts_pace=0, tts_lead=20)
+    worker = SimpleNamespace(adapter=adapter, binding=None, error=lambda *_: None)
+
+    async def play():
+        async with lw.SpeechTTS(worker).synthesize(S1) as stream:
+            return [event.frame async for event in stream]
+
+    frames = run(play())
+    pcm = np.concatenate([np.frombuffer(f.data, np.int16) for f in frames])
+    assert np.flatnonzero(pcm)[0] == lw.LEAD_KEEP
+    assert np.count_nonzero(pcm) == 10 * 960
+    assert pcm.size < lw.LEAD_KEEP + 11 * 960  # LiveKit may pad the last frame
 
 
 def test_config_loads_from_env_and_the_poster_never_raises():

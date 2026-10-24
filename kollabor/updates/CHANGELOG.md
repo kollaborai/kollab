@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stale assignments, preserves direct-to-agent requests without TaskLedger
   IDs, and caps the wrapped recovery message at 8,000 characters.
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Voice: a spoken reply no longer pauses about a second between sentences; each
+  sentence's silent lead-in is cut to a short breath.
 
 ### Removed
 - Web: WireGuard phone access is removed; PhoneLink is the way to connect a

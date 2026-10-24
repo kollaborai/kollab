@@ -268,6 +268,43 @@ class SpeechSTT(stt.STT):
         )
 
 
+# VibeVoice opens every clip with 0.5-1 s of silence, and a clip is one
+# sentence, so replies paused about a second between sentences. A breath of
+# silence stays at each end of a clip.
+SILENCE = 0.01  # |sample| at or below this is silence, about -40 dBFS
+LEAD_KEEP = round(0.1 * PLAY_RATE)
+TAIL_KEEP = round(0.2 * PLAY_RATE)
+
+
+class _EdgeTrim:
+    """Cuts a clip's leading and trailing silence down to a breath."""
+
+    def __init__(self):
+        self.started = False
+        self.quiet = np.zeros(0, np.float32)  # silence since the last sound
+
+    def push(self, audio):
+        loud = np.flatnonzero(np.abs(audio) > SILENCE)
+        if not loud.size:
+            self.quiet = np.concatenate([self.quiet, audio])
+            if not self.started:
+                self.quiet = self.quiet[-LEAD_KEEP:]
+            return audio[:0]
+        before = np.concatenate([self.quiet, audio[: loud[0]]])
+        if not self.started:
+            before = before[-LEAD_KEEP:]
+        self.started, self.quiet = True, audio[loud[-1] + 1 :]
+        return np.concatenate([before, audio[loud[0] : loud[-1] + 1]])
+
+    def end(self):
+        # a silent clip still sends its breath, so the stream is never empty
+        return self.quiet[:TAIL_KEEP] if self.started else self.quiet
+
+
+def _pcm16(audio) -> bytes:
+    return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
 class SpeechTTS(tts.TTS):
     """One ChunkedStream per sentence over the shared VibeVoice owner."""
 
@@ -295,12 +332,15 @@ class _SpeechAudio(tts.ChunkedStream):
         )
         cancel = asyncio.Event()
         frames = worker.adapter.synthesize(worker.binding, self.input_text, cancel)
+        trim = _EdgeTrim()
         try:
             async with contextlib.aclosing(frames):
                 async for frame in frames:
                     audio = resample(frame.samples, frame.sample_rate_hz, PLAY_RATE)
-                    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-                    output_emitter.push(pcm.tobytes())
+                    if (audio := trim.push(audio)).size:
+                        output_emitter.push(_pcm16(audio))
+            if (tail := trim.end()).size:
+                output_emitter.push(_pcm16(tail))
             output_emitter.flush()
         except AdapterError as exc:
             # TTS failure changes state only; the display transcript stays.
@@ -362,6 +402,8 @@ class KollabAgent(Agent):
     async def tts_node(self, text, model_settings):
         # Each sentence is one utterance. The default node re-splits the text and
         # holds a sentence back until the next one starts, which delays first audio.
+        # (One clip per several sentences is worse: VibeVoice pauses 0.7-1.3 s
+        # between the sentences of a clip.)
         worker, turn = self.worker, None
         async for sentence in text:
             turn = self.turn  # llm_node set it before it produced this sentence
