@@ -55,16 +55,19 @@ consumers or the maintainer, rather than inventing them.
 
 ## Releases and the shared checkout
 
-For any release request, read `docs/release-process.md`. Agents share one
-checkout on `main`: never create a worktree, stash, reset, clean, restore, or
-switch branches in it, and never build a release from uncommitted files or a
-scratch clone. Commit the release on local `main` by explicit paths (other
-people's edits stay uncommitted and out of it), push `HEAD` to
-`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only origin main`
-and tag the merge. Once it is published, run `uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`
-(the release binary in `~/.local/bin`). The release is not done until
-`main` matches `origin/main`, `git status` lists none of the release's files,
-and `kollab --version` reports the new version.
+Follow the agent workflow standard in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`: your
+own git worktree and lane branch based on the current release branch, the
+before-push checks, pushes to your lane branch only, `git ls-remote`
+verification before you report done, and draft PRs into `release/<ver>`, never
+`main`. The shared checkout is read-only for agents: never edit, stash, reset,
+clean, restore, or switch branches in it, and never build a release from
+uncommitted files or a scratch clone. For any release request, read
+`docs/release-process.md`; its steps that touch the shared checkout
+(fast-forwarding `main`, tagging, the local install with
+`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh`) are the
+operator's, and an agent runs them only on Marco's explicit instruction. The
+release is not done until `main` matches `origin/main`, `git status` lists none
+of the release's files, and `kollab --version` reports the new version.
 
 ## Put the change in its existing owner
 

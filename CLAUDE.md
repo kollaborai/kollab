@@ -855,27 +855,42 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 ### Git Workflow
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, `tests/` MUST reference GitHub issue
-- Worktree per task (trunk-based development, see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
-  `git worktree add ../kollab-wt/issue-123-slug -b issue-123-slug origin/main`;
-  remove the worktree and branch after the PR merges
-- Branch: `issue-123-description`, one branch per worktree, branched off `origin/main`
+- Worktree per task (trunk-based development; SOFTWARE_DEVELOPMENT_LIFECYCLE.md is the
+  canonical agent workflow):
+  `git worktree add ../kollab-wt/issue-123-slug -b issue-123-slug origin/release/<ver>`;
+  remove the worktree and branch once the PR is merged and verified on the remote
+- Branch: `issue-123-description`, one branch per worktree, based on the current release
+  branch (`origin/release/<ver>`), never on `main`
 - Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
   `fixes #123`, `closes #123`, `resolves #123`, or `#123`
 - Main branch protected - no direct pushes
-- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco marks a PR
-  ready or approves it; auto-merge then merges it once checks pass.
+- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
+  koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
 - PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
   repo, opened by a person with write access, merges with a merge commit once the three
   required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
   `gh pr merge <n> --disable-auto` stops one already armed. Such a merge starts no
   push-to-main CI run.
+- Agents push only their own lane branch (`git push -u origin <lane-branch>`), never `main`
+  or `release/*`, and open PRs as drafts into the release branch, never `main`
+  (`gh pr create --draft --base release/<ver>`). Auto-merge watches PRs into `main` only, so
+  a lane PR is merged by hand with Marco's explicit approval; a release is one draft PR,
+  `release/<ver>` into `main`.
+- Before every push: `pwd` is your worktree, `git branch --show-current` is your lane, and
+  `git log --oneline origin/release/<ver>..HEAD` plus `git status` show only your lane's
+  commits. Before reporting done: `git ls-remote origin refs/heads/<lane-branch>` equals
+  `git rev-parse HEAD`. If anything looks off, stop and report to the koordinator.
+- The shared checkout is read-only for agents and the live checkout Marco designates is
+  off-limits to all of them. Never force-push, and never stash, reset, clean or switch
+  branches in a shared checkout. Full rules: SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
 
 ```bash
 gh issue create --title "Fix version display"
-git switch -c issue-8-version-display-fix
+git worktree add ../kollab-wt/issue-8-version-display-fix -b issue-8-version-display-fix origin/release/<ver>
+cd ../kollab-wt/issue-8-version-display-fix
 git commit -m "Fix version display fixes #8"
-git push -u kollaborai issue-8-version-display-fix
-gh pr create --draft --title "Fix version display" --body "Fixes #8"
+git push -u origin issue-8-version-display-fix
+gh pr create --draft --base release/<ver> --title "Fix version display" --body "Fixes #8"
 ```
 
 ### Version Management
@@ -901,17 +916,22 @@ do not need runtime Git access.
 required CI checks (`ci/security-scan`, `ci/standards-check`, `ci/tests`).
 
 **Correct order: prep PR BEFORE the tag** (source must already match the tag; do
-not rely on CI to repair it):
+not rely on CI to repair it). All of a release's work reaches `main` through one draft
+release PR, `release/X.Y.Z` into `main`; lanes push only their own branch, never
+`release/*` or `main`. The shared checkout is read-only for agents, so the steps that
+touch it (the `git pull --ff-only` in step 2, the tag, the local install) are the
+operator's; an agent runs them only on Marco's explicit instruction:
 
-1. Prep commit on local `main` (`git commit -- <paths>`; never a worktree, branch
-   switch, scratch clone or uncommitted files) bumping *everything* to `X.Y.Z`:
+1. Prep commit, made in a lane worktree based on `release/X.Y.Z` (never the shared
+   checkout, a scratch clone or uncommitted files) and landed on the release branch by a
+   draft lane PR like any other change, bumping *everything* to `X.Y.Z`:
    - root `pyproject.toml` + all 10 `packages/*/pyproject.toml` versions
    - inter-package `kollabor-*>=` constraints, then `uv lock`
    - move `[Unreleased]` → `## [X.Y.Z] - DATE` in **both** `CHANGELOG.md` and
      `kollabor/updates/CHANGELOG.md` (keep them **byte-identical**, `cmp` them;
      the in-app update UI reads the packaged copy)
-2. `git push origin "HEAD:refs/heads/release/X.Y.Z"` and open the PR; it merges itself
-   with a merge commit once the checks pass (never squash). Then
+2. The release PR (`release/X.Y.Z` into `main`) stays a draft until it is marked ready;
+   it then merges itself with a merge commit once the checks pass (never squash). Then
    `git pull --ff-only origin main`.
 3. Annotated tag on the merged commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`,
    then `git push origin vX.Y.Z` (push the exact tag, never `--tags`).

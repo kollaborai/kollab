@@ -18,31 +18,46 @@ state. Temporary rollback artifacts require an explicit retention/cleanup condit
 
 ## releases and the shared checkout
 
-We follow Trunk-Based Development (short-lived feature branches, one worktree
-per task) with Conventional Commits and SemVer; see
-SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
+We follow Trunk-Based Development (short-lived lane branches, one worktree per
+task) with Conventional Commits and SemVer. The agent workflow is Marco's
+standard (issue #302); it applies to every agent on every machine, and
+SOFTWARE_DEVELOPMENT_LIFECYCLE.md is canonical, so read it before your first
+edit. The short version:
 
-Feature work happens in git worktrees. For each task, create a worktree at
-`../kollab-wt/issue-<N>-<slug>` with branch `issue-<N>-<slug>` branched off
-`origin/main`:
+- one worktree and one lane branch per task, based on the current release
+  branch (`release/<ver>`), never on `main`:
 
-    git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/main
+      git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/release/<ver>
 
-Edit, test, and commit inside the worktree; remove the worktree and branch
-after the PR merges. The shared checkout on `main` is a coordination and
-release surface, not an editing surface: never stash, reset, clean, restore,
-or switch branches in it, and never build a release from uncommitted files or
-a scratch clone.
+- the shared checkout is read-only for agents: edit, test, and commit only in
+  your worktree, and never stash, reset, clean, restore, or switch branches in
+  the shared one
+- before every push, confirm `pwd` is your worktree, `git branch
+  --show-current` is your lane's branch, and `git log --oneline
+  origin/release/<ver>..HEAD` plus `git status` show only your lane's commits
+- push only your lane branch (`git push -u origin <lane-branch>`), never `main`
+  or `release/*`, and never force; open PRs as drafts into the release branch
+  (`gh pr create --draft --base release/<ver>`), never into `main`
+- before reporting done, `git ls-remote origin refs/heads/<lane-branch>` must
+  equal `git rev-parse HEAD`; report the branch, the full SHA and that result
+  (and the PR's base from `gh pr view`)
+- correct beats fast; if anything looks off (wrong branch, unexpected commits, a
+  file in the wrong checkout, a remote that does not match), stop and report to
+  the koordinator with exact paths, branches and SHAs
+- the live checkout Marco designates is off-limits: no edits, pulls, resets or
+  restarts from it
+- a release's work folds into one draft release PR (`release/<ver>` into
+  `main`); no merges without Marco's explicit approval, no tags unless Marco
+  says so, no engine or web UI restart without approval
 
 For every release, read `docs/release-process.md`. Releases are tagged
 whenever Marco decides, and agents may create a release tag ONLY when Marco
-explicitly instructs them to. Commit the release on local `main` by explicit
-paths (other people's edits stay uncommitted and out of it), push `HEAD` to
-`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only
-origin main` and tag the merge. Once it is published, run
-`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the
-release binary in `~/.local/bin`). The release is not done until `main`
-matches `origin/main`, `git status` lists none of the release's files, and
+explicitly instructs them to. The release steps that touch the shared `main`
+checkout (`git pull --ff-only origin main`, tagging the merge, `uv sync
+--all-extras`, and `KOLLAB_VERSION=X.Y.Z bash install.sh` for the release
+binary in `~/.local/bin`) are the operator's; an agent runs them only on
+Marco's explicit instruction. The release is not done until `main` matches
+`origin/main`, `git status` lists none of the release's files, and
 `kollab --version` reports the new version.
 
 ## project snapshot
