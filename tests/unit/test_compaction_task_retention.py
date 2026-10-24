@@ -10,11 +10,16 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.context_compaction_plugin import (  # noqa: E402
+    MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS,
     MAX_PRESERVED_HUB_TASK_CHARS,
     MAX_PRESERVED_HUB_TASK_MESSAGES,
+    SUMMARY_INJECTION_PREFIX,
+    SUMMARY_INJECTION_SUFFIX,
     ContextCompactionPlugin,
 )
 
@@ -37,9 +42,14 @@ def _task_message(task_id: str, detail: str) -> Message:
     )
 
 
-def _plugin() -> ContextCompactionPlugin:
+def _plugin(identity: str | None = None) -> ContextCompactionPlugin:
     plugin = ContextCompactionPlugin.__new__(ContextCompactionPlugin)
     plugin.event_bus = None
+    if identity:
+        hub_plugin = SimpleNamespace(_identity=SimpleNamespace(identity=identity))
+        plugin.event_bus = SimpleNamespace(
+            get_service=lambda name: hub_plugin if name == "hub_plugin" else None
+        )
     return plugin
 
 
@@ -461,3 +471,224 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
         and call.args[1] == MAX_PRESERVED_HUB_TASK_MESSAGES
         for call in info.call_args_list
     )
+
+
+def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None:
+    plugin = _plugin()
+    filler_tasks = [
+        _task_message(f"live-{index:02}", f"active task {index} " + ("x" * 6_000))
+        for index in range(22)
+    ]
+    superseded = _task_message("live-22", "SUPERSEDED_TASK_CANARY " + ("s" * 6_000))
+    current_version = _task_message(
+        "live-22", "CURRENT_TASK_VERSION_CANARY " + ("c" * 6_000)
+    )
+    closed = _task_message("closed-task", "CLOSED_TASK_CANARY " + ("d" * 6_000))
+    old_summary = Message(
+        role="user",
+        content="OLD_COMPACTION_SUMMARY_CANARY",
+        metadata={"context_compaction": True},
+    )
+    old_reminder = Message(
+        role="user",
+        content="OLD_TASK_REMINDER_CANARY",
+        metadata={"compaction_task_reminder": True},
+    )
+    request_marker = "LATEST_USER_REQUEST_CANARY"
+    latest_request = Message(
+        role="user",
+        content=request_marker + " q" * 1_500 + " REQUEST_END_CANARY",
+    )
+    calls = [
+        {"id": f"call-{index}", "function": {"name": "read", "arguments": "{}"}}
+        for index in range(5)
+    ]
+    assistant = Message(role="assistant", content="", metadata={"tool_calls": calls})
+    tool_results = [
+        Message(role="tool", content="result", metadata={"tool_call_id": call["id"]})
+        for call in calls
+    ]
+    history = [
+        Message(role="system", content="system prompt"),
+        *filler_tasks,
+        superseded,
+        current_version,
+        closed,
+        old_summary,
+        old_reminder,
+        latest_request,
+        assistant,
+        *tool_results,
+    ]
+
+    split_point = plugin._find_split_point(history, keep_recent=4)
+    assert history[split_point:] == [assistant, *tool_results]
+    recovery_text = plugin._build_emergency_summary(history[1:split_point])
+
+    assert request_marker in recovery_text
+    assert "REQUEST_END_CANARY" in recovery_text
+    assert "SUPERSEDED_TASK_CANARY" not in recovery_text
+    assert "CLOSED_TASK_CANARY" not in recovery_text
+    assert "OLD_COMPACTION_SUMMARY_CANARY" not in recovery_text
+    assert "OLD_TASK_REMINDER_CANARY" not in recovery_text
+
+    live_ids = {f"live-{index:02}" for index in range(22)} | {"live-22"}
+    preserved, _ = plugin._extract_preservable_messages(
+        history, live_task_ids=live_ids
+    )
+    current_excerpt = next(
+        message for message in preserved if message.metadata["task_id"] == "live-22"
+    )
+    assert "CURRENT_TASK_VERSION_CANARY" in current_excerpt.content
+    assert "SUPERSEDED_TASK_CANARY" not in current_excerpt.content
+
+    compacted = plugin._build_compacted_history(
+        system_msg=history[0],
+        summary_text=recovery_text,
+        to_keep=history[split_point:],
+        preserved_tasks=preserved,
+        compaction_round=1,
+        pre_message_count=len(history),
+    )
+    summary_message = next(
+        message for message in compacted if message.metadata.get("context_compaction")
+    )
+    assert request_marker in summary_message.content
+    assert "CLOSED_TASK_CANARY" not in summary_message.content
+    assert len(summary_message.content) <= MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS
+    tool_call_message = next(
+        message for message in compacted if message.metadata.get("tool_calls")
+    )
+    assert len(tool_call_message.metadata["tool_calls"]) == 5
+    assert sum(message.role == "tool" for message in compacted) == 5
+
+
+def test_emergency_summary_excludes_later_hub_and_agent_hud_records() -> None:
+    plugin = _plugin()
+    human_request = Message(
+        role="user",
+        content="REAL_HUMAN_REQUEST_CANARY: finish the requested analysis.",
+    )
+    ordinary_hub_notice = Message(
+        role="user",
+        content="NON_TASK_HUB_NOTICE_CANARY: peer status update.",
+        metadata={"hub_message": True, "hub_is_intended": False},
+    )
+    hud_notice = Message(
+        role="user",
+        content="STANDALONE_AGENT_HUD_CANARY: pending status.",
+        metadata={"agent_hud": True, "agent_hud_sources": ["hub"]},
+    )
+
+    recovery_text = plugin._build_emergency_summary(
+        [human_request, ordinary_hub_notice, hud_notice]
+    )
+
+    assert "REAL_HUMAN_REQUEST_CANARY" in recovery_text
+    assert "NON_TASK_HUB_NOTICE_CANARY" not in recovery_text
+    assert "STANDALONE_AGENT_HUD_CANARY" not in recovery_text
+
+
+def test_emergency_summary_preserves_intended_untracked_hub_request() -> None:
+    plugin = _plugin("target-agent")
+    request_marker = "INTENDED_UNTRACKED_HUB_REQUEST_CANARY"
+    earlier_human_request = Message(
+        role="user",
+        content="OLDER_HUMAN_REQUEST_CANARY: first request.",
+    )
+    direct_hub_request = Message(
+        role="user",
+        content=(
+            "[hub channel: sender -> target-agent] "
+            + request_marker
+            + ": Please investigate this issue carefully and report back."
+        ),
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": "target-agent",
+            "hub_scope": "direct",
+        },
+    )
+
+    recovery_text = plugin._build_emergency_summary(
+        [earlier_human_request, direct_hub_request]
+    )
+
+    assert request_marker in recovery_text
+    assert "OLDER_HUMAN_REQUEST_CANARY" in recovery_text
+
+
+@pytest.mark.parametrize(
+    ("recipient", "scope"),
+    [
+        ("*", "broadcast"),
+        ("all", "broadcast"),
+        ("everyone", "broadcast"),
+        ("team", "team"),
+        ("project", "project"),
+    ],
+)
+def test_emergency_summary_excludes_intended_group_hub_notices(
+    recipient: str, scope: str
+) -> None:
+    plugin = _plugin("target-agent")
+    request_marker = "CURRENT_HUMAN_REQUEST_CANARY"
+    group_marker = f"GROUP_NOTICE_{recipient}_CANARY"
+    current_request = Message(role="user", content=request_marker)
+    group_notice = Message(
+        role="user",
+        content=f"[hub channel: sender -> {recipient}] {group_marker}: FYI only.",
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": recipient,
+            "hub_scope": scope,
+        },
+    )
+
+    recovery_text = plugin._build_emergency_summary([current_request, group_notice])
+
+    assert request_marker in recovery_text
+    assert group_marker not in recovery_text
+
+
+@pytest.mark.parametrize("scope", ["broadcast", "team", "project"])
+def test_emergency_summary_requires_direct_scope_for_hub_request(
+    scope: str,
+) -> None:
+    plugin = _plugin("target-agent")
+    request_marker = "CURRENT_HUMAN_REQUEST_CANARY"
+    group_marker = f"NON_DIRECT_SCOPE_{scope}_CANARY"
+    current_request = Message(role="user", content=request_marker)
+    scoped_notice = Message(
+        role="user",
+        content=f"[hub channel: sender -> target-agent] {group_marker}: FYI only.",
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": "target-agent",
+            "hub_scope": scope,
+        },
+    )
+
+    recovery_text = plugin._build_emergency_summary([current_request, scoped_notice])
+
+    assert request_marker in recovery_text
+    assert group_marker not in recovery_text
+
+
+def test_emergency_summary_bound_includes_injection_wrapper() -> None:
+    plugin = _plugin()
+    messages = [
+        Message(role="user", content=f"turn-{index} " + ("x" * 2_400))
+        for index in range(12)
+    ]
+
+    recovery_text = plugin._build_emergency_summary(messages)
+    injected_message = (
+        SUMMARY_INJECTION_PREFIX + recovery_text + SUMMARY_INJECTION_SUFFIX
+    )
+
+    assert "turn-11" in recovery_text
+    assert len(injected_message) <= MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS
