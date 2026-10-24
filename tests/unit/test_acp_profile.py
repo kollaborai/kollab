@@ -1,5 +1,6 @@
 import pytest
 
+from kollabor.llm.acp_bridge import ACPProfile
 from kollabor_ai.profile_manager import LLMProfile
 
 
@@ -43,7 +44,6 @@ def test_default_acp_profiles_are_selectable_without_native_fallback():
     for name, command, package in (
         ("claude-code", "claude-agent-acp", "claude-agent-acp@0.89.0"),
         ("codex-cli", "codex-acp", "codex-acp@2.1.1"),
-        ("gemini-cli", "gemini", "@google/gemini-cli@0.63.0"),
     ):
         data = ProfileManager.DEFAULT_PROFILES[name]
         profile = LLMProfile.from_dict(name, data)
@@ -69,13 +69,11 @@ def test_model_env_cannot_replace_builtin_acp_profile(monkeypatch):
     assert active.command == ("claude-agent-acp",)
 
 
-def test_builtin_gemini_profile_declares_supported_auth_pass_env():
-    """Default gemini-cli allowlists exactly the two documented supported keys."""
+def test_gemini_cli_is_not_a_builtin_acp_profile():
+    """Google retired Gemini CLI; it is neither a default profile nor an ACP builtin."""
     from kollabor_ai.profile_manager import ProfileManager
 
-    gemini = LLMProfile.from_dict("gemini-cli", ProfileManager.DEFAULT_PROFILES["gemini-cli"])
-    assert gemini.provider == "acp"
-    assert gemini.pass_env == ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-    for name in ("claude-code", "codex-cli"):
-        other = LLMProfile.from_dict(name, ProfileManager.DEFAULT_PROFILES[name])
-        assert other.pass_env == (), name
+    assert "gemini-cli" not in ProfileManager.DEFAULT_PROFILES
+    assert "gemini-cli" not in ACPProfile.BUILTIN_PROFILES
+    with pytest.raises(ValueError, match="unknown ACP profile"):
+        ACPProfile.builtin("gemini-cli")

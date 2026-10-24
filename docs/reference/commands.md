@@ -96,7 +96,7 @@ kollab acp --llm my-profile
 kollab acp --attach lapis
 ```
 
-The built-in harness profiles are `claude-code`, `codex-cli` and `gemini-cli`.
+The built-in harness profiles are `claude-code` and `codex-cli`.
 Their model and effort are managed by the harness. `/llm` changes harnesses;
 `/clear` opens fresh context and `/resume` attempts the stored harness session.
 

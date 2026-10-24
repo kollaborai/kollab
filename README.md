@@ -261,7 +261,7 @@ kollab --as codex --llm codex-cli --detached      # Codex joins as "codex"
 kollab --attach claude                            # open a window on it
 ```
 
-Install the harness and its ACP adapter on that computer and sign in there first; `/llm` shows the exact install command. Both have been run through model, tool, permission, cancel, steering and resume checks, and Codex has answered a request across two devices. Gemini CLI has a built-in `gemini-cli` profile but is not qualified yet.
+Install the harness and its ACP adapter on that computer and sign in there first; `/llm` shows the exact install command. Both have been run through model, tool, permission, cancel, steering and resume checks, and Codex has answered a request across two devices.
 
 ### Use Kollab from Zed
 
@@ -732,7 +732,7 @@ architecture guidance, see [AGENTS.md](https://github.com/kollaborai/kollab/blob
 - [Reasoning Effort](https://github.com/kollaborai/kollab/blob/main/docs/features/reasoning-effort.md)
 - [Setup Wizard](https://github.com/kollaborai/kollab/blob/main/docs/features/setup-wizard.md)
 - [Agent System](https://github.com/kollaborai/kollab/blob/main/docs/features/agents.md)
-- [ACP Agents](https://github.com/kollaborai/kollab/blob/main/docs/features/acp.md) — Claude Code and Codex as agents, Kollab inside Zed and other ACP clients; Gemini CLI qualification open
+- [ACP Agents](https://github.com/kollaborai/kollab/blob/main/docs/features/acp.md) — Claude Code and Codex as agents, Kollab inside Zed and other ACP clients
 - [Apps](https://github.com/kollaborai/kollab/blob/main/docs/features/apps.md)
 - [Voice Mode](https://github.com/kollaborai/kollab/blob/main/docs/features/voice-mode.md)
 - [Hub Quick Start](https://github.com/kollaborai/kollab/blob/main/docs/guides/hub-quick-start.md)
