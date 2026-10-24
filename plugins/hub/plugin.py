@@ -88,11 +88,15 @@ from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
     DEFAULT_ALERT_COOLDOWN,
+    DEFAULT_HANDOFF_ACK_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_STALL_THRESHOLD,
     DEFAULT_WAKE_COOLDOWN,
     DEFAULT_WAKE_INEFFICACY,
     SupervisorState,
+    ack_handoff,
+    begin_handoff,
+    unacked_handoffs,
 )
 from .supervisor import (
     evaluate as evaluate_supervisor,
@@ -653,6 +657,9 @@ class HubPlugin(BasePlugin):
         self._supervisor_state = SupervisorState()
         # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
         self._supervisor_alerts: List[Tuple[float, str]] = []
+        # Bounded (timestamp, text) pairs for sends that did not reach their
+        # target, shown by /hub status on every agent (issue #283).
+        self._dispatch_failures: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
         self._email_task: Optional[asyncio.Task] = None
@@ -744,6 +751,7 @@ class HubPlugin(BasePlugin):
                     "supervisor_max_reassignments": 3,
                     "supervisor_wake_inefficacy": 3,
                     "supervisor_alert_cooldown": 900,
+                    "supervisor_handoff_ack_timeout": 120,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -3480,6 +3488,28 @@ class HubPlugin(BasePlugin):
             ):
                 metadata["task_assignment"] = True
 
+        # A tagged handoff to a local agent is tracked on the ledger until
+        # the assignee acknowledges it (issue #283).
+        if (
+            metadata.get("task_assignment")
+            and task_id
+            and not handle
+            and not target.startswith("relay:")
+            and self._task_ledger
+            and self._identity
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                begin_handoff(
+                    self._task_ledger,
+                    task_id,
+                    self._identity.identity,
+                    target,
+                    content,
+                )
+            except Exception as e:
+                logger.debug("failed to track handoff %s: %s", task_id, e)
+
         # Route the message
         msg = HubMessage(
             action="message",
@@ -3531,6 +3561,7 @@ class HubPlugin(BasePlugin):
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
+                self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
                 ""
@@ -3577,11 +3608,22 @@ class HubPlugin(BasePlugin):
                 )
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
+            self._record_dispatch_failure(
+                ", ".join(queued_for), "offline, queued in its mailbox"
+            )
+        elif (msg.metadata or {}).get("_socket_failed"):
+            down = ", ".join(msg.metadata["_socket_failed"])
+            output = (
+                f"queued for {down} (socket send failed; it will read the"
+                " message from its mailbox)"
+            )
+            self._record_dispatch_failure(down, "socket send failed, queued")
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
             if target not in known_ids and target not in ("all", "*", "everyone"):
                 warned = True
+                self._record_dispatch_failure(target, "not online, no match")
                 output = (
                     f"warning: '{target}' is not online. "
                     f"message broadcast but no matching agent. "
@@ -6468,6 +6510,12 @@ class HubPlugin(BasePlugin):
             )
             if self.config
             else DEFAULT_ALERT_COOLDOWN,
+            handoff_ack_timeout=self.config.get(
+                "plugins.hub.supervisor_handoff_ack_timeout",
+                DEFAULT_HANDOFF_ACK_TIMEOUT,
+            )
+            if self.config
+            else DEFAULT_HANDOFF_ACK_TIMEOUT,
             state=self._supervisor_state,
         )
         if not decisions:
@@ -6533,6 +6581,31 @@ class HubPlugin(BasePlugin):
                         f" delivered to {decision.worker} (offline or"
                         " unreachable); the card will be requeued"
                     )
+            elif decision.kind == "retry_handoff":
+                card = self._task_ledger.get(decision.card_id)
+                retry = HubMessage(
+                    action="message",
+                    from_agent=my_id,
+                    from_identity=(card.assigner if card else "")
+                    or "idle-supervisor",
+                    to=decision.worker,
+                    content=decision.text,
+                    scope=MessageScope.DIRECT.value,
+                    metadata={
+                        "task_id": decision.card_id,
+                        "task_assignment": True,
+                    },
+                )
+                rejections = await self._route_message(retry)
+                if rejections:
+                    for ident, reason in rejections:
+                        self._record_dispatch_failure(ident, reason)
+                outcomes.append(f"retry_handoff -> {decision.worker}")
+            elif decision.kind == "alert_handoff_unacked":
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append(f"alert: handoff {decision.card_id} unacked")
             elif decision.kind == "alert_coordinator_stalled":
                 # Wake efficacy failed: the coordinator got the wakes and
                 # still produced no turn. Say it loudly — this is the
@@ -8402,6 +8475,7 @@ class HubPlugin(BasePlugin):
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
                         assigned_task_id = str(existing.id)
+                        ack_handoff(self._task_ledger, task_id, assignee)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -9506,6 +9580,30 @@ class HubPlugin(BasePlugin):
             except Exception:
                 logger.debug("supervisor alert publish failed", exc_info=True)
 
+    def _record_dispatch_failure(self, target: str, reason: str) -> None:
+        """Remember a send that did not reach ``target`` (issue #283).
+
+        The sender already reads the failure in its tool result; this keeps
+        it where `/hub status` (and so `kollab --hub status`) can show it.
+        """
+        failures = getattr(self, "_dispatch_failures", None)
+        if failures is None:
+            failures = self._dispatch_failures = []
+        failures.append((time.time(), f"{target}: {reason}"))
+        del failures[:-10]
+        logger.warning("hub dispatch failed: %s: %s", target, reason)
+
+    def _dispatch_failure_lines(self) -> List[str]:
+        failures = getattr(self, "_dispatch_failures", None) or []
+        if not failures:
+            return []
+        now = time.time()
+        lines = [f"dispatch failures: {len(failures)} recent"]
+        for ts, text in failures[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            lines.append(f"  ({ago}m ago) {' '.join(text.split())[:110]}")
+        return lines
+
     async def _notify_supervisor_alert(self, text: str) -> None:
         """Send the alert through the configured notifier channel, if any."""
         backend = getattr(getattr(self, "_notifier", None), "_backend", None)
@@ -9551,6 +9649,10 @@ class HubPlugin(BasePlugin):
                 f" turn; last completed turn {idle}m ago"
             )
         now = time.time()
+        for card in unacked_handoffs(self._task_ledger):
+            lines.append(
+                f"  handoff awaiting ack: {card.id} -> {card.assignee}"
+            )
         for ts, text in self._supervisor_alerts[-3:]:
             ago = max(1, int((now - ts) // 60))
             first = " ".join(text.split())[:110]
@@ -10503,6 +10605,11 @@ class HubPlugin(BasePlugin):
         )
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
+            # The sender has to hear that this was a mailbox drop, not a
+            # live delivery (issue #283).
+            failed = list((message.metadata or {}).get("_socket_failed", []))
+            if agent.identity not in failed:
+                message.metadata["_socket_failed"] = [*failed, agent.identity]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
@@ -13852,6 +13959,7 @@ class HubPlugin(BasePlugin):
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
         lines.extend(self._supervisor_status_lines())
+        lines.extend(self._dispatch_failure_lines())
         lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
 
