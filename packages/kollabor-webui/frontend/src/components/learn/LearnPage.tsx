@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleAlert, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { markCompleted, readCompleted } from "@/learn/completed";
 import { getLearnTopic, LEARN_TOPICS, type LearnRoute, type LearnTopicId } from "@/learn/catalog";
 
 type LearnPageProps = {
@@ -14,6 +15,12 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
   const topicHeadingRef = useRef<HTMLHeadingElement>(null);
   const topicScrollRef = useRef<HTMLDivElement>(null);
   const topic = route.kind === "topic" ? getLearnTopic(route.topicId) : null;
+  const [completed, setCompleted] = useState(readCompleted);
+  // Moving on from a topic counts as finishing it.
+  const goTo = (id: LearnTopicId) => {
+    if (topic && topic.id !== id) setCompleted((done) => markCompleted(topic.id, done));
+    onNavigate(id);
+  };
 
   useEffect(() => {
     topicScrollRef.current?.scrollTo({ top: 0 });
@@ -35,12 +42,16 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                 variant="ghost"
                 size="sm"
                 aria-current={topic?.id === item.id ? "page" : undefined}
-                onClick={() => onNavigate(item.id)}
+                onClick={() => goTo(item.id)}
                 className={`h-auto min-h-9 justify-start px-3 py-2 text-left font-normal md:w-full ${
                   topic?.id === item.id ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
               >
                 <span className="min-w-0 whitespace-nowrap md:whitespace-normal">{item.title}</span>
+                {completed.includes(item.id) ? (
+                  <span aria-hidden="true" className="ml-auto pl-2 text-xs opacity-60">✓</span>
+                ) : null}
+                {completed.includes(item.id) ? <span className="sr-only"> (completed)</span> : null}
               </Button>
             ))}
           </div>
