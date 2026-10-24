@@ -1013,6 +1013,7 @@ Consider:
 - 4 approval modes: CONFIRM_ALL (default), DEFAULT, AUTO_APPROVE_EDITS, TRUST_ALL
 - Risk-based assessment with pattern matching
 - Inline permission prompts (no modal interruption)
+- A Stop (ESC, the web UI's Stop, a voice talk-over) answers every open prompt cancelled: `LLMService.cancel_current_request` calls `PermissionManager.cancel_confirmations`, and a prompt asked while the turn is stopping never shows
 - Session-scoped approvals
 - `/permissions` command for runtime management
 - Event bus integration at SECURITY priority (900)

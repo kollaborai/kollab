@@ -192,8 +192,10 @@ Tool format: `Bash(command)`, `Edit(path)`, `Write(path)`, `Read(path)`, `MCP(se
 - `terminal` → "this cmd" (approves this specific command)
 - other → "project"
 
-**Note:** There is currently NO timeout on the permission prompt. If you miss it,
-press `d` or `ESC` to unblock. A timeout feature is planned but not yet implemented.
+**Stop and timeout:** a Stop (ESC, the web UI's Stop, a voice talk-over) answers
+every open prompt cancelled (`PermissionManager.cancel_confirmations`): the tool
+does not run and the turn ends. A prompt nobody answers gives up after 5 minutes
+(the hook's timeout) and the tool does not run.
 
 ## Commands
 

@@ -2232,6 +2232,7 @@ class LLMService:
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
             generation = queue_processor.request_cancellation(origin=origin)
+            self._cancel_open_prompts()
             async def cancel_acp() -> None:
                 try:
                     await asyncio.wait_for(acp.cancel(), timeout=35.0)
@@ -2271,6 +2272,7 @@ class LLMService:
                 return queue_processor.cancel_generation
 
         generation = queue_processor.request_cancellation(origin=origin)
+        self._cancel_open_prompts()
         cancellation_task_id = self._safe_operation_task_id(task_id)
         if cancellation_task_id is None:
             cancellation_task_id = self._operation_context_task_id()
@@ -2310,6 +2312,18 @@ class LLMService:
                 logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
         return generation
+
+    def _cancel_open_prompts(self) -> None:
+        """An approval prompt left open would hold the stopped turn until answered."""
+        bus = getattr(self, "event_bus", None)
+        permissions = bus.get_service("permission_manager") if bus is not None else None
+        cancel = getattr(permissions, "cancel_confirmations", None)
+        if cancel is None:
+            return
+        try:
+            cancel()
+        except Exception:  # the Stop still ends the stream and the running tool
+            logger.warning("could not answer the open approval prompts", exc_info=True)
 
     def clear_remote_task_cancellation(
         self, generation: int, *, task_id: str | None = None

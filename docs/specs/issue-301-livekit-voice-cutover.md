@@ -70,6 +70,11 @@ them, and no voice screen shows classifier controls, status or decisions.
   checkpoint and summary records) are copied into the new file at the swap.
 - A cut still queued when `/resume` or a new session swaps the conversation is
   dropped: its turn is not in the new one.
+- A talk-over or a Stop while a tool waits for approval answers the prompt
+  cancelled (`PermissionManager.cancel_confirmations`, called from
+  `LLMService.cancel_current_request`): the tool does not run, every window
+  closes the prompt and the turn ends, so the cut lands before the next turn. A
+  prompt asked while the turn is stopping is answered cancelled without showing.
 - Known limits, accepted for 0.18: a daemon that dies with a cut still queued
   loses it (the history and the log keep the uncut reply), and a typed message
   that reaches the daemon in the moment between a talk-over and its cut (the

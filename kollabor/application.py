@@ -778,8 +778,12 @@ class TerminalLLMChat:
                     }
                 return decision
 
+            def cancel_confirmations() -> None:  # a Stop or a talk-over
+                self._attach_permission_bridge.cancel_pending()
+                self.renderer.layout_manager.cancel_permission_prompt()
+
             self.permission_manager.set_confirmation_callback(
-                confirmation_callback_wrapper
+                confirmation_callback_wrapper, cancel=cancel_confirmations
             )
             logger.info("Permission confirmation callback wired to layout manager")
         else:

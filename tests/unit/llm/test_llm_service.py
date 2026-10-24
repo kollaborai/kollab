@@ -251,6 +251,33 @@ class TestLLMServiceIntegration(unittest.TestCase):
 
         self.assertTrue(self.service.cancel_processing)
 
+    def _stop_with_permissions(self):
+        """Stop the turn; return the permission manager it reached."""
+        permissions = MagicMock()
+        self.event_bus.get_service.side_effect = (
+            lambda name: permissions if name == "permission_manager" else None
+        )
+
+        async def cancel_and_drain():
+            self.service.cancel_current_request()
+            await self.service._task_manager.wait_for_tasks()
+
+        asyncio.run(cancel_and_drain())
+        return permissions
+
+    def test_a_stop_answers_an_open_approval_prompt_cancelled(self):
+        """A Stop or a talk-over must not leave the turn waiting on a prompt."""
+        self.service.is_processing = True
+        permissions = self._stop_with_permissions()
+        permissions.cancel_confirmations.assert_called_once_with()
+
+    def test_an_acp_stop_answers_an_open_approval_prompt_cancelled(self):
+        acp = SimpleNamespace(cancel=AsyncMock())
+        with patch.object(self.service, "_selected_active_acp_orchestrator", return_value=acp):
+            permissions = self._stop_with_permissions()
+        permissions.cancel_confirmations.assert_called_once_with()
+        acp.cancel.assert_awaited_once()
+
     def test_idle_human_cancel_supersedes_remote_cancellation_generation(self):
         async def scenario():
             self.service.is_processing = True

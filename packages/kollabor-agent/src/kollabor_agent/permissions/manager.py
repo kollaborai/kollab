@@ -80,6 +80,8 @@ class PermissionManager:
         self._confirmation_callback: Optional[
             Callable[[Dict[str, Any]], Awaitable[PermissionDecision]]
         ] = None
+        # Answers every prompt the callback has open cancelled (cancel_confirmations)
+        self._cancel_confirmations: Optional[Callable[[], None]] = None
 
         # Statistics
         self._stats = {
@@ -200,15 +202,27 @@ class PermissionManager:
     def set_confirmation_callback(
         self,
         callback: Callable[[Dict[str, Any]], Awaitable[PermissionDecision]],
+        cancel: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         Set callback for showing confirmation UI.
 
         Args:
             callback: Async function that shows confirmation and returns decision
+            cancel: Answers every prompt the callback has open cancelled
         """
         self._confirmation_callback = callback
+        self._cancel_confirmations = cancel
         logger.debug("Confirmation callback set")
+
+    def cancel_confirmations(self) -> None:
+        """A Stop or a talk-over ends the turn: its open prompts are answered cancelled.
+
+        A prompt asked after it, while the turn is still stopping, is answered
+        cancelled without showing (check_permission).
+        """
+        if self._cancel_confirmations is not None:
+            self._cancel_confirmations()
 
     async def check_permission(
         self,
@@ -372,7 +386,17 @@ class PermissionManager:
                 source="permission_manager",
             )
 
-            decision = await self._confirmation_callback(confirmation_details)
+            executor = getattr(self, "_tool_executor", None)
+            if executor is not None and executor.is_cancelled():
+                # A Stop or a talk-over came first. With a window attached nothing
+                # yields from here to the prompt opening, so a later Stop finds it.
+                decision = PermissionDecision(
+                    allowed=False,
+                    reason="User cancelled operation",
+                    risk_level=risk_result.level,
+                )
+            else:
+                decision = await self._confirmation_callback(confirmation_details)
 
             if decision.allowed:
                 self._stats["user_approved"] += 1

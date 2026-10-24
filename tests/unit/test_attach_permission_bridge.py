@@ -708,3 +708,95 @@ def test_attach_permission_timeout_cleans_pending_and_broadcasts_denial():
         assert display_tap.events[-1]["type"] == "permission_denied"
 
     asyncio.run(run_bridge())
+
+
+class QuietBus:
+    async def emit_with_hooks(self, *args, **kwargs):
+        return {}
+
+
+def _confirm_all_manager():
+    from kollabor_agent.permissions.manager import PermissionManager
+    from kollabor_agent.permissions.risk_assessor import RiskAssessor
+    from kollabor_events.dict_utils import deep_merge
+    from kollabor_events.permissions_config import PERMISSION_CONFIG_DEFAULTS
+    from kollabor_events.permissions_models import RiskAssessmentRules
+
+    config = deep_merge(
+        PERMISSION_CONFIG_DEFAULTS,
+        {"kollabor": {"permissions": {"approval_mode": "confirm_all"}}},
+    )
+    return PermissionManager(
+        config=config,
+        risk_assessor=RiskAssessor(rules=RiskAssessmentRules(), config=config),
+        event_bus=QuietBus(),
+    )
+
+
+SHELL_CALL = {"id": "t1", "type": "terminal", "name": "terminal", "command": "ls"}
+
+
+def test_a_stop_answers_every_open_prompt_cancelled():
+    # A Stop or a talk-over ends the turn, so no prompt may keep holding it,
+    # and every window closes the prompt it shows.
+    async def run_bridge():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        prompts = [_prompt(bridge, display_tap, "terminal_0"), _prompt(bridge, display_tap, "terminal_1")]
+        await asyncio.sleep(0)
+        bridge.cancel_pending()
+        answers = await asyncio.gather(*prompts)
+        return answers, [event for event in display_tap.events if event["type"] != "permission_request"]
+
+    answers, closed = asyncio.run(run_bridge())
+    assert answers == [ConfirmationResponse.CANCEL, ConfirmationResponse.CANCEL]
+    assert closed == [
+        {"type": "permission_denied", "tool_id": "terminal_0", "outcome": "cancelled"},
+        {"type": "permission_denied", "tool_id": "terminal_1", "outcome": "cancelled"},
+    ]
+
+
+def test_a_stop_refuses_the_tool_its_turn_waits_to_approve():
+    # Talking over the agent or pressing Stop while a tool waits for approval:
+    # the tool is refused at once instead of holding the turn for 5 minutes.
+    from kollabor_agent.permissions import handle_confirmation_response
+
+    async def scenario():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        manager = _confirm_all_manager()
+
+        async def ask(details):
+            response = await bridge.request_confirmation(
+                display_tap=display_tap, rpc_server=FakeRpcServer(), details=dict(details), timeout=300
+            )
+            return await handle_confirmation_response(manager, details, response)
+
+        manager.set_confirmation_callback(ask, cancel=bridge.cancel_pending)
+        check = asyncio.create_task(manager.check_permission(dict(SHELL_CALL)))
+        for _ in range(100):
+            if bridge._pending:
+                break
+            await asyncio.sleep(0)
+        assert bridge._pending  # the prompt is open
+        manager.cancel_confirmations()
+        return await asyncio.wait_for(check, 1)
+
+    decision = asyncio.run(scenario())
+    assert not decision.allowed and decision.reason == "User cancelled operation"
+
+
+def test_a_prompt_asked_while_its_turn_stops_never_shows():
+    from types import SimpleNamespace
+
+    async def scenario():
+        manager, asked = _confirm_all_manager(), []
+
+        async def ask(details):
+            asked.append(details)
+
+        manager.set_confirmation_callback(ask)
+        manager.set_tool_executor(SimpleNamespace(is_cancelled=lambda: True))
+        return await manager.check_permission(dict(SHELL_CALL)), asked
+
+    decision, asked = asyncio.run(scenario())
+    assert asked == []
+    assert not decision.allowed and decision.reason == "User cancelled operation"

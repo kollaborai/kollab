@@ -173,6 +173,11 @@ class AttachPermissionBridge:
         future.set_result(response)
         return True
 
+    def cancel_pending(self) -> None:
+        """Answer every open prompt cancelled: a Stop or a talk-over is ending its turn."""
+        for tool_id in list(self._pending):
+            self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+
     async def request_confirmation(
         self,
         *,
