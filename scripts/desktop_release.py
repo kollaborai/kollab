@@ -4,6 +4,12 @@
 Uses only the standard library so the publishing job needs no Kollab install.
 The CLI's existing macOS/Linux assets and names remain unchanged.
 
+Windows keeps the verified scie opaque, as Linux does (nothing rewrites or signs
+it): `stage` maps it to runtime\\kollab.exe beside kollab-desktop.exe in the NSIS
+installer. That one installer pair is optional in `verify` until the Windows
+job has passed on a real runner (docs/specs/windows-desktop.md); once there,
+`verify --windows required` makes it as mandatory as the Linux packages.
+
 macOS gets no scie: codesign cannot sign one (its jump keeps 15 bytes after
 LC_CODE_SIGNATURE), and notarization rejects any unsigned Mach-O. So `stage`
 unpacks the verified CLI scie into a plain tree, the scie's own CPython with
@@ -64,6 +70,11 @@ MACOS_TARGETS = {"macos-aarch64": "aarch64-apple-darwin", "macos-x86_64": "x86_6
 TARGETS = {
     "linux-x86_64": ("x86_64-unknown-linux-gnu", (("appimage", "*.AppImage", ".AppImage"), ("deb", "*.deb", ".deb"))),
 }
+# Not in TARGETS: manifest() is the set every release must hold, and this pair is
+# optional-but-whole (verify_manifest). The runtime binary itself is no release asset.
+WINDOWS_TARGETS = {
+    "windows-x86_64": ("x86_64-pc-windows-msvc", (("nsis", "*-setup.exe", "-setup.exe"),)),
+}
 
 
 def release_version(value: str = "") -> str:
@@ -99,8 +110,13 @@ def verify_checksum(asset: Path) -> None:
         raise ValueError(f"SHA-256 mismatch: {asset.name}")
 
 
+def desktop_packages(platform: str) -> tuple[str, tuple[tuple[str, str, str], ...]]:
+    """(Rust target triple, ((bundle folder, glob, asset suffix), ...)) of a Linux or Windows desktop package."""
+    return {**TARGETS, **WINDOWS_TARGETS}[platform]
+
+
 def desktop_names(platform: str, version: str) -> list[str]:
-    return [f"kollab-desktop-{platform}-{version}{suffix}" for _, _, suffix in TARGETS[platform][1]]
+    return [f"kollab-desktop-{platform}-{version}{suffix}" for _, _, suffix in desktop_packages(platform)[1]]
 
 
 def manifest(version: str) -> set[str]:
@@ -113,9 +129,22 @@ def manifest(version: str) -> set[str]:
     return {name + suffix for name in payloads for suffix in ("", ".sha256")}
 
 
-def verify_manifest(directory: Path, version: str) -> None:
+def windows_manifest(version: str) -> set[str]:
+    return {
+        name + suffix
+        for platform in WINDOWS_TARGETS
+        for name in desktop_names(platform, version)
+        for suffix in ("", ".sha256")
+    }
+
+
+def verify_manifest(directory: Path, version: str, windows: str = "optional") -> None:
+    """The release set is exact; the Windows installer pair may be absent (unless required) but never half there."""
     expected = manifest(version)
     actual = {path.name for path in directory.iterdir()}
+    pair = windows_manifest(version)
+    if windows == "required" or actual & pair:
+        expected |= pair
     if actual != expected:
         raise ValueError(
             f"release manifest mismatch; missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
@@ -210,6 +239,20 @@ def stage(platform: str, source: Path, version: str) -> Path:
         target = MACOS_TARGETS[platform]
         launcher = unpack_runtime(source, ROOT / "desktop/src-tauri/binaries" / f"app-runtime-{target}")
         return check_staged(launcher, version, {"version": version, "bundle": {"targets": ["app"]}})
+    if platform in WINDOWS_TARGETS:
+        target, packages = WINDOWS_TARGETS[platform]
+        destination = ROOT / "desktop/src-tauri/binaries" / f"kollab-{target}.exe"
+        # NSIS installs resources beside kollab-desktop.exe: runtime\kollab.exe is what
+        # desktop/src-tauri/src/main.rs windows_bundled_kollab looks for.
+        bundle = {
+            "targets": [package[0] for package in packages],
+            "externalBin": [],
+            "resources": {f"binaries/{destination.name}": "runtime/kollab.exe"},
+            "windows": {"nsis": {"installMode": "currentUser"}},
+        }
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        return check_staged(destination, version, {"version": version, "bundle": bundle})
     target, packages = TARGETS[platform]
     # linuxdeploy rewrites ELFs under usr/bin and usr/lib, including a
     # scie's appended archive. Keep the verified CLI opaque under usr/share.
@@ -242,7 +285,7 @@ def check_staged(destination: Path, version: str, release_config: dict) -> Path:
 def collect(platform: str, bundle_dir: Path, output: Path, version: str) -> list[Path]:
     output.mkdir(parents=True, exist_ok=True)
     collected = []
-    for (folder, pattern, _), name in zip(TARGETS[platform][1], desktop_names(platform, version), strict=True):
+    for (folder, pattern, _), name in zip(desktop_packages(platform)[1], desktop_names(platform, version), strict=True):
         candidates = list((bundle_dir / folder).glob(pattern))
         if len(candidates) != 1 or not candidates[0].is_file() or candidates[0].is_symlink():
             raise ValueError(f"expected exactly one {folder}/{pattern}; found {candidates}")
@@ -262,14 +305,18 @@ def main() -> int:
     parser.add_argument("--version", default="", help="release tag, or the source version for PR builds")
     commands = parser.add_subparsers(dest="command", required=True)
     staging = commands.add_parser("stage")
-    staging.add_argument("--platform", choices=(*TARGETS, *MACOS_TARGETS), required=True)
+    staging.add_argument("--platform", choices=(*TARGETS, *MACOS_TARGETS, *WINDOWS_TARGETS), required=True)
     staging.add_argument("--source", type=Path, required=True)
     collecting = commands.add_parser("collect")
-    collecting.add_argument("--platform", choices=TARGETS, required=True)
+    collecting.add_argument("--platform", choices=(*TARGETS, *WINDOWS_TARGETS), required=True)
     collecting.add_argument("--bundle-dir", type=Path, default=ROOT / "desktop/src-tauri/target/release/bundle")
     collecting.add_argument("--out", type=Path, default=ROOT / "dist/desktop")
     verification = commands.add_parser("verify")
     verification.add_argument("directory", type=Path)
+    verification.add_argument(
+        "--windows", choices=("optional", "required"), default="optional",
+        help="whether the Windows installer pair must be present (default: optional, but never half there)",
+    )
     commands.add_parser("manifest")
     args = parser.parse_args()
     try:
@@ -279,7 +326,7 @@ def main() -> int:
         elif args.command == "collect":
             collect(args.platform, args.bundle_dir, args.out, version)
         elif args.command == "verify":
-            verify_manifest(args.directory, version)
+            verify_manifest(args.directory, version, args.windows)
         else:
             print("\n".join(sorted(manifest(version))))
     except (ValueError, OSError, subprocess.SubprocessError) as error:
