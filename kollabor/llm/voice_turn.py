@@ -50,7 +50,7 @@ async def voice_provider(
     """Run model calls on the voice profile with the voice reasoning, then put chat's back.
 
     The profile switches only when the voice profile differs from the active one.
-    Reasoning is off unless the voice setting asks for low.
+    Reasoning runs at the lowest level the model takes.
     """
     active = getattr(api_service, "_profile", None)
     wanted = settings.get("voice_provider_profile_id")
@@ -67,9 +67,13 @@ async def voice_provider(
     has_effort = config is not None and hasattr(config, "effort")
     previous = config.effort if has_effort else None
     if has_effort:
+        # No effort field means the model's own default (often medium), not off,
+        # so "off" asks for the lowest level whenever chat already sends an effort
+        # (the model takes one) and sends none otherwise.
         # ponytail: providers read config.effort per request; a second concurrent
         # call (curator, dreaming) during a voice call would see it too.
-        config.effort = "low" if settings.get("voice_reasoning") == "low" else None
+        low = settings.get("voice_reasoning") == "low" or previous
+        config.effort = "low" if low else None
     try:
         yield
     finally:

@@ -24,16 +24,17 @@ class Config:
 class FakeApi:
     """Records what the model call saw: history, profile and reasoning effort."""
 
-    def __init__(self) -> None:
+    def __init__(self, effort: str | None = "high") -> None:
+        self._effort = effort  # what every profile's model config starts with
         self._profile = SimpleNamespace(name="chat")
-        self._provider = SimpleNamespace(config=Config())
+        self._provider = SimpleNamespace(config=Config(effort))
         self.calls: list[dict] = []
         self.reinitialized: list[str] = []
 
     async def reinitialize_provider(self, profile) -> bool:
         self.reinitialized.append(profile.name)
         self._profile = profile
-        self._provider = SimpleNamespace(config=Config())
+        self._provider = SimpleNamespace(config=Config(self._effort))
         return True
 
     async def call_llm(self, conversation_history, **_):
@@ -84,9 +85,21 @@ async def test_voice_turn_gets_overlay_and_reasoning_for_that_call_only():
         await call(handler(api, origin), stored)
         sent = api.calls[0]
         assert sent["history"][0].content == "You are Lapis.\n\nSpeak out loud."
-        assert sent["effort"] is None  # reasoning off for the voice call
+        # no effort field would be the model's default, so "off" is the lowest level
+        assert sent["effort"] == "low"
         assert stored[0].content == "You are Lapis."  # the stored history never changes
         assert api._provider.config.effort == "high"  # and chat's effort comes back
+    finally:
+        revoke_voice_admission_context(origin)
+
+
+@pytest.mark.asyncio
+async def test_voice_reasoning_off_sends_no_effort_when_chat_sends_none():
+    api = FakeApi(effort=None)  # a model that may not take an effort field
+    origin = {**make_voice_origin_context(), "voice_reasoning": "off"}
+    try:
+        await call(handler(api, origin), history())
+        assert api.calls[0]["effort"] is None
     finally:
         revoke_voice_admission_context(origin)
 
