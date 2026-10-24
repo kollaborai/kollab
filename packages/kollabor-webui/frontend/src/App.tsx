@@ -1,3 +1,4 @@
+import { refreshesOnEvent } from "./live-follow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
@@ -763,8 +764,6 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setEventActivity(null);
     };
     const followEvents = async () => {
-      // A turn is streaming; its history is still growing.
-      let midTurn = false;
       resetEventActivity();
       while (!controller.signal.aborted && activeId) {
         try {
@@ -775,30 +774,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             if (compactionStatus !== undefined) {
               setContextCompactionStatus(compactionStatus);
             }
-            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
             setEventActivity(liveActivity(eventActivityRef.current));
-            // hub_message: another agent's message just landed in the
-            // history, ahead of the reply it wakes. One that lands mid-turn
-            // waits for turn_complete, which reloads the whole turn.
+            // hub_message / history_updated: another agent's or window's
+            // message just landed in the history, mid-turn or not.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (
-              type === "hub_message" || type === "history_updated"
-                ? !midTurn
-                : ["turn_complete", "error", "permission_request"].includes(type)
-            ) {
-              void refreshActiveState(activeId);
-            }
-            if (type === "turn_complete") midTurn = false;
+            if (refreshesOnEvent(type)) void refreshActiveState(activeId);
           }, () => {
             // A reconnect may have missed the last turn's end.
             resetEventActivity();
-            // Open, so nothing slips past from here. The history_updated that
-            // replaces a seed can have fired before this stream existed: ask
-            // again now.
-            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
+            // Open, so nothing slips past from here. An event fired while the
+            // stream was down (or before it existed, like the history_updated
+            // that replaces a seed) left no trace: reconcile from history.
+            void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
