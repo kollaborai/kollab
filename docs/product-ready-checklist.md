@@ -67,7 +67,7 @@ Keep the PR draft while any required evidence or work is outstanding.
 - [ ] Work was done in a task-specific sibling worktree (for example,
   `../kollab-wt/issue-<N>-<slug>`) based on the current release branch (`origin/release/<ver>`), leaving the shared
   checkout untouched.
-- [ ] The PR remains a draft until Marco marks it ready; agents do not merge or
+- [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
   create release tags without explicit authorization.
 
 ## Evidence notes

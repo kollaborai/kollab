@@ -22,7 +22,8 @@ machine, for all Kollab work, not only one release.
 
 ## Roles
 
-- Marco (operator): decides what ships, approves and marks PRs ready, decides
+- Marco (operator): decides what ships, approves and marks PRs ready (the koordinator
+  may too), decides
   releases and tags, and is the only merge authority for product changes.
 - Agents: investigate, implement, test, open DRAFT PRs into the release branch,
   keep branches updated, and respond to review. Agents never mark their own PRs
@@ -138,7 +139,7 @@ the wrong checkout, or a remote that does not match.
 - Agents ALWAYS open PRs as drafts into the release branch, never `main`:
   `gh pr create --draft --base release/<ver>`. Draft is the
   default for every agent-opened PR, no exceptions.
-- Only Marco marks a PR ready or approves it. Once ready, auto-merge
+- Only Marco or the koordinator marks a PR ready or approves it. Once ready, auto-merge
   (`.github/workflows/auto-merge.yml`) merges it when checks pass.
 - Keep the branch updated from the release branch while the PR is open.
 - Note any overlapping PRs in the body so the operator can decide disposition.
