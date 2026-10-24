@@ -832,6 +832,9 @@ class EngineSession:
         self._active_turn_task = asyncio.create_task(
             self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
         )
+        # A cancelled tool call may never report a result or a turn end: tell
+        # the open windows so a gem does not keep acting out the dead call.
+        self._emit_event({"type": "turn_cancelled"})
 
     async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
         """Cancel only this admitted owner, without a current-turn fallback."""

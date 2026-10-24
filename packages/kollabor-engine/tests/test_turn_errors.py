@@ -159,3 +159,16 @@ async def test_history_route_defaults_to_bounded_newest_page(client, session, mo
     )
     assert output_response.status_code == 200
     assert output_response.json()["content"] == history[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_turn_tells_open_windows(session):
+    """A cancelled tool call may never report a result: the stream says so (#305)."""
+    seen = []
+    session.daemon.fan_out = seen.append
+    session.daemon.state.cancel_current_request = AsyncMock()
+
+    session.cancel_turn()
+    await asyncio.sleep(0)
+
+    assert {"type": "turn_cancelled"} in seen
