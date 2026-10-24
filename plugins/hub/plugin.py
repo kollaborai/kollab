@@ -752,6 +752,7 @@ class HubPlugin(BasePlugin):
                     "supervisor_wake_inefficacy": 3,
                     "supervisor_alert_cooldown": 900,
                     "supervisor_handoff_ack_timeout": 120,
+                    "supervisor_handoff_resend": False,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -6516,6 +6517,11 @@ class HubPlugin(BasePlugin):
             )
             if self.config
             else DEFAULT_HANDOFF_ACK_TIMEOUT,
+            handoff_resend=bool(
+                self.config.get("plugins.hub.supervisor_handoff_resend", False)
+            )
+            if self.config
+            else False,
             state=self._supervisor_state,
         )
         if not decisions:

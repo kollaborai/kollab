@@ -1,7 +1,8 @@
 """Handoff reliability and failed-dispatch surfacing (issue #283).
 
 A task handed to an agent stays on the ledger as an unacknowledged handoff
-until the assignee proves receipt; the supervisor resends once, then alerts.
+until the assignee proves receipt; the supervisor alerts (and, when
+`supervisor_handoff_resend` is on, resends once first).
 A send that did not reach its target is told to the sender and listed by
 `/hub status`.
 """
@@ -39,16 +40,29 @@ def test_unacked_handoff_is_resent_once_then_alerted_once(tmp_path):
 
     assert [c.id for c in unacked_handoffs(ledger)] == ["task0001"]
     # Inside the ack window: nothing happens, the card just stays visible.
-    assert _kinds(evaluate(ledger, ROSTER, t + 10)[0]) == []
+    assert _kinds(evaluate(ledger, ROSTER, t + 10, handoff_resend=True)[0]) == []
 
-    retry = [d for d in evaluate(ledger, ROSTER, t + 130)[0] if d.kind == "retry_handoff"]
+    decisions = evaluate(ledger, ROSTER, t + 130, handoff_resend=True)[0]
+    retry = [d for d in decisions if d.kind == "retry_handoff"]
     assert len(retry) == 1 and retry[0].worker == "lapis"
     assert retry[0].text == "build the thing"
 
     # The resend restarts the window; no second resend, an alert after it.
-    assert _kinds(evaluate(ledger, ROSTER, t + 10)[0]) == []
-    kinds = _kinds(evaluate(ledger, ROSTER, t + 130)[0])
+    assert _kinds(evaluate(ledger, ROSTER, t + 10, handoff_resend=True)[0]) == []
+    kinds = _kinds(evaluate(ledger, ROSTER, t + 130, handoff_resend=True)[0])
     assert kinds == ["alert_handoff_unacked"]
+    assert _kinds(evaluate(ledger, ROSTER, t + 400, handoff_resend=True)[0]) == []
+
+
+def test_unacked_handoff_is_alerted_without_resend_by_default(tmp_path):
+    ledger = TaskLedger(tasks_dir=str(tmp_path))
+    begin_handoff(ledger, "task0001", "koordinator", "lapis", "build the thing")
+    t = time.time()
+
+    decisions = evaluate(ledger, ROSTER, t + 130)[0]
+    assert _kinds(decisions) == ["alert_handoff_unacked"]
+    alert = next(d for d in decisions if d.kind == "alert_handoff_unacked")
+    assert "resent" not in alert.text
     assert _kinds(evaluate(ledger, ROSTER, t + 400)[0]) == []
 
 

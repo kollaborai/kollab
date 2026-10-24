@@ -53,6 +53,10 @@ again before the unacknowledged handoff is surfaced (issue #283)."""
 
 HANDOFF_MAX_RETRIES = 1
 
+DEFAULT_HANDOFF_RESEND = False
+"""Resend an unacknowledged handoff once before alerting. Off by default: a
+resend wakes the assignee again, which changes how agents take messages."""
+
 # Presence states from which a direct coordinator-originated message can
 # re-invoke an agent. "waiting" agents accept coordinator delivery, which
 # is exactly what the supervisor is.
@@ -212,6 +216,7 @@ def evaluate(
     wake_inefficacy: int = DEFAULT_WAKE_INEFFICACY,
     alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
     handoff_ack_timeout: float = DEFAULT_HANDOFF_ACK_TIMEOUT,
+    handoff_resend: bool = DEFAULT_HANDOFF_RESEND,
     state: Optional[SupervisorState] = None,
 ) -> Tuple[List[SupervisorDecision], SupervisorState]:
     """Decide what the supervisor should do this pass.
@@ -219,8 +224,10 @@ def evaluate(
     Decisions in order:
       retry_handoff            — a handed-off task is still unacknowledged
                                  after ``handoff_ack_timeout``: resend once
-                                 (``text`` is the directive).
-      alert_handoff_unacked    — still unacknowledged after the resend: say
+                                 (``text`` is the directive). Only when
+                                 ``handoff_resend`` is on.
+      alert_handoff_unacked    — still unacknowledged (after the resend, if
+                                 any): say
                                  so (issue #283). Both are recorded on the
                                  card here, so each fires once per handoff.
       nudge_worker             — first stall of an active card whose worker
@@ -249,7 +256,7 @@ def evaluate(
         if now - sent_at < handoff_ack_timeout:
             continue
         who = card.assignee
-        if retries < HANDOFF_MAX_RETRIES:
+        if handoff_resend and retries < HANDOFF_MAX_RETRIES:
             ledger.checkpoint(
                 card.id,
                 "handoff resent: no acknowledgement",
@@ -273,7 +280,8 @@ def evaluate(
                     card_id=card.id,
                     worker=who,
                     text=(
-                        f"task {card.id} was handed to {who} and resent but"
+                        f"task {card.id} was handed to {who}"
+                        f"{' and resent' if retries else ''} but"
                         f" never acknowledged ({int(now - sent_at)}s)."
                         f" {who} may be offline, wedged or not reading its"
                         " inbox."
