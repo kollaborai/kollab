@@ -75,6 +75,12 @@ export function latencyText(room: VoiceRoomState): string {
   return stages.flatMap(([name, ms]) => (ms == null ? [] : [`${name} ${seconds(ms)}`])).join(" · ");
 }
 
+/** The room is live in this browser, so the chat follows its turns to the bottom. */
+export function useVoiceRoomLive(): boolean {
+  const { room } = useVoiceRoom();
+  return REACHABLE && !!room && isActive(room);
+}
+
 /**
  * The room as the composer mic sees it: the mic starts the room in this browser
  * (the phone's mic on a phone), the listening mic stops it.
@@ -136,8 +142,13 @@ export function VoiceRoomBar() {
               </span>
             ) : null}
             {latency ? (
-              <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" data-slot="aui_voice-room-latency">
-                {latency}
+              // Wraps between stages, never inside one, so a narrow composer shows them all.
+              <span className="flex min-w-0 flex-wrap gap-x-1" data-slot="aui_voice-room-latency">
+                {latency.split(" · ").map((stage, index) => (
+                  <span key={stage} className="whitespace-nowrap">
+                    {index ? `· ${stage}` : stage}
+                  </span>
+                ))}
               </span>
             ) : null}
           </>

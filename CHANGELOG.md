@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Voice: every reply speaks its last sentence, which was dropped, so a short
   reply such as the answer after a talk-over is heard. The latency line keeps
   Hear, Think and Speak when the reply's Total arrives.
+- Voice: while the voice room is on, the chat follows the conversation to the
+  latest turn. The greeting shows as a message of its own instead of running
+  into the reply before it, and the latency line wraps rather than being cut
+  off on a phone or a narrow window.
 
 ### Removed
 - Web: WireGuard phone access is removed; PhoneLink is the way to connect a

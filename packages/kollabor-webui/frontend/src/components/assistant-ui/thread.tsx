@@ -34,7 +34,7 @@ import {
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
-import { useRoomVoiceMode, VoiceRoomBar } from "@/voice/voice-room";
+import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -75,9 +75,9 @@ import {
 import {
   createContext,
   useContext,
+  useEffect,
   useMemo,
   useLayoutEffect,
-
   useRef,
   type ComponentType,
   type FC,
@@ -207,6 +207,15 @@ const ThreadRoot: FC<{
 
   const userScrollRef = useRef(false);
 
+  // A voice room's turns arrive from the room, not from this composer's runs,
+  // so the top anchor never moves for them: while the room is live the chat
+  // follows the bottom, from the latest turn when the room starts.
+  const voiceLive = useVoiceRoomLive();
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (voiceLive && viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
+  }, [voiceLive]);
+
   useLayoutEffect(() => {
     const anchor = scrollAnchorRef.current;
     if (!anchor) return;
@@ -275,6 +284,7 @@ const ThreadRoot: FC<{
             });
         }}
         turnAnchor="top"
+        autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
