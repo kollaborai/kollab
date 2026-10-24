@@ -1,3 +1,6 @@
+import json
+import os
+import subprocess
 import sys
 
 import pytest
@@ -110,13 +113,37 @@ def test_turn_display_texts_projects_voice_user_and_assistant_channels():
     ]
 
 
-def _without_voice(monkeypatch):
-    monkeypatch.setitem(sys.modules, "kollabor_voice", None)
-    monkeypatch.setitem(sys.modules, "kollabor_voice.observer", None)
+# Runs in a fresh interpreter where kollabor_voice cannot be imported at all, so
+# no earlier import in this process can hide a dependency on it.
+_NO_VOICE_PROBE = """
+import importlib.abc, json, sys
+
+class _NoVoice(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "kollabor_voice" or name.startswith("kollabor_voice."):
+            raise ImportError("kollabor_voice is not installed")
+
+sys.meta_path.insert(0, _NoVoice())
+from kollabor_ai.response_channels import turn_display_texts
+
+assert "kollabor_voice" not in sys.modules
+print(json.dumps(turn_display_texts(json.loads(sys.argv[1]))))
+"""
 
 
-def test_turn_display_texts_without_voice_renders_plain_turns(monkeypatch):
-    _without_voice(monkeypatch)
+def _turn_display_texts_without_voice(messages):
+    result = subprocess.run(
+        [sys.executable, "-c", _NO_VOICE_PROBE, json.dumps(messages)],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_turn_display_texts_without_voice_renders_plain_turns():
     messages = [
         {"role": "user", "content": "Typed request.", "metadata": {}},
         {
@@ -127,17 +154,15 @@ def test_turn_display_texts_without_voice_renders_plain_turns(monkeypatch):
         {"role": "assistant", "content": "Plain.", "metadata": {}},
     ]
 
-    assert turn_display_texts(messages) == [None, "Visible.", None]
+    assert _turn_display_texts_without_voice(messages) == [None, "Visible.", None]
 
 
-def test_turn_display_texts_without_voice_shows_a_voice_turn_as_stored(monkeypatch):
-    _without_voice(monkeypatch)
-    stored = "[voice rules]\nCheck the tests."
-    messages = [
-        {"role": "user", "content": stored, "metadata": {"voice": {"event_ids": ["t"]}}}
-    ]
+def test_turn_display_texts_without_voice_shows_a_voice_turn_as_stored():
+    voice = {"event_ids": ["turn-1"]}
+    stored = voice_preamble(voice, rules_sent=False) + "Check the tests."
+    messages = [{"role": "user", "content": stored, "metadata": {"voice": voice}}]
 
-    assert turn_display_texts(messages) == [stored]
+    assert _turn_display_texts_without_voice(messages) == [stored]
 
 
 def test_turn_display_texts_strips_the_preamble_when_voice_is_importable():
