@@ -98,6 +98,17 @@ class LLMService:
     conversation logging with memory features.
     """
 
+    def _is_hidden_voice_message(self, message) -> bool:
+        """The user message that carries a hidden voice turn's instruction."""
+        if (message.metadata or {}).get("tool_output_batch"):
+            return False
+        origin = getattr(getattr(self, "_queue_processor", None), "active_origin_context", None)
+        return (
+            isinstance(origin, dict)
+            and origin.get("voice_hidden") is True
+            and validate_voice_admission_context(origin)
+        )
+
     def _add_conversation_message(
         self, message_or_role, content=None, parent_uuid=None, metadata=None
     ) -> str:
@@ -128,6 +139,9 @@ class LLMService:
             message = ConversationMessage(
                 role=role, content=content, metadata=dict(metadata or {})
             )
+        hidden = role == "user" and self._is_hidden_voice_message(message)
+        if hidden:
+            message.metadata["hidden"] = True
 
         # Add to conversation manager if available
         if hasattr(self, "conversation_manager") and self.conversation_manager:
@@ -149,7 +163,7 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user":
+        if role == "user" and not hidden:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             publish_semantic(
@@ -864,6 +878,12 @@ class LLMService:
             api_service=self.api_service,
             message_display_service=self.message_display_service,
             renderer=self.renderer,
+            # A voice turn's settings reach its model calls through the running
+            # turn's origin context; every other turn has none.
+            origin_context=lambda: getattr(
+                getattr(self, "_queue_processor", None), "active_origin_context", None
+            ),
+            profile_manager=lambda: getattr(self, "profile_manager", None),
         )
 
         # Background task manager (owns task tracking, circuit breaker, monitoring)
@@ -1938,8 +1958,14 @@ class LLMService:
         if (voice or trusted_origin_context) and self._queue_processor.processing_queue.full():
             return {"status": "rejected", "reason": "Agent input queue is full"}
 
+        # A hidden voice turn (the greeting) is an instruction, not something the
+        # user said: it is never shown as a user message.
+        hidden_voice_turn = bool(
+            trusted_origin_context and trusted_origin_context.get("voice_hidden") is True
+        )
+
         # Display user message using MessageDisplayService (DRY refactoring)
-        if not pre_displayed:
+        if not pre_displayed and not hidden_voice_turn:
             logger.debug(
                 f"DISPLAY DEBUG: About to display user message: '{display_text[:100]}...' ({len(display_text)} chars)"
             )

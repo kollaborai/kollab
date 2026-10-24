@@ -1,11 +1,11 @@
-"""Voice session control API, voice-session SSE and the two worker routes."""
+"""Voice session control API, voice-session SSE and the two worker routes (/turns, /events)."""
 
 from __future__ import annotations
 
 import json
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
@@ -17,6 +17,7 @@ from ..voice_types import (
     JoinVoiceSessionRequest,
     StopVoiceSessionRequest,
     VoiceTranscriptSnapshot,
+    VoiceTurnRequest,
 )
 
 router = APIRouter(tags=["voice"])
@@ -198,12 +199,11 @@ async def voice_session_events(
 # --- worker -> engine (bearer engine token, same auth middleware) ------------
 
 
-@router.post("/voice/sessions/{voice_session_id}/transcripts")
-async def worker_transcript(
-    request: Request, voice_session_id: str, body: VoiceTranscriptSnapshot
-):
-    async def run():
-        if len(body.display_text.encode()) > MAX_FINAL_TRANSCRIPT_BYTES:
+@router.post("/voice/sessions/{voice_session_id}/turns")
+async def worker_turn(request: Request, voice_session_id: str, body: VoiceTurnRequest):
+    """Admit a turn and stream the reply as NDJSON speech sentences (see VoiceControl.open_turn)."""
+    try:
+        if body.kind == "speech" and len(body.display_text.encode()) > MAX_FINAL_TRANSCRIPT_BYTES:
             raise RuntimeHostError(
                 "transcript_too_large", 413, "Voice transcript exceeds the size limit."
             )
@@ -211,10 +211,23 @@ async def worker_transcript(
             raise RuntimeHostError(
                 "target_mismatch", 409, "Transcript belongs to another voice session."
             )
-        receipt = await _control(request).ingest_transcript(voice_session_id, body)
-        return JSONResponse(receipt.model_dump(mode="json"))
+        turn = await _control(request).open_turn(
+            voice_session_id,
+            VoiceTranscriptSnapshot(**body.model_dump(exclude={"kind"})),
+            kind=body.kind,
+        )
+    except RuntimeHostError as exc:
+        return error_response(exc)
 
-    return await _guard(run)
+    async def lines():
+        try:
+            async for item in turn:
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            # A client that goes away mid-reply closes the turn: that is a barge-in.
+            await turn.aclose()
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 @router.post("/voice/sessions/{voice_session_id}/events")

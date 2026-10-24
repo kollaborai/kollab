@@ -9,6 +9,7 @@ Phase 8A: Thinking parsing and display delegated to kollabor_ai and kollabor_tui
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from typing import Any, Callable, List, Optional
 
 # Delegated thinking parsing (kollabor_ai)
@@ -20,6 +21,8 @@ from kollabor_tui.status.core_widgets import get_token_io_state
 
 # Delegated thinking display formatting (kollabor_tui)
 from kollabor_tui.thinking_display import ThinkingDisplayFormatter
+
+from .voice_turn import voice_provider, voice_turn_settings, with_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +38,27 @@ class StreamingHandler:
     - Clean up streaming state after completion/error
     """
 
-    def __init__(self, api_service, message_display_service, renderer):
+    def __init__(
+        self,
+        api_service,
+        message_display_service,
+        renderer,
+        *,
+        origin_context=None,
+        profile_manager=None,
+    ):
         """Initialize the streaming handler.
 
         Args:
             api_service: APICommunicationService for making LLM API calls
             message_display_service: MessageDisplayService for streaming output
             renderer: TerminalRenderer for thinking display updates
+            origin_context: Callable returning the running turn's origin context;
+                a validated voice turn gets its voice settings for these calls only
+            profile_manager: Callable returning the ProfileManager (voice profile lookup)
         """
+        self._origin_context = origin_context
+        self._profile_manager = profile_manager
         self.api_service = api_service
         self.message_display_service = message_display_service
         self.renderer = renderer
@@ -119,15 +135,32 @@ class StreamingHandler:
 
         # Delegate to API communication service
         try:
-            return await self.api_service.call_llm(  # type: ignore[no-any-return]
-                conversation_history=conversation_history,
-                streaming_callback=self.handle_chunk,
-                tools=native_tools,
-                on_rate_limit=self._on_rate_limit,
-                turn_id=turn_id,
-                parent_turn_id=parent_turn_id,
-                **provider_kwargs,
-            )
+            async with AsyncExitStack() as stack:
+                voice = (
+                    voice_turn_settings(self._origin_context())
+                    if self._origin_context is not None
+                    else None
+                )
+                if voice is not None:
+                    conversation_history = with_overlay(
+                        conversation_history, voice.get("voice_prompt_overlay")
+                    )
+                    await stack.enter_async_context(
+                        voice_provider(
+                            self.api_service,
+                            self._profile_manager() if self._profile_manager else None,
+                            voice,
+                        )
+                    )
+                return await self.api_service.call_llm(  # type: ignore[no-any-return]
+                    conversation_history=conversation_history,
+                    streaming_callback=self.handle_chunk,
+                    tools=native_tools,
+                    on_rate_limit=self._on_rate_limit,
+                    turn_id=turn_id,
+                    parent_turn_id=parent_turn_id,
+                    **provider_kwargs,
+                )
         except asyncio.CancelledError:
             logger.info("LLM API call was cancelled")
             raise

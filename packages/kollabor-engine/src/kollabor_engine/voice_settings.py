@@ -310,5 +310,9 @@ class VoiceSettingsService:
     def prompt_revision(self, agent_id: str | None) -> str:
         return hashlib.sha256(self.overlay(agent_id).encode()).hexdigest()[:12]
 
+    def reasoning(self) -> str:
+        """Reasoning effort for voice turns: off (the default) or low."""
+        return "low" if self._value("reasoning") == "low" else "off"
+
     def voice_profile_id(self, fallback: str) -> str:
         return self._value("provider_profile_id") or fallback
