@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from kollabor_agent.file_operations_executor import PathAccessMode
+from kollabor_agent.yes_approval import NEEDS_YES, call_approval
 from kollabor_events.dict_utils import safe_get
 from kollabor_events.models import EventType
 from kollabor_events.permissions_models import (
@@ -367,6 +368,26 @@ class PermissionManager:
             return decision
 
         # Step 6: Request user confirmation
+        approval = call_approval.get()
+        if approval == "yes":
+            # The user's own yes, typed or spoken, already approved this call.
+            self._stats["user_approved"] += 1
+            decision = PermissionDecision(
+                allowed=True,
+                reason="User approved (yes)",
+                risk_level=risk_result.level,
+            )
+            await self._emit_permission_granted(
+                tool_id, tool_type, tool_name, risk_result.level, decision.reason
+            )
+            return decision
+        if approval == "ask":
+            # A voice turn never waits on a prompt nobody can click: the model
+            # asks for a yes in its reply instead (kollabor_agent.yes_approval).
+            return PermissionDecision(
+                allowed=False, reason=NEEDS_YES, risk_level=risk_result.level
+            )
+
         if self._confirmation_callback:
             confirmation_details = self._build_confirmation_details(
                 tool_data, risk_result

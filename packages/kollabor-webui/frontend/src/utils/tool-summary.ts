@@ -203,3 +203,11 @@ export function summarizeToolCall(toolName: string, argsText?: string): string {
 
   return humanizeToolName(normalizedName);
 }
+
+/**
+ * The agent may not run this call unasked, so it asked for the user's OK in its
+ * reply instead (NEEDS_YES in kollabor_agent/yes_approval.py). Not a failure.
+ */
+export function askedForOk(errorLine: string | undefined): boolean {
+  return errorLine?.startsWith("Not run yet: this needs the user's OK") === true;
+}

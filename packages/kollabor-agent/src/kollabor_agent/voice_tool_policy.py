@@ -1,9 +1,8 @@
 """Fail-closed execution guard for trusted LiveKit-originated tool calls.
 
-This is the low-level executor boundary. It does not implement the voice
-confirmation exchange; mutating or externally communicative actions remain
-blocked with ``confirmation_required`` until that control-plane contract is
-connected.
+This is the low-level executor boundary. A mutating or externally communicative
+action comes back ``confirmation_required``: the agent asks for the user's OK in
+its reply, and their yes runs that exact call (``yes_approval``).
 """
 
 from __future__ import annotations

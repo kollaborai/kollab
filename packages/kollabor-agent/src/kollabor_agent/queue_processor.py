@@ -38,6 +38,7 @@ from .voice_admission import (
     revoke_voice_admission_context,
     validate_voice_admission_context,
 )
+from .yes_approval import YesApprovals
 
 logger = logging.getLogger(__name__)
 
@@ -1059,12 +1060,16 @@ class QueueProcessor:
                 combined_message,
             )
 
+        metadata: dict[str, Any] = (
+            {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
+        )
+        approvals = getattr(self.tool_executor, "yes_approvals", None)
+        if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
+            metadata["injected_context"] = note  # what the user's yes approved, model-only
+
         # Add user message to conversation history
         self._add_message_fn(
-            ConversationMessage(
-                role="user", content=combined_message,
-                metadata={"source": "voice", "voice": self.active_voice} if self.active_voice else {},
-            ),
+            ConversationMessage(role="user", content=combined_message, metadata=metadata),
             parent_uuid=current_parent_uuid,
         )
 

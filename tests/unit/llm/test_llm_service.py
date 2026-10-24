@@ -159,6 +159,24 @@ class TestLLMServiceIntegration(unittest.TestCase):
         self.assertEqual(queued.content, message)
         self.assertEqual(queued.origin_context, origin_context)
 
+    def test_only_the_users_own_yes_runs_what_the_agent_asked_for(self):
+        """A hidden voice turn (the greeting) is an instruction, never the user's answer."""
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        greeting = {**make_voice_origin_context("greet"), "voice_hidden": True}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call)
+            asyncio.run(self.service.process_user_input("yes", origin_context=greeting))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            asyncio.run(self.service.process_user_input("Yes."))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))
+
 
     def test_process_user_input_displays_before_lazy_alias_rebuild(self):
         """First submit must echo immediately before alias/prompt rebuild work."""

@@ -1,7 +1,7 @@
 // Run: node --test tests/tool-summary.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeToolCall } from "../src/utils/tool-summary.ts";
+import { askedForOk, summarizeToolCall } from "../src/utils/tool-summary.ts";
 
 test("MCP filesystem tools show the file they touch", () => {
   assert.equal(
@@ -51,4 +51,10 @@ test("outgoing hub reply tool row labels Replied to <agent>", () => {
     summarizeToolCall("hub_msg", JSON.stringify({ to: "zircon", reply_to: "msg-1" })),
     "Replied to zircon",
   );
+});
+
+test("a call the agent asked the user to OK is not a failure", () => {
+  assert.equal(askedForOk("Not run yet: this needs the user's OK. In your reply, say why."), true);
+  assert.equal(askedForOk("Exit code 1: no such file"), false);
+  assert.equal(askedForOk(undefined), false);
 });

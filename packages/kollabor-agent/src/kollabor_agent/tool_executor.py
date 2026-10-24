@@ -25,6 +25,7 @@ from .voice_tool_policy import (
     VoiceToolDecision,
     VoiceToolExecutionGuard,
 )
+from .yes_approval import NEEDS_YES, YesApprovals, call_approval
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class ToolExecutor:
             interactive_shell = config.get("terminal.interactive_shell", False)
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
+        self.yes_approvals = YesApprovals()
 
         # True while a tool is genuinely executing. The TurnWatchdog reads this
         # (like an in-flight API call) so a long-running foreground tool — e.g.
@@ -472,6 +474,7 @@ class ToolExecutor:
 
         tool_id = tool_data.get("id", "unknown")
         tool_name = self._get_display_name(tool_data)
+        approval = "yes" if self.yes_approvals.take(tool_data) else None
         voice_decision: VoiceToolDecision | None = None
         if execution_context is not None and execution_context.get("source") == "livekit_voice":
             voice_decision = self._voice_tool_guard.evaluate(
@@ -479,14 +482,23 @@ class ToolExecutor:
                 execution_context,
                 repository_root=self.workspace or Path.cwd(),
             )
+            if approval is None:
+                approval = "ask"  # a voice turn asks for a yes, never waits on a prompt
+            elif voice_decision.reason_code == "confirmation_required":
+                # Their yes was the confirmation: it runs as a typed command would.
+                voice_decision = VoiceToolDecision(allowed=True)
             if not voice_decision.allowed:
                 reason_code = voice_decision.reason_code or "command_blocked"
                 message = voice_decision.message or "Voice tool policy denied this action."
+                error = f"{reason_code}: {message}"
+                if reason_code == "confirmation_required":
+                    self.yes_approvals.ask(tool_data)
+                    error = NEEDS_YES
                 result = ToolExecutionResult(
                     tool_id=tool_id,
                     tool_type=tool_data.get("type", "unknown"),
                     success=False,
-                    error=f"{reason_code}: {message}",
+                    error=error,
                     metadata={
                         "reason_code": reason_code,
                         "voice_tool_policy": execution_context.get("voice_tool_policy"),
@@ -545,7 +557,13 @@ class ToolExecutor:
             if execution_context is not None:
                 inner_kwargs["execution_context"] = execution_context
                 inner_kwargs["voice_decision"] = voice_decision
-            result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            approval_token = call_approval.set(approval)
+            try:
+                result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            finally:
+                call_approval.reset(approval_token)
+            if result.error == NEEDS_YES:  # a permission prompt it did not wait on
+                self.yes_approvals.ask(tool_data)
             self._executed_count += 1
 
             if self._tool_output_store is not None:

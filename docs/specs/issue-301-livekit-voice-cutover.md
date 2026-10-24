@@ -85,6 +85,31 @@ them, and no voice screen shows classifier controls, status or decisions.
   worker's post and the Engine's call, right after the audio stops) goes to the
   model before the cut, which lands after that round.
 
+## Approvals by voice
+
+Like the demo: the agent says what it wants to run and asks, and a spoken yes
+runs it.
+
+- A voice turn never waits on an approval prompt. A call it may not run
+  unasked comes back "Not run yet: this needs the user's OK", and the agent
+  says in its reply what it wants to run and why and asks for a yes. That is
+  the voice guard's `confirmation_required` (anything that is not read-only,
+  `kollab --hub msg`, the `hub_msg` tool), in every permission mode, and in a
+  Confirm mode the permission prompt too (no card opens).
+- The user's next message, spoken or typed, decides
+  (`kollabor_agent/yes_approval.py`, fed by `LLMService.process_user_input`): a
+  short yes ("yes", "yeah, go ahead", "do it", "okay") lets each call the agent
+  last asked for run once, past both checks. A one-shot note on the yes, seen
+  only by the model, names them; the agent runs exactly those and answers with
+  what it found. A short no drops them. Anything else is a normal turn that
+  leaves them open; a later ask replaces them, and `/resume` or a new chat drops
+  them.
+- Only the user's own words count. `process_user_input` is the human entry
+  (terminal, web UI, voice); a hidden voice turn (the greeting), hub and relay
+  messages and the model's own text never answer.
+- Hard blocks (`sudo`, `rm -r`, `git push`, ...) and unsafe syntax stay refused;
+  a yes never runs them.
+
 ## Logs
 
 `<voice root>/logs/livekit-server.log` and `livekit-worker.log` (the voice root

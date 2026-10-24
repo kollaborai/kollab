@@ -1963,6 +1963,11 @@ class LLMService:
         hidden_voice_turn = bool(
             trusted_origin_context and trusted_origin_context.get("voice_hidden") is True
         )
+        if not hidden_voice_turn:
+            # The user's own words: a short yes runs what the agent asked to run.
+            self.tool_executor.yes_approvals.on_human_input(
+                display_text, self.conversation_manager.current_session_id
+            )
 
         # Display user message using MessageDisplayService (DRY refactoring)
         if not pre_displayed and not hidden_voice_turn:

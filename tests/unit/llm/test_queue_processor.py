@@ -772,6 +772,24 @@ class TestQueueProcessor(unittest.TestCase):
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
 
+    def test_the_users_yes_tells_the_model_what_it_approved(self):
+        """The note rides on the yes itself, model-only, once."""
+        from kollabor_agent.yes_approval import YesApprovals
+
+        approvals = YesApprovals()
+        self.processor.tool_executor = MagicMock(yes_approvals=approvals)
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        approvals.ask({"type": "terminal", "id": "c1", "command": "gh pr list"})
+        approvals.on_human_input("yes")
+
+        self.loop.run_until_complete(self.processor.process_message_batch(["yes"], "parent"))
+        yes = self.add_message_fn.call_args.args[0]
+        self.assertEqual(yes.content, "yes")
+        self.assertIn("gh pr list", yes.metadata["injected_context"])
+
+        self.loop.run_until_complete(self.processor.process_message_batch(["thanks"], "parent"))
+        self.assertNotIn("injected_context", self.add_message_fn.call_args.args[0].metadata)
+
     def test_livekit_origin_survives_tool_continuation(self):
         from kollabor_agent.queue_processor import QueuedInput
         from tests.unit.llm.voice_admission_helpers import make_voice_origin_context

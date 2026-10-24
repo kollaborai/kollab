@@ -197,6 +197,14 @@ every open prompt cancelled (`PermissionManager.cancel_confirmations`): the tool
 does not run and the turn ends. A prompt nobody answers gives up after 5 minutes
 (the hook's timeout) and the tool does not run.
 
+**Voice turns ask instead of waiting:** a voice turn never waits on a prompt.
+A call it may not run unasked (the voice guard's `confirmation_required`, or a
+prompt in a Confirm mode) comes back "Not run yet" and the agent asks for the OK
+in its reply; no card opens. The user's next message, spoken or typed, decides
+(`kollabor_agent/yes_approval.py`): a short yes lets each asked call run once
+(step 6 answers it "User approved (yes)"), a short no drops them, and anything
+else leaves them open.
+
 ## Commands
 
 ### `/permissions` (aliases: `/perms`, `/security`)
