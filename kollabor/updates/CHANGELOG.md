@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed
+- Context-compaction emergency recovery prioritizes the latest human request,
+  excludes non-intended, group, and other-agent hub notices plus standalone HUD
+  and stale assignments, preserves direct-to-agent requests without TaskLedger
+  IDs, and caps the wrapped recovery message at 8,000 characters.
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
 
 ### Removed
