@@ -86,13 +86,6 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # message, so the pool drops them at the boundary.
 _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
 
-# A cancelled turn's tool may ignore the stop signal and report afterwards.
-# These late mid-turn events still flow (the transcript mirror follows them)
-# but carry `cancelled: true`, so no gem reads them as a live turn. A new
-# turn's first event clears the mark.
-_POST_CANCEL_EVENT_TYPES = frozenset({"tool_start", "tool_result", "thinking", "token"})
-_NEW_TURN_EVENT_TYPES = frozenset({"turn_start", "user_message"})
-
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Reshape a daemon display event into the engine's documented SSE shape.
@@ -178,7 +171,13 @@ class DaemonHandle:
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
         self.startup_error: str = ""
-        self._post_cancel = False
+        # A cancelled turn's tool may ignore the stop signal and report
+        # afterwards. Its late result still flows (the transcript mirror
+        # follows it) but carries `cancelled: true`, so no gem reads it as a
+        # live turn. Only tools running at the cancel are marked: the next
+        # turn, whatever starts it (a client, a hub message, a goal), never is.
+        self._running_tools: Set[str] = set()
+        self._cancelled_tools: Set[str] = set()
 
         self.rpc: Any = None
         self.state: Any = None
@@ -295,11 +294,14 @@ class DaemonHandle:
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)
-        if self._post_cancel:
-            etype = event.get("type")
-            if etype in _NEW_TURN_EVENT_TYPES:
-                self._post_cancel = False
-            elif etype in _POST_CANCEL_EVENT_TYPES:
+        tool_id = event.get("tool_id")
+        if tool_id and event.get("type") == "tool_start":
+            self._running_tools.add(tool_id)
+            self._cancelled_tools.discard(tool_id)  # a new call reusing the id
+        elif tool_id and event.get("type") == "tool_result":
+            self._running_tools.discard(tool_id)
+            if tool_id in self._cancelled_tools:
+                self._cancelled_tools.discard(tool_id)
                 event = {**event, "cancelled": True}
         for queue in list(self._subscribers):
             try:
@@ -308,6 +310,11 @@ class DaemonHandle:
                 logger.warning(
                     "dropping event for slow subscriber on session %s", self.session_id
                 )
+
+    def mark_cancelled(self) -> None:
+        """The turn was cancelled: a result from a tool still running arrives marked."""
+        self._cancelled_tools |= self._running_tools
+        self._running_tools.clear()
 
     def fan_out(self, event: Dict[str, Any]) -> None:
         """Engine-generated event to every SSE subscriber of this session."""

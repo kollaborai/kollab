@@ -56,8 +56,8 @@ export type LiveActivity = { tools: ReadonlyArray<readonly [string, Activity]>; 
 export const NO_LIVE_ACTIVITY: LiveActivity = { tools: [], phase: null };
 
 export function nextLiveActivity(live: LiveActivity, event: { type?: string; [key: string]: unknown }): LiveActivity {
-  // The engine marks a cancelled turn's late tool events (its tool ignored
-  // the stop signal), so none restarts the gem; the next turn arrives unmarked.
+  // The engine marks a cancelled turn's late tool result (its tool ignored
+  // the stop signal), so it restarts nothing; the next turn arrives unmarked.
   if (event.cancelled) return live;
   const id = String(event.tool_id ?? "");
   switch (event.type) {
@@ -70,7 +70,9 @@ export function nextLiveActivity(live: LiveActivity, event: { type?: string; [ke
       // The model reads the result next.
       return { tools: live.tools.filter(([tool]) => tool !== id), phase: "thinking" };
     case "thinking":
-      return { ...live, phase: "thinking" };
+      // `active: false` is the daemon hiding its spinner (the last thing a
+      // cancelled turn's tail sends): no new thought.
+      return event.active === false ? live : { ...live, phase: "thinking" };
     case "token":
       return { ...live, phase: "speaking" };
     case "turn_complete":

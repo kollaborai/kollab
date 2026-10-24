@@ -91,14 +91,17 @@ test("a tool_result for another id leaves the running tool alone", () => {
 });
 
 test("a cancelled turn's late tool events never restart the gem", () => {
-  // The engine marks what trails its turn_cancelled; a tool that ignored the
-  // stop signal reports ~2s later and must leave the gem idle.
+  // A tool that ignored the stop signal reports ~2s after turn_cancelled:
+  // the engine marks its result, then the daemon hides its spinner. This is
+  // the sequence the engine sends; it must leave the gem idle.
   const start = { type: "tool_start", tool_id: "a", tool_name: "terminal: sleep 99" };
   const late = { type: "tool_result", tool_id: "a", cancelled: true };
+  const spinnerOff = { type: "thinking", active: false, message: "" };
+  const toolRow = { type: "message", message_type: "tool" };
   assert.equal(liveActivity(nextLiveActivity(NO_LIVE_ACTIVITY, late)), null);
-  assert.equal(liveActivity(fold(start, { type: "turn_cancelled" }, late)), null);
-  assert.equal(liveActivity(fold({ type: "thinking", cancelled: true })), null);
-  assert.equal(liveActivity(fold({ type: "token", cancelled: true })), null);
+  assert.equal(liveActivity(fold(start, { type: "turn_cancelled" }, late, spinnerOff, toolRow)), null);
+  // A spinner that turns on is a thought.
+  assert.equal(liveActivity(fold({ type: "thinking", active: true, message: "Thinking..." })), "thinking");
   // The next turn arrives unmarked and animates as usual.
   assert.equal(
     liveActivity(fold({ type: "turn_cancelled" }, { type: "tool_start", tool_id: "b", tool_name: "file_grep: x" })),

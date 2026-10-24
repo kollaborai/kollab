@@ -1,9 +1,9 @@
-"""A cancelled turn's late tool events reach the transcript but not the gems.
+"""A cancelled turn's late tool result reaches the transcript but not the gems.
 
 A tool that ignores the stop signal reports ~2s after the engine already sent
-``turn_cancelled``. The daemon handle marks those trailing mid-turn events
-(``cancelled: true``) so no gem reads them as a live turn; a new turn's first
-event clears the mark.
+``turn_cancelled``. The daemon handle marks that result (``cancelled: true``)
+so no gem reads it as a live turn. Only tools running at the cancel are marked:
+a later turn is never, whatever starts it (a hub message sends no turn_start).
 """
 
 import asyncio
@@ -15,46 +15,66 @@ from kollabor_engine.daemon_pool import DaemonHandle
 from kollabor_engine.session import EngineSession
 
 
-async def _collect(handle: DaemonHandle, events: list[dict]) -> list[dict]:
+def _handle() -> DaemonHandle:
+    return DaemonHandle(session_id="s", identity="i", launcher=None)
+
+
+async def _marks(handle: DaemonHandle, events: list) -> list:
+    """Fan the events out (a string is a cancel); return each one's cancelled mark."""
     queue = handle.subscribe()
     for event in events:
-        handle._fan_out(dict(event))
+        if event == "cancel":
+            handle.mark_cancelled()
+        else:
+            handle._fan_out(dict(event))
     await asyncio.sleep(0)
     collected = []
     while not queue.empty():
-        collected.append(queue.get_nowait())
+        collected.append(queue.get_nowait().get("cancelled"))
     handle.unsubscribe(queue)
     return collected
 
 
 @pytest.mark.asyncio
-async def test_late_tool_events_after_cancel_arrive_marked_until_a_new_turn():
-    handle = DaemonHandle(session_id="s", identity="i", launcher=None)
-    handle._post_cancel = True
-    collected = await _collect(
-        handle,
-        [
-            {"type": "tool_result", "tool_id": "a"},
-            {"type": "thinking"},
-            {"type": "tool_start", "tool_id": "b"},
-            {"type": "token"},
-            # A new turn begins: its events arrive unmarked.
-            {"type": "user_message"},
-            {"type": "tool_result", "tool_id": "b"},
-        ],
+async def test_the_cancelled_tools_late_result_arrives_marked():
+    marks = await _marks(
+        _handle(),
+        [{"type": "tool_start", "tool_id": "a"}, "cancel", {"type": "tool_result", "tool_id": "a"}],
     )
-    assert [e.get("cancelled") for e in collected] == [True, True, True, True, None, None]
+    assert marks == [None, True]
 
 
 @pytest.mark.asyncio
-async def test_turn_start_also_clears_the_cancel_mark():
-    handle = DaemonHandle(session_id="s", identity="i", launcher=None)
-    handle._post_cancel = True
-    collected = await _collect(
-        handle,
-        [{"type": "turn_start"}, {"type": "tool_result", "tool_id": "a"}],
+async def test_a_turn_started_by_a_hub_message_after_the_cancel_is_never_marked():
+    marks = await _marks(
+        _handle(),
+        [
+            {"type": "tool_start", "tool_id": "a"},
+            "cancel",
+            {"type": "hub_message"},
+            {"type": "thinking"},
+            {"type": "tool_start", "tool_id": "b"},
+            {"type": "token"},
+            {"type": "tool_result", "tool_id": "b"},
+            # The stubborn tool reports in the middle of the new turn.
+            {"type": "tool_result", "tool_id": "a"},
+        ],
     )
-    assert [e.get("cancelled") for e in collected] == [None, None]
+    assert marks == [None, None, None, None, None, None, True]
+
+
+@pytest.mark.asyncio
+async def test_a_new_call_reusing_the_id_belongs_to_the_new_turn():
+    marks = await _marks(
+        _handle(),
+        [
+            {"type": "tool_start", "tool_id": "a"},
+            "cancel",
+            {"type": "tool_start", "tool_id": "a"},
+            {"type": "tool_result", "tool_id": "a"},
+        ],
+    )
+    assert marks == [None, None, None]
 
 
 @pytest.mark.asyncio
@@ -63,25 +83,29 @@ async def test_cancel_turn_marks_the_daemon_and_emits_turn_cancelled():
         session_id="s", profile=SimpleNamespace(name="p", model=None, provider="openai")
     )
     state = SimpleNamespace(cancel_current_request=AsyncMock(return_value={"cancelled": True}))
-    session.daemon = SimpleNamespace(state=state, fan_out=Mock())
+    session.daemon = SimpleNamespace(state=state, fan_out=Mock(), mark_cancelled=Mock())
     session.cancel_turn()
-    assert session.daemon._post_cancel is True
+    session.daemon.mark_cancelled.assert_called_once_with()
     types = [call.args[0]["type"] for call in session.daemon.fan_out.call_args_list]
     assert types == ["turn_cancelled"]
 
 
 @pytest.mark.asyncio
-async def test_owned_cancel_marks_only_a_successful_cancel():
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_owned_cancel_marks_only_a_successful_cancel(cancelled):
     session = EngineSession(
         session_id="s", profile=SimpleNamespace(name="p", model=None, provider="acp")
     )
 
     class Rpc:
         async def call(self, method, params):
-            return {"cancelled": False}
+            return {"cancelled": cancelled}
 
-    session.daemon = DaemonHandle(session_id="s", identity="i", launcher=None)
+    session.daemon = _handle()
     session.daemon.rpc = Rpc()
+    session.daemon._fan_out({"type": "tool_start", "tool_id": "a"})
     result = await session.cancel_owned_turn("req-1")
-    assert result["cancelled"] is False
-    assert session.daemon._post_cancel is False
+    assert result["cancelled"] is cancelled
+    assert await _marks(session.daemon, [{"type": "tool_result", "tool_id": "a"}]) == [
+        True if cancelled else None
+    ]
