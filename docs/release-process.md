@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-19
+modified: 2026-10-23
 status: active
 ---
 # Release Process
@@ -36,25 +36,28 @@ Use a `vX.Y.Z` Git tag for public releases.
 
 ## Release From Main, in Place
 
-Releases run from the shared `main` checkout; feature work happens in git
-worktrees per `SOFTWARE_DEVELOPMENT_LIFECYCLE.md` (`../kollab-wt/issue-<N>-<slug>`,
-branched off `origin/main`). In the shared checkout, never stash, reset, clean,
-restore, or switch branches, and never build a release from uncommitted files
-or a scratch clone: the checkout stays behind, dirty with work that already
-shipped. Commit the release on local `main` instead; the merge then
-fast-forwards it, so `main` ends clean and level by construction.
+A release's work reaches `main` through one draft release PR (`release/X.Y.Z`
+into `main`). Feature work happens in git worktrees per
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` (`../kollab-wt/issue-<N>-<slug>`, based on
+`origin/release/X.Y.Z`), and lanes push only their own branch: nobody pushes to
+`release/X.Y.Z` or `main` directly. The shared checkout is read-only for
+agents: never edit, stash, reset, clean, restore, or switch branches in it, and
+never build a release from uncommitted files or a scratch clone. Steps 5 and 6
+run in it and belong to the operator; an agent runs them only on Marco's
+explicit instruction. Because nothing is ever committed in the shared checkout,
+the merge fast-forwards it, so `main` ends clean and level by construction.
 
-1. Commit the release's work on `main` by explicit paths
-   (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'
-   uncommitted work stays uncommitted and out of the release.
-2. Commit the release prep the same way (every version, `uv.lock`, both
+1. Land every lane's work on `release/X.Y.Z` through draft lane PRs, each merged
+   with Marco's explicit approval and each committed by explicit paths
+   (`git commit -- <paths>`), never `git add -A` or `git add .`. Work that is
+   not part of the release stays on its own lane branch.
+2. Land the release prep the same way (every version, `uv.lock`, both
    changelogs) as `chore: prepare release vX.Y.Z`.
-3. Everything committed on `main` ships: review `git log origin/main..HEAD`,
-   then push it and open the PR with
-   `git push origin "HEAD:refs/heads/release/X.Y.Z"`.
+3. Review the release PR: `git log origin/main..origin/release/X.Y.Z` is the
+   full scope that ships. It stays a draft until it is marked ready.
 4. Wait for the PR to merge: auto-merge (`.github/workflows/auto-merge.yml`)
    merges it with a merge commit once the required checks pass. Never squash or
-   rebase it, so local `main` stays a parent of the merge.
+   rebase it.
 5. Bring `main` level and tag the merge:
 
    ```bash
