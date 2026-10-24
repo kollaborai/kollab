@@ -284,7 +284,15 @@ async def test_full_voice_turn(rig):
             and ctx["source"] == "livekit_voice"
         )
 
-        await wait_for(lambda: any(e["event"] == "voice.metrics" for e in events))
+        await wait_for(
+            lambda: any(
+                e["event"] == "voice.transcript"
+                and e["payload"]["speaker"] == "assistant"
+                and e["payload"]["final"]
+                for e in events
+            )
+        )
+        assert not any(e["event"] == "voice.metrics" for e in events)  # the worker's
         assistant = [
             e["payload"]
             for e in events
@@ -562,6 +570,78 @@ async def test_greeting_is_a_hidden_instruction_turn(rig):
             if e["event"] == "voice.transcript" and e["payload"]["speaker"] == "user"
         ]
         assert users == []  # no user bubble for an instruction
+    await rig.control.shutdown()
+
+
+SHOWN = {"type": "message", "message_type": "assistant"}  # the daemon's display event
+
+
+async def said(rig, http, view):
+    resp = await http.post(
+        f"/voice/sessions/{view['voice_session_id']}/turns", json=transcript(view)
+    )
+    lines = [json.loads(ln) for ln in resp.text.splitlines()]
+    assert lines[-1]["done"] is True
+    return [line["text"] for line in lines[:-1]]
+
+
+async def test_a_reply_says_its_last_sentence_once_it_is_shown(rig):
+    # What the daemon sends: its echo of the user, the reply's tokens, then the
+    # reply's display message. A last sentence has no space after it to cut on.
+    rig.session.script = [
+        {"type": "message", "message_type": "user", "content": "hello there"},
+        {"type": "token", "text": "Sure thing. "},
+        {"type": "token", "text": "All good now."},
+        {**SHOWN, "content": "Sure thing. All good now."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Sure thing.", "All good now."]
+    await rig.control.shutdown()
+
+
+async def test_a_turns_latency_outlives_its_reply_stream(rig):
+    # The worker reports the last audio after the turn's reply stream ended: that
+    # Total joins the turn's other stages, all of them the worker's own.
+    rig.session.script = [
+        {"type": "token", "text": "Done."},
+        {**SHOWN, "content": "Done."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        body = transcript(view)
+        rig.control._merge_latency(body["turn_id"], {"stage": "stt", "ms": 40})
+        resp = await http.post(
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
+        )
+        assert json.loads(resp.text.splitlines()[-1])["done"] is True
+        merged = rig.control._merge_latency(
+            body["turn_id"], {"stage": "total_turn", "ms": 900}
+        )
+    assert merged == {
+        "stt_ms": 40,
+        "llm_first_token_ms": None,
+        "first_audio_ms": None,
+        "total_turn_ms": 900,
+    }
+    await rig.control.shutdown()
+
+
+async def test_a_reply_with_xml_tool_tags_is_said_once(rig):
+    # Its "response" (the clean text) comes before its display message.
+    rig.session.script = [
+        {"type": "token", "text": "Checking now."},
+        {"type": "response", "text": "Checking now."},
+        {**SHOWN, "content": "Checking now."},
+        {"type": "token", "text": "It is green."},
+        {**SHOWN, "content": "It is green."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Checking now.", "It is green."]
     await rig.control.shutdown()
 
 

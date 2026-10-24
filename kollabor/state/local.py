@@ -184,6 +184,18 @@ def _web_command_output(result: Any, command_name: str) -> str:
     return "\n".join(lines)
 
 
+def _heard_part(played: str, reply: str) -> str | None:
+    """The played text from where `reply`'s own words start, or None if they never did."""
+    words = re.findall(r"\w+", reply.lower())
+    spans = list(re.finditer(r"\w+", played.lower()))
+    heard = [m.group() for m in spans]
+    for i in range(len(heard)):
+        size = min(4, len(words), len(heard) - i)
+        if size and heard[i : i + size] == words[:size]:
+            return played[spans[i].start() :]
+    return None
+
+
 class LocalStateService(StateService):
     """In-process StateService backed by the existing kollabor services.
 
@@ -3148,6 +3160,22 @@ class LocalStateService(StateService):
             for m in llm.conversation_history
         ):
             return {"recorded": False, "duplicate": True}
+        said = [
+            m
+            for m in llm.conversation_history
+            if m.role == "assistant"
+            and (m.metadata or {}).get("voice_turn_id") == turn_id
+        ]
+        if said:
+            # The reply finished before playback did, the usual case: cut its last
+            # message to what was heard, in place, so history keeps one copy.
+            last = said[-1]
+            heard = text if len(said) == 1 else _heard_part(text, content_to_text(last.content))
+            if not heard:
+                return {"recorded": False}  # cut off before this message was heard
+            last.content = heard
+            last.metadata = {**last.metadata, "interrupted": True, "turn_id": turn_id}
+            return {"recorded": True, "replaced": True}
         llm._add_conversation_message(
             ConversationMessage(
                 role="assistant",

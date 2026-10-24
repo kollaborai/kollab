@@ -27,6 +27,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
+from kollabor_tui.turn_context import current_turn
 
 from .tool_call_contract import is_text_written_call, resolve_text_tool_call
 from .tool_output_budget import (
@@ -442,6 +443,7 @@ class QueueProcessor:
         self.is_processing = False
         self.turn_completed = False
         self.active_origin_context: dict[str, Any] | None = None
+        self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -1017,6 +1019,7 @@ class QueueProcessor:
                 "voice_tool_policy": "invalid",
             }
         self.active_origin_context = merged_origin_context
+        self._stamp_voice_turn(self._voice_turn_metadata().get("voice_turn_id"))
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -1874,6 +1877,7 @@ class QueueProcessor:
                 assistant_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                assistant_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1980,6 +1984,7 @@ class QueueProcessor:
                 xml_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                xml_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -2153,8 +2158,35 @@ class QueueProcessor:
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
                 or "end_turn",
             )
+            self._stamp_voice_turn(None)
 
         return parent_uuid
+
+    def _stamp_voice_turn(self, turn_id: str | None) -> None:
+        """Every event of a voice turn carries its id, its turn_complete last.
+
+        The Engine streams a voice turn's reply by that id (request_id): the
+        next turn's stream starts before a talked-over turn's late events are
+        out, and its turn_complete would end that stream before the reply.
+        """
+        token, self._voice_turn_token = self._voice_turn_token, None
+        if token is not None:
+            try:
+                current_turn.reset(token)
+            except ValueError:  # set in another task: nothing of it is here
+                pass
+        if turn_id:
+            fields = {**current_turn.get(), "request_id": turn_id}
+            self._voice_turn_token = current_turn.set(fields)
+
+    def _voice_turn_metadata(self) -> dict[str, Any]:
+        """Which voice turn a reply belongs to: a talk-over after it finished cuts
+        it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
+        origin = self.active_origin_context
+        if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
+            if isinstance(origin.get("turn_id"), str) and origin["turn_id"]:
+                return {"voice_turn_id": origin["turn_id"]}
+        return {}
 
     async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.

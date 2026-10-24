@@ -707,7 +707,14 @@ class VoiceControl:
     def _merge_latency(
         self, turn_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        """The worker's stages for a turn: its own measures, the only writer.
+
+        A turn's last audio is reported after its reply stream ended, so the
+        stages outlive that stream; the newest turns are kept.
+        """
         stages = self._latency.setdefault(turn_id or "", {})
+        while len(self._latency) > 16:
+            self._latency.pop(next(iter(self._latency)))
         key = {
             "stt": "stt_ms",
             "llm_first_token": "llm_first_token_ms",
@@ -841,16 +848,14 @@ class VoiceControl:
             snapshot.generation,
             snapshot.turn_id,
         )
-        started = time.monotonic()
-        stages = self._latency.setdefault(turn_id, {})
         raw = ""  # the reply being streamed (one per model call in the turn)
         consumed = 0  # chars of its speakable text already cut into sentences
         said: list[str] = []  # sentences handed to the worker, across the turn
         revision = 0
         partial_id = str(uuid4())
-        first_token_ms: int | None = None
         last_partial = 0.0
         completed = False
+        after_response = False  # its display message repeats what "response" said
 
         async def emit(event: str, payload: dict[str, Any]) -> None:
             await self._emit(vsid, generation, event, payload, turn_id=turn_id)
@@ -914,9 +919,7 @@ class VoiceControl:
                     continue
                 kind = event.get("type")
                 if kind == "token":
-                    if first_token_ms is None:
-                        first_token_ms = int((time.monotonic() - started) * 1000)
-                        stages["llm_first_token_ms"] = first_token_ms
+                    after_response = False
                     raw += str(event.get("text") or "")
                     async for item in say(final=False):
                         yield item
@@ -935,8 +938,18 @@ class VoiceControl:
                             " ".join(said) or None,
                             partial=True,
                         )
-                elif kind == "response":
-                    reply = str(event.get("text") or "")
+                elif kind == "response" or (
+                    kind == "message" and event.get("message_type") == "assistant"
+                ):
+                    # A model call's reply is shown (its display message), so its
+                    # last sentence, with no space after it yet, is said now. Only
+                    # a reply with XML tool tags sends "response" (its clean text)
+                    # before that display message.
+                    if kind == "message" and after_response:
+                        after_response = False
+                        continue
+                    after_response = kind == "response"
+                    reply = str(event.get("text") or event.get("content") or "")
                     raw = raw or reply  # no token events: the whole reply arrives here
                     async for item in say(final=True):
                         yield item
@@ -995,8 +1008,6 @@ class VoiceControl:
                         },
                     )
                 elif kind == "turn_complete":
-                    stages["total_turn_ms"] = int((time.monotonic() - started) * 1000)
-                    await emit("voice.metrics", self._metrics(stages))
                     completed = True
                     yield {"done": True, "turn_id": turn_id}
                     return
@@ -1019,7 +1030,6 @@ class VoiceControl:
             raise
         finally:
             session.unsubscribe(queue)
-            self._latency.pop(turn_id, None)
 
     async def _publish_assistant(
         self,

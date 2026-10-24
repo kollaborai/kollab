@@ -259,6 +259,86 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self._assistant_messages(), [])
         self.conversation_logger.log_assistant_message.assert_not_awaited()
 
+    def _reply_with(self, text):
+        """A model call that answers `text` with no tools, through the real turn."""
+        self.streaming_handler.call_llm = AsyncMock(return_value=text)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.response_parser.parse_response.return_value = {
+            "content": text,
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=(text, False, False)
+        )
+
+    def test_a_voice_reply_names_its_voice_turn(self):
+        """A talk-over after the reply finished cuts that reply to what was heard."""
+        self.processor.active_origin_context = make_voice_origin_context(turn_id="turn-9")
+        self._reply_with("The build is green.")
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.metadata.get("voice_turn_id"), "turn-9")
+        self.processor.active_origin_context = None
+        self.assertEqual(self.processor._voice_turn_metadata(), {})
+
+    def test_every_event_of_a_voice_turn_carries_its_id(self):
+        """The Engine streams a voice turn's reply by its id: a talked-over turn's
+        late events, its turn_complete above all, end no other turn's stream."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap, publish_semantic
+        from kollabor_tui.turn_context import current_turn
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("Sure.")
+
+        async def call_llm(*_args, **_kwargs):
+            publish_semantic(self.renderer, "token", text="Sure.")
+            return "Sure."
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+
+        async def turn():
+            voice = QueuedInput(
+                "is it green", {}, origin_context=make_voice_origin_context("turn-9")
+            )
+            await self.processor.process_message_batch([voice], "parent")
+            publish_semantic(self.renderer, "token", text="typed reply")  # the next turn
+            return current_turn.get()
+
+        after = self.loop.run_until_complete(turn())
+        ids = [
+            (e["type"], e.get("request_id"))
+            for e in tap.get_snapshot()
+            if e["type"] in ("token", "turn_complete")
+        ]
+        self.assertEqual(
+            ids,
+            [("token", "turn-9"), ("turn_complete", "turn-9"), ("token", None)],
+        )
+        self.assertNotIn("request_id", after)
+
     def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
         """The reply joins history after its tools; a Stop in between kept nothing."""
         self.streaming_handler.call_llm = AsyncMock(

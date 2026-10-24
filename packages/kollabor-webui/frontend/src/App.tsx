@@ -65,6 +65,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
+import { VoiceRoomProvider } from "./voice/voice-room";
 
 import {
   historyPageCache,
@@ -1359,39 +1360,43 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             </div>
           ) : null}
           {activeSession && initialState ? (
-            <EngineRuntimeProvider
-              key={`${activeId}:${runtimeEpoch}`}
-              api={api}
-              sessionId={activeSession.session_id}
-              initialState={initialState}
-              onStale={() => void resetThread(activeSession.session_id)}
-            >
-              <RuntimeShell
-                session={activeSession}
-                profiles={profiles}
-                agents={agents}
-                liveAgents={liveAgents}
-                remoteAgents={network.remote}
-                refreshSignal={refreshSignal}
-                supervisorEvents={supervisorEvents}
-                onSessionUpdated={handleSessionUpdated}
-                onOpenSettings={openSettings}
-                onHistoryCleared={() => resetThread(activeSession.session_id)}
-                onActivity={setActiveActivity}
-                eventActivity={eventActivity}
-                onOpenProperties={() => openProperties(activeSession.session_id)}
-                view={sessionView}
-                onViewChange={setSessionView}
-                locked={busy ? busyMessage || "Loading…" : ""}
+            // Outside the epoch key: a thread reload (resetThread) must not
+            // stop the voice room, as a talk-over that cuts a reply reloads it.
+            <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>
+              <EngineRuntimeProvider
+                key={`${activeId}:${runtimeEpoch}`}
+                api={api}
+                sessionId={activeSession.session_id}
+                initialState={initialState}
+                onStale={() => void resetThread(activeSession.session_id)}
+              >
+                <RuntimeShell
+                  session={activeSession}
+                  profiles={profiles}
+                  agents={agents}
+                  liveAgents={liveAgents}
+                  remoteAgents={network.remote}
+                  refreshSignal={refreshSignal}
+                  supervisorEvents={supervisorEvents}
+                  onSessionUpdated={handleSessionUpdated}
+                  onOpenSettings={openSettings}
+                  onHistoryCleared={() => resetThread(activeSession.session_id)}
+                  onActivity={setActiveActivity}
+                  eventActivity={eventActivity}
+                  onOpenProperties={() => openProperties(activeSession.session_id)}
+                  view={sessionView}
+                  onViewChange={setSessionView}
+                  locked={busy ? busyMessage || "Loading…" : ""}
 
-                historyStatus={historyStatus?.sessionId === activeSession.session_id
-                  ? { kind: historyStatus.kind, message: historyStatus.message }
-                  : undefined}
-                onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
-                onRetryHistory={retryHistory}
-                historyStartIndex={initialState.synced?.start ?? 0}
-              />
-            </EngineRuntimeProvider>
+                  historyStatus={historyStatus?.sessionId === activeSession.session_id
+                    ? { kind: historyStatus.kind, message: historyStatus.message }
+                    : undefined}
+                  onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
+                  onRetryHistory={retryHistory}
+                  historyStartIndex={initialState.synced?.start ?? 0}
+                />
+              </EngineRuntimeProvider>
+            </VoiceRoomProvider>
           ) : (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">

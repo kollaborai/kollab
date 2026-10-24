@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
 - Voice: a spoken reply no longer pauses about a second between sentences; each
   sentence's silent lead-in is cut to a short breath.
+- Chat: a reply you stop keeps the text shown so far, also when you stop it
+  while its tools run.
+- Voice: talking over a reply keeps only the part that was played, marked
+  interrupted, and the voice room stays up while the chat reloads to show it.
+- Voice: every reply speaks its last sentence, which was dropped, so a short
+  reply such as the answer after a talk-over is heard. The latency line keeps
+  Hear, Think and Speak when the reply's Total arrives.
 
 ### Removed
 - Web: WireGuard phone access is removed; PhoneLink is the way to connect a

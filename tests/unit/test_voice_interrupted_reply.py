@@ -92,3 +92,47 @@ async def test_a_log_failure_still_keeps_the_message_in_the_history():
     }
     assert [m.content for m in llm.conversation_history] == ["So the"]
     assert llm.current_parent_uuid == "user-uuid"  # not lost to the failed log
+
+
+def voice_reply(text, turn_id="turn-1"):
+    from kollabor_events.data_models import ConversationMessage
+
+    return ConversationMessage(
+        role="assistant", content=text, metadata={"voice_turn_id": turn_id}
+    )
+
+
+async def test_a_talk_over_after_the_reply_finished_cuts_it_in_place():
+    # a fast model finishes long before the voice does: the reply is in history
+    llm = FakeLLM()
+    reply = voice_reply("So the build is green. Ship it.")
+    llm.conversation_history.append(reply)
+    state = service(llm)
+
+    assert await state.record_interrupted_voice_reply("turn-1", "So the build is") == {
+        "recorded": True,
+        "replaced": True,
+    }
+    assert llm.conversation_history == [reply]  # one copy, same message
+    assert reply.content == "So the build is"
+    assert reply.metadata["interrupted"] and reply.metadata["turn_id"] == "turn-1"
+    assert await state.record_interrupted_voice_reply("turn-1", "So the build is") == {
+        "recorded": False,
+        "duplicate": True,
+    }
+
+
+async def test_a_talk_over_cuts_the_last_reply_of_a_turn_that_used_tools():
+    llm = FakeLLM()
+    first, last = voice_reply("Let me check."), voice_reply("**The build** is green.")
+    llm.conversation_history.extend([first, last])
+    state = service(llm)
+
+    assert await state.record_interrupted_voice_reply("turn-1", "Let me che") == {
+        "recorded": False  # cut off before the last reply was heard
+    }
+    assert last.content == "**The build** is green."
+    assert (await state.record_interrupted_voice_reply("turn-1", "Let me check. The build is"))[
+        "replaced"
+    ]
+    assert (first.content, last.content) == ("Let me check.", "The build is")
