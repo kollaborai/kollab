@@ -839,6 +839,8 @@ class EngineSession:
         )
         # A cancelled tool call may never report a result or a turn end: tell
         # the open windows so a gem does not keep acting out the dead call.
+        # Its late tool events arrive marked, so none restarts the turn.
+        self.daemon._post_cancel = True
         self._emit_event({"type": "turn_cancelled"})
 
     async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
@@ -854,6 +856,8 @@ class EngineSession:
             raise ValueError(str(result["error"]))
         if not isinstance(result.get("cancelled"), bool):
             raise TypeError("state.acp_cancel expected a cancelled boolean")
+        if result["cancelled"]:
+            self.daemon._post_cancel = True
         return {**result, "request_id": request_id}
 
     # === permissions ===

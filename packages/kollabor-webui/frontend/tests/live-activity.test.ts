@@ -89,3 +89,19 @@ test("a tool_result for another id leaves the running tool alone", () => {
   );
   assert.equal(liveActivity(live), "typing");
 });
+
+test("a cancelled turn's late tool events never restart the gem", () => {
+  // The engine marks what trails its turn_cancelled; a tool that ignored the
+  // stop signal reports ~2s later and must leave the gem idle.
+  const start = { type: "tool_start", tool_id: "a", tool_name: "terminal: sleep 99" };
+  const late = { type: "tool_result", tool_id: "a", cancelled: true };
+  assert.equal(liveActivity(nextLiveActivity(NO_LIVE_ACTIVITY, late)), null);
+  assert.equal(liveActivity(fold(start, { type: "turn_cancelled" }, late)), null);
+  assert.equal(liveActivity(fold({ type: "thinking", cancelled: true })), null);
+  assert.equal(liveActivity(fold({ type: "token", cancelled: true })), null);
+  // The next turn arrives unmarked and animates as usual.
+  assert.equal(
+    liveActivity(fold({ type: "turn_cancelled" }, { type: "tool_start", tool_id: "b", tool_name: "file_grep: x" })),
+    "searching",
+  );
+});

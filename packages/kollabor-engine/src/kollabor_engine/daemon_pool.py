@@ -86,6 +86,13 @@ SPAWN_TIMEOUT_SECONDS = 45.0
 # message, so the pool drops them at the boundary.
 _RENDERED_EVENT_TYPES = frozenset({"output", "active_area", "heartbeat", "clear"})
 
+# A cancelled turn's tool may ignore the stop signal and report afterwards.
+# These late mid-turn events still flow (the transcript mirror follows them)
+# but carry `cancelled: true`, so no gem reads them as a live turn. A new
+# turn's first event clears the mark.
+_POST_CANCEL_EVENT_TYPES = frozenset({"tool_start", "tool_result", "thinking", "token"})
+_NEW_TURN_EVENT_TYPES = frozenset({"turn_start", "user_message"})
+
 
 def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Reshape a daemon display event into the engine's documented SSE shape.
@@ -171,6 +178,7 @@ class DaemonHandle:
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
         self.startup_error: str = ""
+        self._post_cancel = False
 
         self.rpc: Any = None
         self.state: Any = None
@@ -287,6 +295,12 @@ class DaemonHandle:
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)
+        if self._post_cancel:
+            etype = event.get("type")
+            if etype in _NEW_TURN_EVENT_TYPES:
+                self._post_cancel = False
+            elif etype in _POST_CANCEL_EVENT_TYPES:
+                event = {**event, "cancelled": True}
         for queue in list(self._subscribers):
             try:
                 queue.put_nowait(event)

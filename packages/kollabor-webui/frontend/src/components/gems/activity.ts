@@ -56,6 +56,9 @@ export type LiveActivity = { tools: ReadonlyArray<readonly [string, Activity]>; 
 export const NO_LIVE_ACTIVITY: LiveActivity = { tools: [], phase: null };
 
 export function nextLiveActivity(live: LiveActivity, event: { type?: string; [key: string]: unknown }): LiveActivity {
+  // The engine marks a cancelled turn's late tool events (its tool ignored
+  // the stop signal), so none restarts the gem; the next turn arrives unmarked.
+  if (event.cancelled) return live;
   const id = String(event.tool_id ?? "");
   switch (event.type) {
     case "tool_start": {
