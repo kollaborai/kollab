@@ -2064,6 +2064,7 @@ class QueueProcessor:
 
             self.turn_completed = True
             self.stats["total_thinking_time"] += thinking_duration
+            await self._keep_interrupted_reply(parent_uuid)
 
         except Exception as e:
             logger.error(f"Error processing message: {type(e).__name__}: {e}")
@@ -2150,6 +2151,39 @@ class QueueProcessor:
             )
 
         return parent_uuid
+
+    async def _keep_interrupted_reply(self, parent_uuid: str) -> None:
+        """Keep the reply text a Stop cut off, marked interrupted.
+
+        The user watched it stream; without it the next turn answers a question
+        the model no longer remembers asking. A voice turn adds nothing here:
+        the voice side records what was actually played.
+        """
+        take = getattr(self._streaming_handler, "take_interrupted_text", None)
+        text = take() if callable(take) else ""
+        if not isinstance(text, str) or not text.strip():
+            return
+        origin = self.active_origin_context
+        # Not validate_voice_admission_context: a talk-over revokes the grant
+        # before the cancel lands, and the turn keeps its voice source.
+        if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
+            return
+        # History first: a second cancel can land on the await below, and the
+        # engine reads history when turn_complete goes out.
+        self._add_message_fn(
+            ConversationMessage(
+                role="assistant", content=text, metadata={"interrupted": True}
+            ),
+            parent_uuid=parent_uuid,
+        )
+        try:
+            await self.conversation_logger.log_assistant_message(
+                text,
+                parent_uuid=parent_uuid,
+                model=getattr(self.api_service, "model", None),
+            )
+        except Exception:
+            logger.exception("Could not log the interrupted reply")
 
     # ------------------------------------------------------------------
     # Shared helpers (used by both native and XML tool paths)

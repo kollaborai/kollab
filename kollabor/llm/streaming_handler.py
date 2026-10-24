@@ -72,6 +72,10 @@ class StreamingHandler:
         # then flushed via display_complete_response when streaming ends.
         self._streaming_buffer: str = ""
         self._display_stream_buffer: str = ""
+        # The text on screen when a Stop cancelled the call. cleanup() blanks
+        # the buffer in the same finally, so the cancel path copies it here
+        # for the queue processor to take.
+        self._interrupted_text: str = ""
 
     async def call_llm(
         self,
@@ -112,6 +116,7 @@ class StreamingHandler:
         self._thinking_parser.reset()
         self._thinking_formatter.reset()
         self._response_started = False
+        self._interrupted_text = ""
 
         # Check for cancellation before starting
         if is_cancelled_fn():
@@ -163,12 +168,18 @@ class StreamingHandler:
                 )
         except asyncio.CancelledError:
             logger.info("LLM API call was cancelled")
+            self._interrupted_text = self._display_stream_buffer
             raise
         except Exception as e:
             logger.error(f"LLM API call failed: {type(e).__name__}: {e}")
             raise
         finally:
             self.cleanup()
+
+    def take_interrupted_text(self) -> str:
+        """Return the text a Stop cut off, once, and forget it."""
+        text, self._interrupted_text = self._interrupted_text, ""
+        return text
 
     async def handle_chunk(self, chunk: str) -> None:
         """Handle streaming content chunk from API.

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueueProcessor,
@@ -16,6 +17,10 @@ from kollabor_agent.queue_processor import (
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
+from tests.unit.llm.voice_admission_helpers import (
+    make_voice_origin_context,
+    revoke_voice_admission_context,
+)
 
 
 @dataclass
@@ -181,6 +186,78 @@ class TestQueueProcessor(unittest.TestCase):
         event_types = [call.args[0] for call in self.event_bus.emit_with_hooks.await_args_list]
         self.assertIn(EventType.LLM_REQUEST_ERROR, event_types)
         self.streaming_handler.call_llm.assert_awaited_once()
+
+    def _stop_after_streaming(self, *chunks):
+        """Run a turn whose reply streams `chunks` and is then stopped.
+
+        Uses the real StreamingHandler: the text a Stop keeps lives in it.
+        Returns what happened in order: "history" for each message added, then
+        the semantic event types, so a test can check the engine's turn_complete
+        read comes after the row.
+        """
+
+        async def call_llm(*, streaming_callback, **_):
+            for chunk in chunks:
+                await streaming_callback(chunk)
+            raise asyncio.CancelledError("Request cancelled by user")
+
+        order = []
+        self.renderer.get_service.return_value.publish.side_effect = (
+            lambda event: order.append(event["type"])
+        )
+        self.add_message_fn.side_effect = lambda *a, **k: order.append("history")
+        self.processor._streaming_handler = StreamingHandler(
+            SimpleNamespace(call_llm=call_llm), MagicMock(), self.renderer
+        )
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+        return order
+
+    def _assistant_messages(self):
+        return [
+            call.args[0]
+            for call in self.add_message_fn.call_args_list
+            if call.args[0].role == "assistant"
+        ]
+
+    def test_a_stop_keeps_the_text_already_shown(self):
+        order = self._stop_after_streaming("Hello ", "wor")
+
+        replies = self._assistant_messages()
+        self.assertEqual([m.content for m in replies], ["Hello wor"])
+        self.assertEqual(replies[0].metadata, {"interrupted": True})
+        self.assertEqual(self.add_message_fn.call_args.kwargs["parent_uuid"], "t")
+        logged = self.conversation_logger.log_assistant_message
+        logged.assert_awaited_once()
+        self.assertEqual(logged.await_args.args[0], "Hello wor")
+        # the engine reads history when turn_complete goes out
+        self.assertLess(order.index("history"), order.index("turn_complete"))
+
+    def test_a_stop_before_any_text_keeps_nothing(self):
+        for chunks in ((), ("\n",)):
+            with self.subTest(chunks=chunks):
+                self.add_message_fn.reset_mock()
+                self.conversation_logger.reset_mock()
+
+                self._stop_after_streaming(*chunks)
+
+                self.assertEqual(self._assistant_messages(), [])
+                self.conversation_logger.log_assistant_message.assert_not_awaited()
+
+    def test_a_stopped_voice_turn_keeps_no_text_here(self):
+        """The voice side records what was played; this text was never heard."""
+        voice = make_voice_origin_context()
+        # a talk-over revokes the grant before the cancel lands
+        revoke_voice_admission_context(voice)
+        self.processor.active_origin_context = voice
+
+        self._stop_after_streaming("Hello wor")
+
+        self.assertEqual(self._assistant_messages(), [])
+        self.conversation_logger.log_assistant_message.assert_not_awaited()
 
     def test_context_window_failure_emits_typed_error_without_retry(self):
         class ContextWindowExceeded(RuntimeError):

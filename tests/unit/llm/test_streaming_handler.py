@@ -152,6 +152,47 @@ class TestStreamingHandler(unittest.TestCase):
                 )
             )
 
+    def _call(self):
+        mcp_complete = asyncio.Event()
+        mcp_complete.set()
+        return self.loop.run_until_complete(
+            self.handler.call_llm(
+                conversation_history=[],
+                native_tools=None,
+                mcp_discovery_complete=mcp_complete,
+                is_cancelled_fn=lambda: False,
+            )
+        )
+
+    def _stream_then_stop(self, *chunks):
+        async def call_llm(*, streaming_callback, **_):
+            for chunk in chunks:
+                await streaming_callback(chunk)
+            raise asyncio.CancelledError("Request cancelled by user")
+
+        self.api_service.call_llm = call_llm
+
+    def test_a_stopped_call_hands_back_the_text_it_streamed_once(self):
+        self._stream_then_stop("Hello ", "wor")
+
+        with self.assertRaises(asyncio.CancelledError):
+            self._call()
+
+        # cleanup() blanked the live buffer in the same finally
+        self.assertEqual(self.handler._display_stream_buffer, "")
+        self.assertEqual(self.handler.take_interrupted_text(), "Hello wor")
+        self.assertEqual(self.handler.take_interrupted_text(), "")
+
+    def test_the_next_call_forgets_a_stopped_reply_nobody_took(self):
+        self._stream_then_stop("Hello wor")
+        with self.assertRaises(asyncio.CancelledError):
+            self._call()
+
+        self.api_service.call_llm = AsyncMock(return_value="fine")
+        self._call()
+
+        self.assertEqual(self.handler.take_interrupted_text(), "")
+
     @patch("kollabor.llm.streaming_handler.asyncio.wait_for")
     def test_call_llm_waits_for_mcp_discovery(self, mock_wait):
         """Test LLM call waits for MCP discovery."""
