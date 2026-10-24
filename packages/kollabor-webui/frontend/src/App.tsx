@@ -591,8 +591,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [workspacePath]);
 
   const loadState = useCallback(
-    async (sessionId: string, nextSessions: Session[]) => {
-      setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+    async (sessionId: string, nextSessions: Session[], quiet = false) => {
+      // A refresh of an open chat shows no banner: the thread is already there.
+      if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
       try {
         const [loaded, permissions] = await Promise.all([
           loadLatestHistoryPage(sessionId, api, historyPageCache),
@@ -747,7 +748,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
-        const nextState = await loadState(sessionId, nextSessions);
+        const nextState = await loadState(sessionId, nextSessions, true);
         if (controller.signal.aborted || activeId !== sessionId) return;
         // Still the seed: the daemon's answer comes as history_updated.
         if (seeded && staleHistoryRef.current.has(sessionId)) return;
