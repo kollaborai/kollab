@@ -60,15 +60,9 @@ class MessageInjector:
 
         try:
             # Emit pre-injection event (plugins can modify/block)
-            # The bus answers with a phase envelope (pre/main/post), not the
-            # context: read the hooks' (possibly modified) data out of it.
-            envelope = await self.event_bus.emit_with_hooks(
+            context = await self.event_bus.emit_with_hooks(
                 EventType.PRE_MESSAGE_INJECT, context, "message_injector"
             )
-            main = envelope.get("main") if isinstance(envelope, dict) else None
-            final = main.get("final_data") if isinstance(main, dict) else None
-            if isinstance(final, dict) and "content" in final:
-                context = final
         except Exception as e:
             logger.debug(f"Pre-injection event error: {e}")
 
