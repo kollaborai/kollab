@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
@@ -35,7 +35,14 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
-from .capture import normalize_records, normalize_text, paginate, plain_text
+from .capture import (
+    group_transcript_records,
+    normalize_records,
+    normalize_text,
+    paginate,
+    plain_text,
+    render_transcript,
+)
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
@@ -80,10 +87,16 @@ from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
+    DEFAULT_ALERT_COOLDOWN,
+    DEFAULT_HANDOFF_ACK_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_STALL_THRESHOLD,
     DEFAULT_WAKE_COOLDOWN,
+    DEFAULT_WAKE_INEFFICACY,
     SupervisorState,
+    ack_handoff,
+    begin_handoff,
+    unacked_handoffs,
 )
 from .supervisor import (
     evaluate as evaluate_supervisor,
@@ -196,6 +209,18 @@ class _NetworkTurn:
     replies: int = 0  # hub_msgs already sent on its thread
     answer: str = ""  # text of the model's last response, if it ended the chain
     bound_ask: bool = False
+
+
+@dataclass(frozen=True)
+class _CaptureOutcome:
+    """Typed result for Hub capture command/tool dispatch."""
+
+    text: str
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -630,8 +655,14 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._supervisor_state = SupervisorState()
+        # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
+        self._supervisor_alerts: List[Tuple[float, str]] = []
+        # Bounded (timestamp, text) pairs for sends that did not reach their
+        # target, shown by /hub status on every agent (issue #283).
+        self._dispatch_failures: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        self._email_task: Optional[asyncio.Task] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
         # graceful and forced paths can execute the replacement only once.
         self._self_restart_watchdog_task: Optional[asyncio.Task] = None
@@ -718,6 +749,10 @@ class HubPlugin(BasePlugin):
                     "supervisor_stall_threshold": 900,
                     "supervisor_wake_cooldown": 120,
                     "supervisor_max_reassignments": 3,
+                    "supervisor_wake_inefficacy": 3,
+                    "supervisor_alert_cooldown": 900,
+                    "supervisor_handoff_ack_timeout": 120,
+                    "supervisor_handoff_resend": False,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -733,6 +768,12 @@ class HubPlugin(BasePlugin):
                     "bridge_user_id": "",
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
+                    "email_enabled": False,
+                    "email_imap_host": "imap.gmail.com",
+                    "email_address": "",
+                    "email_app_password": "",
+                    "email_filter": "category:primary",
+                    "email_target_agent": "",
                     "route_untagged_to_coordinator": True,
                     # Who wakes for a model call when an agent comes online:
                     # "all", "koordinator" (only the folder's coordinator) or
@@ -984,8 +1025,8 @@ class HubPlugin(BasePlugin):
                     "type": "text_input",
                     "label": "Bridge Target Agent",
                     "config_path": "plugins.hub.bridge_target_agent",
-                    "placeholder": "auto (self)",
-                    "help": "Identity to route incoming bridge messages to",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by bridge messages; that agent runs the bridge",
                 },
                 {
                     "type": "slider",
@@ -995,6 +1036,48 @@ class HubPlugin(BasePlugin):
                     "max_value": 30,
                     "step": 1,
                     "help": "Seconds between polls for incoming messages",
+                },
+                # --- Email Wake ---
+                {
+                    "type": "checkbox",
+                    "label": "Email Wake",
+                    "config_path": "plugins.hub.email_enabled",
+                    "help": "New mail in the inbox wakes an agent (IMAP IDLE; mail stays unread)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Address",
+                    "config_path": "plugins.hub.email_address",
+                    "placeholder": "you@gmail.com",
+                    "help": "Mailbox to watch",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email App Password",
+                    "config_path": "plugins.hub.email_app_password",
+                    "placeholder": "Gmail app password",
+                    "help": "App password, not the account password (myaccount.google.com/apppasswords)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email IMAP Host",
+                    "config_path": "plugins.hub.email_imap_host",
+                    "placeholder": "imap.gmail.com",
+                    "help": "IMAP server of the mailbox",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Filter",
+                    "config_path": "plugins.hub.email_filter",
+                    "placeholder": "every new message",
+                    "help": "Gmail search new mail must match, e.g. category:primary",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Target Agent",
+                    "config_path": "plugins.hub.email_target_agent",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by new mail; that agent runs the watcher",
                 },
                 # --- Routing ---
                 {
@@ -3406,6 +3489,28 @@ class HubPlugin(BasePlugin):
             ):
                 metadata["task_assignment"] = True
 
+        # A tagged handoff to a local agent is tracked on the ledger until
+        # the assignee acknowledges it (issue #283).
+        if (
+            metadata.get("task_assignment")
+            and task_id
+            and not handle
+            and not target.startswith("relay:")
+            and self._task_ledger
+            and self._identity
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                begin_handoff(
+                    self._task_ledger,
+                    task_id,
+                    self._identity.identity,
+                    target,
+                    content,
+                )
+            except Exception as e:
+                logger.debug("failed to track handoff %s: %s", task_id, e)
+
         # Route the message
         msg = HubMessage(
             action="message",
@@ -3457,6 +3562,7 @@ class HubPlugin(BasePlugin):
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
+                self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
                 ""
@@ -3503,11 +3609,22 @@ class HubPlugin(BasePlugin):
                 )
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
+            self._record_dispatch_failure(
+                ", ".join(queued_for), "offline, queued in its mailbox"
+            )
+        elif (msg.metadata or {}).get("_socket_failed"):
+            down = ", ".join(msg.metadata["_socket_failed"])
+            output = (
+                f"queued for {down} (socket send failed; it will read the"
+                " message from its mailbox)"
+            )
+            self._record_dispatch_failure(down, "socket send failed, queued")
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
             if target not in known_ids and target not in ("all", "*", "everyone"):
                 warned = True
+                self._record_dispatch_failure(target, "not online, no match")
                 output = (
                     f"warning: '{target}' is not online. "
                     f"message broadcast but no matching agent. "
@@ -4587,42 +4704,85 @@ class HubPlugin(BasePlugin):
         )
 
     async def _handle_hub_capture_tool(self, tool_data: dict):
-        """Execute a hub_capture tool."""
+        """Execute a hub_capture tool with typed target, line, and format args."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        # Native normalization keeps the executor's canonical ``name`` as
-        # ``hub_capture``. Read provider arguments from the nested payload
-        # first, while retaining the legacy XML extractor keys.
+        tool_id = tool_data.get("id", "unknown")
         request = tool_data.get("input") or tool_data.get("arguments") or {}
         if not isinstance(request, dict):
             request = {}
-        cap_name = tool_data.get("cap_name", "") or request.get("name", "")
-        cap_lines = (
-            tool_data.get("cap_lines", "")
-            or request.get("lines", "")
-            or tool_data.get("lines", "")
-            or "50"
+
+        def failure(message: str) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="hub_capture",
+                success=False,
+                error=message,
+            )
+
+        cap_name = tool_data.get("cap_name") or request.get("name") or ""
+        if not isinstance(cap_name, str) or not cap_name.strip():
+            return failure("hub_capture requires a non-empty agent name")
+        cap_name = cap_name.strip()
+
+        if tool_data.get("cap_lines") not in (None, ""):
+            raw_lines = tool_data["cap_lines"]
+        elif "lines" in request:
+            raw_lines = request["lines"]
+        elif "lines" in tool_data:
+            raw_lines = tool_data["lines"]
+        else:
+            raw_lines = 50
+        if isinstance(raw_lines, bool):
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if isinstance(raw_lines, int):
+            cap_lines = raw_lines
+        elif (
+            isinstance(raw_lines, str)
+            and raw_lines.strip().isascii()
+            and raw_lines.strip().isdigit()
+        ):
+            cap_lines = int(raw_lines.strip())
+        else:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if cap_lines < 1:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        cap_lines = min(cap_lines, 100)
+
+        raw_format = request.get(
+            "format", tool_data.get("format", tool_data.get("cap_format", "transcript"))
         )
-        cap_format = str(
-            request.get("format", "") or tool_data.get("cap_format", "") or ""
-        ).strip().lower()
-        wants_raw = cap_format == "terminal" or bool(request.get("raw"))
-        args = cap_name.strip()
-        if cap_lines:
-            args += f" {cap_lines}"
-        if wants_raw:
-            args += " --raw"
-        result = await self._handle_capture_command(args)
-        # Truncate per-agent capture to 10k chars (2000 was too low —
-        # oldest entries consumed the entire budget before recent work
-        # became visible).  Entries are already newest-first.
-        if len(result) > 10000:
-            result = result[:10000] + "\n... (truncated)"
+        if raw_format in (None, ""):
+            raw_format = "transcript"
+        if not isinstance(raw_format, str):
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        cap_format = raw_format.strip().lower()
+        if cap_format not in {"transcript", "json", "plain", "terminal"}:
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        raw_flag = request.get("raw", tool_data.get("raw", False))
+        if not isinstance(raw_flag, bool):
+            return failure("hub_capture raw must be a boolean")
+        if raw_flag or cap_format == "terminal":
+            capture_format = "terminal"
+        elif cap_format == "plain":
+            capture_format = "plain"
+        else:
+            capture_format = "json"
+
+        outcome = await self._capture_target(
+            cap_name,
+            cap_lines,
+            capture_format=capture_format,
+        )
+        output = outcome.text
+        if len(output) > 10_000:
+            output = output[:10_000] + "\n... (truncated)"
         return ToolExecutionResult(
-            tool_id=tool_data.get("id", "unknown"),
+            tool_id=tool_id,
             tool_type="hub_capture",
-            success=True,
-            output=result,
+            success=outcome.success,
+            output=output,
+            error=outcome.error,
         )
 
     async def register_hooks(self) -> None:
@@ -5445,14 +5605,12 @@ class HubPlugin(BasePlugin):
                 )
                 self._notify_task = asyncio.create_task(self._notifier.run())
 
-            # Start messaging bridge loop if enabled
-            bridge_enabled = False
-            if self.config:
-                bridge_enabled = self.config.get("plugins.hub.bridge_enabled", False)
-            # Only coordinator runs the bridge (avoids 409 conflict
-            # when multiple agents poll the same bot token)
-            if bridge_enabled and self._identity.is_coordinator:
+            # Each inbox runs on the agent it wakes, so its messages are a
+            # local delivery and its replies go out through its own bridge.
+            if self._runs_inbox("bridge"):
                 self._bridge_task = asyncio.create_task(self._messaging_bridge_loop())
+            if self._runs_email_watch():
+                self._email_task = asyncio.create_task(self._email_inbox_loop())
 
             # Start cron loop (always -- jobs are added at runtime)
             self._cron_task = asyncio.create_task(self._cron_loop())
@@ -6293,6 +6451,9 @@ class HubPlugin(BasePlugin):
             "plugins.hub.supervisor_max_reassignments",
             3,
         )
+        # Boot counts as fresh activity: wake-efficacy alerts need real
+        # stall time after start, not a zero baseline (issue #283).
+        self._supervisor_state.last_turn_end = time.time()
         while True:
             try:
                 await asyncio.sleep(max(1.0, float(poll_interval)))
@@ -6338,6 +6499,29 @@ class HubPlugin(BasePlugin):
             stall_threshold=stall,
             wake_cooldown=cooldown,
             max_reassignments=max_reassign,
+            wake_inefficacy=self.config.get(
+                "plugins.hub.supervisor_wake_inefficacy",
+                DEFAULT_WAKE_INEFFICACY,
+            )
+            if self.config
+            else DEFAULT_WAKE_INEFFICACY,
+            alert_cooldown=self.config.get(
+                "plugins.hub.supervisor_alert_cooldown",
+                DEFAULT_ALERT_COOLDOWN,
+            )
+            if self.config
+            else DEFAULT_ALERT_COOLDOWN,
+            handoff_ack_timeout=self.config.get(
+                "plugins.hub.supervisor_handoff_ack_timeout",
+                DEFAULT_HANDOFF_ACK_TIMEOUT,
+            )
+            if self.config
+            else DEFAULT_HANDOFF_ACK_TIMEOUT,
+            handoff_resend=bool(
+                self.config.get("plugins.hub.supervisor_handoff_resend", False)
+            )
+            if self.config
+            else False,
             state=self._supervisor_state,
         )
         if not decisions:
@@ -6396,6 +6580,46 @@ class HubPlugin(BasePlugin):
                         decision.worker,
                         decision.card_id,
                     )
+                    # A nudge nobody received must not vanish (issue #283):
+                    # surface it; the next pass requeues the card.
+                    self._record_supervisor_alert(
+                        f"nudge for task {decision.card_id} was not"
+                        f" delivered to {decision.worker} (offline or"
+                        " unreachable); the card will be requeued"
+                    )
+            elif decision.kind == "retry_handoff":
+                card = self._task_ledger.get(decision.card_id)
+                retry = HubMessage(
+                    action="message",
+                    from_agent=my_id,
+                    from_identity=(card.assigner if card else "")
+                    or "idle-supervisor",
+                    to=decision.worker,
+                    content=decision.text,
+                    scope=MessageScope.DIRECT.value,
+                    metadata={
+                        "task_id": decision.card_id,
+                        "task_assignment": True,
+                    },
+                )
+                rejections = await self._route_message(retry)
+                if rejections:
+                    for ident, reason in rejections:
+                        self._record_dispatch_failure(ident, reason)
+                outcomes.append(f"retry_handoff -> {decision.worker}")
+            elif decision.kind == "alert_handoff_unacked":
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append(f"alert: handoff {decision.card_id} unacked")
+            elif decision.kind == "alert_coordinator_stalled":
+                # Wake efficacy failed: the coordinator got the wakes and
+                # still produced no turn. Say it loudly — this is the
+                # 2026-10-16/#283 stall that used to sit in silence.
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append("alert: coordinator stalled")
             else:  # requeue_stalled — already applied on the ledger
                 outcomes.append(
                     f"requeue_stalled: task {decision.card_id}"
@@ -6483,7 +6707,84 @@ class HubPlugin(BasePlugin):
             return
 
         self._bridge = bridge
+        try:
+            await self._run_bridge_inbox(
+                bridge,
+                lock_key=f"{platform}:{token}",
+                poll_interval=poll_interval,
+                target=self.config.get("plugins.hub.bridge_target_agent", ""),
+                set_polling=self._set_bridge_polling,
+            )
+        finally:
+            self._bridge = None
 
+    async def _email_inbox_loop(self) -> None:
+        """Watch the configured inbox; each new email wakes this agent.
+
+        Runs only on the agent named by ``email_target_agent`` (or the
+        coordinator when it is empty), so the wake is a local delivery. The
+        machine-global poll lock keeps one watcher per mailbox.
+        """
+        if not self.config or not self._identity:
+            return
+        from .email_bridge import EmailBridge
+
+        address = self.config.get("plugins.hub.email_address", "")
+        password = self.config.get(
+            "plugins.hub.email_app_password", ""
+        ) or os.environ.get("KOLLAB_HUB_EMAIL_APP_PASSWORD", "")
+        if not address or not password:
+            logger.warning("email_enabled=True but email_address/email_app_password not set")
+            return
+        bridge = EmailBridge(
+            address,
+            password,
+            host=self.config.get("plugins.hub.email_imap_host", "imap.gmail.com"),
+            search=self.config.get("plugins.hub.email_filter", ""),
+        )
+        if not await bridge.connect():
+            return
+        await self._run_bridge_inbox(
+            bridge,
+            lock_key=f"email:{address.lower()}",
+            poll_interval=1,
+            target=self._identity.identity,
+        )
+
+    def _runs_email_watch(self) -> bool:
+        return self._runs_inbox("email")
+
+    def _runs_inbox(self, kind: str) -> bool:
+        """True when this agent runs the ``bridge`` or ``email`` inbox.
+
+        That is the agent named by ``<kind>_target_agent``, or the coordinator
+        when it is empty.
+        """
+        if not self.config or not self._identity:
+            return False
+        if not self.config.get(f"plugins.hub.{kind}_enabled", False):
+            return False
+        target = self.config.get(f"plugins.hub.{kind}_target_agent", "")
+        if target:
+            return target == self._identity.identity
+        return self._identity.is_coordinator
+
+    def _set_bridge_polling(self, polling: bool) -> None:
+        self._bridge_polling = polling
+
+    async def _run_bridge_inbox(
+        self,
+        bridge: MessagingBridge,
+        lock_key: str,
+        poll_interval: float,
+        target: str,
+        set_polling: Callable[[bool], None] = lambda _polling: None,
+    ) -> None:
+        """Own one bridge's inbox: poll it and route what arrives to ``target``.
+
+        Shared by the messaging bridge and the email watcher. Disconnects the
+        bridge when cancelled.
+        """
         # Machine-global poll lock keyed on the token (see BridgePollLock).
         # The hub elects a coordinator per project, so multiple kollab sessions
         # in different repos each elect their own coordinator and would each
@@ -6492,7 +6793,8 @@ class HubPlugin(BasePlugin):
         # to take over on holder death) while still able to send.
         from kollabor_config.config_utils import get_config_directory
 
-        poll_lock = BridgePollLock(f"{platform}:{token}", get_config_directory())
+        platform = bridge.name
+        poll_lock = BridgePollLock(lock_key, get_config_directory())
         standby_interval = max(int(poll_interval), 15)
         conflict_logged = False
         was_standby = False
@@ -6515,7 +6817,7 @@ class HubPlugin(BasePlugin):
                                 f"retry every {standby_interval}s"
                             )
                             was_standby = True
-                        self._bridge_polling = False
+                        set_polling(False)
                         await asyncio.sleep(standby_interval)
                         continue
 
@@ -6525,12 +6827,12 @@ class HubPlugin(BasePlugin):
                             f"polling every {poll_interval}s"
                         )
                         was_standby = False
-                    self._bridge_polling = True
+                    set_polling(True)
 
                     messages = await bridge.poll()
                     conflict_logged = False
                     for msg in messages:
-                        await self._handle_bridge_incoming(msg)
+                        await self._handle_bridge_incoming(msg, target)
                     # poll() already blocks via long-polling (30s for telegram).
                     # Only add extra sleep if no messages came back (backoff)
                     # or if the platform doesn't do long-polling.
@@ -6558,12 +6860,11 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError:
             pass
         finally:
-            self._bridge_polling = False
+            set_polling(False)
             poll_lock.release()
             await bridge.disconnect()
-            self._bridge = None
 
-    async def _handle_bridge_incoming(self, msg: IncomingMessage) -> None:
+    async def _handle_bridge_incoming(self, msg: IncomingMessage, target: str = "") -> None:
         """Route an incoming bridge message as a hub message.
 
         The message arrives from an external platform (e.g. Telegram)
@@ -6572,9 +6873,6 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        target = ""
-        if self.config:
-            target = self.config.get("plugins.hub.bridge_target_agent", "")
         if not target:
             target = self._identity.identity
 
@@ -6593,13 +6891,17 @@ class HubPlugin(BasePlugin):
             },
         )
 
-        logger.info(
-            f"bridge incoming ({msg.platform}): "
-            f"{msg.sender_name} -> {target}: {msg.text[:80]}"
-        )
+        # Email bodies and subjects stay out of the log; the uid identifies it.
+        preview = f"uid {msg.sender_id}" if msg.platform == "email" else msg.text[:80]
+        logger.info(f"bridge incoming ({msg.platform}): {msg.sender_name} -> {target}: {preview}")
 
-        # Route through the standard message handler
-        await self._on_message_received(hub_msg)
+        if target == self._identity.identity:
+            await self._on_message_received(hub_msg)
+            return
+        # Another agent's inbox (a bridge turned on here with /hub bridge on):
+        # receiving it here would only show it as observed, so send it on.
+        for recipient, reason in await self._route_message(hub_msg):
+            logger.warning(f"bridge incoming ({msg.platform}) not delivered to {recipient}: {reason}")
 
     async def bridge_send(self, text: str) -> bool:
         """Send a message through the active bridge (if connected).
@@ -6616,6 +6918,14 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"bridge_send failed: {e}")
             return False
+
+    def _answers_bridge_message(self) -> bool:
+        """True when the newest user message came in through the bridge."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        for msg in reversed(getattr(llm, "conversation_history", None) or []):
+            if msg.role == "user":
+                return bool((getattr(msg, "metadata", None) or {}).get("bridge_platform"))
+        return False
 
     async def _bridge_forward(self, text: str) -> None:
         """Forward a message to the bridge if connected. Truncates to 500 chars.
@@ -8128,6 +8438,10 @@ class HubPlugin(BasePlugin):
             )
 
         # Auto-create TaskCard for incoming task assignments.
+        assigned_task_id = str(
+            (message.metadata or {}).get("task_id", "") or ""
+        ).strip()
+
         # Messages with task metadata or work-assignment patterns
         # get persisted to disk so they survive compaction.
         if (
@@ -8166,6 +8480,8 @@ class HubPlugin(BasePlugin):
                     task_id = str(message.metadata.get("task_id", "") or "").strip()
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
+                        assigned_task_id = str(existing.id)
+                        ack_handoff(self._task_ledger, task_id, assignee)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -8184,6 +8500,8 @@ class HubPlugin(BasePlugin):
                             card_id=task_id,
                         )
                         logger.info(f"Auto-created task {card.id} from" f" {assigner}")
+                        assigned_task_id = str(card.id)
+
                     else:
                         # Heuristic match (no tag): mint as OPEN so the
                         # worker must claim it and the idle supervisor
@@ -8202,6 +8520,8 @@ class HubPlugin(BasePlugin):
                             card.id,
                             assigner,
                         )
+                        assigned_task_id = str(card.id)
+
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -8499,6 +8819,9 @@ class HubPlugin(BasePlugin):
                     "hub_wake_mode": wake_decision.mode,
                     "hub_wake_reason": wake_decision.reason,
                 }
+                if assigned_task_id:
+                    msg_metadata["task_id"] = assigned_task_id
+
                 # Pass through bridge metadata for relay
                 if hasattr(message, "metadata") and message.metadata:
                     if message.metadata.get("bridge_platform"):
@@ -9221,6 +9544,7 @@ class HubPlugin(BasePlugin):
             self._running_tools.pop(tool_id, None)
         elif kind in ("turn_complete", "error"):
             self._running_tools.clear()
+            self._stamp_supervisor_turn(kind, event)
         else:
             return
         tool = next(reversed(self._running_tools.values()), {})
@@ -9229,6 +9553,117 @@ class HubPlugin(BasePlugin):
             identity.current_tool = tool
             if self._presence:
                 self._presence.publish()
+
+    def _stamp_supervisor_turn(self, kind: str, event: Dict[str, Any]) -> None:
+        """Feed the supervisor's wake-efficacy tracking (issue #283).
+
+        A completed turn proves the coordinator is alive; a failed turn
+        only explains why it is not. Errors are kept so the stall alert
+        names the actual blocker (context overflow, provider outage)
+        instead of silence.
+        """
+        state = getattr(self, "_supervisor_state", None)
+        if state is None:
+            return
+        if kind == "turn_complete":
+            state.last_turn_end = time.time()
+            state.wakes_since_turn = 0
+        else:
+            err = str(
+                event.get("error") or event.get("message") or ""
+            ).strip()
+            if err:
+                state.last_error = err[:200]
+
+    def _record_supervisor_alert(self, text: str) -> None:
+        """Keep the last few supervisor alerts for /hub status (issue #283)."""
+        self._supervisor_alerts.append((time.time(), text))
+        del self._supervisor_alerts[:-10]
+        tap = getattr(self, "_display_tap", None)
+        if tap is not None:
+            try:
+                tap.publish({"type": "supervisor_alert", "message": text})
+            except Exception:
+                logger.debug("supervisor alert publish failed", exc_info=True)
+
+    def _record_dispatch_failure(self, target: str, reason: str) -> None:
+        """Remember a send that did not reach ``target`` (issue #283).
+
+        The sender already reads the failure in its tool result; this keeps
+        it where `/hub status` (and so `kollab --hub status`) can show it.
+        """
+        failures = getattr(self, "_dispatch_failures", None)
+        if failures is None:
+            failures = self._dispatch_failures = []
+        failures.append((time.time(), f"{target}: {reason}"))
+        del failures[:-10]
+        logger.warning("hub dispatch failed: %s: %s", target, reason)
+
+    def _dispatch_failure_lines(self) -> List[str]:
+        failures = getattr(self, "_dispatch_failures", None) or []
+        if not failures:
+            return []
+        now = time.time()
+        lines = [f"dispatch failures: {len(failures)} recent"]
+        for ts, text in failures[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            lines.append(f"  ({ago}m ago) {' '.join(text.split())[:110]}")
+        return lines
+
+    async def _notify_supervisor_alert(self, text: str) -> None:
+        """Send the alert through the configured notifier channel, if any."""
+        backend = getattr(getattr(self, "_notifier", None), "_backend", None)
+        if backend is None:
+            return
+        try:
+            await backend.send(
+                f"[idle-supervisor] {text}", {"kind": "supervisor_alert"}
+            )
+        except Exception as e:
+            logger.warning("supervisor alert delivery failed: %s", e)
+
+    def _supervisor_status_lines(self) -> List[str]:
+        """Idle-supervisor section for /hub status (issue #283).
+
+        Shown for a coordinator running the loop even while healthy: an
+        open stall must be visible on request, not only when it alerts.
+        """
+        if (
+            not self._identity
+            or not self._identity.is_coordinator
+            or self._task_ledger is None
+            or self._supervisor_task is None
+        ):
+            return []
+        state = self._supervisor_state
+        open_cards = self._task_ledger.get_open()
+        stalled = self._task_ledger.get_stalled(
+            self.config.get(
+                "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
+            )
+            if self.config
+            else DEFAULT_STALL_THRESHOLD
+        )
+        lines = [
+            f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
+            f" {len(self._supervisor_alerts)} alert(s)"
+        ]
+        if state.wakes_since_turn and state.last_turn_end:
+            idle = max(0, int((time.time() - state.last_turn_end) // 60))
+            lines.append(
+                f"  {state.wakes_since_turn} wake(s) without a completed"
+                f" turn; last completed turn {idle}m ago"
+            )
+        now = time.time()
+        for card in unacked_handoffs(self._task_ledger):
+            lines.append(
+                f"  handoff awaiting ack: {card.id} -> {card.assignee}"
+            )
+        for ts, text in self._supervisor_alerts[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            first = " ".join(text.split())[:110]
+            lines.append(f"  alert ({ago}m ago): {first}")
+        return lines
 
     async def _broadcast_user_input(self, data, event=None):
         """Broadcast user input to all peers so they see what the human said."""
@@ -9592,8 +10027,12 @@ class HubPlugin(BasePlugin):
         # Hub messages from this agent are already forwarded at send time,
         # so only forward the cleaned text that remains after tag stripping
         # (the "natural language" part of the response).
+        # A reply to a bridge message goes out whole: it is the answer.
         if cleaned and not has_pending_tool_work:
-            await self._bridge_forward(cleaned)
+            if self._answers_bridge_message():
+                await self.bridge_send(cleaned)
+            else:
+                await self._bridge_forward(cleaned)
 
         # Route untagged responses to coordinator if enabled. This path is
         # only for terminal/final summaries from worker agents. Native tool
@@ -10172,6 +10611,11 @@ class HubPlugin(BasePlugin):
         )
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
+            # The sender has to hear that this was a mailbox drop, not a
+            # live delivery (issue #283).
+            failed = list((message.metadata or {}).get("_socket_failed", []))
+            if agent.identity not in failed:
+                message.metadata["_socket_failed"] = [*failed, agent.identity]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
@@ -11803,12 +12247,13 @@ class HubPlugin(BasePlugin):
         format: str = "terminal",
         max_chars: Any = None,
         cursor: Any = None,
-    ) -> Any:
+    ) -> _CaptureOutcome:
         """Capture output directly from a live hub peer via its socket."""
         if not peer.socket_path:
             if self._presence:
                 self._presence.cleanup_agent(peer)
-            return f"agent '{peer.identity}' has no socket path, cleaned up"
+            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            return _CaptureOutcome(message, error=message)
 
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
@@ -11824,12 +12269,20 @@ class HubPlugin(BasePlugin):
                 auth=dial_auth,
             )
             if capture_error:
-                return f"capture failed for '{peer.identity}': {capture_error}"
+                message = f"capture failed for '{peer.identity}': {capture_error}"
+                return _CaptureOutcome(message, error=message)
             if payload is None:
-                return f"no recent output from '{peer.identity}'"
+                return _CaptureOutcome(f"no recent output from '{peer.identity}'")
             if format == "json":
-                return payload
-            return self._render_plain_capture(peer.identity, payload)
+                text = render_transcript(
+                    payload,
+                    identity=peer.identity,
+                    max_lines=lines,
+                    max_chars=max_chars or 10_000,
+                )
+            else:
+                text = self._render_plain_capture(peer.identity, payload)
+            return _CaptureOutcome(text)
 
         output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
@@ -11838,21 +12291,21 @@ class HubPlugin(BasePlugin):
             auth=dial_auth,
         )
         if capture_error:
-            return f"capture failed for '{peer.identity}': {capture_error}"
+            message = f"capture failed for '{peer.identity}': {capture_error}"
+            return _CaptureOutcome(message, error=message)
         if not output_lines:
-            return f"no recent output from '{peer.identity}'"
+            return _CaptureOutcome(f"no recent output from '{peer.identity}'")
 
         header = f"[{peer.identity}]"
-        return header + "\n" + "\n".join(output_lines)
+        return _CaptureOutcome(header + "\n" + "\n".join(output_lines))
 
     @staticmethod
     def _render_plain_capture(identity: str, payload: Any) -> str:
-        """Render a plain capture envelope as escape-free text.
+        """Render an explicitly requested plain capture envelope.
 
-        Plain is the default chat/CLI format: it strips ANSI and control
-        codes so agent captures do not burn tokens on terminal styling.
-        Older peers may still answer the get_output request with bare
-        "lines" (no envelope); those lines are normalized here too.
+        This preserves the socket/API plain-text contract for callers that
+        request it. Default Hub capture commands use ``render_transcript``;
+        older peers may still answer with bare lines, normalized here too.
         """
         if not isinstance(payload, dict):
             return str(payload or f"no recent output from '{identity}'")
@@ -12178,68 +12631,99 @@ class HubPlugin(BasePlugin):
 
         return msg
 
-    async def _handle_capture_command(self, rest: str) -> str:
+    async def _capture_target(
+        self,
+        target: str,
+        lines: int,
+        *,
+        capture_format: str = "json",
+    ) -> _CaptureOutcome:
+        """Capture one validated target/line request without textual argument parsing."""
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return _CaptureOutcome(refusal, error=refusal)
+        target_for_orchestrator = target
+        if target.lower() != "all":
+            own_identity = self._identity.identity if self._identity else ""
+            if target.lower() == own_identity.lower():
+                message = (
+                    f"self-capture not supported for '{own_identity}' "
+                    "(coordinator runs in the main process, not a "
+                    "spawned session). capture a spawned agent instead."
+                )
+                return _CaptureOutcome(message, error=message)
+
+            peer = self._get_peer_by_identity(target)
+            if peer is not None:
+                return await self._capture_peer_output(
+                    peer,
+                    lines,
+                    format=capture_format,
+                    max_chars=10_000 if capture_format == "json" else None,
+                )
+
+        orchestrator = self._get_orchestrator()
+        if not orchestrator:
+            message = "error: agent orchestrator not available"
+            return _CaptureOutcome(message, error=message)
+        if target.lower() != "all":
+            resolved = self._resolve_identity_to_agent_name(target)
+            if resolved is not None:
+                target_for_orchestrator = resolved
+            else:
+                try:
+                    known_names = list(
+                        orchestrator.orchestrator.get_all_agents().keys()
+                    )
+                except Exception:
+                    known_names = []
+                if target not in known_names:
+                    message = f"error: agent '{target}' not found"
+                    return _CaptureOutcome(message, error=message)
+
+        result = await orchestrator._cmd_capture([target_for_orchestrator, str(lines)])
+        message = str(result.message)
+        if getattr(result, "success", True) is False:
+            error = str(getattr(result, "error", None) or message)
+            return _CaptureOutcome(message, error=error)
+        if capture_format == "json":
+            message = render_transcript(
+                message,
+                identity=target,
+                max_lines=lines,
+                max_chars=10_000,
+            )
+        return _CaptureOutcome(message)
+
+    async def _handle_capture_command(
+        self, rest: str, *, capture_format: str = "json"
+    ) -> str:
         """Handle /hub capture <identity|name|all> [lines] [--raw].
 
-        Accepts hub identity names (e.g. "lapis"), orchestrator agent
-        names, or "all". Hub identities capture directly over peer sockets.
-        Orchestrator session names still route through agent_orchestrator.
-        Defaults to the plain format (ANSI/control codes stripped);
-        pass --raw for the raw terminal rendering.
+        Hub identities use the shared transcript renderer by default; --raw
+        preserves the terminal capture path. Tool callers use `_capture_target`
+        with validated identity and line arguments.
         """
         args = rest.split() if rest.strip() else []
-        # Plain (ANSI-stripped) is the default capture format; --raw opts
-        # back into the raw terminal rendering.
-        capture_format = "terminal" if "--raw" in args else "plain"
-        args = [a for a in args if a != "--raw"]
-        refusal = self._remote_target_refusal(args[0] if args else "")
-        if refusal:
-            return refusal
-        orch = self._get_orchestrator()
-        if not orch:
-            return "error: agent orchestrator not available"
         if not args:
             return "usage: /hub capture <identity|name|all> [lines] [--raw]"
-
+        if "--raw" in args:
+            capture_format = "terminal"
+            args = [arg for arg in args if arg != "--raw"]
+        if capture_format not in {"json", "plain", "terminal"}:
+            capture_format = "json"
         target = args[0]
         try:
             lines = int(args[1]) if len(args) > 1 else 50
         except (TypeError, ValueError):
             lines = 50
-
-        # Resolve hub identity first. Not every live peer is an orchestrator-
-        # owned subprocess in this process, so capture over the hub socket when
-        # we have a presence record.
-        if target.lower() != "all":
-            own_identity = self._identity.identity if self._identity else ""
-            if target.lower() == own_identity.lower():
-                return (
-                    f"self-capture not supported for '{own_identity}' "
-                    "(coordinator runs in the main process, not a "
-                    "spawned session). capture a spawned agent instead."
-                )
-
-            peer = self._get_peer_by_identity(target)
-            if peer is not None:
-                return await self._capture_peer_output(
-                    peer, lines, format=capture_format
-                )
-
-            resolved = self._resolve_identity_to_agent_name(target)
-            if resolved is not None:
-                args[0] = resolved
-            else:
-                known_agent_names = []
-                try:
-                    known_agent_names = list(orch.orchestrator.get_all_agents().keys())
-                except Exception:
-                    known_agent_names = []
-
-                if target not in known_agent_names:
-                    return f"error: agent '{target}' not found"
-
-        result = await orch._cmd_capture(args)
-        return str(result.message)
+        return (
+            await self._capture_target(
+                target,
+                lines,
+                capture_format=capture_format,
+            )
+        ).text
 
     async def _handle_wake_command(self, rest: str) -> str:
         """Handle /hub wake <identity> — manually wake a waiting agent."""
@@ -13480,6 +13964,8 @@ class HubPlugin(BasePlugin):
             for slot in pending[:5]:
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
+        lines.extend(self._supervisor_status_lines())
+        lines.extend(self._dispatch_failure_lines())
         lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
 
@@ -14291,26 +14777,75 @@ class HubPlugin(BasePlugin):
                 return ["(no recent output)"]
             return [str(e.get("rendered", "")) for e in rendered_events[-limit:]]
 
-        semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"]
+        semantic = [
+            e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"
+        ]
         if not semantic:
-            semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") == "output"]
-        records = normalize_records(semantic[-limit:])
-        page, truncated, next_cursor = paginate(records, cursor=cursor, max_chars=max_chars)
+            semantic = [
+                e
+                for e in raw_events
+                if isinstance(e, dict) and e.get("type") == "output"
+            ]
+        records = group_transcript_records(normalize_records(semantic))
+        ring_truncated = False
+        first_seq = 0
+        latest_seq = 0
+        if raw_events:
+            try:
+                first_seq = int(raw_events[0].get("seq", 0))
+                ring_truncated = first_seq > 1
+                latest_seq = max(int(event.get("seq", 0)) for event in raw_events)
+            except (AttributeError, TypeError, ValueError):
+                first_seq = 0
+                ring_truncated = False
+                latest_seq = 0
+        cursor_reset = False
+        if cursor is not None:
+            try:
+                cursor_seq = int(cursor)
+            except (TypeError, ValueError):
+                cursor = None
+                cursor_reset = True
+            else:
+                if latest_seq and cursor_seq > latest_seq:
+                    cursor = None
+                    cursor_reset = True
+                elif ring_truncated and cursor_seq < first_seq - 1:
+                    # The requested sequence predates the in-memory ring.
+                    # Restart at the oldest retained event and signal the gap.
+                    cursor = first_seq - 1
+                    cursor_reset = True
+                elif not latest_seq:
+                    cursor = None
+                    cursor_reset = True
+        page, truncated, next_cursor = paginate(
+            records,
+            cursor=cursor,
+            max_chars=max_chars,
+            limit=limit,
+        )
+        truncated = truncated or ring_truncated or cursor_reset
+        if truncated and next_cursor is None and page:
+            next_cursor = str(page[-1].get("seq", "")) or None
         if format == "plain":
-            return {
+            response = {
                 "format": "plain",
                 "order": "oldest-first",
                 "text": plain_text(page),
                 "truncated": truncated,
                 "next_cursor": next_cursor,
             }
-        return {
-            "format": "json",
-            "order": "oldest-first",
-            "lines": page,
-            "truncated": truncated,
-            "next_cursor": next_cursor,
-        }
+        else:
+            response = {
+                "format": "json",
+                "order": "oldest-first",
+                "lines": page,
+                "truncated": truncated,
+                "next_cursor": next_cursor,
+            }
+        if cursor_reset:
+            response["cursor_reset"] = True
+        return response
 
     async def _inject_attacher_input(
         self,
@@ -14894,12 +15429,13 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError:
                 pass
 
-        if self._bridge_task:
-            self._bridge_task.cancel()
-            try:
-                await self._bridge_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._bridge_task, self._email_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # Announce departure to peers before removing presence.
         # Each peer gets a unique HubMessage (unique id) so that

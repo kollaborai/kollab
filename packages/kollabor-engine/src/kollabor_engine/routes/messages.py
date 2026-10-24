@@ -11,9 +11,11 @@ import copy
 import json
 import logging
 import time
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+import anyio
 from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
@@ -48,6 +50,17 @@ def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[st
             and str(event.get("request_id") or "") not in request_ids)
 
 
+def _contains_reserved_voice_origin(value: Any) -> bool:
+    if isinstance(value, dict):
+        origin_context = value.get("origin_context")
+        if isinstance(origin_context, dict) and origin_context.get("source") == "livekit_voice":
+            return True
+        return any(_contains_reserved_voice_origin(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_reserved_voice_origin(item) for item in value)
+    return False
+
+
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
@@ -58,6 +71,14 @@ class MessageRequest(BaseModel):
 
 @router.post("/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
+    if _contains_reserved_voice_origin(
+        {"origin_context": body.origin_context, "content": body.content}
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Voice origin context is reserved for the Engine voice session router",
+        )
+
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
@@ -860,7 +881,12 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if option_id is None:
                         resolved = await session.resolve_permission(source_tool_id, decision, scope)
                     else:
-                        resolved = await session.resolve_permission(source_tool_id, decision, scope, option_id=str(option_id))
+                        resolved = await session.resolve_permission(
+                            source_tool_id,
+                            decision,
+                            scope,
+                            option_id=str(option_id),
+                        )
                     saw_action = True
                     if not resolved:
                         controller.add_error(
@@ -922,7 +948,11 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     add_streamed_text("reasoning", thinking)
                 elif event_type == "acp_update":
                     update = event.get("update") or {}
-                    if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                    if (
+                        not isinstance(update, dict)
+                        or update.get("sessionUpdate")
+                        not in {"tool_call", "tool_call_update"}
+                    ):
                         continue
                     tool_id = str(update.get("toolCallId") or "")
                     if not tool_id:
@@ -1105,7 +1135,23 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             session.unsubscribe(queue)
 
     stream = create_run(run_callback, state=body.state)
-    return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
+    protocol_stream = _assistant_protocol_stream(stream, completion)
+
+    class _OwnedAssistantTransportResponse(AssistantTransportResponse):
+        async def stream_response(self, send):
+            try:
+                await super().stream_response(send)
+            finally:
+                # Cancellation can arrive during downstream send, outside the
+                # generators. Close every owned layer explicitly so create_run
+                # releases its callback/subscription without stopping the daemon.
+                with anyio.CancelScope(shield=True):
+                    async with AsyncExitStack() as closing:
+                        closing.push_async_callback(stream.aclose)
+                        closing.push_async_callback(protocol_stream.aclose)
+                        closing.push_async_callback(self.body_iterator.aclose)
+
+    return _OwnedAssistantTransportResponse(protocol_stream)
 
 
 class CancelRequest(BaseModel):

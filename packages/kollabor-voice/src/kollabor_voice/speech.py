@@ -170,10 +170,10 @@ class SpeechEngine:
         return state
 
     def configure(self, force=False):
-        from .classifiers import load_preferences
+        from .speech_settings import load_speech_preferences
 
         with self.lock:
-            preferences = load_preferences(self.root)
+            preferences = load_speech_preferences(self.root)
             key = speech_key(preferences)
             if not force and key == self.key:
                 return

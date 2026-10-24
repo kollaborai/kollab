@@ -3,6 +3,17 @@
 # Python 3.14 is the launch runtime (operator directive)
 ARG PYTHON_IMAGE=python:3.14-slim
 
+# BuildKit can replace this stage with an asset-only named context containing
+# frontend-dist/ when reusing the same selected UI as native/service artifacts.
+FROM node:24-slim AS frontend
+
+WORKDIR /src/packages/kollabor-webui/frontend
+COPY packages/kollabor-webui/frontend/package.json packages/kollabor-webui/frontend/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY packages/kollabor-webui/frontend/ ./
+COPY kollabor/updates/CHANGELOG.md /src/kollabor/updates/CHANGELOG.md
+RUN npm run build -- --outDir /frontend-dist
+
 FROM ${PYTHON_IMAGE} AS wheelhouse
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -20,6 +31,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip build
 
 WORKDIR /src
 COPY . .
+COPY --from=frontend /frontend-dist /opt/kollab-frontend
+ENV KOLLAB_FRONTEND_DIST=/opt/kollab-frontend
 
 RUN mkdir -p /wheelhouse \
     && for package_dir in \
@@ -34,7 +47,7 @@ RUN mkdir -p /wheelhouse \
         packages/kollabor-webui \
         . \
     ; do \
-        python -m build --wheel --outdir /wheelhouse "$package_dir"; \
+        python -m build --wheel --outdir /wheelhouse "$package_dir" || exit; \
     done \
     && python - <<'PY'
 from pathlib import Path

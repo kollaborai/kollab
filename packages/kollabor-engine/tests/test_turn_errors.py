@@ -2,12 +2,14 @@
 reloaded page can show why the turn ended (GET /sessions/{id}/history)."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from kollabor_engine import history_paging
 from kollabor_engine.session import EngineSession  # type: ignore[import-not-found]
 
 
@@ -104,3 +106,69 @@ async def test_clearing_the_history_clears_the_turn_error(client, session):
     assert session.last_turn_error is None
     body = (await client.get(f"/sessions/{session.session_id}/history")).json()
     assert body["last_turn_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_history_route_defaults_to_bounded_newest_page(client, session, monkeypatch):
+    monkeypatch.setattr(history_paging, "_CURSOR_SECRET", b"x" * 32)
+
+    # Entirely synthetic: 219 ordinary messages plus one huge tool result make
+    # an approximately 1.8 MB session without reading any real conversation.
+    history = [
+        {
+            "role": "user",
+            "content": f"synthetic-message-{index}-" + ("x" * 2_700),
+            "metadata": {},
+        }
+        for index in range(219)
+    ]
+    history.append(
+        {
+            "role": "tool",
+            "content": "synthetic-tool-output-" + ("y" * 1_200_000),
+            "metadata": {"tool_call_id": "synthetic-call-219"},
+        }
+    )
+    assert len(history) == 220
+    history_size = len(
+        json.dumps(history, separators=(",", ":")).encode("utf-8")
+    )
+    assert history_size >= 1_800_000
+
+    session._schedule_refresh = lambda notify=True: None
+    session.history = history
+
+    response = await client.get(f"/sessions/{session.session_id}/history")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert len(body["history"]) == 50
+    assert body["history"][0]["content"].startswith("synthetic-message-170-")
+    tool_message = body["history"][-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["metadata"]["history_output_truncated"] is True
+    assert tool_message["metadata"]["history_output_ref"]
+    assert len(response.content) <= 150_000
+    assert body["has_more_older"] is True
+    assert body["older_cursor"]
+    assert body["newer_cursor"]
+
+    output_response = await client.get(
+        f"/sessions/{session.session_id}/history/output",
+        params={"ref": tool_message["metadata"]["history_output_ref"]},
+    )
+    assert output_response.status_code == 200
+    assert output_response.json()["content"] == history[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_turn_tells_open_windows(session):
+    """A cancelled tool call may never report a result: the stream says so (#305)."""
+    seen = []
+    session.daemon.fan_out = seen.append
+    session.daemon.state.cancel_current_request = AsyncMock()
+
+    session.cancel_turn()
+    await asyncio.sleep(0)
+
+    assert {"type": "turn_cancelled"} in seen

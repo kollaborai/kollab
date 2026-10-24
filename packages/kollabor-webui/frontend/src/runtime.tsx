@@ -34,6 +34,7 @@ import type {
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
+import { shownMessagesChanged } from "./history-merge";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
@@ -44,6 +45,7 @@ import {
   type TurnClock,
 } from "./turn-timing";
 import { VoiceModeProvider } from "./voice-mode";
+import { VoiceRoomProvider } from "./voice/voice-room";
 
 export type EngineState = {
   sessionId: string;
@@ -54,7 +56,7 @@ export type EngineState = {
    * messages. Set when the history loads, and by the engine when a turn this
    * page ran ends; a later reload appends only what lies past it.
    */
-  synced?: { history: number; messages: number };
+  synced?: { history: number; messages: number; start?: number };
   error?: string;
   usage?: {
     inputTokens: number;
@@ -148,6 +150,8 @@ function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
   turnError?: TurnError | null,
+  historyStartIndex = 0,
+  sessionId = "",
 ): ThreadMessageLike[] {
   type RestoredToolCall = {
     type: "tool-call";
@@ -352,7 +356,7 @@ function historyToMessages(
     if (firstReply !== undefined && reply) messages[firstReply] = { ...reply, status };
     else {
       messages.push({
-        id: `history-${turnError.history_length}-error`,
+        id: `history-${historyStartIndex + turnError.history_length}-error`,
         role: "assistant",
         content: "",
         status,
@@ -360,8 +364,19 @@ function historyToMessages(
     }
   };
 
-  history.forEach((message, sourceIndex) => {
-    if (sourceIndex === turnError?.history_length) showTurnError();
+  const toolOutputResult = (message: HistoryMessage) => {
+    const metadata = asRecord(message.metadata);
+    const reference = asString(metadata?.history_output_ref);
+    const preview = historyContentToThreadContent(message.content);
+    return reference && sessionId
+      ? { kind: "history-output-preview", sessionId, reference, preview }
+      : preview;
+  };
+
+
+  history.forEach((message, pageIndex) => {
+    const sourceIndex = historyStartIndex + pageIndex;
+    if (pageIndex === turnError?.history_length) showTurnError();
     const metadata = asRecord(message.metadata);
     // Initialization context remains in model history and Trajectory, not Chat.
     if (metadata?.system_initialization === true) return;
@@ -459,7 +474,7 @@ function historyToMessages(
       const callId = toolResultId(message);
       const existingCall = callId ? callsById.get(callId) : undefined;
       if (existingCall) {
-        existingCall.result = historyContentToThreadContent(message.content);
+        existingCall.result = toolOutputResult(message);
         existingCall.isError = toolResultIsError(message);
         // History keeps only how long the call ran (seconds), not when; the
         // elapsed hook and the group total read just completedAt - startedAt.
@@ -482,7 +497,7 @@ function historyToMessages(
           asString(asRecord(message.metadata)?.tool_name) || "tool result",
         args: {},
         argsText: "{}",
-        result: historyContentToThreadContent(message.content),
+        result: toolOutputResult(message),
         isError: toolResultIsError(message),
       };
       messages.push({
@@ -767,16 +782,39 @@ export function EngineRuntimeProvider({
     // A run that ended without a sync point (an older engine, a dropped
     // stream) leaves the thread to its next full load.
     if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
-    const tail = initialState.messages.filter((message) => {
+    if (!initialState.synced) return;
+    if (shownMessagesChanged(shown.messages, initialState.messages)) {
+      onStale?.();
+      return;
+    }
+    const currentStart = from.start ?? 0;
+    const nextStart = initialState.synced.start ?? currentStart;
+    const currentIds = new Set(shown.messages.map((message) => String(message.id ?? "")));
+    const historyIndex = (message: ThreadMessageLike) => {
       const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
-      return index !== undefined && Number(index) >= from.history;
+      return index === undefined ? null : Number(index);
+    };
+    const older = nextStart < currentStart
+      ? initialState.messages.filter((message) => {
+          const index = historyIndex(message);
+          const id = String(message.id ?? "");
+          return index !== null && index >= nextStart && index < currentStart && !currentIds.has(id);
+        })
+      : [];
+    const tail = initialState.messages.filter((message) => {
+      const index = historyIndex(message);
+      return index !== null && index >= from.history && !currentIds.has(String(message.id ?? ""));
     });
-    if (!tail.length || !initialState.synced) return;
-    const messages = [...shown.messages, ...tail];
+    if (!older.length && !tail.length && nextStart >= currentStart) return;
+    const messages = [...older, ...shown.messages, ...tail];
     runtime.thread.importExternalState({
       ...shown,
       messages,
-      synced: { history: initialState.synced.history, messages: messages.length },
+      synced: {
+        history: Math.max(from.history, initialState.synced.history),
+        start: Math.min(currentStart, nextStart),
+        messages: messages.length,
+      },
     });
   }, [initialState, runtime, onStale]);
 
@@ -791,7 +829,9 @@ export function EngineRuntimeProvider({
         >
           <PermissionToolUI />
           <VoiceModeProvider api={api} sessionId={sessionId}>
-            {children}
+            <VoiceRoomProvider api={api} sessionId={sessionId}>
+              {children}
+            </VoiceRoomProvider>
           </VoiceModeProvider>
         </InitialMessagesGate>
       </PermissionCancellationContext.Provider>
@@ -825,12 +865,23 @@ export function buildInitialState(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[] = [],
   lastTurnError: TurnError | null = null,
+  historyStartIndex = 0,
 ): EngineState {
-  const messages = historyToMessages(history, pendingPermissions, lastTurnError);
+  const messages = historyToMessages(
+    history,
+    pendingPermissions,
+    lastTurnError,
+    historyStartIndex,
+    sessionId,
+  );
   return {
     sessionId,
     sessions,
     messages,
-    synced: { history: history.length, messages: messages.length },
+    synced: {
+      history: historyStartIndex + history.length,
+      start: historyStartIndex,
+      messages: messages.length,
+    },
   };
 }

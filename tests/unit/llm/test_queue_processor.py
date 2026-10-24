@@ -14,6 +14,7 @@ from kollabor_agent.queue_processor import (
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 
 
@@ -177,6 +178,43 @@ class TestQueueProcessor(unittest.TestCase):
         self.message_display_service.display_error_message.assert_called_once_with(
             "LLM provider not available"
         )
+        event_types = [call.args[0] for call in self.event_bus.emit_with_hooks.await_args_list]
+        self.assertIn(EventType.LLM_REQUEST_ERROR, event_types)
+        self.streaming_handler.call_llm.assert_awaited_once()
+
+    def test_context_window_failure_emits_typed_error_without_retry(self):
+        class ContextWindowExceeded(RuntimeError):
+            error_code = "context_window_exceeded"
+
+        self.streaming_handler.call_llm.side_effect = ContextWindowExceeded(
+            "model context window exceeded"
+        )
+
+        self.api_service._provider = SimpleNamespace(
+            config=SimpleNamespace(context_window=272_000)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="overflow",
+            )
+        )
+
+        error_call = next(
+            call
+            for call in self.event_bus.emit_with_hooks.await_args_list
+            if call.args[0] is EventType.LLM_REQUEST_ERROR
+        )
+        error_data = error_call.args[1]
+        self.assertEqual(error_data["error_code"], "context_window_exceeded")
+        self.assertTrue(error_data["context_window_exceeded"])
+        self.streaming_handler.call_llm.assert_awaited_once()
+        tap = self.renderer.get_service.return_value
+        self.assertNotIn(
+            "usage_update",
+            [call.args[0]["type"] for call in tap.publish.call_args_list],
+        )
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]
@@ -242,6 +280,57 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self.processor.active_voice, voice)
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
+
+    def test_livekit_origin_survives_tool_continuation(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+        self.processor.turn_completed = False
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent-uuid")
+        queued = QueuedInput("show status", {}, origin_context=origin_context)
+
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([queued], "parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+        self.processor._execute_llm_turn.reset_mock()
+        self.processor.turn_completed = False
+
+        self.loop.run_until_complete(
+            self.processor.continue_conversation("parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+
+
+    def test_mixed_voice_turn_provenance_fails_closed(self):
+        from kollabor_agent.queue_processor import (
+            QueuedInput,
+            merge_livekit_origin_contexts,
+        )
+        from kollabor_agent.voice_admission import validate_voice_admission_context
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        voice_context = make_voice_origin_context("turn-1")
+        merged = merge_livekit_origin_contexts(
+            [
+                QueuedInput("voice text", {}, origin_context=voice_context),
+                "typed input",
+            ]
+        )
+
+        self.assertEqual(merged["source"], "livekit_voice")
+        self.assertEqual(merged["voice_tool_policy"], "invalid")
+        self.assertFalse(validate_voice_admission_context(voice_context))
+
 
     def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
         from kollabor_agent.queue_processor import QueuedInput
@@ -502,7 +591,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(
             return_value="assistant-uuid"
         )
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("test response", False, False)
@@ -561,7 +649,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("intermediate answer", False, False)
@@ -625,7 +712,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Running it.", False, False)
@@ -681,6 +767,246 @@ class TestQueueProcessor(unittest.TestCase):
         ]
         self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
 
+    def test_model_first_compaction_resumes_once_after_staging(self):
+        """The same user turn resumes only after the staged swap is applied."""
+        from kollabor_events import EventType
+        from plugins.context_compaction_plugin import ContextCompactionPlugin
+
+        history = self.conversation_history
+        history.extend(
+            ConversationMessage(
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"prior message {index}",
+            )
+            for index in range(12)
+        )
+        compact_values = {
+            "plugins.context_compaction.keep_recent": 2,
+            "plugins.context_compaction.max_summary_tokens": 2000,
+        }
+        compact_config = MagicMock()
+        compact_config.get = lambda key, default=None: compact_values.get(key, default)
+        plugin = ContextCompactionPlugin(
+            "test", MagicMock(), MagicMock(), compact_config
+        )
+        plugin._llm_service = SimpleNamespace(
+            conversation_history=history,
+            session_stats=self.session_stats,
+            is_processing=False,
+            _pending_agent_hud=[],
+        )
+        plugin._conversation_logger = SimpleNamespace(session_id="session-1")
+        plugin._awaiting_model = True
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+
+        summary_started = asyncio.Event()
+        release_summary = asyncio.Event()
+
+        async def summarize(*_args, **_kwargs):
+            summary_started.set()
+            await release_summary.wait()
+            return "S" * 200
+
+        plugin._call_summarization_llm = AsyncMock(side_effect=summarize)
+        applied_swaps = []
+
+        async def emit_with_hooks(*args, **kwargs):
+            event_type = args[0] if args else kwargs["event_type"]
+            data = args[1] if len(args) > 1 else kwargs.get("data", {})
+            if event_type == EventType.LLM_REQUEST_PRE:
+                had_pending_compaction = plugin._pending_compaction is not None
+                data = await plugin._apply_pending_compaction(data, MagicMock())
+                if had_pending_compaction:
+                    applied_swaps.append(list(history))
+            return data
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=emit_with_hooks)
+        llm_call_count = 0
+        request_snapshots = []
+        llm_responses = [
+            "Preparing the requested work. <compact>task: continue</compact>",
+            "The original response is complete.",
+        ]
+
+        async def call_llm(*_args, **_kwargs):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            request_snapshots.append(
+                [
+                    (message.role, message.content, dict(message.metadata or {}))
+                    for message in history
+                ]
+            )
+            return llm_responses[llm_call_count - 1]
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = (
+            "[compact] history staged"
+        )
+
+        async def execute_compact(tool_data, *_args, **_kwargs):
+            return await plugin._handle_compact_tool(tool_data)
+
+        self.tool_executor.execute_tool = AsyncMock(side_effect=execute_compact)
+        self.response_parser.parse_response.side_effect = [
+            {
+                "content": "Preparing the requested work.",
+                "components": {},
+                "turn_completed": False,
+            },
+            {
+                "content": "The original response is complete.",
+                "components": {},
+                "turn_completed": True,
+            },
+        ]
+        self.response_parser.get_all_tools.side_effect = [
+            [
+                {
+                    "id": "compact_1",
+                    "type": "compact",
+                    "notes": "task: continue",
+                    "_position": 29,
+                }
+            ],
+            [],
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            side_effect=[
+                ("Preparing the requested work.", False, False),
+                ("The original response is complete.", False, False),
+            ]
+        )
+        self.renderer.get_service = MagicMock(return_value=MagicMock())
+
+        def append_message(message, **_kwargs):
+            history.append(message)
+
+        self.add_message_fn.side_effect = append_message
+        parent_uuid = ["parent-uuid"]
+        late_message = ConversationMessage(
+            role="user", content="arrived while compaction was running"
+        )
+        batch_inputs = []
+        turn_complete_calls = []
+        turn_complete_at_batch_return = []
+        continuation_calls = 0
+
+        def capture_semantic(_renderer, event_type, **_payload):
+            if event_type == "turn_complete":
+                turn_complete_calls.append(llm_call_count)
+
+        async def process_batch(messages):
+            batch_inputs.append(list(messages))
+            turn = asyncio.create_task(
+                self.processor.process_message_batch(messages, parent_uuid[0])
+            )
+            try:
+                await asyncio.wait_for(summary_started.wait(), timeout=2)
+                history.append(late_message)
+            finally:
+                release_summary.set()
+            parent_uuid[0] = await turn
+            turn_complete_at_batch_return.append(len(turn_complete_calls))
+
+        async def continue_turn():
+            nonlocal continuation_calls
+            continuation_calls += 1
+            parent_uuid[0] = await self.processor.continue_conversation(
+                parent_uuid[0]
+            )
+
+        async def run_queue():
+            await self.processor.enqueue("original user request")
+            await asyncio.wait_for(
+                self.processor.process_queue(
+                    MagicMock(), process_batch, continue_turn
+                ),
+                timeout=5,
+            )
+
+        try:
+            with patch(
+                "kollabor_agent.queue_processor.publish_semantic",
+                side_effect=capture_semantic,
+            ):
+                self.loop.run_until_complete(run_queue())
+        finally:
+            release_summary.set()
+            pending_tasks = tuple(plugin._compaction_tasks)
+            if pending_tasks:
+                self.loop.run_until_complete(
+                    asyncio.gather(*pending_tasks, return_exceptions=True)
+                )
+
+        self.assertEqual(batch_inputs, [["original user request"]])
+        self.assertEqual(turn_complete_at_batch_return, [0])
+        self.assertEqual(turn_complete_calls, [2])
+        self.assertEqual(continuation_calls, 1)
+        self.assertEqual(self.streaming_handler.call_llm.await_count, 2)
+        self.tool_executor.execute_tool.assert_awaited_once()
+        self.assertEqual(len(applied_swaps), 1)
+        self.assertIsNone(plugin._pending_compaction)
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertEqual(sum(message is late_message for message in history), 1)
+
+        self.assertEqual(len(request_snapshots), 2)
+        first_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[0]
+            if role == "user" and content == "original user request"
+        ]
+        second_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == "original user request"
+        ]
+        self.assertEqual(len(first_request_users), 1)
+        self.assertLessEqual(len(second_request_users), 1)
+        late_in_resumed_request = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == late_message.content
+        ]
+        self.assertEqual(len(late_in_resumed_request), 1)
+        compact_summaries = [
+            content
+            for _role, content, metadata in request_snapshots[1]
+            if metadata.get("context_compaction")
+        ]
+        self.assertEqual(len(compact_summaries), 1)
+
+        tool_batches = [
+            message for message in history if message.metadata.get("tool_output_batch")
+        ]
+        self.assertEqual(len(tool_batches), 1)
+        self.assertEqual(len(tool_batches[0].metadata["xml_tool_results"]), 1)
+        final_responses = [
+            message
+            for message in history
+            if message.role == "assistant"
+            and message.content == "The original response is complete."
+        ]
+        self.assertEqual(len(final_responses), 1)
+
+
     def test_native_and_xml_results_log_display_data_without_changing_model_calls(self):
         native = SimpleNamespace(id="native-one", name="file_edit", input={"file": "owned.txt"})
         diffs = [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]
@@ -711,7 +1037,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "xml-one", "type": "terminal", "command": "echo xml"},
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant-uuid")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("Checking", False, False))
         self.loop.run_until_complete(self.processor._execute_llm_turn_inner(
@@ -784,7 +1109,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("On it.", False, False)
@@ -873,7 +1197,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a-uuid")
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             side_effect=lambda raw, clean, *a, **k: (clean, False, False)
@@ -919,7 +1242,6 @@ class TestQueueProcessor(unittest.TestCase):
         }
         self.response_parser.get_all_tools.return_value = []
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=(".", False, False)
@@ -975,7 +1297,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "read", "type": "terminal", "command": "true"}
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("I'll recheck the voice mode files.", False, False)
@@ -1035,7 +1356,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Which file should I inspect?", False, False)
@@ -1232,155 +1552,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.assertEqual(result, ("x", False, False))
 
-    # ------------------------------------------------------------------
-    # Tests for _bridge_relay
-    # ------------------------------------------------------------------
-
-    def test_bridge_relay_no_event_bus(self):
-        """No-op when event_bus is None."""
-        self.processor.event_bus = None
-        # Should not raise
-        self.loop.run_until_complete(
-            self.processor._bridge_relay("some response")
-        )
-
-    def test_bridge_relay_empty_response(self):
-        """No-op when clean_response is empty."""
-        self.loop.run_until_complete(self.processor._bridge_relay(""))
-
-    def test_bridge_relay_no_hub_plugin(self):
-        """No-op when hub_plugin service is not available."""
-        self.event_bus.get_service = MagicMock(return_value=None)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-        self.event_bus.get_service.assert_called_with("hub_plugin")
-
-    def test_bridge_relay_hub_no_bridge(self):
-        """No-op when hub_plugin exists but has no _bridge."""
-        hub = MagicMock()
-        hub._bridge = None
-        self.event_bus.get_service = MagicMock(return_value=hub)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
-    def test_bridge_relay_sends_to_bridge(self):
-        """Sends clean_response to bridge when bridge platform found in history."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("relay this"))
-        hub.bridge_send.assert_called_once_with("relay this")
-
-    def test_bridge_relay_skips_non_bridge_users(self):
-        """Does not relay when no user message has bridge_platform metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata=None),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("should not relay"))
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_stops_at_first_bridge_user(self):
-        """Finds the most recent bridge user (reversed history search)."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "slack"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Should find discord (most recent bridge user) and send
-        hub.bridge_send.assert_called_once_with("msg")
-
-    def test_bridge_relay_stops_at_first_non_bridge_user(self):
-        """Stops searching at the first user message without bridge metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # non-bridge user
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # most recent, no bridge -> breaks loop
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Reversed: last user has metadata=None -> hits elif branch, breaks immediately
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_exception_handled_gracefully(self):
-        """Exceptions in bridge relay are caught and logged."""
-        self.event_bus.get_service = MagicMock(side_effect=RuntimeError("boom"))
-        # Should not raise
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
     def test_file_ingestion_uses_raw_hash_for_unchanged_read_detection(self):
         """Rendered read headers must not replace the disk-content hash."""
         from kollabor_ai.context_service.hash_utils import compute_hash
@@ -1442,7 +1613,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.tool_executor.is_cancelled.return_value = False
         self.tool_executor.take_executed_count.return_value = 0
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False))
 

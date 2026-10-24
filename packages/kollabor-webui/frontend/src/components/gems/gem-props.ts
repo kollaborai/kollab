@@ -5,6 +5,7 @@
  * Tools are summoned out of the gem the way the Gems summon their weapons.
  */
 
+import { frenzy } from "./gem-animation";
 import { BLACK, TAU, WHITE, drawFace, eyeGap, mix, rgba, type FaceFrame } from "./gem-face";
 
 const GLYPHS = ["{", "}", ";", "</>", "=>", "()", "0", "1", "[]", "&&"];
@@ -260,9 +261,12 @@ export function drawProps(f: FaceFrame) {
   const Y = (v: number) => box.y + v * s;
   // Thinking at the laptop rests its hands; only typing taps.
   const typing = f.activity === "typing" && !f.still;
+  // How hard it is going at the keys right now (gem-animation.ts frenzy).
+  const m = typing ? frenzy(f.since, f.seed) : null;
+  const fury = m?.hands ?? 0;
   const glow = rgba(mix(f.rgb, WHITE, 0.55));
   const hand = rgba(mix(f.rgb, BLACK, 0.15));
-  const flicker = typing ? 0.92 + 0.08 * Math.sin(t * 5) : 1;
+  const flicker = typing ? 0.92 + (0.08 + 0.1 * fury) * Math.sin(t * (5 + 20 * fury)) : 1;
   const baseTop = Y(0.86);
   const hingeX = X(1.1);
   const lidLen = s * 0.36;
@@ -273,6 +277,8 @@ export function drawProps(f: FaceFrame) {
   ctx.save();
   ctx.globalAlpha = Math.min(1, f.desk * 1.5);
   const base = ctx.globalAlpha;
+  // Every stomp jolts the laptop on the desk.
+  if (m) ctx.translate(0, m.squash * s * 0.12);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
@@ -301,7 +307,7 @@ export function drawProps(f: FaceFrame) {
   ctx.fill();
   ctx.stroke();
   for (let i = 0; i < 8; i += 1) {
-    ctx.fillStyle = typing && Math.sin(t * 23 + i * 1.7) > 0.8 ? glow : "#2a2d35";
+    ctx.fillStyle = typing && Math.sin(t * (23 + 25 * fury) + i * 1.7) > 0.8 - 0.55 * fury ? glow : "#2a2d35";
     ctx.fillRect(X(0.66) + i * s * 0.042, baseTop - s * 0.011, s * 0.032, s * 0.011);
   }
 
@@ -325,16 +331,20 @@ export function drawProps(f: FaceFrame) {
   ctx.fill();
   ctx.restore();
 
-  // Hands on the keys, fading with the laptop, tapping out of step while it types.
+  // Hands on the keys, fading with the laptop, tapping out of step while it
+  // types: pecking while it reads the screen, thrown up when it jerks back,
+  // then hammering.
   [0.72, 0.88].forEach((u, i) => {
-    const lift = typing ? Math.max(0, Math.sin(t * 11 + i * Math.PI)) * s * 0.026 : 0;
-    handAt(ctx, X(u), baseTop - s * 0.026 - lift, s, hand);
+    const rate = 11 + 17 * fury;
+    const lift = typing ? Math.max(0, Math.sin(t * rate + i * Math.PI)) * s * (0.02 + 0.03 * fury) : 0;
+    const raise = (m?.raise ?? 0) * s * (0.09 + 0.02 * i);
+    handAt(ctx, X(u) - raise * 0.4, baseTop - s * 0.026 - lift - raise, s, hand, -0.5 * (m?.raise ?? 0));
   });
 
   if (typing && s >= 40) {
     // Keystrokes: code glyphs float up off the keys.
-    const count = 3;
-    const rate = 0.8;
+    const count = 3 + Math.round(3 * fury);
+    const rate = 0.8 + 2.4 * fury;
     ctx.font = `700 ${Math.round(s * 0.06)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";

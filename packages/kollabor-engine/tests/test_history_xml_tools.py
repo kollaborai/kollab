@@ -157,7 +157,7 @@ def test_a_voice_reply_keeps_code_that_shows_the_field_tags():
 
 
 def test_a_voice_turn_shows_what_the_user_said():
-    from kollabor_voice.observer import voice_preamble
+    from kollabor_voice.voice_context import voice_preamble
 
     first = {"event_ids": ["a"], "transcript_context": [{"text": "earlier ] line"}]}
     later = {"event_ids": ["b"], "spoken_ack": "One moment."}

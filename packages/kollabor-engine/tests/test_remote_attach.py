@@ -301,7 +301,9 @@ async def test_an_agent_on_another_computer_reports_its_own_folder(monkeypatch):
         async def get_conversation(self, since=None, anchor=None):
             return SimpleNamespace(messages=[])
 
-    async def adopt(self, session_id, found):
+    async def adopt(self, session_id, found, *, owned=False, webui_owned=False):
+        assert owned is False
+        assert webui_owned is False
         return SimpleNamespace(
             state=State(), alive=True, pid=0, identity="koordinator", agent_name="", subscribe=asyncio.Queue,
             launcher=None,

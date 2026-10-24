@@ -53,12 +53,6 @@ class ACPProfile:
             "managed_dir": "codex-2.1.1",
             "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1",
         },
-        "gemini-cli": {
-            "command": ["gemini", "--acp"],
-            "managed_dir": "gemini-0.63.0",
-            "pass_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            "install": "npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0",
-        },
     }
     _PROVIDER_KEYS: ClassVar[frozenset[str]] = frozenset({
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY",
@@ -67,10 +61,6 @@ class ACPProfile:
     LOGIN_GUIDANCE: ClassVar[dict[str, str]] = {
         "claude-code": "Run claude and /login on this device.",
         "codex-cli": "Run codex login on this device.",
-        "gemini-cli": (
-            "Google retired consumer Gemini sign-in; set GEMINI_API_KEY, or configure Vertex AI "
-            "(GOOGLE_GENAI_USE_VERTEXAI with a project and credentials), then restart."
-        ),
     }
 
     @classmethod

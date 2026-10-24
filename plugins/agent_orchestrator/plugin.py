@@ -1001,10 +1001,7 @@ Aliases: /sub, /sa"""
         agents = self.orchestrator.list_agents()
 
         if not agents:
-            msg = (
-                "No active agents. Use XML commands to spawn agents:\n"
-                "  <agent><name><task>...</task></name></agent>"
-            )
+            msg = "No active agents. Start one with: /sub create <name> <task>"
             return CommandResult(success=True, message=msg, display_type="info")
 
         lines = ["Active Agents:"]
@@ -1040,10 +1037,7 @@ Aliases: /sub, /sa"""
             agents = self.orchestrator.list_agents()
 
             if not agents:
-                msg = (
-                    "No active agents. Use XML commands to spawn agents:\n"
-                    "  <agent><name><task>...</task></name></agent>"
-                )
+                msg = "No active agents. Start one with: /sub create <name> <task>"
                 return CommandResult(success=True, message=msg, display_type="info")
 
             # Show detailed status for each agent

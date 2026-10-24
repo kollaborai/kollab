@@ -33,6 +33,10 @@ from .tool_output_budget import (
     build_tool_output_store,
     pack_tool_history_and_results,
 )
+from .voice_admission import (
+    revoke_voice_admission_context,
+    validate_voice_admission_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,50 @@ class QueuedInput:
 
     content: MessageContent
     voice: dict
+    origin_context: dict[str, Any] | None = None
+
+
+def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    contexts = [
+        item.origin_context
+        for item in messages
+        if isinstance(item, QueuedInput)
+        and isinstance(item.origin_context, dict)
+        and item.origin_context.get("source") == "livekit_voice"
+    ]
+    if not contexts:
+        return None
+
+    def fail_closed() -> dict[str, Any]:
+        for context in contexts:
+            revoke_voice_admission_context(context)
+        return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+
+    # Any plain or untrusted item mixed into the batch invalidates voice
+    # authority for the combined LLM turn.
+    if len(contexts) != len(messages):
+        return fail_closed()
+    if any(not validate_voice_admission_context(context) for context in contexts):
+        return fail_closed()
+
+    signatures = {
+        (
+            context.get("voice_session_id"),
+            context.get("generation"),
+            context.get("turn_id"),
+            context.get("voice_tool_policy"),
+        )
+        for context in contexts
+    }
+    if len(signatures) != 1:
+        return fail_closed()
+
+    selected_context = dict(contexts[-1])
+    selected_capability = selected_context.get("admission_capability")
+    for context in contexts[:-1]:
+        if context.get("admission_capability") != selected_capability:
+            revoke_voice_admission_context(context)
+    return selected_context
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -393,6 +441,7 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
+        self.active_origin_context: dict[str, Any] | None = None
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -920,7 +969,7 @@ class QueueProcessor:
         cache holds). A new session (epoch), or a history that compaction has
         emptied of them, gets them again.
         """
-        from kollabor_voice.observer import VOICE_RULES_MARK
+        from kollabor_voice.voice_context import VOICE_RULES_MARK
 
         for message in reversed(self.conversation_history):
             sent = (getattr(message, "metadata", None) or {}).get("voice")
@@ -949,11 +998,30 @@ class QueueProcessor:
         """
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+        merged_origin_context = merge_livekit_origin_contexts(messages)
+        previous_origin_context = self.active_origin_context
+        if (
+            isinstance(previous_origin_context, dict)
+            and previous_origin_context.get("source") == "livekit_voice"
+            and (
+                not isinstance(merged_origin_context, dict)
+                or merged_origin_context.get("admission_capability")
+                != previous_origin_context.get("admission_capability")
+            )
+        ):
+            revoke_voice_admission_context(previous_origin_context)
+            if isinstance(merged_origin_context, dict):
+                revoke_voice_admission_context(merged_origin_context)
+            merged_origin_context = {
+                "source": "livekit_voice",
+                "voice_tool_policy": "invalid",
+            }
+        self.active_origin_context = merged_origin_context
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
         if self.active_voice:
-            from kollabor_voice.observer import voice_preamble
+            from kollabor_voice.voice_context import voice_preamble
 
             combined_message = prepend_text(
                 voice_preamble(
@@ -972,6 +1040,12 @@ class QueueProcessor:
         )
 
         # Execute LLM turn with user message
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=True,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=True,
             current_parent_uuid=current_parent_uuid,
@@ -986,15 +1060,34 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=False,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=False,
             current_parent_uuid=current_parent_uuid,
+        )
+
+    async def _execute_tool_with_context(
+        self,
+        tool_data: dict[str, Any],
+        execution_context: dict[str, Any] | None,
+    ) -> ToolExecutionResult:
+        if execution_context is None:
+            return await self.tool_executor.execute_tool(tool_data)
+        return await self.tool_executor.execute_tool(
+            tool_data,
+            execution_context=execution_context,
         )
 
     async def _execute_llm_turn(
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Execute a single LLM turn (deduped from process_message_batch and continue_conversation).
 
@@ -1021,6 +1114,12 @@ class QueueProcessor:
         async with self._turn_lock:
             self.last_turn_error = None
             try:
+                if execution_context is not None:
+                    return await self._execute_llm_turn_inner(
+                        user_message_provided,
+                        current_parent_uuid,
+                        execution_context=execution_context,
+                    )
                 return await self._execute_llm_turn_inner(
                     user_message_provided, current_parent_uuid
                 )
@@ -1036,6 +1135,7 @@ class QueueProcessor:
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Watchdog heartbeat: a turn is actually executing = forward progress.
@@ -1590,9 +1690,15 @@ class QueueProcessor:
                 )
                 self.renderer.update_thinking(True, f"Executing {tool_desc}...")
 
-                native_results = await self._native_tools_handler.execute_tool_calls(
-                    self.tool_executor
-                )
+                if execution_context is None:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor
+                    )
+                else:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor,
+                        execution_context=execution_context,
+                    )
                 self.renderer.update_thinking(False)
 
                 # Display native tool results
@@ -1640,7 +1746,7 @@ class QueueProcessor:
                             f"Executing {tool_desc}... ({i + 1}/{tool_count})",
                         )
 
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
 
                         self.renderer.update_thinking(False)
@@ -1668,7 +1774,7 @@ class QueueProcessor:
                     for i, tool_data in enumerate(all_tools):
                         if self.cancel_processing:
                             break
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
                         logger.info(
                             f"[TOOL-DISPLAY-DEBUG] calling display_tool_results "
@@ -1679,9 +1785,6 @@ class QueueProcessor:
                             [result], [tool_data]
                         )
                         await asyncio.sleep(0)
-
-            # Step 8: Bridge relay
-            await self._bridge_relay(clean_response)
 
             # First apply the per-result spill boundary, then pack the whole
             # native/XML batch against the remaining request budget. This is
@@ -1968,6 +2071,49 @@ class QueueProcessor:
             error_msg = str(e) or f"{type(e).__name__} (no details)"
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
+
+            # Publish a typed failure separately from the generic UI error.
+            # Compaction hooks can react to context overflow, but the failed
+            # request is never resubmitted automatically.
+            error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
+            nested_error = getattr(e, "error", None)
+            if not error_code and isinstance(nested_error, dict):
+                error_code = nested_error.get("code")
+            error_code = str(error_code)[:120] if error_code else None
+            error_text = str(e).lower()
+            context_window_exceeded = (
+                error_code
+                in {
+                    "model_context_window_exceeded",
+                    "context_window_exceeded",
+                    "context_length_exceeded",
+                }
+                or any(
+                    phrase in error_text
+                    for phrase in (
+                        "context window",
+                        "context_window",
+                        "maximum context length",
+                        "too many tokens",
+                        "prompt is too long",
+                    )
+                )
+            )
+            event_bus = getattr(self, "event_bus", None)
+            if event_bus is not None:
+                try:
+                    await event_bus.emit_with_hooks(
+                        EventType.LLM_REQUEST_ERROR,
+                        {
+                            "error_type": type(e).__name__,
+                            "error_code": error_code,
+                            "context_window_exceeded": context_window_exceeded,
+                        },
+                        "llm_service",
+                    )
+                except Exception:
+                    logger.exception("Failed to dispatch LLM request error hooks")
+
             self.message_display_service.display_error_message(error_msg)
             # Web clients follow the turn through semantic events, not the
             # terminal's red line; without this a failed turn ends silently.
@@ -1980,9 +2126,11 @@ class QueueProcessor:
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
             self.active_voice = None
+            revoke_voice_admission_context(self.active_origin_context)
+            self.active_origin_context = None
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
-            if context_size > 0:
+            if context_size > 0 and not self.last_turn_error:
                 publish_semantic(self.renderer, "usage_update", payload={
                     "sessionUpdate": "usage_update",
                     "used": int(self.session_stats.get("input_tokens", 0) or 0)
@@ -2237,28 +2385,3 @@ class QueueProcessor:
                         )
 
         return clean_response, suppress_display, turn_complete
-
-    async def _bridge_relay(self, clean_response: str) -> None:
-        """Send response to external platform if last user message was from bridge."""
-        if not clean_response or not self.event_bus:
-            return
-        try:
-            hub = self.event_bus.get_service("hub_plugin")
-            if hub and getattr(hub, "_bridge", None):
-                history = getattr(
-                    self.event_bus.get_service("llm_service"),
-                    "conversation_history",
-                    [],
-                )
-                for msg in reversed(history):
-                    if msg.role == "user" and getattr(msg, "metadata", None):
-                        if msg.metadata.get("bridge_platform"):
-                            logger.info(
-                                "Bridge relay: sending response to external platform"
-                            )
-                            await hub.bridge_send(clean_response)
-                            break
-                    elif msg.role == "user":
-                        break
-        except Exception as e:
-            logger.debug(f"Bridge relay check: {e}")

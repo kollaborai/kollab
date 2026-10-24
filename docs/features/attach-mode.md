@@ -136,7 +136,8 @@ kollab --hub work         show pending work queue
 kollab --hub agents       list all discovered agents
 kollab --hub stop <name>  stop a specific agent
 kollab --hub stop all     stop every agent
-kollab --hub capture <name> [lines]  grab last N lines from agent's stream
+kollab --hub capture <name> [lines] [--raw]  read a recent transcript
+kollab --hub capture <name> [lines] --raw    preserve terminal rendering
 kollab --hub msg <name> <text>      send direct message to an agent
 kollab --hub broadcast <text>       send message to all agents
 kollab --hub user [name]            set/show hub username

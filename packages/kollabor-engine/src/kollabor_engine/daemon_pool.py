@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -38,8 +39,40 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import psutil
+
 from .folders import agents_in_folder
 from .hub_bridge import HubBridge
+
+
+def _pid_start_time(pid: int) -> Optional[float]:
+    if pid <= 0:
+        return None
+    try:
+        process = psutil.Process(pid)
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+            return None
+        return float(process.create_time())
+    except psutil.Error:
+        return None
+
+
+def _pid_matches_start_time(pid: int, started_at: Optional[float]) -> bool:
+    if pid <= 0 or started_at is None:
+        return False
+    try:
+        process = psutil.Process(pid)
+        return (
+            process.is_running()
+            and process.status() != psutil.STATUS_ZOMBIE
+            and math.isclose(
+                float(process.create_time()), float(started_at), rel_tol=0.0, abs_tol=0.02
+            )
+        )
+    except psutil.Error:
+        return False
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +150,14 @@ class DaemonHandle:
         # None for an agent this pool attached to but did not start
         # (DaemonPool.adopt): closing that handle detaches and never signals it.
         self.launcher = launcher
+        # Process-kill authority is independent of the launcher object. A daemon
+        # reowned from a WebUI manifest has no Popen launcher, but this engine
+        # is now responsible for stopping that same PID on explicit Delete.
+        self.owned = launcher is not None
+        self.webui_owned = False
         self.pid: int = 0
+
+        self.process_started_at: Optional[float] = None
         # Folder a spawned daemon runs in (its presence ``project``). Gem names
         # repeat across folders, so finding it by identity alone can return
         # another folder's agent.
@@ -281,6 +321,9 @@ class DaemonHandle:
                 and not self._read_task.done()
                 and not self._closed
             )
+        if self.process_started_at is not None:
+            return _pid_matches_start_time(self.pid, self.process_started_at)
+
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:
@@ -289,8 +332,14 @@ class DaemonHandle:
             return True
         return True
 
-    async def close(self, timeout: float = 10.0) -> None:
-        """Detach, then stop the daemon. SIGKILL only if it refuses to exit."""
+    async def close(self, timeout: float = 10.0, *, stop_process: bool = True) -> None:
+        """Close this transport, optionally stop the owned daemon process.
+
+        A WebUI engine shutdown passes ``stop_process=False`` so its explicitly
+        persistent daemon survives. Explicit Delete still uses the default.
+        """
+        process_handle: Optional[psutil.Process] = None
+
         if self._closed:
             return
         self._closed = True
@@ -329,7 +378,7 @@ class DaemonHandle:
                         # daemon is still stopped below, so this is best effort.
                         pass
 
-        if self.launcher is None:
+        if not stop_process or not self.owned:
             logger.info("detached from %s (session %s)", self.identity, self.session_id)
             return
 
@@ -345,15 +394,42 @@ class DaemonHandle:
                 )
                 if agent:
                     self.pid = int(agent.get("pid") or 0)
+                    self.process_started_at = _pid_start_time(self.pid)
             except Exception as e:
                 logger.debug("pid lookup during close failed: %s", e)
 
+        # Never signal a recycled PID. Spawn and manifest-reown paths capture
+        # creation time; an owned handle without that identity cannot safely kill.
+        if self.owned and self.pid and not _pid_matches_start_time(
+            self.pid, self.process_started_at
+        ):
+            logger.warning(
+                "not stopping daemon %s: pid %s no longer matches its recorded start time",
+                self.identity,
+                self.pid,
+            )
+            return
+        if self.owned and self.pid:
+            try:
+                # psutil's Process handle also checks create time when sending a
+                # signal, closing the gap between validation and os.kill(pid).
+                process_handle = psutil.Process(self.pid)
+            except psutil.Error:
+                return
+
+
         # The launcher is long gone; signal the detached daemon by pid.
         if self.pid and self.alive:
-            try:
-                os.kill(self.pid, signal.SIGTERM)
-            except ProcessLookupError:
+            if process_handle is None:
                 return
+            try:
+                process_handle.send_signal(signal.SIGTERM)
+            except psutil.NoSuchProcess:
+                return
+            except psutil.Error as exc:
+                raise RuntimeError(
+                    f"could not signal daemon {self.identity} (pid {self.pid}): {exc}"
+                ) from exc
 
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -367,9 +443,20 @@ class DaemonHandle:
                     self.pid,
                 )
                 try:
-                    os.kill(self.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    process_handle.send_signal(signal.SIGKILL)
+                except psutil.NoSuchProcess:
                     pass
+                except psutil.Error as exc:
+                    raise RuntimeError(
+                        f"could not kill daemon {self.identity} (pid {self.pid}): {exc}"
+                    ) from exc
+                kill_deadline = time.monotonic() + 2.0
+                while time.monotonic() < kill_deadline and self.alive:
+                    await asyncio.sleep(0.05)
+                if self.alive:
+                    raise RuntimeError(
+                        f"daemon {self.identity} (pid {self.pid}) remained alive after SIGKILL"
+                    )
 
         logger.info("daemon %s stopped (session %s)", self.identity, self.session_id)
 
@@ -474,6 +561,7 @@ class DaemonPool:
         solo: bool = False,
         profile_env: Optional[Dict[str, str]] = None,
         stop_on_owner_exit: bool = False,
+        webui_owned: bool = False,
     ) -> DaemonHandle:
         """Start a daemon for `session_id` and attach to it.
 
@@ -553,6 +641,7 @@ class DaemonPool:
                 )
 
                 handle = DaemonHandle(session_id, identity_name, process)
+                handle.webui_owned = webui_owned
                 handle.project = folder
                 try:
                     deadline = time.monotonic() + SPAWN_TIMEOUT_SECONDS
@@ -580,25 +669,64 @@ class DaemonPool:
             finally:
                 self._starting.pop(session_id, None)
 
-    async def adopt(self, session_id: str, found: Dict[str, Any]) -> DaemonHandle:
-        """Attach to a live agent this pool did not start (a discover_sessions row).
+    async def adopt(
+        self,
+        session_id: str,
+        found: Dict[str, Any],
+        *,
+        owned: bool = False,
+        webui_owned: bool = False,
+    ) -> DaemonHandle:
+        """Attach to an existing daemon, optionally reowning a saved WebUI PID.
 
-        A terminal session or another engine's daemon stays its owner's
-        process: the handle has no launcher, so closing it only detaches.
+        Ordinary discovery defaults to unowned/detach-only. A validated
+        WebUI-manifest reown explicitly sets process-kill authority so Delete
+        can stop the same PID after the engine restarts.
         """
         async with self._spawn_lock:
             existing = await self._live_handle(session_id)
             if existing is not None:
+                if owned:
+                    expected_pid = int(found.get("daemon_pid") or found.get("pid") or 0)
+                    stored_start_time = found.get("daemon_started_at")
+                    if not expected_pid or (existing.pid and existing.pid != expected_pid):
+                        raise RuntimeError(
+                            f"cannot reown session {session_id}: daemon PID does not match manifest"
+                        )
+                    expected_start = (
+                        float(stored_start_time)
+                        if isinstance(stored_start_time, (int, float))
+                        else existing.process_started_at or _pid_start_time(expected_pid)
+                    )
+                    if not _pid_matches_start_time(expected_pid, expected_start):
+                        raise RuntimeError(
+                            f"cannot reown session {session_id}: daemon process identity changed"
+                        )
+                    existing.pid = expected_pid
+                    existing.process_started_at = expected_start
+                    existing.owned = True
+                    existing.webui_owned = webui_owned
                 return existing
 
             handle = DaemonHandle(session_id, str(found.get("identity") or ""), None)
-            handle.pid = int(found.get("daemon_pid") or 0)
+            handle.owned = owned
+            handle.webui_owned = webui_owned
+            handle.pid = int(found.get("daemon_pid") or found.get("pid") or 0)
+
+            stored_start_time = found.get("daemon_started_at")
+            handle.process_started_at = (
+                float(stored_start_time)
+                if isinstance(stored_start_time, (int, float))
+                else _pid_start_time(handle.pid)
+            )
+            handle.project = str(found.get("workspace") or found.get("project") or "")
             handle.agent_name = str(found.get("agent") or "")
             try:
                 await handle.connect(str(found.get("socket_path") or ""))
             except BaseException:
                 try:
-                    await handle.close()
+                    # Attach failure is not an explicit Delete or /quit request.
+                    await handle.close(stop_process=False)
                 except BaseException as cleanup_error:
                     logger.warning("failed daemon attach cleanup (%s)", type(cleanup_error).__name__)
                 raise
@@ -648,6 +776,8 @@ class DaemonPool:
                 # socket check - otherwise a failure between here and connect()
                 # leaves close() with no pid and the daemon orphaned.
                 handle.pid = int(agent.get("pid") or 0) or handle.pid
+
+                handle.process_started_at = _pid_start_time(handle.pid)
                 handle.agent_name = str(
                     agent.get("agent_name") or agent.get("name") or ""
                 )
@@ -661,6 +791,22 @@ class DaemonPool:
             f"daemon {handle.identity} did not publish a socket within "
             f"{SPAWN_TIMEOUT_SECONDS}s"
         )
+
+    async def detach(self, session_id: str) -> bool:
+        """Close this engine's transport without signaling or killing the PID."""
+        async with self._spawn_lock:
+            handle = self._daemons.get(session_id)
+            if handle is None:
+                return False
+            try:
+                await handle.close(stop_process=False)
+            except BaseException:
+                handle._closed = False
+                raise
+            if self._daemons.get(session_id) is handle:
+                self._daemons.pop(session_id)
+            return True
+
 
     async def stop(self, session_id: str) -> bool:
         async with self._spawn_lock:

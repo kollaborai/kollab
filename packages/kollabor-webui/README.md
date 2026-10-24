@@ -15,19 +15,40 @@ Visual direction and review rules: [Web UI design guide](../../design.md).
 | `src/kollabor_webui/__init__.py` | `kollabor-webui` command entrypoint and uvicorn launcher |
 | `src/kollabor_webui/server.py` | FastAPI config endpoint, Vite assets, and SPA fallback |
 | `frontend/src/` | assistant-ui React/TypeScript source |
-| `frontend/dist/` | local Vite output (ignored; regenerated for package builds) |
+| `frontend/dist/` | local Vite output served by source checkouts (ignored) |
 | `src/kollabor_webui/static/` | legacy static fallback and packaged assistant-ui output |
 
-The checked-in frontend source is the source of truth.  `hatch_build.py` runs
-`npm ci` and `npm run build` when npm is available, then force-includes Vite's
-`frontend/dist` output in a wheel under `kollabor_webui/static/assistant`.  The
-source checkout also serves `frontend/dist` directly, which makes editable
-installs useful without copying generated files into git. When `frontend/` holds a
-change newer than that build, `kollabor-webui` runs `npm run build` before it serves
-(and `kollab --web-ui` does too when the UI is already running), so the UI it serves
-is never older than its source.  Python-only builds
-continue to serve the legacy `static/index.html` and `static/app.js` fallback
-if Node/npm is unavailable.
+The checked-in frontend source is the source of truth. `hatch_build.py` runs
+`npm ci` and `npm run build` into an isolated temporary directory, then
+force-includes those assets in a wheel under `kollabor_webui/static/assistant`.
+The output stays available until Hatch finishes packaging. Missing npm or a
+failed compilation fails the build; an old dist or legacy UI cannot silently
+substitute. Source distributions contain frontend source, the lockfile and the
+canonical changelog input, and compile only when their wheel is built. The
+monorepo keeps using `kollabor/updates/CHANGELOG.md`; Hatch includes that same
+file as `frontend/CHANGELOG.md` for standalone source builds. A source checkout
+normally serves `frontend/dist` directly. When its source, public assets or
+changelog input is newer, startup rebuilds it; missing dependencies or a failed
+build stops startup instead of serving older output.
+
+To package the local app and PhoneLink service from one UI build, compile once
+into a fresh isolated directory with `npm --prefix packages/kollabor-webui/frontend run build -- --outDir /absolute/frontend-dist`
+from the repository root. Pass that same directory to
+`python scripts/build_binary.py --frontend-dist /absolute/frontend-dist` and
+`python scripts/relay/build_service.py /absolute/service.tar.gz --frontend-dist /absolute/frontend-dist`.
+Both builders reuse the selected assets without rebuilding them. The builders,
+WebUI wheel hook and runtime also accept `KOLLAB_FRONTEND_DIST=/absolute/frontend-dist`.
+At runtime this selection overrides both source and packaged assets and skips
+source rebuilds, including in editable installs. An invalid selection stops startup.
+An explicit `--frontend-dist` takes precedence over the environment input.
+Keep these outputs outside the shared checkout's `frontend/dist`.
+
+The release Binaries workflow compiles one `frontend-dist` artifact for all
+native binaries and the `connection-service` source archive. Desktop stages
+those same native binaries. PyPI publication downloads that frontend artifact
+and supplies `KOLLAB_FRONTEND_DIST` to the WebUI wheel build, so these packages
+share the same compiled UI. The connection-service artifact is deployment
+input; producing it does not update a running public service.
 
 ## Interface
 
@@ -189,16 +210,28 @@ For an editable checkout without installed console scripts:
 python -c "from kollabor_webui import main; main()"
 ```
 
-## Phone Access
+## PhoneLink
 
-The session settings panel can provision one WireGuard peer per phone and show
-its one-time QR code. The feature is restricted to authenticated clients on
-exact private subnets and requires direct private WebUI binding plus a host-admin
-apply helper; forwarded client chains and reverse proxies are not supported. See
-[`docs/features/phone-access.md`](../../docs/features/phone-access.md) for the
-server, UDP forwarding, DNS, private LAN, and revocation prerequisites. Kollab
-never configures a router or exposes the helper command in the WebUI.
+**Settings > PhoneLink** pairs a phone browser through the connection service
+already used by `/connect`. Scan the expiring QR with the phone camera, compare
+the pairing codes, and approve locally. Saved phones reconnect and can be
+removed independently. Provider calls and tools run on the computer; the phone
+needs no credential setup. Approve only phones you trust with the app's controls.
 
+The directory serves the same built frontend at `/relay/v1/phone/` and accepts
+same-origin browser registrations at `/relay/v1/phone/ws`. Each phone has an
+isolated private room; the engine's own ASGI application handles encrypted app
+requests and streamed responses. The engine token never leaves the computer.
+Native `/relay/v1/ws` continues to reject browser Origin headers. The directory
+capability endpoint must confirm support before a pairing QR can be created.
+
+Phone chats open with the newest 50 messages, fetch older pages as you scroll
+back, and keep a bounded IndexedDB cache so reopening requests only new messages.
+Large historical tool results are fetched only after Show more.
+
+
+See [`docs/features/phone-access.md`](../../docs/features/phone-access.md) for
+the contract and its deployment/physical-phone verification gates.
 
 ## Frontend development
 

@@ -180,3 +180,69 @@ Encrypted envelope fields bind version, sender/recipient keys, sender/recipient 
 
 The relay sees stable raw public keys, source IPs, room membership, timing, and ciphertext sizes. The same key is linkable across rooms. It also sees which keys declared consent to which, so it knows which pairs of devices are linked; it still sees no frame contents. `Box` with long-lived device keys does not provide forward secrecy after key compromise. The service cannot revoke a copied room capability. A room rotation creates a new capability for this device and clears its local approvals; it does not invalidate an old invitation, close other members, or revoke old-room access at the relay. If an invite is exposed, rotate, distribute the new private invitation, and have affected peers explicitly disconnect/rejoin; treat the old room as still usable by existing holders.
 
+
+## PhoneLink browser transport
+
+PhoneLink (product contract: agent-network-simple-flow.md section 16) adds:
+
+- `GET /relay/v1/phone/status`: no-store `{protocol:"kollab-phonelink/1",ready}`.
+  Ready requires the actual browser bundle and running relay backend.
+- `GET /relay/v1/phone/`: the same Kollab browser app and its own relative assets.
+  No engine, engine token, phone identity, invitation, or chat content is served
+  by these static routes. Referrer policy is no-referrer; HTML is no-store.
+- `GET /relay/v1/phone/ws`: exact canonical same-origin browser Origin required;
+  queries refused. Registration, Ed25519 proof, room isolation, replay/session
+  binding, capacity, quotas and shared-backend delivery reuse the native path.
+  Browsers omit the WS subprotocol header because the native name contains '/';
+  the application challenge and signed registration still bind its protocol.
+  `/relay/v1/ws` continues to reject every browser Origin header.
+
+A phone QR carries `v`, phone ID, private phone-room capability, pinned host
+public key and five-minute expiry in the URL fragment. It carries no engine
+or model credential and no client private key. The browser generates its own
+Ed25519 seed locally. Explicit local approval pins exactly one public key from
+that invitation; the app compares its first eight hex digits on both screens.
+Saved approved browser credentials stay in that browser's origin storage.
+Expired or invalid pending invitations cannot hide a valid approved bookmark.
+Messages from other room keys and invalid encrypted messages are discarded
+without disconnecting the approved host channel.
+
+On the computer, a process-held exclusive lock protects device-wide phone state
+and live rooms. Other engines refuse PhoneLink management while it is held.
+The durable local approval pin is authoritative; startup restores its transport
+approval before connecting, including after interruption between the two saves.
+
+The isolated host accepts only `phone_session` and `phone_http` requests from
+its locally approved key. `phone_session` exchanges ephemeral Curve25519 keys
+inside the normal authenticated NaCl envelopes. The Box shared key, protocol
+name and both relay session IDs derive distinct SHA-256 phone-to-host and
+host-to-phone SecretBox keys. Session changes erase those keys and cancel owned
+HTTP exchanges. Each encrypted inner packet has a monotonic sequence number.
+Neither method enters the agent messaging or config-sync handler.
+
+`phone_http` carries bounded start/write/run/read/cancel operations. Bodies are
+limited to 8 MiB; negotiated chunks are at most 160 KiB, while legacy peers
+retain 8 KiB. The host coalesces headers with the first body read only when the
+phone advertises that capability. Each phone has 16 outstanding HTTP exchanges
+and 16 queued output events per exchange. Relay limits remain in force. Headers
+are restricted to content-type and accept; the engine supplies its token only
+inside its own ASGI call. Only the engine's app API roots are callable; phone
+management, WebUI bootstrap, absolute URLs and arbitrary destination hosts are
+refused. Responses stream through bounded queues. Forty-five seconds without
+consumer activity cancels an abandoned exchange. Closing a stream preserves the
+engine's existing rule that cancelling agent work requires explicit Stop.
+
+The `phone_session` payload may negotiate `frame_compression`, `max_chunk`,
+`coalesce_reads`, and `zero_body_autorun`. The host returns the accepted
+capabilities and chunk size. Missing or unsupported capabilities retain the
+legacy 8 KiB, uncompressed protocol and separate start/run/read sequence. When
+negotiated, an inner JSON packet is prefixed `KLPZ1` and gzip-compressed only if
+that makes it smaller; either peer rejects decompressed packets above 256 KiB.
+The maximum negotiated HTTP chunk is 160 KiB. PhoneLink application payloads
+are bounded at 320 KiB, relay ciphertext at 448 KiB, and relay frames at 512
+KiB. Ordinary relay application messages remain limited to 24 KiB.
+
+
+Deployment requires the directory's existing HTTPS proxy to forward this whole
+prefix, including WS upgrades, and its artifact to carry the built browser
+bundle. This source change does not establish deployment on kollabor.ai.

@@ -1,11 +1,11 @@
 {
   "name": "kollabor-webui-frontend",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "build": "node scripts/build.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -22,6 +22,8 @@
     "@vitejs/plugin-react": "^6.1.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "libsodium-wrappers": "^0.8.4",
+    "livekit-client": "2.22.3",
     "lucide-react": "^1.55.0",
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",

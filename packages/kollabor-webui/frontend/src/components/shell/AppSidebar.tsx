@@ -74,7 +74,7 @@ import {
  */
 /** Why a row did not open, in full: it can name the command that allows it. */
 function OpenError({ text }: { text: string }) {
-  return <span className="text-destructive text-[0.6875rem] leading-snug break-words whitespace-normal">{text}</span>;
+  return <span className="text-destructive text-[0.8125rem] leading-snug break-words whitespace-normal">{text}</span>;
 }
 
 type LocalRow = { key: string; folder: string; session?: Session; offline?: OfflineAgent };
@@ -97,10 +97,10 @@ function FoldGroup({
 }) {
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="group/fold">
-      <SidebarGroup>
+      <SidebarGroup className="gap-1 py-1.5">
         <SidebarGroupLabel
           asChild
-          className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground w-full cursor-pointer"
+          className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground h-9 w-full cursor-pointer gap-1 px-2.5 text-xs text-sidebar-foreground/80 transition-colors"
         >
           <CollapsibleTrigger>
             <span className="flex min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap">{label}</span>
@@ -118,6 +118,9 @@ function FoldGroup({
 
 const FOOTER_BUTTON =
   "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-7 md:p-1.5";
+
+const ROW_CLASS = "h-auto gap-2.5 overflow-visible rounded-lg px-2.5 py-2.5 transition-colors";
+const AVATAR_SIZE = 40;
 
 export function AppSidebar({
   sessions,
@@ -375,7 +378,7 @@ export function AppSidebar({
                           }}
                           title={[heading, formatSessionName(session.name, session.session_id), session.harness, session.workspace, task].filter(Boolean).join(" · ")}
                           // overflow-visible: the gem canvas overhangs its box for hats and props.
-                          className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                          className={ROW_CLASS}
                         >
                           <span
                             className="contents"
@@ -394,14 +397,14 @@ export function AppSidebar({
                               activity={session.session_id === activeId ? activeActivity : presenceActivity(agent?.current_tool)}
                               season="auto"
                               follow
-                              size={56}
+                              size={AVATAR_SIZE}
                             />
                           </span>
                           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                            <span className="truncate text-[0.8125rem] leading-tight font-semibold">
+                            <span className="truncate text-sm leading-snug font-medium">
                               {heading}
                             </span>
-                            <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.6875rem] leading-tight">
+                            <span className="text-muted-foreground flex min-w-0 items-center gap-1 truncate text-[0.8125rem] leading-snug">
                               {note && !note.error ? (
                                 "Opening…"
                               ) : harness ? (
@@ -413,13 +416,13 @@ export function AppSidebar({
                               )}
                             </span>
                             {task && harness ? (
-                              <span className="text-muted-foreground truncate text-[0.6875rem]" title={task}>{task}</span>
+                              <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug" title={task}>{task}</span>
                             ) : null}
                             {session.acp_waiting && (
-                              <span className="text-amber-600 truncate text-[0.6875rem]">Waiting for Approval</span>
+                              <span className="text-amber-600 dark:text-amber-400 truncate text-[0.8125rem] leading-snug">Waiting for Approval</span>
                             )}
                             {harness && (agent?.solo || folder) ? (
-                              <span className="text-muted-foreground truncate text-[0.6875rem]">
+                              <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                 {[agent?.solo ? "Off Hub" : "", folder].filter(Boolean).join(" · ")}
                               </span>
                             ) : null}
@@ -442,7 +445,7 @@ export function AppSidebar({
                         if (await onStartOffline(agent.identity, agent.workspace)) setOpenMobile(false);
                       }}
                       title={`Start ${offlineName(agent)} in ${agent.workspace}`}
-                      className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                      className={ROW_CLASS}
                       data-testid={`offline-${agent.identity}`}
                     >
                       <Avatar
@@ -457,13 +460,13 @@ export function AppSidebar({
                         live={false}
                         season="auto"
                         follow
-                        size={56}
+                        size={AVATAR_SIZE}
                       />
                       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="text-muted-foreground truncate text-[0.8125rem] leading-tight font-medium">
+                        <span className="text-muted-foreground truncate text-sm leading-snug font-medium">
                           {offlineName(agent)}
                         </span>
-                        <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
+                        <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                           Offline · {lastRanLabel(agent.last_ran)}
                         </span>
                       </div>
@@ -635,7 +638,7 @@ export function AppSidebar({
         </div>
       </SidebarHeader>
 
-      <SidebarContent>
+      <SidebarContent className="gap-4">
         <FoldGroup
           label={
             <>
@@ -654,9 +657,9 @@ export function AppSidebar({
           <SidebarGroupContent>
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
-                  <div className="text-muted-foreground flex h-6 items-center gap-2 px-2 text-xs" title={group.folder}>
+                  <div className="text-muted-foreground flex h-7 items-center gap-2 px-2.5 text-xs" title={group.folder}>
                     <span className="min-w-0 truncate">{workspaceName(group.folder)}</span>
-                    <span className="ml-auto shrink-0 text-[0.625rem] tabular-nums">{group.rows.length}</span>
+                    <span className="ml-auto shrink-0 text-xs tabular-nums">{group.rows.length}</span>
                   </div>
                   <AgentSidebarList
                     id={JSON.stringify(["local", group.folder])}
@@ -682,8 +685,8 @@ export function AppSidebar({
             key={net.id}
             label={
               <>
-                {net.name || "Network"}
-                <span className="text-muted-foreground ml-1 truncate text-[0.625rem]">
+                <span className="min-w-0 truncate">{net.name || "Network"}</span>
+                <span className="text-muted-foreground ml-1 shrink-0 text-xs">
                   {net.name && net.trust ? ` ${net.trust}` : ""}
                 </span>
               </>
@@ -707,7 +710,7 @@ export function AppSidebar({
                 {(dev) => dev.workspaces.map((ws) => (
                     <Fragment key={ws.label || "-"}>
                       {ws.label ? (
-                        <p className="text-muted-foreground truncate px-2 text-[0.6875rem]">{ws.label}</p>
+                        <p className="text-muted-foreground truncate px-2.5 text-xs">{ws.label}</p>
                       ) : null}
                       {ws.orderRows.map((group) => (
                       <AgentSidebarList
@@ -746,7 +749,7 @@ export function AppSidebar({
                                 if (await onSelectRemote(id)) setOpenMobile(false);
                               }}
                               title={`Open ${remoteName(agent.name)} on ${agent.device}`}
-                              className="h-auto gap-3 overflow-visible py-2 pl-2.5"
+                              className={ROW_CLASS}
                             >
                               <Avatar
                                 gem={agent.name}
@@ -760,13 +763,13 @@ export function AppSidebar({
                                 activity={id && id === activeId ? activeActivity : up ? presenceActivity(agent.current_tool) : null}
                                 season="auto"
                                 follow
-                                size={56}
+                                size={AVATAR_SIZE}
                               />
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                                <span className="truncate text-[0.8125rem] leading-tight font-medium">
+                                <span className="truncate text-sm leading-snug font-medium">
                                   {remoteName(agent.name)}
                                 </span>
-                                <span className="text-muted-foreground truncate text-[0.6875rem] leading-tight">
+                                <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                   {note && !note.error
                                     ? "Opening…"
                                     : agent.state === "offline"
@@ -776,9 +779,9 @@ export function AppSidebar({
                                         : agentStatus(agent.state)}
                                 </span>
                                 {note?.error ? <OpenError text={note.error} /> : null}
-                                <CliBadge harness={cliHarness({ harness: agent.harness })} className="text-muted-foreground text-[0.6875rem]" />
+                                <CliBadge harness={cliHarness({ harness: agent.harness })} className="text-muted-foreground text-[0.8125rem] leading-snug" />
                                 {agent.acp_waiting && up ? (
-                                  <span className="truncate text-[0.6875rem] text-amber-600">Waiting for Approval</span>
+                                  <span className="truncate text-[0.8125rem] leading-snug text-amber-600 dark:text-amber-400">Waiting for Approval</span>
                                 ) : null}
                               </div>
                             </SidebarMenuButton>
@@ -806,7 +809,7 @@ export function AppSidebar({
                   <SidebarMenuItem key={contact.key}>
                     <SidebarMenuButton
                       disabled
-                      className="text-muted-foreground h-auto cursor-default gap-3 py-2 pl-2.5"
+                      className={`${ROW_CLASS} text-muted-foreground cursor-default`}
                       title={`Accepted contact (${contact.trust || "no trust"}): nothing is permitted until /connect allow`}
                     >
                       <Avatar
@@ -816,13 +819,13 @@ export function AppSidebar({
                         live={false}
                         season="auto"
                         follow
-                        size={40}
+                        size={AVATAR_SIZE}
                       />
                       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="truncate text-[0.8125rem] leading-tight font-medium">
+                        <span className="truncate text-sm leading-snug font-medium">
                           {contact.label}
                         </span>
-                        <span className="truncate text-[0.6875rem] leading-tight">
+                        <span className="truncate text-[0.8125rem] leading-snug">
                           {contact.trust ? `${titleCase(contact.trust)} trust · ` : ""}
                           {"Ask /connect allow to work together"}
                         </span>
