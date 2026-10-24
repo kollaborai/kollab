@@ -5,6 +5,8 @@ import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
+import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
@@ -147,6 +149,7 @@ function RuntimeShell({
   eventActivity,
   onOpenProperties,
   refreshSignal,
+  supervisorEvents,
   view,
   onViewChange: setView,
   locked,
@@ -173,6 +176,7 @@ function RuntimeShell({
   /** This session's Properties (its gem, double-clicked). */
   onOpenProperties: () => void;
   refreshSignal: number;
+  supervisorEvents: StreamEvent[];
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
@@ -289,6 +293,7 @@ function RuntimeShell({
               </ol>
             </details>
           )}
+          <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
             {view === "chat" ? (
               <Thread
@@ -459,6 +464,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
@@ -766,10 +772,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
     const followEvents = async () => {
       resetEventActivity();
+      setSupervisorEvents([]);
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);
             if (compactionStatus !== undefined) {
@@ -1365,6 +1373,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 liveAgents={liveAgents}
                 remoteAgents={network.remote}
                 refreshSignal={refreshSignal}
+                supervisorEvents={supervisorEvents}
                 onSessionUpdated={handleSessionUpdated}
                 onOpenSettings={openSettings}
                 onHistoryCleared={() => resetThread(activeSession.session_id)}
