@@ -662,7 +662,9 @@ class Worker:
         if self.greeting_task:
             self.greeting_task.cancel()
             await asyncio.gather(self.greeting_task, return_exceptions=True)
-        # Fence first: no older stream of this room listens or speaks past this point.
+        # The service first: fence so no older stream of this room listens or speaks
+        # past this point, then give the lease back. The Engine sends SIGKILL 3 s after
+        # SIGTERM and LiveKit's own teardown can take 2 s, so it goes last and bounded.
         await self.adapter.fence(
             RoomBinding(
                 self.binding.owner_id,
@@ -670,14 +672,14 @@ class Worker:
                 self.generation + 1,
             )
         )
-        if self.session:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(self.session.aclose(), 5)
         await self.adapter.cancel(self.binding)
         await self.adapter.release()
+        if self.session:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.session.aclose(), 2)
         await self.turns.close()
         await self.room.close()
-        await self.drain()
+        await self.drain(1.0)
         if self.pump:
             self.pump.cancel()
 

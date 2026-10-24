@@ -125,6 +125,7 @@ class FakeAdapter:
         self.states = states or itertools.repeat(SpeechReadiness("ready"))
         self.heard, self.spoken, self.finalized = [], [], []
         self.fenced = self.released = None
+        self.order = []  # service and room teardown, in the order they happened
 
     async def readiness(self, owner_id=""):
         return next(self.states)
@@ -134,9 +135,11 @@ class FakeAdapter:
 
     async def release(self):
         self.released = True
+        self.order.append("release")
 
     async def fence(self, binding):
         self.fenced = binding.generation
+        self.order.append("fence")
 
     async def cancel(self, binding, stream_id=None):
         pass
@@ -255,6 +258,7 @@ class FakeRoom:
         self.closed, self.participant = asyncio.Event(), asyncio.Event()
         self.connected = self.output = None
         self.is_closed = False
+        self.order = []
 
     async def connect(self, url, token):
         self.connected = (url, token)
@@ -269,6 +273,7 @@ class FakeRoom:
 
     async def close(self):
         self.is_closed = True
+        self.order.append("room")
 
 
 class Rig:
@@ -280,6 +285,7 @@ class Rig:
         )
         self.vad, self.room, self.poster = ScriptedVAD(), FakeRoom(), Recorder()
         self.detector = detector
+        self.room.order = self.adapter.order
 
     async def __aenter__(self):
         await self.engine.start()
@@ -520,6 +526,8 @@ def test_ready_line_then_sigterm_stops_and_fences(capsys):
     rig, agent = run(scenario())
     assert rig.adapter.fenced == CONFIG.generation + 1 and rig.adapter.released
     assert rig.room.is_closed and rig.worker.stopping.is_set()
+    # the service lease goes back before LiveKit's slow teardown (SIGKILL follows SIGTERM by 3 s)
+    assert rig.adapter.order == ["fence", "release", "room"]
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL  # restored
 
     async def after_stop():
