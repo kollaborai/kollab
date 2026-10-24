@@ -74,10 +74,13 @@ fast-forwards it, so `main` ends clean and level by construction.
    from then on `/upgrade` swaps the binary and never touches the checkout.
 
 Done means `main` matches `origin/main`, `git status` lists none of the
-release's files, and `kollab --version` reports X.Y.Z inside and outside the
-repo. Any file still dirty is work outside the release: name it in the release
-report. Running agents keep the code they started with; list them and ask
-before restarting any.
+release's files, and `kollab --version` prints `Build: <branch> @ <8-character
+SHA>` immediately before the unchanged final `kollab X.Y.Z` line inside and
+outside the repo. Build identity comes from the exact checkout used to build the
+artifact; a detached checkout reports branch `unknown` but still reports the
+short SHA when HEAD is resolvable. Each unavailable field displays as `unknown`. Any other dirty file is work
+outside the release: name it in the release report. Running agents
+keep the code they started with; list them and ask before restarting any.
 
 ## Pre-Release Checklist
 

@@ -6,17 +6,33 @@ one prebuilt frontend into the service and installed CLI/desktop artifacts.
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import os
+import sys
 import tarfile
+import tempfile
 from pathlib import Path
+
+# Load the standalone helper by path: this script runs without kollab installed.
+_spec = importlib.util.spec_from_file_location(
+    "_kollabor_build_info", Path(__file__).resolve().parents[2] / "kollabor/build_info.py"
+)
+_build_info = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _build_info
+_spec.loader.exec_module(_build_info)
+BuildProvenance = _build_info.BuildProvenance
+read_embedded_provenance = _build_info.read_embedded_provenance
+resolve_build_provenance = _build_info.resolve_build_provenance
+write_embedded_provenance = _build_info.write_embedded_provenance
 
 FILES = (
     "kollabor_cli_main.py",
     "pyproject.toml",
     "kollabor/__init__.py",
     "kollabor/version.py",
+    "kollabor/build_info.py",
     "kollabor/binary.py",
     "plugins/__init__.py",
     "plugins/hub/__init__.py",
@@ -41,11 +57,21 @@ FILES = (
 )
 
 
-def build(output: Path, *, frontend_dist: Path | None = None) -> None:
+def build(
+    output: Path, *, frontend_dist: Path | None = None, provenance: BuildProvenance | None = None
+) -> None:
     root = Path(__file__).resolve().parents[2]
     # Read all sources before opening the artifact; a missing dependency must
     # not leave a partially constructed release that could be deployed.
     sources = {name: (root / name).read_bytes() for name in FILES}
+    # The artifact has no .git, so carry the checkout identity as generated data.
+    generated = root / "kollabor/_build_info.py"
+    identity = provenance or resolve_build_provenance(
+        root, inherited=read_embedded_provenance(generated)
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        write_embedded_provenance(Path(scratch) / "_build_info.py", identity)
+        sources["kollabor/_build_info.py"] = (Path(scratch) / "_build_info.py").read_bytes()
     selected = os.environ.get("KOLLAB_FRONTEND_DIST")
     if frontend_dist is None and selected is not None:
         if not selected:

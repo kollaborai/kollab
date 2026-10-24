@@ -184,3 +184,32 @@ def test_phone_assets_must_exist_before_an_artifact_is_created(tmp_path):
     with pytest.raises(ValueError, match="Build the Kollab frontend"):
         build_service.build(archive, frontend_dist=tmp_path / "missing")
     assert not archive.exists()
+
+
+def test_relay_artifact_reports_exact_branch_and_sha(tmp_path):
+    frontend = tmp_path / "frontend"
+    (frontend / "phonelink/loader").mkdir(parents=True)
+    (frontend / "phonelink/loader/index.html").write_text("<main>PhoneLink</main>")
+    expected = build_service.BuildProvenance("release/0.18.0", "ab" * 20)
+    archive = tmp_path / "source.tar.gz"
+    build_service.build(archive, frontend_dist=frontend, provenance=expected)
+    tree = tmp_path / "tree"
+    with tarfile.open(archive) as tar:
+        tar.extractall(tree, filter="data")
+
+    # A source tree has no .git, and the generated module must be read as data.
+    assert not (tree / ".git").exists()
+    (tree / "kollabor/_build_info.py").write_text(
+        (tree / "kollabor/_build_info.py").read_text() + "raise SystemExit('executed')\n"
+    )
+    paths = [str(tree), sysconfig.get_path("purelib")]
+    script = (
+        f"import sys; sys.path[:0] = {paths!r}\n"
+        "from kollabor.version import get_build_provenance as g; print(*g())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", script],
+        cwd=tree, capture_output=True, text=True, env=child_env(tree),
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert result.stdout.split() == ["release/0.18.0", "ab" * 20]

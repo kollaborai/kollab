@@ -126,6 +126,9 @@ built files) and runs it from a verified copy.
   verifies. The verified copy is kept in the phone browser (IndexedDB) and is
   checked again at every launch, so a modified copy is re-fetched from the
   computer, or refused when the computer is out of reach.
+- **Build identity.** Settings > Versions shows the source branch and short
+  SHA embedded in the verified app bundle. This does not fetch the token-bearing
+  `/api/config` response; the build values are covered by the signed app files.
 - **Home Screen.** The loader is installable (manifest and icons), and the
   verified app opens from its stored copy. Safari's Home Screen app has its own
   storage (WebKit copies cookies, not local storage), so a phone linked in the
