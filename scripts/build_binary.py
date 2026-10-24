@@ -12,12 +12,20 @@ With --wheels, it checks that those wheels already contain that exact UI.
 
 The binary is a pex scie: one executable holding a portable CPython and every
 wheel kollab needs, so it runs with no Python installed. It lands in --out as
-kollab-<os>-<arch> (macos-aarch64, linux-x86_64, ...) beside a .sha256 file,
-which install.sh and /upgrade check before installing it.
+kollab-<os>-<arch> (macos-aarch64, linux-x86_64, windows-x86_64.exe, ...) beside
+a .sha256 file, which install.sh and /upgrade check before installing it.
+On Windows it is the desktop installer's runtime and no release asset by itself:
+see docs/specs/windows-desktop.md for what that runtime cannot do yet.
 
 Then the binary must report embedded build provenance and the expected
 version, import kollab's packages, and verify an HTTPS certificate with its own
 Python. CI runs this on each platform (.github/workflows/binaries.yml).
+
+    python scripts/build_binary.py --agent-smoke dist/bin/kollab-windows-x86_64.exe
+
+--agent-smoke builds nothing: it runs the check a Windows binary must pass before
+a desktop installer may carry it. A detached agent starts, shows online in
+`--hub status` and stops again (native daemon start and local IPC, no model turn).
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -46,7 +55,8 @@ PYTHON = "3.14.8"
 UVX_PEX = ["uvx", "--python", PYTHON.rsplit(".", 1)[0], "--from", PEX]
 # The oldest systems the binary runs on: macOS 11, and glibc 2.28 (Debian 10+,
 # Ubuntu 20.04+, RHEL 8+). Wheels are picked for these, never for the build
-# machine, so a newer CI image cannot raise the floor unnoticed.
+# machine, so a newer CI image cannot raise the floor unnoticed. Windows wheels
+# (win_amd64) carry no OS floor; the portable CPython sets it.
 FLOORS = {"macosx": (11, 0), "manylinux": (2, 28)}
 IMPORTS = "import kollabor.application, kollabor_cli_main, kollabor_engine, kollabor_webui, kollabor_voice, plugins"
 TLS_URL = "https://pypi.org/simple/kollab/"
@@ -149,14 +159,23 @@ def verify_frontend(wheels: list[Path], frontend: Path) -> None:
 
 
 def platform_name() -> str:
-    """This machine as release binaries name it, as kollabor/updates/auto_update.py:platform_name does."""
-    system = {"Darwin": "macos", "Linux": "linux"}.get(platform.system())
+    """This machine as release binaries name it, as kollabor/updates/auto_update.py:platform_name does.
+
+    Windows is named here for the desktop installer's runtime only: /upgrade and
+    install.sh still know no Windows binary.
+    """
+    system = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(platform.system())
     machine = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}.get(
         platform.machine().lower()
     )
     if not (system and machine):
         raise SystemExit(f"no kollab binary for {platform.system()} {platform.machine()}")
     return f"{system}-{machine}"
+
+
+def binary_filename() -> str:
+    """kollab-<platform>, with the .exe suffix pex gives a Windows scie."""
+    return f"kollab-{platform_name()}" + (".exe" if platform.system() == "Windows" else "")
 
 
 def floor_platform(path: Path) -> Path:
@@ -178,7 +197,7 @@ def floor_platform(path: Path) -> Path:
 def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     """The scie for this machine, kollab-<platform>, plus the .sha256 pex writes beside it."""
     out.mkdir(parents=True, exist_ok=True)
-    binary = out / f"kollab-{platform_name()}"
+    binary = out / binary_filename()
     checksum = binary.with_name(binary.name + ".sha256")
     binary.unlink(missing_ok=True)
     checksum.unlink(missing_ok=True)
@@ -205,16 +224,17 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     return binary
 
 
+def smoke_env(**extra: str) -> dict[str, str]:
+    """This environment minus any binary identity, which would make one kollab act as another."""
+    build_env = {"KOLLAB_BUILD_BRANCH", "KOLLAB_BUILD_SHA"}
+    env = {key: value for key, value in os.environ.items() if key not in {"SCIE", "SCIE_ARGV0", "PEX"} | build_env}
+    env["KOLLAB_NO_KEYRING"] = "1"
+    return {**env, **extra}
+
+
 def smoke(binary: Path, version: str, expected_build_line: str) -> None:
     """The binary starts outside any checkout, reports the version, imports kollab and verifies TLS."""
-    # A binary built from another binary's shell must not inherit that one's identity.
-    build_env = {"KOLLAB_BUILD_BRANCH", "KOLLAB_BUILD_SHA"}
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in {"SCIE", "SCIE_ARGV0", "PEX"} | build_env
-    }
-    env["KOLLAB_NO_KEYRING"] = "1"
+    env = smoke_env()
     with tempfile.TemporaryDirectory() as cwd:
         shown = subprocess.run(
             [str(binary), "--version"], cwd=cwd, env=env, capture_output=True, text=True, timeout=600
@@ -240,13 +260,72 @@ def smoke(binary: Path, version: str, expected_build_line: str) -> None:
             raise SystemExit(f"{binary.name} cannot import kollab or verify HTTPS:\n{probe.stderr[-2000:]}")
 
 
+AGENT_ONLINE = re.compile(r"^\s+(?P<name>\S+).*\bpid=(?P<pid>\d+)", re.MULTILINE)
+
+
+def agent_smoke(binary: Path, timeout: float = 120.0) -> None:
+    """A detached agent starts, shows online in `--hub status`, and stops: native daemon start plus local IPC.
+
+    This is what a Windows binary must pass before a desktop installer may carry
+    it (docs/specs/windows-desktop.md); it needs no model provider or network.
+    The agent runs with a throwaway home and folder, so it joins no real hub.
+    """
+    # ignore_cleanup_errors: Windows keeps a folder locked while a stopped agent's files close.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
+        home, project = Path(scratch, "home"), Path(scratch, "project")
+        project.mkdir()
+        (home / ".kollab").mkdir(parents=True)
+        (home / ".kollab" / "config.json").write_text(json.dumps({"application": {"setup_completed": True}}))
+        env = smoke_env(HOME=str(home), USERPROFILE=str(home))
+
+        def kollab(*args: str, **kwargs) -> subprocess.CompletedProcess:
+            return subprocess.run([str(binary), *args], cwd=project, env=env, text=True, timeout=60, **kwargs)
+
+        # A file, not a pipe: the detached agent may keep its inherited handles open for good.
+        log = Path(scratch, "detached.log")
+        with log.open("wb") as stream:
+            started = kollab("--detached", stdin=subprocess.DEVNULL, stdout=stream, stderr=stream)
+        online = None
+        status = None
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                status = kollab("--hub", "status", capture_output=True)
+                online = AGENT_ONLINE.search(status.stdout)
+                if online:
+                    break
+                time.sleep(2)
+        finally:
+            if online:
+                kollab("--hub", "stop", online["name"], capture_output=True)
+        if not online:
+            shown = status.stdout + status.stderr[-2000:] if status else ""
+            raise SystemExit(
+                f"{binary.name} --detached started no agent that answers `--hub status` within {timeout:.0f}s\n"
+                f"--detached: exit {started.returncode}\n{log.read_text(errors='replace')[-2000:]}\n"
+                f"--hub status:\n{shown}"
+            )
+        deadline = time.monotonic() + 30
+        while AGENT_ONLINE.search(kollab("--hub", "status", capture_output=True).stdout):
+            if time.monotonic() > deadline:
+                raise SystemExit(f"{binary.name} --hub stop {online['name']} left the agent online")
+            time.sleep(1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--wheels", type=Path, help="directory of built wheels (default: build them here)")
     parser.add_argument("--frontend-dist", type=Path, help="use this built frontend; verify it when using --wheels")
     parser.add_argument("--out", type=Path, default=ROOT / "dist" / "bin", help="where the binary goes")
     parser.add_argument("--expect-version", help="fail unless the binary is this version (v prefix allowed)")
+    parser.add_argument(
+        "--agent-smoke", type=Path, metavar="BINARY", help="build nothing: start and stop a detached agent of BINARY"
+    )
     args = parser.parse_args()
+    if args.agent_smoke:
+        agent_smoke(args.agent_smoke.resolve())
+        print(f"{args.agent_smoke.name} started a detached agent, saw it online and stopped it")
+        return 0
     selected = os.environ.get("KOLLAB_FRONTEND_DIST")
     if args.frontend_dist is None and selected is not None:
         if not selected:
