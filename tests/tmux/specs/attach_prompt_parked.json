@@ -1,0 +1,169 @@
+{
+  "name": "attach-prompt-parked",
+  "description": "A Stop from another window (the web UI's Stop) ends the turn and leaves its approval prompt open, parked: this terminal closes its copy without answering (its keys would answer it mid-message) and the call comes back Not run yet. The user's typed yes here runs it. A second prompt, parked the same way, is allowed from another window (Allow on the web card): the agent goes on and runs it. Throwaway HOME per run, a local fake model (tests/tmux/lib/fake_llm.py), approval mode confirm_all, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 exec \"$R/.venv/bin/python\" \"$R/main.py\"'",
+    "app_init_sleep": 3,
+    "show_captures": false,
+    "key_delay": 0.3
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME with a fake model and confirm_all",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && [ -d \"$O/ws\" ] && (cd \"$O/ws\" && HOME=\"$O\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all >/dev/null 2>&1; kill \"$(cat \"$O/fake.pid\")\" 2>/dev/null); H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"permissions\":{\"approval_mode\":\"confirm_all\"},\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on port $(cat \"$H/fake.port\")\""
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up (daemon forked, this window attached)"
+    },
+    {
+      "action": "section",
+      "label": "a Stop from another window parks the prompt"
+    },
+    {
+      "action": "type",
+      "text": "please parkone"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "PERMISSION REQUIRED",
+      "timeout": 40,
+      "description": "the prompt shows in this terminal"
+    },
+    {
+      "action": "shell",
+      "description": "attach as a second window and press Stop (what the web UI does)",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/answer_prompt_elsewhere.py\" STOP"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Not run yet",
+      "timeout": 30,
+      "description": "the call came back without running"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "this terminal closed its copy of the parked prompt"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "park-one-ran",
+      "description": "nothing ran"
+    },
+    {
+      "action": "section",
+      "label": "the typed yes runs it"
+    },
+    {
+      "action": "type",
+      "text": "yes"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "park-one-ran",
+      "timeout": 40,
+      "description": "the yes ran the call the prompt asked for"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "no prompt for the approved call"
+    },
+    {
+      "action": "section",
+      "label": "Allow from another window on a parked prompt"
+    },
+    {
+      "action": "type",
+      "text": "please parktwo"
+    },
+    {
+      "action": "enter"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "PERMISSION REQUIRED",
+      "timeout": 40,
+      "description": "the second prompt shows in this terminal"
+    },
+    {
+      "action": "shell",
+      "description": "Stop from another window",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/answer_prompt_elsewhere.py\" STOP"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Not run yet",
+      "timeout": 30,
+      "description": "the second call came back without running"
+    },
+    {
+      "action": "sleep",
+      "seconds": 1
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "the second prompt parked and closed here"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "park-two-ran",
+      "description": "nothing ran yet"
+    },
+    {
+      "action": "shell",
+      "description": "Allow it from another window (Allow on the web card)",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/answer_prompt_elsewhere.py\" APPROVE_ONCE"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "park-two-ran",
+      "timeout": 40,
+      "description": "the agent went on and ran it"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "PERMISSION REQUIRED",
+      "description": "no prompt left here"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "description": "stop the agent and the fake model",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-parked-prompt.path\"); (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" --hub stop all 2>&1 | tail -1); kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null; true"
+    }
+  ]
+}

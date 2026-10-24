@@ -70,11 +70,11 @@ them, and no voice screen shows classifier controls, status or decisions.
   checkpoint and summary records) are copied into the new file at the swap.
 - A cut still queued when `/resume` or a new session swaps the conversation is
   dropped: its turn is not in the new one.
-- A talk-over or a Stop while a tool waits for approval answers the prompt
-  cancelled (`PermissionManager.cancel_confirmations`, called from
-  `LLMService.cancel_current_request`): the tool does not run, every window
-  closes the prompt and the turn ends, so the cut lands before the next turn. A
-  prompt asked while the turn is stopping is answered cancelled without showing.
+- A talk-over or a Stop while a tool waits for approval ends the turn at once,
+  so the cut lands before the next turn, and leaves the prompt open
+  (`PermissionManager.park_confirmations`, called from
+  `LLMService.cancel_current_request`; see "Approvals by voice"). ACP's Stop
+  answers its prompts cancelled (`cancel_confirmations`).
 - A Stop or a talk-over ends the voice turn's grant with it
   (`QueueProcessor._drain_queue`): the next turn, spoken or typed, runs on its own,
   so its tools run and a talk-over can cut its reply. Input that cuts in while a
@@ -109,6 +109,33 @@ runs it.
   messages and the model's own text never answer.
 - Hard blocks (`sudo`, `rm -r`, `git push`, ...) and unsafe syntax stay refused;
   a yes never runs them.
+
+A typed turn keeps its card, and a Stop or a wait no longer refuses the tool:
+
+- A Stop while the card waits ends the turn and the card stays open: it
+  "parks" (`PermissionManager.park_confirmations`). So does a card nobody
+  answers for 290 s (`PARK_AFTER_SECONDS`, under the permission hook's 5 min):
+  the tool comes back "Not run yet", the agent writes that it needs the OK, and
+  the card stays. A prompt asked while its turn is stopping shows as a card and
+  parks at once.
+- Allow on a parked card runs that call, and the agent goes on: the card's
+  answer approves it once (`YesApprovals.answered_on_card`), an agent HUD note
+  names it and `TRIGGER_LLM_CONTINUE` starts the turn that runs it. Deny on it
+  drops the ask and the agent stays quiet; the web answer's stream ends with no
+  turn (the resolution event carries `parked`).
+- The user's typed yes runs a parked call like a spoken one, and closes its
+  card approved; a typed no closes it denied. A new chat or `/resume` closes
+  the old one's cards.
+- Terminals never keep a parked prompt: its keys would answer it in the middle
+  of the next message. The daemon publishes `permission_parked` and attached
+  terminals close theirs without answering; a `--no-daemon` terminal closes its
+  own. The card (web UI) stays open, and the typed yes works everywhere.
+- The engine marks a parked prompt (`permission_parked` sets the stored
+  prompt's `details.parked`), so a page that loads the chat knows its turn
+  ended. A page whose own run showed the card reloads whole when it parks
+  (`promptParkedSinceShown`): that run ended at the card, so only a reload shows
+  the call's "Asked for your OK" and the agent's ask. A message that answers a
+  card an earlier run showed (a typed yes or no) closes that card at once.
 
 ## Logs
 

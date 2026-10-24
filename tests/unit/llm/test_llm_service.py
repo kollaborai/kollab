@@ -283,17 +283,19 @@ class TestLLMServiceIntegration(unittest.TestCase):
         asyncio.run(cancel_and_drain())
         return permissions
 
-    def test_a_stop_answers_an_open_approval_prompt_cancelled(self):
-        """A Stop or a talk-over must not leave the turn waiting on a prompt."""
+    def test_a_stop_leaves_an_open_approval_prompt_open(self):
+        """A Stop ends the turn at once; its card stays open for Allow or a yes."""
         self.service.is_processing = True
         permissions = self._stop_with_permissions()
-        permissions.cancel_confirmations.assert_called_once_with()
+        permissions.park_confirmations.assert_called_once_with()
+        permissions.cancel_confirmations.assert_not_called()
 
     def test_an_acp_stop_answers_an_open_approval_prompt_cancelled(self):
         acp = SimpleNamespace(cancel=AsyncMock())
         with patch.object(self.service, "_selected_active_acp_orchestrator", return_value=acp):
             permissions = self._stop_with_permissions()
         permissions.cancel_confirmations.assert_called_once_with()
+        permissions.park_confirmations.assert_not_called()
         acp.cancel.assert_awaited_once()
 
     def test_idle_human_cancel_supersedes_remote_cancellation_generation(self):

@@ -14,6 +14,7 @@ import {
   cancelPendingPermission,
   pendingPermissions,
   permissionOwner,
+  promptParkedSinceShown,
   samePendingPermission,
   type PendingPermission,
 } from "@/utils/permission-cancel";
@@ -798,6 +799,11 @@ export function EngineRuntimeProvider({
     // prompt is waiting, reload the thread whole.
     const waiting = (message?: { status?: { type?: string } }) => message?.status?.type === "requires-action";
     if (!thread.isRunning && waiting(thread.messages.at(-1)) !== initialState.messages.some(waiting)) {
+      onStale?.();
+      return;
+    }
+    // The turn behind the shown prompt ended and left it open: reload whole too.
+    if (!thread.isRunning && promptParkedSinceShown(thread.messages, initialState.messages)) {
       onStale?.();
       return;
     }

@@ -6,6 +6,10 @@ comes back "not run yet" and is kept here, and the model asks for the OK in its
 reply. The user's next message, typed or spoken, decides: a short yes lets each
 call the agent last asked for run once, a short no drops them, and anything else
 is a normal turn that leaves them open.
+
+A typed turn's approval prompt that its turn leaves open (a Stop, 5 minutes with
+no answer) is parked here too: its card answers it, and the user's typed yes or
+no closes that card.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import json
 import re
 import shlex
 from contextvars import ContextVar
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 NEEDS_YES = (
     "Not run yet: this needs the user's OK. In your reply, say in a few plain words "
@@ -84,6 +88,9 @@ class YesApprovals:
         self._note = ""
         self._turn = 0
         self._conversation: str | None = None
+        self._cards: dict[str, str] = {}  # parked prompt's call id -> approval key
+        # Closes a parked prompt's card: (call id, approve / deny / None cancel).
+        self.close_card: Callable[[str, bool | None], None] | None = None
 
     def ask(self, tool_data: Mapping[str, Any]) -> None:
         """Keep a call that needs the user's OK; a later turn's ask replaces it."""
@@ -102,6 +109,33 @@ class YesApprovals:
         self._approved.discard(key)
         return True
 
+    def park(self, tool_data: Mapping[str, Any]) -> None:
+        """Its approval prompt stays open past its turn: its card answers it too."""
+        self._cards[str(tool_data.get("id"))] = approval_key(tool_data)
+
+    def answered_on_card(self, tool_data: Mapping[str, Any], allowed: bool | None) -> str:
+        """A parked prompt was answered on its card: what to run now, or "".
+
+        Allow approves that call once and Deny drops the ask; a prompt that closed
+        unanswered (None) leaves it open. A card the user's typed answer already
+        closed does nothing.
+        """
+        key = self._cards.pop(str(tool_data.get("id")), None)
+        if key is None or allowed is None:
+            return ""
+        self._asked.pop(key, None)
+        if not allowed:
+            return ""
+        self._approved.add(key)
+        return _describe(tool_data)
+
+    def _close_cards(self, keys: set[str], allowed: bool | None) -> None:
+        for card, key in list(self._cards.items()):
+            if key in keys:
+                del self._cards[card]
+                if self.close_card is not None:
+                    self.close_card(card, allowed)
+
     def on_human_input(self, text: str, conversation: str | None = None) -> None:
         """The user's own message (never another agent's or the model's)."""
         self._turn += 1
@@ -111,6 +145,7 @@ class YesApprovals:
             if self._conversation is not None:
                 # /resume or a new chat: what the agent asked is not in this one.
                 self._asked.clear()
+                self._close_cards(set(self._cards.values()), None)
             self._conversation = conversation
         answer = human_answer(text) if self._asked else None
         if answer == "yes":
@@ -121,6 +156,7 @@ class YesApprovals:
                 "Run exactly those now, then tell them what you found."
             )
         if answer:
+            self._close_cards(set(self._asked), answer == "yes")
             self._asked.clear()
 
     def take_note(self) -> str:

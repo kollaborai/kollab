@@ -2237,7 +2237,7 @@ class LLMService:
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
             generation = queue_processor.request_cancellation(origin=origin)
-            self._cancel_open_prompts()
+            self._cancel_open_prompts(park=False)
             async def cancel_acp() -> None:
                 try:
                     await asyncio.wait_for(acp.cancel(), timeout=35.0)
@@ -2277,7 +2277,7 @@ class LLMService:
                 return queue_processor.cancel_generation
 
         generation = queue_processor.request_cancellation(origin=origin)
-        self._cancel_open_prompts()
+        self._cancel_open_prompts(park=True)
         cancellation_task_id = self._safe_operation_task_id(task_id)
         if cancellation_task_id is None:
             cancellation_task_id = self._operation_context_task_id()
@@ -2318,17 +2318,22 @@ class LLMService:
             logger.info("Processing cancellation requested")
         return generation
 
-    def _cancel_open_prompts(self) -> None:
-        """An approval prompt left open would hold the stopped turn until answered."""
+    def _cancel_open_prompts(self, *, park: bool) -> None:
+        """A prompt left waiting would hold the stopped turn until answered.
+
+        A native Stop parks it: the turn ends, the card stays open, and the card
+        or the user's yes runs it. ACP's are answered cancelled.
+        """
         bus = getattr(self, "event_bus", None)
         permissions = bus.get_service("permission_manager") if bus is not None else None
-        cancel = getattr(permissions, "cancel_confirmations", None)
-        if cancel is None:
+        name = "park_confirmations" if park else "cancel_confirmations"
+        release = getattr(permissions, name, None)
+        if release is None:
             return
         try:
-            cancel()
+            release()
         except Exception:  # the Stop still ends the stream and the running tool
-            logger.warning("could not answer the open approval prompts", exc_info=True)
+            logger.warning("could not release the open approval prompts", exc_info=True)
 
     def clear_remote_task_cancellation(
         self, generation: int, *, task_id: str | None = None

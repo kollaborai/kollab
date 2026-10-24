@@ -1,6 +1,7 @@
 """A voice turn asks for the user's yes instead of waiting on an approval prompt."""
 
 import asyncio
+import copy
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -150,6 +151,7 @@ async def _executor():
     executor.shell_executor.run_argv = AsyncMock(
         return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
     )
+    executor.permissions = manager
     return executor, prompt
 
 
@@ -210,3 +212,143 @@ def test_a_typed_turn_still_shows_its_prompt():
     prompt, result = asyncio.run(scenario())
     prompt.assert_awaited_once()
     assert not result.success and result.error == "User denied execution"
+
+
+# A typed turn's prompt its turn leaves open (a Stop): the card stays open, and
+# Allow on it or the user's typed yes runs the call.
+
+
+class _Tap:
+    def __init__(self):
+        self.events = []
+        self.subscriber_count = 1
+
+    def publish(self, event):
+        self.events.append(copy.deepcopy(event))  # as sent: a real tap serializes it
+
+
+class _Rpc:
+    def register(self, method, handler):
+        pass
+
+
+async def _parked_call():
+    """A Confirm All call on the real bridge, its prompt parked by a Stop."""
+    from kollabor.llm.permissions.attach_bridge import AttachPermissionBridge
+    from kollabor_agent.permissions import handle_confirmation_response
+
+    executor, _ = await _executor()
+    manager = executor.permissions
+    bridge, tap = AttachPermissionBridge(), _Tap()
+
+    async def ask(details):
+        response = await bridge.request_confirmation(
+            display_tap=tap, rpc_server=_Rpc(), details=dict(details), timeout=None
+        )
+        return await handle_confirmation_response(manager, details, response)
+
+    manager.set_confirmation_callback(ask, park=bridge.park, settle=bridge.try_settle_response)
+    call = asyncio.create_task(executor.execute_tool(dict(CHECK_PRS)))
+    for _ in range(200):
+        if bridge._pending:
+            break
+        await asyncio.sleep(0)
+    manager.park_confirmations()  # the Stop
+    return executor, manager, bridge, tap, await asyncio.wait_for(call, 1)
+
+
+def _continued(manager):
+    """The agent was told to go on (TRIGGER_LLM_CONTINUE), and with what."""
+    from kollabor_events.models import EventType
+
+    triggers = [
+        call for call in manager._event_bus.emit_with_hooks.await_args_list
+        if call.args and call.args[0] == EventType.TRIGGER_LLM_CONTINUE
+    ]
+    hud = manager._event_bus.get_service.return_value.queue_agent_hud
+    return triggers, hud
+
+
+def test_allow_on_a_parked_card_runs_the_call_and_the_agent_goes_on():
+    from kollabor_events.permissions_models import ConfirmationResponse
+
+    async def scenario():
+        executor, manager, bridge, tap, first = await _parked_call()
+        assert "call-1" in bridge._pending  # the card stays open after the Stop
+        bridge.try_settle_response("call-1", ConfirmationResponse.APPROVE_ONCE)  # Allow
+        for _ in range(50):
+            await asyncio.sleep(0)
+        triggers, hud = _continued(manager)
+        second = await asyncio.wait_for(executor.execute_tool(again(CHECK_PRS)), 2)  # the agent's re-call
+        return executor, first, triggers, hud, second, list(tap.events)
+
+    executor, first, triggers, hud, second, events = asyncio.run(scenario())
+    assert first.error == NEEDS_YES
+    assert len(triggers) == 1  # the agent goes on
+    section, label, text = hud.call_args.args
+    assert (section, label) == ("permission", "approved") and "gh pr list" in text
+    assert second.success and second.output == "#318 open"
+    executor._execute_terminal_command.assert_awaited_once()
+    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True}
+
+
+def test_deny_on_a_parked_card_never_runs_it_and_the_agent_stays_quiet():
+    from kollabor_events.permissions_models import ConfirmationResponse
+
+    async def scenario():
+        executor, manager, bridge, tap, first = await _parked_call()
+        bridge.try_settle_response("call-1", ConfirmationResponse.DENY)
+        for _ in range(50):
+            await asyncio.sleep(0)
+        triggers, _ = _continued(manager)
+        executor.yes_approvals.on_human_input("yes")  # nothing is asked any more
+        return executor, triggers, executor.yes_approvals.take(again(CHECK_PRS))
+
+    executor, triggers, approved = asyncio.run(scenario())
+    assert triggers == [] and not approved
+    executor._execute_terminal_command.assert_not_awaited()
+
+
+def test_a_typed_yes_closes_the_parked_card_and_runs_the_call():
+    async def scenario():
+        executor, manager, bridge, tap, first = await _parked_call()
+        executor.yes_approvals.on_human_input("Yes.")
+        for _ in range(50):
+            await asyncio.sleep(0)
+        triggers, _ = _continued(manager)
+        second = await asyncio.wait_for(executor.execute_tool(again(CHECK_PRS)), 2)
+        return executor, set(bridge._pending), triggers, second, list(tap.events)
+
+    executor, pending, triggers, second, events = asyncio.run(scenario())
+    assert not pending  # its card closed, approved
+    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True}
+    assert triggers == []  # the yes is its own turn: it runs the call there
+    assert second.success
+    executor._execute_terminal_command.assert_awaited_once()
+
+
+def test_a_typed_no_closes_the_parked_card_denied():
+    async def scenario():
+        executor, manager, bridge, tap, first = await _parked_call()
+        executor.yes_approvals.on_human_input("no thanks")
+        for _ in range(50):
+            await asyncio.sleep(0)
+        return set(bridge._pending), list(tap.events)
+
+    pending, events = asyncio.run(scenario())
+    assert not pending
+    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "parked": True}
+
+
+def test_a_new_chat_closes_the_old_ones_parked_cards():
+    async def scenario():
+        executor, manager, bridge, tap, first = await _parked_call()
+        executor.yes_approvals.on_human_input("show me the PRs", "chat-1")
+        executor.yes_approvals.on_human_input("hello", "chat-2")  # /resume or a new chat
+        for _ in range(50):
+            await asyncio.sleep(0)
+        return set(bridge._pending), list(tap.events)
+
+    pending, events = asyncio.run(scenario())
+    assert not pending
+    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "outcome": "cancelled", "parked": True}

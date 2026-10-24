@@ -994,6 +994,14 @@ class EngineSession:
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
                         self._pending_permissions[tool_id] = event
+                elif etype == "permission_parked":
+                    # Its turn ended and left the prompt open (a Stop, or 5 min
+                    # unanswered): a window that loads it now must know.
+                    tool_id = str(event.get("tool_id") or "")
+                    stored = self._pending_permissions.get(tool_id)
+                    if stored is not None:
+                        details = {**(stored.get("details") or {}), "parked": True}
+                        self._pending_permissions[tool_id] = {**stored, "details": details}
                 elif etype == "acp_waiting":
                     self.acp_waiting = bool(event.get("waiting"))
                 elif etype == "plan":

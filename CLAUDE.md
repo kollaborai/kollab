@@ -1013,7 +1013,7 @@ Consider:
 - 4 approval modes: CONFIRM_ALL (default), DEFAULT, AUTO_APPROVE_EDITS, TRUST_ALL
 - Risk-based assessment with pattern matching
 - Inline permission prompts (no modal interruption)
-- A Stop (ESC, the web UI's Stop, a voice talk-over) answers every open prompt cancelled: `LLMService.cancel_current_request` calls `PermissionManager.cancel_confirmations`, and a prompt asked while the turn is stopping never shows
+- A Stop (ESC, the web UI's Stop, a voice talk-over) ends the turn and parks its open prompts (`PermissionManager.park_confirmations`): the tool comes back "Not run yet" and the card stays open. A card unanswered for 290 s parks the same way and the agent writes that it needs the OK. Allow on a parked card runs that call once and the agent goes on (HUD note + `TRIGGER_LLM_CONTINUE`); Deny drops it quietly; the user's typed yes runs it and closes the card. Terminals close a parked prompt without answering (`permission_parked`). ACP's Stop answers its prompts cancelled (`cancel_confirmations`)
 - A voice turn never waits on a prompt: a call that needs the user's OK (the voice guard's `confirmation_required`, or a Confirm-mode prompt) returns "Not run yet" and the agent asks in its reply. The user's own next message decides (`kollabor_agent/yes_approval.py`, fed by `LLMService.process_user_input`): a short yes runs each asked call once, a short no drops them, anything else leaves them open
 - Session-scoped approvals
 - `/permissions` command for runtime management

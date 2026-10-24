@@ -192,10 +192,17 @@ Tool format: `Bash(command)`, `Edit(path)`, `Write(path)`, `Read(path)`, `MCP(se
 - `terminal` → "this cmd" (approves this specific command)
 - other → "project"
 
-**Stop and timeout:** a Stop (ESC, the web UI's Stop, a voice talk-over) answers
-every open prompt cancelled (`PermissionManager.cancel_confirmations`): the tool
-does not run and the turn ends. A prompt nobody answers gives up after 5 minutes
-(the hook's timeout) and the tool does not run.
+**Stop and timeout:** a Stop (ESC, the web UI's Stop, a voice talk-over) ends
+the turn at once and parks every open prompt (`PermissionManager.park_confirmations`):
+the tool comes back "Not run yet" and the card stays open. A prompt nobody
+answers parks after 290 s (`PARK_AFTER_SECONDS`, under the hook's 5 min): the
+agent writes that it needs the OK, and the card stays. A prompt asked while its
+turn is stopping shows as a card and parks at once. Allow on a parked card runs
+that call once and the agent goes on (an agent HUD note plus
+`TRIGGER_LLM_CONTINUE`); Deny drops it quietly. The user's typed yes runs it too
+and closes the card. Terminals close a parked prompt without answering
+(`permission_parked`), since its keys would answer it mid-message. ACP's Stop
+still answers its prompts cancelled (`cancel_confirmations`).
 
 **Voice turns ask instead of waiting:** a voice turn never waits on a prompt.
 A call it may not run unasked (the voice guard's `confirmation_required`, or a

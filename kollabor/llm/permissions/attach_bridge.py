@@ -33,7 +33,7 @@ def resolution_event(
     """Resolve the offered choice without losing its explicit turn owner."""
     event = _permission_resolution(tool_id, response, details)
     if details:
-        for key in ("request_id", "turn_id", "input_source", "generation", "thread_id"):
+        for key in ("request_id", "turn_id", "input_source", "generation", "thread_id", "parked"):
             if details.get(key) is not None:
                 event[key] = details[key]
     return event
@@ -104,6 +104,7 @@ class AttachPermissionBridge:
         self._pending: Dict[str, asyncio.Future[ConfirmationResponse | str]] = {}
         self._pending_option_ids: Dict[str, set[str]] = {}
         self._pending_details: Dict[str, dict[str, Any]] = {}
+        self._pending_taps: Dict[str, Any] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
         # (shown or queued) that another window answered first.
@@ -174,9 +175,18 @@ class AttachPermissionBridge:
         return True
 
     def cancel_pending(self) -> None:
-        """Answer every open prompt cancelled: a Stop or a talk-over is ending its turn."""
+        """Answer every open prompt cancelled: an ACP Stop is ending its turn."""
         for tool_id in list(self._pending):
             self.try_settle_response(tool_id, ConfirmationResponse.CANCEL)
+
+    def park(self, tool_id: str) -> None:
+        """Its turn went on unanswered: terminals close the prompt, its card stays open."""
+        details = self._pending_details.get(tool_id)
+        tap = self._pending_taps.get(tool_id)
+        if details is None or tap is None or details.get("parked"):
+            return
+        details["parked"] = True
+        tap.publish({"type": "permission_parked", "tool_id": tool_id})
 
     async def request_confirmation(
         self,
@@ -184,16 +194,20 @@ class AttachPermissionBridge:
         display_tap: Any,
         rpc_server: Any,
         details: dict[str, Any],
-        timeout: float,
+        timeout: float | None,
         local_layout_manager: Any = None,
     ) -> ConfirmationResponse | str:
-        """Share one pending decision between local and attached surfaces."""
+        """Share one pending decision between local and attached surfaces.
+
+        ``timeout=None`` waits for an answer: a parked prompt's card stays open.
+        """
         self.register_response_handler(rpc_server)
         tool_id = str(details.get("tool_id") or uuid.uuid4().hex)
         details["tool_id"] = tool_id
         future = asyncio.get_running_loop().create_future()
         self._pending[tool_id] = future
         self._pending_details[tool_id] = details
+        self._pending_taps[tool_id] = display_tap
         self._pending_option_ids[tool_id] = {
             str(option.get("optionId"))
             for option in details.get("acp_options", ())
@@ -215,6 +229,8 @@ class AttachPermissionBridge:
                     self.try_settle_response(tool_id, candidate)
                 local_task = asyncio.create_task(local_answer())
             display_tap.publish({"type": "permission_request", "details": details})
+            if details.get("parked"):  # asked while its turn stopped
+                display_tap.publish({"type": "permission_parked", "tool_id": tool_id})
             try:
                 response = await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
@@ -223,6 +239,7 @@ class AttachPermissionBridge:
             self._pending.pop(tool_id, None)
             self._pending_option_ids.pop(tool_id, None)
             self._pending_details.pop(tool_id, None)
+            self._pending_taps.pop(tool_id, None)
             if not details.pop("_acp_resolution_published", False):
                 display_tap.publish(resolution_event(tool_id, response, details))
             if local_task is not None:
@@ -249,6 +266,8 @@ class AttachPermissionBridge:
         if not isinstance(details, dict):
             details = {}
         tool_id = str(details.get("tool_id") or "")
+        if details.get("parked"):
+            return  # asked while its turn stopped: only its card shows
 
         self._queued.add(tool_id)
         try:
