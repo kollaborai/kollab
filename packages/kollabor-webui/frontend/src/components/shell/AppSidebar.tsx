@@ -13,6 +13,7 @@ import { KollabLogo } from "@/components/icons/kollab-logo";
 import { CliBadge } from "@/components/shell/CliBadge";
 import { AgentSidebarList, AgentSidebarRow, type AgentRowDrag } from "@/components/shell/AgentSidebarRow";
 import { DeviceSidebarList } from "@/components/shell/DeviceSidebarList";
+import { relayDetachedTouches } from "@/components/shell/touch-relay";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
@@ -246,6 +247,8 @@ export function AppSidebar({
   useEffect(() => {
     if (learnActive || whatsNewActive) setOptionsOpen(false);
   }, [learnActive, whatsNewActive]);
+  // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
+  useEffect(() => relayDetachedTouches(window), []);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one

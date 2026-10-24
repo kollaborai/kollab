@@ -120,6 +120,11 @@ input; producing it does not update a running public service.
   agent ordering and survives refresh. This Computer and Contacts remain fixed.
   A device rename has a new ordering identity because the network API identifies
   devices by name.
+- **Touch drag**: press and hold a row, then drag. A lifted row is swapped for a
+  clone in the page body, which unmounts the element the finger started on, and
+  the browser keeps sending that touch to the unmounted element. `touch-relay.ts`
+  hands those events to the window so a touch drag keeps moving, drops and
+  cancels; without it the row lifts and the sidebar scrolls instead.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list
