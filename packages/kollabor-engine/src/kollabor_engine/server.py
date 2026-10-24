@@ -189,6 +189,12 @@ async def _engine_lifespan(app: FastAPI):
                 logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
+        voice = getattr(app.state, "voice", None)
+        if voice is not None:
+            try:
+                await voice.shutdown()
+            except Exception:
+                logger.exception("Voice shutdown failed")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
@@ -209,6 +215,19 @@ async def _engine_lifespan(app: FastAPI):
             set_handover_store(None)
 
 
+def _wire_voice(app: FastAPI, port: Optional[int]) -> None:
+    """Build the voice runtime (nothing starts until a voice session is created)."""
+    from .auth import get_token, read_token_from_disk
+    from .voice_control import VoiceControl
+    from .voice_livekit import LiveKitRuntime
+
+    runtime = LiveKitRuntime(
+        engine_url=lambda: f"http://127.0.0.1:{port or 7433}",
+        engine_token=lambda: get_token() or read_token_from_disk(),
+    )
+    app.state.voice = VoiceControl(runtime=runtime, registry=get_session_registry)
+
+
 def create_app(port: Optional[int] = None) -> FastAPI:
     app = FastAPI(
         title="Kollab Engine",
@@ -219,6 +238,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     from .phone_link import PhoneLink
 
     app.state.phone_link = PhoneLink(app)
+    _wire_voice(app, port)
     if port is not None:
         from .handover import HandoverStore
 
@@ -319,6 +339,9 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(phonelink_router)
+    from .routes.voice import router as voice_router
+
+    app.include_router(voice_router)
     app.include_router(prompts_router)
     app.include_router(rosters_router)
     app.include_router(teams_router)

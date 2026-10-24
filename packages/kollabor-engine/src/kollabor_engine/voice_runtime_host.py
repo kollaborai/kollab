@@ -421,6 +421,15 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
             return _to_view(record)
 
+    async def get_binding(self, owner_id: OwnerId, voice_session_id: VoiceSessionId) -> VoiceSessionBinding:
+        """The stored binding for an owned session (what admit_turn compares against)."""
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is None or record.binding.owner_id != owner_id:
+                # Never reveal another owner's session.
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            return record.binding
+
     async def shutdown(self) -> None:
         """Fence all session generations, stop ready handles, and drain starts/stops."""
         async with self._lock:
