@@ -39,6 +39,7 @@ import { shownMessagesChanged } from "./history-merge";
 import {
   applyLiveEvent,
   emptyLiveTurn,
+  endsLiveTurn,
   isLiveMessage,
   liveMessage,
   type LiveTurn,
@@ -789,10 +790,11 @@ export function EngineRuntimeProvider({
     liveEvents.current = (event: SessionEvent) => {
       const thread = runtime.thread.getState();
       if (thread.isRunning) return;
-      if ((event.type ?? "") === "turn_complete") {
+      if (endsLiveTurn(event.type ?? "")) {
         // Drop the ephemeral parts now: the reload this event triggers
-        // appends the finished turn from history, and keeping both would
-        // show it twice (assistant-ui keeps every message by id).
+        // appends the finished (or stopped) turn from history, and keeping
+        // both would show it twice (assistant-ui keeps every message by id).
+        // A stopped turn that is not dropped would spin here forever.
         liveTurn.current = emptyLiveTurn();
         const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
         if (shown && shown.messages.some(isLiveMessage)) {

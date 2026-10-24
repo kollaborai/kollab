@@ -37,6 +37,7 @@ export function emptyLiveTurn(): LiveTurn {
 
 type EventLike = {
   type?: string;
+  cancelled?: unknown;
   text?: unknown;
   update?: unknown;
   acp_passthrough?: unknown;
@@ -82,6 +83,9 @@ function applyHarnessUpdate(part: LiveToolPart, update: Record<string, unknown>)
  * when the event carries nothing renderable, so callers can skip the import.
  */
 export function applyLiveEvent(turn: LiveTurn, event: EventLike): LiveTurn {
+  // A cancelled turn's tool that ignored the stop signal reports late, marked
+  // by the engine: it belongs to a turn that already ended.
+  if (event.cancelled) return turn;
   const type = String(event.type ?? "");
   if (type === "token") {
     const delta = typeof event.text === "string" ? event.text : "";
@@ -160,6 +164,10 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
     status: { type: "running" },
   };
 }
+
+/** The events after which nothing more streams into this turn. */
+export const endsLiveTurn = (type: string): boolean =>
+  type === "turn_complete" || type === "turn_cancelled" || type === "error";
 
 export const isLiveMessage = (message: { id?: unknown }): boolean =>
   String(message.id ?? "") === LIVE_MESSAGE_ID;

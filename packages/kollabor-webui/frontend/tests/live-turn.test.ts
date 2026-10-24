@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   applyLiveEvent,
   emptyLiveTurn,
+  endsLiveTurn,
   isLiveMessage,
   LIVE_MESSAGE_ID,
   liveMessage,
@@ -110,4 +111,19 @@ test("clearing the live turn drops exactly the ephemeral message", () => {
   turn = applyLiveEvent(turn, token("stream"));
   const live = liveMessage(turn);
   assert.deepEqual([...kept, live].filter(isLiveMessage).length, 1);
+});
+
+test("a stopped or failed turn ends the live message, like a finished one", () => {
+  for (const type of ["turn_complete", "turn_cancelled", "error"]) assert.equal(endsLiveTurn(type), true, type);
+  for (const type of ["token", "tool_start", "tool_result", "acp_update", "hub_message"]) {
+    assert.equal(endsLiveTurn(type), false, type);
+  }
+});
+
+test("a cancelled turn's late tool result never restarts the live message", () => {
+  // The engine marks a result that arrives after turn_cancelled (#305).
+  const late = { type: "tool_result", tool_id: "a", success: true, output: "done", cancelled: true };
+  const started = applyLiveEvent(emptyLiveTurn(), { type: "tool_start", tool_id: "a", tool_name: "terminal" });
+  assert.equal(applyLiveEvent(started, late), started);
+  assert.equal(liveMessage(applyLiveEvent(emptyLiveTurn(), { ...late, type: "token", text: "x" })), null);
 });
