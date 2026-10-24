@@ -158,11 +158,11 @@ These guards apply to both the basic and forked strategies:
   If even that cannot fit, cancel the tool/request with a visible recovery
   action instead of sending an oversized prompt. The 8,000-character limit
   includes the complete injected recovery message and its framing. The latest
-  human request is prioritized. Non-intended `hub_message` notices and
-  standalone `agent_hud` user records are excluded, while an intended direct hub
-  request without a TaskLedger task ID remains eligible as human intent. Raw hub
-  task assignments with IDs are excluded because active work is represented by
-  TaskLedger-selected excerpts above.
+  human request is prioritized. Non-intended, group, and other-recipient
+  `hub_message` notices and standalone `agent_hud` user records are excluded.
+  An untracked hub request is eligible as human intent only when direct-scope
+  recipient metadata names this agent. Raw hub task assignments with IDs are
+  excluded; active work is represented by TaskLedger-selected excerpts above.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from plugins.context_compaction_plugin import (  # noqa: E402
@@ -40,9 +42,14 @@ def _task_message(task_id: str, detail: str) -> Message:
     )
 
 
-def _plugin() -> ContextCompactionPlugin:
+def _plugin(identity: str | None = None) -> ContextCompactionPlugin:
     plugin = ContextCompactionPlugin.__new__(ContextCompactionPlugin)
     plugin.event_bus = None
+    if identity:
+        hub_plugin = SimpleNamespace(_identity=SimpleNamespace(identity=identity))
+        plugin.event_bus = SimpleNamespace(
+            get_service=lambda name: hub_plugin if name == "hub_plugin" else None
+        )
     return plugin
 
 
@@ -583,7 +590,7 @@ def test_emergency_summary_excludes_later_hub_and_agent_hud_records() -> None:
 
 
 def test_emergency_summary_preserves_intended_untracked_hub_request() -> None:
-    plugin = _plugin()
+    plugin = _plugin("target-agent")
     request_marker = "INTENDED_UNTRACKED_HUB_REQUEST_CANARY"
     earlier_human_request = Message(
         role="user",
@@ -592,11 +599,16 @@ def test_emergency_summary_preserves_intended_untracked_hub_request() -> None:
     direct_hub_request = Message(
         role="user",
         content=(
-            "[hub channel: sender -> receiver] "
+            "[hub channel: sender -> target-agent] "
             + request_marker
             + ": Please investigate this issue carefully and report back."
         ),
-        metadata={"hub_message": True, "hub_is_intended": True},
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": "target-agent",
+            "hub_scope": "direct",
+        },
     )
 
     recovery_text = plugin._build_emergency_summary(
@@ -605,6 +617,65 @@ def test_emergency_summary_preserves_intended_untracked_hub_request() -> None:
 
     assert request_marker in recovery_text
     assert "OLDER_HUMAN_REQUEST_CANARY" in recovery_text
+
+
+@pytest.mark.parametrize(
+    ("recipient", "scope"),
+    [
+        ("*", "broadcast"),
+        ("all", "broadcast"),
+        ("everyone", "broadcast"),
+        ("team", "team"),
+        ("project", "project"),
+    ],
+)
+def test_emergency_summary_excludes_intended_group_hub_notices(
+    recipient: str, scope: str
+) -> None:
+    plugin = _plugin("target-agent")
+    request_marker = "CURRENT_HUMAN_REQUEST_CANARY"
+    group_marker = f"GROUP_NOTICE_{recipient}_CANARY"
+    current_request = Message(role="user", content=request_marker)
+    group_notice = Message(
+        role="user",
+        content=f"[hub channel: sender -> {recipient}] {group_marker}: FYI only.",
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": recipient,
+            "hub_scope": scope,
+        },
+    )
+
+    recovery_text = plugin._build_emergency_summary([current_request, group_notice])
+
+    assert request_marker in recovery_text
+    assert group_marker not in recovery_text
+
+
+@pytest.mark.parametrize("scope", ["broadcast", "team", "project"])
+def test_emergency_summary_requires_direct_scope_for_hub_request(
+    scope: str,
+) -> None:
+    plugin = _plugin("target-agent")
+    request_marker = "CURRENT_HUMAN_REQUEST_CANARY"
+    group_marker = f"NON_DIRECT_SCOPE_{scope}_CANARY"
+    current_request = Message(role="user", content=request_marker)
+    scoped_notice = Message(
+        role="user",
+        content=f"[hub channel: sender -> target-agent] {group_marker}: FYI only.",
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_to": "target-agent",
+            "hub_scope": scope,
+        },
+    )
+
+    recovery_text = plugin._build_emergency_summary([current_request, scoped_notice])
+
+    assert request_marker in recovery_text
+    assert group_marker not in recovery_text
 
 
 def test_emergency_summary_bound_includes_injection_wrapper() -> None:
