@@ -233,6 +233,7 @@ class FakeAudioOutput(io.AudioOutput):
             sample_rate=24000,
         )
         self.frames, self.cleared, self.pushed = 0, 0, 0.0
+        self.paused = self.resumed = 0
 
     async def capture_frame(self, frame):
         await super().capture_frame(frame)
@@ -249,6 +250,12 @@ class FakeAudioOutput(io.AudioOutput):
                 playback_position=position, interrupted=False
             ),
         )
+
+    def pause(self):
+        self.paused += 1
+
+    def resume(self):
+        self.resumed += 1
 
     def clear_buffer(self):
         position, self.pushed = self.pushed, 0.0
@@ -322,20 +329,15 @@ class Rig:
         await asyncio.sleep(0.05)
         self.vad.emit("end", seconds)
 
-    async def talk_over(self):
-        self.vad.emit("start")
-        self.vad.emit("inference", 0.7)  # longer than the 0.5 s interruption minimum
-
 
 # -- turn handling and models ---------------------------------------------------
 
 
-def test_turn_handling_is_the_demos_with_a_talk_over_that_really_cancels():
+def test_turn_handling_is_the_demos():
     handling = lw.turn_handling(inference.TurnDetector(version="v1-mini"))
     assert isinstance(handling["turn_detection"], inference.TurnDetector)
-    assert handling["interruption"]["mode"] == "vad"
-    # Without this a VAD hit only pauses the audio and the Kollab turn keeps running.
-    assert handling["interruption"]["resume_false_interruption"] is False
+    # The demo sets only the mode: a talk-over pauses, words cancel, a cough resumes.
+    assert handling["interruption"] == {"mode": "vad"}
     # Every reply is a real Kollab turn, never a speculative one.
     assert handling["preemptive_generation"] == {"enabled": False}
 
@@ -451,28 +453,46 @@ def test_sentences_stream_into_tts_before_the_reply_finishes():
     assert {"hearing", "thinking", "speaking"} <= set(states)
 
 
-def test_talking_over_the_reply_cancels_tts_and_closes_the_turn_stream():
+def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
     async def scenario():
-        async with Rig(["is the build green"], [[S1, "wait", S2, "done"]]) as rig:
+        async with Rig(scripts=[[S1, "wait", S2, "done"], ["Okay.", "done"]]) as rig:
             await rig.say("is the build green")
             await until(
                 lambda: rig.adapter.spoken == [S1] and rig.room.output.frames >= 3
             )
-            await rig.talk_over()
+            await rig.say("stop that")  # speech with words: the interruption is real
             await until(
                 rig.engine.disconnected.is_set
-            )  # the Engine reads this as a barge-in
-            await until(
-                lambda: rig.adapter.finalized == [S1]
-            )  # TTS cancelled, service drains
+            )  # the Engine reads this as a barge-in and cancels the turn
+            await until(lambda: len(rig.engine.requests) == 2)
             await until(lambda: rig.room.output.cleared >= 1)  # playback stopped
             rig.engine.gate.set()  # whatever the cancelled turn would still say
-            await asyncio.sleep(0.3)
+            await until(lambda: "Okay." in rig.adapter.spoken)
         return rig
 
     rig = run(scenario())
-    assert rig.adapter.spoken == [S1]  # nothing late speaks
-    assert len(rig.engine.requests) == 1
+    assert rig.room.output.paused >= 1  # the voice paused first, like the demo
+    assert rig.engine.requests[1]["display_text"] == "stop that"
+    assert S2 not in rig.adapter.spoken  # nothing late from the cancelled turn
+
+
+def test_a_cough_over_the_reply_pauses_it_and_it_resumes():
+    async def scenario():
+        async with Rig(scripts=[[S1, S2, "done"]], tts_chunks=150) as rig:
+            await rig.say("is the build green")
+            await until(
+                lambda: rig.adapter.spoken[:1] == [S1] and rig.room.output.frames >= 3
+            )
+            await rig.say("", seconds=0.7)  # speech, no words: a cough
+            await until(lambda: rig.room.output.paused >= 1)
+            await until(lambda: rig.room.output.resumed >= 1)  # 2 s without words
+            await until(lambda: rig.adapter.spoken == [S1, S2], timeout=15)  # it goes on
+        return rig
+
+    rig = run(scenario())
+    assert not rig.engine.disconnected.is_set()  # the Kollab turn ran to its end
+    assert len(rig.engine.requests) == 1  # the cough was no turn
+    assert rig.adapter.spoken == [S1, S2]
 
 
 def test_greeting_on_join():

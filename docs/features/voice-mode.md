@@ -18,7 +18,7 @@ controls, status or decisions.
 The mic in the message box starts voice in the browser, with the browser's
 microphone. The agent greets you, hears you through Parakeet, and speaks its
 answer sentence by sentence with VibeVoice while the rest is still being
-written. Talk over it to stop it: the speech stops and its turn is cancelled.
+written. Talk over it to stop it: the voice pauses as you start, and once your words come through its turn is cancelled and your words become the next turn. A cough or a short noise only pauses it; after 2 s it carries on.
 The strip above the message box shows what voice is doing (Listening, Hearing,
 Thinking, Speaking, Interrupted), model downloads and how long each step took
 (Hear, Think, Speak, Total). The pulsing mic or the stop button ends it. On

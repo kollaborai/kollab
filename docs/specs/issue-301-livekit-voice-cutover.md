@@ -21,9 +21,12 @@ them, and no voice screen shows classifier controls, status or decisions.
   `llm_node` POSTs `/voice/sessions/{id}/turns` and reads NDJSON lines
   (`{"text"}` per sentence, then `{"done", "turn_id"}`). Replies are spoken
   sentence by sentence while the rest is still generating.
-- Talking over the agent stops its audio; the worker closes the `/turns`
-  stream, and the Engine revokes the turn's admission and cancels the session
-  turn. `kind: "greeting"` is a hidden instruction turn that opens the room.
+- Talking over the agent works like the demo (LiveKit's defaults, `mode: vad`):
+  half a second of speech pauses the voice. Words in it commit a user turn,
+  which interrupts the reply: the worker closes the `/turns` stream, and the
+  Engine revokes the turn's admission and cancels the session turn. No words
+  within 2 s (a cough) and the voice resumes where it paused.
+  `kind: "greeting"` is a hidden instruction turn that opens the room.
 - The worker reports `listening`, `hearing`, `thinking` and `speaking` from
   LiveKit's own state changes; the Engine never guesses them.
 - Turn ids are canonical UUIDs. Thinking runs at the lowest level the model

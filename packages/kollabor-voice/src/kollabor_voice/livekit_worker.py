@@ -9,8 +9,8 @@ detector, VAD interruptions. Speech-to-text and text-to-speech are nodes over
 the shared voice service (Parakeet, VibeVoice); there is no second model
 manager and no HTTP voice server. The "LLM" is the Kollab agent: every user
 turn is one POST /voice/sessions/{id}/turns whose NDJSON sentences stream into
-TTS as they arrive. A talk-over cancels the generation, which closes that
-stream, which the Engine treats as a barge-in.
+TTS as they arrive. Words spoken over the reply cancel the generation, which
+closes that stream, which the Engine treats as a barge-in; a cough only pauses it.
 
 Stdout carries one line, `WORKER_READY -`, once joined. SIGTERM stops it.
 """
@@ -221,9 +221,11 @@ def load_models() -> Models:
 def turn_handling(turn_detection, endpointing: dict | None = None) -> dict:
     handling = {
         "turn_detection": turn_detection,
-        # A talk-over cancels the reply at once. The default only pauses it and
-        # waits for a transcript, leaving the Kollab turn running behind a silent agent.
-        "interruption": {"mode": "vad", "resume_false_interruption": False},
+        # The demo's talk-over (LiveKit's defaults): half a second of speech
+        # pauses the voice. Words in it commit a user turn, which interrupts the
+        # reply and so cancels the Kollab turn; no words within 2 s (a cough)
+        # and the voice picks up where it left off.
+        "interruption": {"mode": "vad"},
         # Every reply is a real Kollab turn: never start one speculatively.
         "preemptive_generation": {"enabled": False},
     }
