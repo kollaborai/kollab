@@ -7,5 +7,5 @@
  * thread shows, by message id, and skips it while its own run streams.
  */
 export function refreshesOnEvent(type: string): boolean {
-  return ["hub_message", "history_updated", "turn_complete", "error", "permission_request"].includes(type);
+  return ["hub_message", "history_updated", "turn_complete", "turn_cancelled", "error", "permission_request"].includes(type);
 }

@@ -15,7 +15,7 @@ verified_by: spec-verify workflow
 | Stable identity and null-safe timing | PASS | Browser assertion kept the assistant ID stable after prepend and returned `null` for missing timing. |
 | Native/XML tool details and thinking reach the inspector contract | PASS | Projector assertion returned joined output and assistant thinking; inspector renders Input/Output/Thinking tabs from the selected record. |
 | XML tool batches stay out of Chat | PASS | Browser-loaded `buildInitialState` assertion returned only the real user and assistant messages, excluding the batch user message. |
-| Refresh boundary and transport preservation | PASS | `TrajectoryView` subscribes to `/events`, refreshes only on `turn_complete`/`error`, reconnects after the endpoint's terminal `turn_complete`, and is mounted inside `EngineRuntimeProvider`. |
+| Refresh boundary and transport preservation | PASS | `TrajectoryView` subscribes to `/events`, refreshes only on `turn_complete`/`error`, reconnects when the endpoint's stream ends (idle timeout or daemon exit; it runs across turns), and is mounted inside `EngineRuntimeProvider`. |
 | Phase 2 usage metadata on native and XML writes | PASS | Shared `_assistant_history_usage_metadata` is used by both queue-processor branches; `tests/unit/test_engine_history_usage_metadata.py` passes. |
 | Phase 2 token/timing projection | PASS | Browser assertion returned `inputTokens=10`, `outputTokens=20`, and `durationSeconds=1.75` from `metadata.usage`. |
 | Phase 3 load-earlier paging | PASS | `EngineApi.getHistory(limit)`, stable keys, and the ledger's `Load earlier` control are implemented and included in the source/build gate. |
