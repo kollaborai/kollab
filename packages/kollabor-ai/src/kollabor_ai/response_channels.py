@@ -105,16 +105,20 @@ def turn_display_texts(messages):
     The model's copy keeps everything. A screen shows a voice turn as the user
     said it, a voice reply's display text, and "" for the lone period a reply
     to speech uses to stay silent (the live terminal draws nothing for it).
+    A chat resumed on a machine without kollabor_voice shows a voice turn as stored.
     """
-    from kollabor_voice.observer import strip_voice_preamble
-
     shown, answers_voice = [], False
     for message in messages:
         role, content = message.get("role"), message.get("content")
         metadata = message.get("metadata") or {}
         text = None
         if isinstance(content, str) and role == "user" and metadata.get("voice"):
-            text = strip_voice_preamble(content)
+            try:
+                from kollabor_voice.observer import strip_voice_preamble
+            except ImportError:
+                text = content
+            else:
+                text = strip_voice_preamble(content)
         elif isinstance(content, str) and role == "assistant":
             lowered = content.lower()
             if (
