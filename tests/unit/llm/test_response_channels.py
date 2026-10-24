@@ -1,6 +1,11 @@
 import pytest
+from kollabor_voice.observer import voice_preamble
 
-from kollabor_ai.response_channels import display_response_text, display_stream_text
+from kollabor_ai.response_channels import (
+    display_response_text,
+    display_stream_text,
+    turn_display_texts,
+)
 from kollabor_ai.response_parser import ResponseParser
 
 
@@ -73,3 +78,31 @@ def test_streaming_every_character_keeps_channels_separate_without_tag_flicker()
         assert "<display_text>" not in shown
         previous = shown
     assert previous == "Example:\n```xml\n<spoken_text>literal</spoken_text>\n```\n"
+
+
+def test_turn_display_texts_projects_voice_user_and_assistant_channels():
+    voice = {"event_ids": ["turn-1"]}
+    messages = [
+        {
+            "role": "user",
+            "content": voice_preamble(voice, rules_sent=False) + "Check the tests.",
+            "metadata": {"voice": voice},
+        },
+        {
+            "role": "assistant",
+            "content": "<display_text>Visible answer.</display_text>"
+            "<spoken_text>Spoken answer.</spoken_text>",
+            "metadata": {},
+        },
+        {"role": "assistant", "content": ".", "metadata": {}},
+        {"role": "user", "content": "Typed request.", "metadata": {}},
+        {"role": "assistant", "content": "Plain answer.", "metadata": {}},
+    ]
+
+    assert turn_display_texts(messages) == [
+        "Check the tests.",
+        "Visible answer.",
+        "",
+        None,
+        None,
+    ]

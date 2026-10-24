@@ -105,6 +105,37 @@ export type HistoryMessage = {
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
 
+
+const configuredHistoryPageSize = Number(import.meta.env.VITE_HISTORY_PAGE_SIZE);
+const configuredHistoryPageBytes = Number(import.meta.env.VITE_HISTORY_MAX_PAGE_BYTES);
+export const HISTORY_MAX_PAGE_SIZE = 100;
+export const HISTORY_PAGE_SIZE = Number.isInteger(configuredHistoryPageSize) && configuredHistoryPageSize > 0
+  ? Math.min(configuredHistoryPageSize, HISTORY_MAX_PAGE_SIZE)
+  : 50;
+export const HISTORY_MAX_PAGE_BYTES = Number.isInteger(configuredHistoryPageBytes) && configuredHistoryPageBytes > 0
+  ? Math.min(Math.max(configuredHistoryPageBytes, 1_024), 150_000)
+  : 150_000;
+
+export type HistoryPage = {
+  history: HistoryMessage[];
+  start_index: number;
+  end_index: number;
+  has_more_older: boolean;
+  older_cursor: string | null;
+  has_more_newer: boolean;
+  newer_cursor: string | null;
+  last_turn_error?: TurnError | null;
+  source?: "mirror" | "disk";
+  stale?: boolean;
+};
+
+export type HistoryPageOptions = {
+  limit?: number;
+  before?: string;
+  after?: string;
+  byteLimit?: number;
+};
+
 export function historyContentToText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -1066,16 +1097,69 @@ export class EngineApi {
     });
   }
 
-  getHistory(sessionId: string, limit?: number) {
-    const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-    return this.json<{
-      history: HistoryMessage[];
-      last_turn_error?: TurnError | null;
-      /** Where the history came from: the engine's mirror or this disk. */
-      source?: "mirror" | "disk";
-      /** True when a background reconcile is still refreshing it. */
-      stale?: boolean;
-    }>(`/sessions/${encodeURIComponent(sessionId)}/history${query}`);
+  getHistoryPage(sessionId: string, options: HistoryPageOptions = {}) {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.before) query.set("before", options.before);
+    if (options.after) query.set("after", options.after);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return this.json<HistoryPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
+    );
+  }
+
+  getHistoryOutput(sessionId: string, reference: string) {
+    const query = new URLSearchParams({ ref: reference });
+    return this.json<{ session_id: string; content: unknown }>(
+      `/sessions/${encodeURIComponent(sessionId)}/history/output?${query}`,
+    );
+  }
+
+  /** Preserve the existing full/limited history consumer contract. */
+  async getHistory(sessionId: string, limit?: number) {
+    const targetCount = limit && Number.isFinite(limit) && limit > 0
+      ? Math.floor(limit)
+      : Number.POSITIVE_INFINITY;
+    const firstLimit = Number.isFinite(targetCount)
+      ? Math.min(HISTORY_MAX_PAGE_SIZE, targetCount)
+      : HISTORY_MAX_PAGE_SIZE;
+    const first = await this.getHistoryPage(sessionId, { limit: firstLimit });
+    let page = first;
+    let history = [...page.history];
+    let startIndex = page.start_index;
+    let lastTurnError = page.last_turn_error ?? null;
+    let lastTurnErrorIndex = lastTurnError
+      ? page.start_index + lastTurnError.history_length
+      : null;
+
+    while (
+      history.length < targetCount &&
+      page.has_more_older &&
+      page.older_cursor
+    ) {
+      const nextLimit = Number.isFinite(targetCount)
+        ? Math.min(HISTORY_MAX_PAGE_SIZE, targetCount - history.length)
+        : HISTORY_MAX_PAGE_SIZE;
+      page = await this.getHistoryPage(sessionId, {
+        limit: nextLimit,
+        before: page.older_cursor,
+      });
+      history = [...page.history, ...history];
+      startIndex = page.start_index;
+      if (!lastTurnError && page.last_turn_error) {
+        lastTurnError = page.last_turn_error;
+        lastTurnErrorIndex = page.start_index + page.last_turn_error.history_length;
+      }
+    }
+
+    return {
+      history,
+      last_turn_error: lastTurnError && lastTurnErrorIndex !== null
+        ? { ...lastTurnError, history_length: lastTurnErrorIndex - startIndex }
+        : null,
+      source: first.source,
+      stale: first.stale,
+    };
   }
 
   clearHistory(sessionId: string) {

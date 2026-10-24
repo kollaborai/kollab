@@ -538,12 +538,20 @@ Telegram bridge setup (run inside interactive mode):
         default=None,
         metavar="CMD",
         help=(
-            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines], "
+            "Hub CLI: status, agents, stop <name|all>, capture <name> [lines] [--raw], "
             "msg <name> <text>, broadcast <text>, where <name>, user [name], on/off, "
             "org <name> [mission]. Pass '--hub help' for the full list. "
             "Telegram bridge and notifications are configured interactively "
             "via /hub bridge setup and /hub notify."
         ),
+    )
+
+    parser.add_argument(
+        "--raw",
+        dest="hub_capture_raw",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -712,6 +720,11 @@ Telegram bridge setup (run inside interactive mode):
 
     # Parse known args, capture unknown as potential CLI commands
     args, unknown = parser.parse_known_args(argv)
+
+    if args.hub_capture_raw:
+        if not args.hub or args.hub[0].lower() != "capture":
+            parser.error("--raw is only valid with --hub capture")
+        args.hub.append("--raw")
 
     # --profile was replaced by --llm. Unknown "--x" flags are otherwise
     # treated as CLI commands, so the old flag would resolve to a nonexistent
@@ -1368,7 +1381,9 @@ def _print_hub_help() -> None:
     print("  agents | list              alias for status")
     print("  stop <name|all>            send shutdown signal to an agent")
     print("  kill <name|all>            alias for stop")
-    print("  capture <name> [lines]     dump last N lines of agent output")
+    print(
+        "  capture <name> [lines] [--raw]  readable transcript; --raw keeps terminal output"
+    )
     print("  msg <name> <text>          send a direct message to one agent")
     print("  broadcast <text>           send a message to all online agents")
     print("  where <name>               show where an agent is running")
@@ -1385,6 +1400,7 @@ def _print_hub_help() -> None:
     print("  kollab --hub msg lapis 'hey, got a minute?'")
     print("  kollab --hub broadcast 'rolling to lunch, bbiab'")
     print("  kollab --hub capture koordinator 200")
+    print("  kollab --hub capture koordinator 200 --raw")
     print("  kollab --hub org engineering 'ship the billing flow'")
     print()
     print("interactive equivalents (run these inside a kollab session):")
@@ -1401,7 +1417,7 @@ async def _handle_cli_hub(hub_args: list) -> None:
         status                  show online agents
         agents / list           same as status
         stop <identity|all>     send shutdown signal (alias: kill)
-        capture <name> [n]      get last N lines of agent output
+        capture <name> [n]      readable transcript; add --raw for terminal output
         msg <name> <text>       send hub message to agent
         broadcast <text>        send message to all agents
         user [name]             show or set hub user name
@@ -1722,11 +1738,20 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 sys.exit(1)
 
     elif subcmd == "capture":
-        if not rest:
-            print("usage: kollab --hub capture <identity> [lines]")
+        raw = "--raw" in rest
+        capture_args = [arg for arg in rest if arg != "--raw"]
+        if not capture_args:
+            print("usage: kollab --hub capture <identity> [lines] [--raw]")
             sys.exit(1)
-        target = rest[0]
-        num_lines = int(rest[1]) if len(rest) > 1 else 50
+        target = capture_args[0]
+        if len(capture_args) > 2:
+            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            sys.exit(2)
+        try:
+            num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
+        except ValueError:
+            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            sys.exit(2)
         agent = _find_agent(target)
         if not agent:
             agents = _get_live_agents()
@@ -1739,12 +1764,43 @@ async def _handle_cli_hub(hub_args: list) -> None:
         if not socket_path:
             print(f"agent '{target}' has no socket")
             sys.exit(1)
-        lines = await AgentMessenger.request_output(socket_path, lines=num_lines)
-        if lines:
-            for line in lines:
-                print(line)
+        if raw:
+            # Keep the original terminal request/response path byte-for-byte.
+            lines, capture_error = await AgentMessenger.request_output_diagnostic(
+                socket_path, lines=num_lines
+            )
+            if capture_error:
+                print(
+                    f"capture failed for '{target}': {capture_error}", file=sys.stderr
+                )
+                sys.exit(1)
+            if lines:
+                for line in lines:
+                    print(line)
+            else:
+                print("(no output)")
         else:
-            print("(no output)")
+            from plugins.hub.capture import render_transcript
+
+            capture, capture_error = await AgentMessenger.request_capture(
+                socket_path,
+                lines=num_lines,
+                capture_format="json",
+                max_chars=10_000,
+            )
+            if capture_error:
+                print(
+                    f"capture failed for '{target}': {capture_error}", file=sys.stderr
+                )
+                sys.exit(1)
+            print(
+                render_transcript(
+                    capture,
+                    identity=target,
+                    max_lines=num_lines,
+                    max_chars=10_000,
+                )
+            )
 
     elif subcmd == "msg":
         if len(rest) < 2:

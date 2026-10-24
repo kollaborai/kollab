@@ -122,13 +122,31 @@ async function run(stored: Stored) {
   if (typeof DecompressionStream === "undefined")
     throw new Error("This browser is too old to open Kollab. Update it and try again.");
   const gz = new Blob([stored.files["phone-app.js.gz"] as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"));
-  const script = await new Response(gz).blob();
+  const scriptBytes = await new Response(gz).arrayBuffer();
+  const script = new Blob([scriptBytes], { type: "text/javascript" });
   const style = document.createElement("style");
   style.textContent = new TextDecoder().decode(stored.files["phone-app.css"] ?? new Uint8Array());
   document.head.append(style);
   const element = document.createElement("script");
-  element.src = URL.createObjectURL(script);
-  document.head.append(element);
+  const scriptUrl = URL.createObjectURL(script);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      element.onload = () => resolve();
+      element.onerror = () => reject(
+        new Error("Kollab's signed phone app could not start. Refresh this page and retry."),
+      );
+      element.src = scriptUrl;
+      document.head.append(element);
+    });
+  } finally {
+    URL.revokeObjectURL(scriptUrl);
+  }
+  await new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+  if (!document.querySelector("#root > *")) {
+    throw new Error("Kollab's phone app did not render. Refresh this page and retry.");
+  }
 }
 
 async function main() {

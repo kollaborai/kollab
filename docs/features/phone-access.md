@@ -66,6 +66,41 @@ expired invitations, wrong keys, replay, reconnect, revoke, streamed responses,
 and 390px/820px/desktop layouts. Public-service deployment and a physical phone
 scan remain separate acceptance gates.
 
+## Bounded chat history on the phone
+
+PhoneLink opens a conversation with the newest 50 messages. History pages are
+capped at 100 messages and 150,000 JSON bytes. The app prefetches the next older
+page after the first render and loads older pages as you scroll back. Cursors are
+opaque and bound to the session snapshot; a stale cursor triggers a fresh latest
+page rather than silently skipping or duplicating messages.
+
+The phone stores up to 12 bounded pages (1.8 MB per session) for up to 12
+sessions in IndexedDB. On reopen, it uses the cached latest page and requests
+only messages newer than the cached
+cursor. If the history changed in a way that invalidates that cursor, the app
+clears the stale cache and reloads the latest page. Loading, empty, and retryable
+error states are shown in the thread. Large historical tool output is previewed
+(up to 4 KiB); **Show more** fetches the full result only when requested.
+
+PhoneLink negotiates gzip frames and larger 160 KiB chunks when both peers
+support them. Decompression is bounded to 256 KiB per packet; legacy phones keep
+the 8 KiB, uncompressed behavior. Relay application payloads remain 24 KiB for
+ordinary messages, while PhoneLink frames use a separate 320 KiB payload bound
+and a 512 KiB relay frame bound. The history cursor-signing key is separate
+from the rotating engine token and is stored in the user's Kollab config
+directory with mode 0600.
+
+The synthetic acceptance path uses 220 messages (about 1.8 MB), including a
+1.2 MB tool result. The browser/relay/engine test measured a 148,047-byte,
+50-message first page and one coalesced history read; a fresh PhoneLink session
+adds one handshake before the HTTP start/read pair. See
+`tests/unit/test_phone_link_engine_streams.py::test_real_history_page_stays_bounded_and_loads_in_three_phone_roundtrips`,
+`packages/kollabor-webui/frontend/tests/history-cache.test.ts`, and the
+scratch-only Chromium/relay flow in
+`packages/kollabor-webui/frontend/tests/phonelink-browser-e2e.mjs`. This is not
+a substitute for the separate physical-phone/public-directory acceptance gate.
+
+
 ## Signed app served from the computer
 
 The connection service never supplies the phone app. A QR opens a small

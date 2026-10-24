@@ -174,8 +174,13 @@ const mainConfig = defineConfig({
     },
   },
   test: {
-    // Keep focused Vitest suites here; most existing tests run with `node --test`.
-    include: ["tests/prompts-page.test.ts", "tests/build-provenance.test.ts"],
+    // Vitest suites; Node's built-in test runner remains for older tests.
+    include: [
+      "tests/prompts-page.test.ts",
+      "tests/history-cache.test.ts",
+      "tests/phone-frame.test.ts",
+      "tests/build-provenance.test.ts",
+    ],
     environment: "node",
   },
 });

@@ -20,6 +20,13 @@ from kollabor_ai.session_naming import generate_session_name
 
 from .. import hidden_agents, sidebar_order
 from ..daemon_pool import get_daemon_pool
+from ..history_paging import (
+    HistoryPageTooLarge,
+    InvalidHistoryCursor,
+    StaleHistoryCursor,
+    build_history_page,
+    resolve_history_output,
+)
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry
@@ -1016,7 +1023,12 @@ async def delete_session(session_id: str):
 
 
 @router.get("/{session_id}/history")
-async def get_history(session_id: str, limit: Optional[int] = None):
+async def get_history(
+    session_id: str,
+    limit: Optional[int] = None,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+):
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
@@ -1027,7 +1039,56 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     # arrives as a history_updated event. source says where the history came
     # from and stale whether it is still the disk seed (every answer before
     # the daemon's replaces it, not only the first).
-    return await session.get_history_nonblocking(limit)
+    snapshot = await session.get_history_nonblocking()
+    history = snapshot.get("history", [])
+    base_payload = {key: value for key, value in snapshot.items() if key != "history"}
+    try:
+        page = build_history_page(
+            session_id,
+            history,
+            limit=limit,
+            before=before,
+            after=after,
+            base_payload=base_payload,
+        )
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except HistoryPageTooLarge as error:
+        raise HTTPException(status_code=413, detail=str(error)) from error
+
+    # Preserve the existing turn-error offset semantics, now relative to the
+    # bounded page. An error outside an older page is not duplicated there.
+    turn_error = page.get("last_turn_error")
+    if isinstance(turn_error, dict):
+        error_position = turn_error.get("history_length")
+        if isinstance(error_position, int) and not isinstance(error_position, bool):
+            if not page["start_index"] <= error_position <= page["end_index"]:
+                page["last_turn_error"] = None
+            else:
+                page["last_turn_error"] = {
+                    **turn_error,
+                    "history_length": error_position - page["start_index"],
+                }
+    return page
+
+
+@router.get("/{session_id}/history/output")
+async def get_history_output(session_id: str, ref: str):
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = await session.get_history_nonblocking()
+    try:
+        content = resolve_history_output(session_id, snapshot.get("history", []), ref)
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "content": content}
 
 
 @router.delete("/{session_id}/history")

@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
 
 ### Changed
+- Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
+  install. The host-side helper that shows stored voice turns as screens draw them
+  (`turn_display_texts`) now lives in `kollabor_ai.response_channels`, and a voice-package
+  test fails if a service module imports a host package. Fixes #301.
+- Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
+  history pages locally, loads older messages on scroll, and fetches full tool
+  output only after Show more. Negotiated compressed PhoneLink frames carry the
+  150 KB first-page budget within the three-round-trip synthetic relay check.
+
 - Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed
@@ -74,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hub: Dream Model selects a provider-supported model for dreaming. A blank
   override uses the shared fast model, then the active session model.
 
+- Hub capture commands show a bounded readable transcript by default; `--raw`
+  keeps the previous terminal output.
+
 ### Fixed
 - Web: disconnecting or revoking a phone closes buffered assistant streams without leaving event subscriptions running. Explicit Stop still cancels the agent turn.
 - Build: one selected frontend is reused by CLI, desktop, service and Python packages. Invalid selections and failed source builds stop instead of silently serving older UI.
@@ -86,6 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
 - Web: agent guidance covers sidebar workspace grouping and drag ordering. Learn no longer tracks completion or shows a progress counter. The Voice topic documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
 - Web: the main pane shares the sidebar's rounded inset frame; footer actions stay on one row or form two balanced rows. Wrapped changelog entries retain their full text.
+- Engine: model-requested context compaction stages the new history before
+  resuming the same turn, rather than ending before the follow-up response.
 - Bound automatic compaction to recent live hub tasks, expose its pause/recovery state in the TUI and Web UI (terminal states are re-announced at the start of the next turn so a banner is never missed), add a Learn topic, and use OAuth model context-window metadata when available instead of an unrelated generic model limit.
 
 ### Security

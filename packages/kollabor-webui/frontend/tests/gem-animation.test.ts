@@ -11,7 +11,11 @@ import {
   danceClock,
   fitPaintCanvas,
   frameInterval,
+  FRENZY,
+  frenzy,
   nextFrameAt,
+  peer,
+  ponder,
   Spring,
 } from "../src/components/gems/gem-animation.ts";
 import { bodyGeometry, bodyPoint, SHAPE_ROW, SHAPES } from "../src/components/gems/gem-blob.ts";
@@ -140,4 +144,44 @@ test("compact and hero meshes are shared, finite and agree with CPU surface seat
       }
     }
   }
+});
+
+test("the typing routine starts from rest and every channel stays continuous", () => {
+  const rest = frenzy(0);
+  assert.equal(rest.lean, 0);
+  assert.equal(rest.pitch, 0);
+  for (const seed of [0, 2.1, 5.9]) {
+    let last = frenzy(0, seed);
+    for (let t = 0.004; t < FRENZY * 3; t += 0.004) {
+      const now = frenzy(t, seed);
+      for (const key of ["lean", "pitch", "lift", "squash"] as const) {
+        assert.ok(Math.abs(now[key] - last[key]) < 0.06, `${key} jumps at ${t.toFixed(3)}s (seed ${seed})`);
+      }
+      last = now;
+    }
+  }
+});
+
+test("each round leans in, jerks back with hands up, then hammers the keys", () => {
+  assert.ok(frenzy(0.6).lean > 0.9, "nose to the screen");
+  const back = frenzy(1.15);
+  assert.ok(back.lean < -0.5 && back.pitch < 0 && back.raise > 0.9, "head back, hands up");
+  const hammer = frenzy(2.4);
+  assert.equal(hammer.hands, 1);
+  const stomps = Array.from({ length: 60 }, (_, i) => frenzy(1.5 + i * 0.02).squash);
+  assert.ok(Math.max(...stomps) > 0.03, "a stomp lands on the keys");
+});
+
+test("thinking moves the whole body and nods hmm every few seconds", () => {
+  const rolls = Array.from({ length: 100 }, (_, i) => ponder(i * 0.05).roll);
+  assert.ok(Math.max(...rolls) - Math.min(...rolls) > 0.2, "the head rolls side to side");
+  const nod = Array.from({ length: 30 }, (_, i) => ponder(1.7 + i * 0.02).pitch);
+  assert.ok(Math.max(...nod) - Math.min(...nod) > 0.1, "a hmm nod");
+});
+
+test("peering at the screen eases in from upright and sits back now and then", () => {
+  assert.equal(peer(0).lean, 0);
+  assert.ok(peer(1).lean > 0.7);
+  const leans = Array.from({ length: 100 }, (_, i) => peer(i * 0.05).lean);
+  assert.ok(Math.min(...leans.slice(20)) < 0, "sits back");
 });
