@@ -19,13 +19,9 @@ SPEAKER_THRESHOLD = 0.45
 STT_ENGINES = {"whisper": "Whisper Base", "parakeet": "Parakeet v3"}
 TTS_ENGINES = {"kokoro": "Kokoro", "vibevoice": "VibeVoice"}
 
-# Earlier microphone lines sent to the agent beside a new utterance.
-DEFAULT_CONTEXT_LINES = 10
-MAX_CONTEXT_LINES = 50
-
 
 def apple_silicon():
-    """MLX, which Parakeet v3 runs on, needs an Apple silicon Mac."""
+    """MLX, which Parakeet v3 and the Qwen classifier run on, needs an Apple silicon Mac."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
@@ -87,7 +83,6 @@ def speech_defaults():
         "echo_cancellation": False,
         "speaker_gate": False,
         "speaker_threshold": SPEAKER_THRESHOLD,
-        "context_lines": DEFAULT_CONTEXT_LINES,
     }
 
 
@@ -126,9 +121,6 @@ def speech_errors(preferences, *, check_files=False):
             or abs((value - low) / step - round((value - low) / step)) > 1e-6
         ):
             errors[key] = f"Choose {low}–{high} in steps of {step}"
-    lines = preferences.get("context_lines")
-    if type(lines) is not int or not 1 <= lines <= MAX_CONTEXT_LINES:
-        errors["context_lines"] = f"Choose a whole number from 1 to {MAX_CONTEXT_LINES}"
     for key in ("vibevoice_model", "vibevoice_prompt"):
         value = preferences.get(key)
         if not isinstance(value, str) or len(value.encode()) > 4096 or "\x00" in value:
@@ -152,7 +144,7 @@ def speech_errors(preferences, *, check_files=False):
 
 
 def load_speech_preferences(root=None):
-    """Read validated voice settings; a bad stored value falls back to its default."""
+    """Read validated speech settings without exposing classifier preferences."""
     try:
         value = json.loads(((root or service_root()) / "preferences.json").read_text())
     except (OSError, ValueError):

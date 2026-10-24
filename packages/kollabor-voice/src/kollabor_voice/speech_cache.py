@@ -1,8 +1,9 @@
 """Audio of the lines voice says itself, kept on disk so they play at once.
 
-Still-working lines come from a fixed set (acks.LINES). Each is synthesized
-once per voice, then replayed from root/cache/speech without the speech
-engine. Agent replies are one-off text and never kept.
+Acks, "Sorry, was that for me?" and still-working lines come from a fixed set
+(acks.LINES). Each is synthesized once per voice, then replayed from
+root/cache/speech without the speech engine. Agent replies are one-off text
+and never kept.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from .speech_settings import load_speech_preferences, speech_key
 log = logging.getLogger(__name__)
 
 # The producers that only speak acks.LINES; any other producer is agent text.
-PRODUCERS = frozenset({"voice-progress"})
+PRODUCERS = frozenset({"voice-classifier", "voice-progress"})
 KEEP_S = 3 * 24 * 3600  # since the file last played
 # A file is this header, then the sentence's float32 samples.
 HEADER = struct.Struct("<4sII")  # magic, sample rate, crc32 of the samples

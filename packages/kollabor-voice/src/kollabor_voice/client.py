@@ -168,12 +168,17 @@ class VoiceClient:
         owner_epoch: str,
         producer_id: str,
         token: str,
+        review: dict | None = None,
     ):
         """Agent adapter. Use an explicitly delegated capability; never claim capture."""
-        from .speech_review import format_decision
+        from .speech_review import SpeechDecision, format_decision
 
-        decision = format_decision(text)
-        if decision:
+        decision = format_decision(text) or (
+            SpeechDecision.from_wire(review)
+            if review is not None
+            else await self.review_speech(text, owner_epoch, token)
+        )
+        if decision.decision != "speak":
             return {
                 "status": decision.decision,
                 "review": decision.to_wire(),
@@ -187,3 +192,24 @@ class VoiceClient:
             producer_id=producer_id,
             token=token,
         )
+
+    async def review_speech(self, text, epoch, token):
+        from .speech_review import SpeechDecision, format_decision
+
+        fixed = format_decision(text)
+        if fixed:
+            return fixed
+        ticket = await self.call(
+            "speech_review_submit", text=text, epoch=epoch, token=token
+        )
+        async with asyncio.timeout(10):
+            while True:
+                result = await self.call(
+                    "speech_review_result",
+                    job_id=ticket["job_id"],
+                    epoch=epoch,
+                    token=token,
+                )
+                if result["done"]:
+                    return SpeechDecision.from_wire(result["result"])
+                await asyncio.sleep(0.05)

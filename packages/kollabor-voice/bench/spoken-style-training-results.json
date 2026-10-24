@@ -1,0 +1,44 @@
+{
+  "method": "Frozen Laya typed-decisions encoder with a trained radial-basis decision head",
+  "task": "speech",
+  "question_sha256": "f31899d4f7a832780f554bdb462360ef91ddd4ec7a27872c84c4d86cad82e5dd",
+  "fixtures_sha256": "944e79a99fb13d9b26ed1bd21264cace99fd597bf36485668b6508df4446819b",
+  "head_sha256": "a4af93a63dc0b0b3b55afcff28e756505989eacdea7cb69d57ddabbf778953d3",
+  "gamma": 0.5,
+  "regularization": 0.001,
+  "temperature": 0.1,
+  "calibration_log_loss": 0.050227277230328646,
+  "model_load_seconds_excluding_imports": 30.939174209022895,
+  "first_inference_ms": 145.84612497128546,
+  "warm_mean_ms": 27.03352057784735,
+  "splits": {
+    "train": {
+      "count": 103,
+      "correct": 103,
+      "automatic": 103,
+      "abstentions": 0,
+      "automatic_errors": 0
+    },
+    "calibration": {
+      "count": 26,
+      "correct": 25,
+      "automatic": 25,
+      "abstentions": 1,
+      "automatic_errors": 0
+    },
+    "development": {
+      "count": 0,
+      "correct": 0,
+      "automatic": 0,
+      "abstentions": 0,
+      "automatic_errors": 0
+    },
+    "heldout": {
+      "count": 26,
+      "correct": 24,
+      "automatic": 25,
+      "abstentions": 1,
+      "automatic_errors": 1
+    }
+  }
+}

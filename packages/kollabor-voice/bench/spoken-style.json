@@ -1,0 +1,781 @@
+{
+  "version": 1,
+  "description": "Synthetic spoken-style examples. Splits fixed before training. No personal audio, conversation or heldout labels used to fit the head. Not human-rated production acceptance. Multiline fixture encoding was corrected after the initial fit; the heldout split is reused only for this encoding repair, not model tuning.",
+  "cases": [
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I can hear you. What should I check?"
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I will check the files and report what I find."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The tests passed. The microphone is off."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The voice service is ready."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The update is saved. Restart the app to load it."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I found the problem and I am checking the fix."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "That request is still running. I will tell you when it finishes."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The download needs another minute."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I could not reach the server. I will try once more."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Your conversation is preserved."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The file is ready to open."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The image could not be saved. Your original is unchanged."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I need the project name before I can continue."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Which microphone should I use?"
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The speaker is working, but the microphone is unavailable."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I have paused recording."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The first check passed. I am looking at the second one."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "That is background speech, so I will stay quiet."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The change is in place. The live check is still pending."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I will read the first line and tell you what it says."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The answer is forty two."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Yes, that is the right file."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "No, I have not sent the message."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The meeting starts in ten minutes."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I can do that after the current task finishes."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Your settings have been saved."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The API timed out. I am retrying once."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The model is warming up before recording starts."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "You can keep typing while setup finishes."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I found two errors in the log."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I will keep the full explanation in chat and give you the short version aloud."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Your request is queued behind the current response."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The document has three pages."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The service is already running, so I will reuse it."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I cannot confirm that from the information available."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The result looks promising, but I have not tested it on your device."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "That would delete your saved data. I need your approval first."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I am checking the microphone now."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The build finished successfully."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Please say that again; the recording was unclear."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The deadline is Friday afternoon."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I will leave the microphone off when the test ends."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The package is installed, and I am checking whether it loads."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "The two sentences played in the correct order."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I have the transcript, including the first part of your question."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "You are using Laya for classification."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "I will read the details silently and explain the result briefly."
+    },
+    {
+      "split": "train",
+      "expected": "speak",
+      "text": "Whisper base is installed."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "# Summary\nThe service is ready."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "- The microphone is active."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "- The queue is empty."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Run `python -m pytest` to validate the change."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "See https://example.com/report for the complete output."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The request lifecycle traverses the event emitter, capability validator, epoch-fenced dispatcher and admission reconciliation subsystem."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The vectorized feature concatenation combines CLS embeddings, option-marker differences and mean-pooled contextual representations."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The RPC multiplexing layer serializes request envelopes through a Unix-domain transport with idempotent acknowledgment persistence."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Implementation details: singleton locking; retry fencing; adapter parity; durable transcript state; callback coordination."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The transformer applies attention masking, tokenizer normalization, kernel evaluation and calibrated probability thresholding to route classifier outcomes."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "First I checked the source. Then I changed the plugin. Then I ran the tests. Then I restarted the service."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Here are the findings:"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "1. The service starts."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "2. The cache is loaded."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "| Component | Status |"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "| Audio | Ready |"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "```python\nprint('ready')\n```"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The artifact is located at /Users/test/project/output/report.json."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The TLS handshake negotiates ALPN protocols before HTTP framing, while a reverse proxy forwards authenticated requests to the upstream handler."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The transactional outbox guarantees idempotent dispatch semantics through row-level locks and producer sequence checkpoints."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Response payload: {\"ok\": true, \"status\": \"ready\", \"pid\": 1234}."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Parameters: min_confidence=0.8, max_tokens=512, owner_epoch=abc123, retry_count=3."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The ORM unit-of-work coalesces pending relationship mutations before applying optimistic concurrency predicates to the database transaction."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "I have completed the update. The first test passed. The second test passed. The third test passed. Everything is ready for another review."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "## Validation\nAll tests passed."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "*Important*: **restart** the **daemon** before proceeding."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The model computes softmax-normalized logits over output labels, using a frozen encoder and a calibrated RBF classifier with precomputed centroids."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "A foreground consumer polls durable offsets while a background producer appends fsync-backed JSONL records under an advisory singleton lock."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "``echo hello`` is the command you should execute."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The stack trace begins with ValueError at worker.py:182 and continues through dispatch.py:57, handler.py:93, and loop.py:451."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The refactor introduces a provider-agnostic dependency injection boundary whose lifecycle hooks decouple allocation from runtime initialization."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Open [the report](https://example.com/report)."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "> The service is ready."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The first task is complete. The second task is running. The third task is waiting."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "status: ready"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "provider: laya"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "worker_pid: 1234"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "queue_depth: 0"
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The eigenvector decomposition projects normalized embeddings onto a low-rank manifold before temperature-scaled posterior estimation."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Your launcher imports the namespaced module through editable site-packages, then constructs the hook registry with ordered callback priorities."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The compatibility envelope preserves protocol-version invariants while epoch-scoped capabilities prevent stale ownership mutations."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The interface has the following sections: Overview, Architecture, Data Flow, Security, Performance, Deployment, Troubleshooting, and Reference."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The implementation begins by constructing an asynchronous initialization task which installs the dependencies, downloads the required assets, validates the checksums, loads the model weights, warms the classifier, creates the recorder, claims the response lease, and finally publishes the visible listening state after the first microphone callback."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The daemon, service, worker, observer, classifier, lease, adapter, handler, coordinator, plugin, executor, provider, serializer, and renderer are separate abstractions."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The serialization contract enforces type normalization at the boundary and applies deterministic key ordering before hashing canonical payload bytes."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The destructor schedules cancellation on the event loop and awaits reference-counted transport cleanup to prevent orphaned subprocess handles."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Configure ~/.kollab/voice/preferences.json and restart the process."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Let us examine the architecture in depth. We will begin with lifecycle management. Then we will consider persistence. Finally we will cover concurrency."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The full command is npm run build -- --mode production --config build.config.ts."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The materialized-view refresh employs incremental delta aggregation with a checkpointed monotonic sequence watermark."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "A residual bottleneck exists in interprocedural lock contention across the producer-consumer boundary during high-frequency event fanout."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The playback pipeline consists of normalization, tokenization, phoneme mapping, graph execution, waveform synthesis, resampling, buffering, and device delivery."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The implementation updates client.py, service.py, worker.py, queue.py, plugin.py, and status.py, with verification in six test modules."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "The accepted contract uses MAX_REQUEST=1048576 and PROTOCOL=1 to constrain wire envelopes."
+    },
+    {
+      "split": "train",
+      "expected": "rewrite",
+      "text": "Trace the execution path from initialize() through register_hooks() to shutdown()."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "I will check that now."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The microphone is hearing you clearly."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The save worked, but the upload did not."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The next step is to restart the app."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "That part is fixed. I still need to check playback."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The download has finished."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "I will wait while you think."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The file was not found. Please check its name."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "I can explain the details when you want them."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "The app is connected to the server."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "I have not changed any of your other files."
+    },
+    {
+      "split": "calibration",
+      "expected": "speak",
+      "text": "Your reply is ready, but the speaker is busy."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The deserializer unwraps a polymorphic envelope before invoking the registered coroutine through a dependency-injected event dispatcher."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "# Next steps\nRestart the app."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The output is stored at /tmp/build/result.log."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "There are four steps. Install it. Configure it. Start it. Test it."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The token budget reservation is reconciled against streaming usage deltas in a provider-specific accounting interceptor."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "Run `git status --short` and inspect the output."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "- Finished installation"
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "- Loaded models"
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "- Opened microphone"
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The inference adapter computes a temperature-scaled sigmoid over radial-basis kernel similarities to normalized encoder feature vectors."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "Fields: stream_id, owner_epoch, event_ids, admission_id, expires_at, producer_id, classifier_generation."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The asynchronous callback is scheduled with call_soon_threadsafe after a lock-protected generation check."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "The implementation uses the following algorithm, which first obtains the current conversation state and then checks each message for role, metadata, structured content, tool output, and reasoning fields before constructing a bounded textual context window to pass to the classifier for its next decision."
+    },
+    {
+      "split": "calibration",
+      "expected": "rewrite",
+      "text": "[Documentation](https://example.com/help) contains the steps."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "The connection dropped. I am trying to reconnect."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "I will keep working and let you know when there is a result."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "Only the short answer will be spoken; the details are in chat."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "Your microphone is muted right now."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "The full question reached the agent this time."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "I found an extra sentence that should not have played."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "That answer needs one more check before I can trust it."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "The new version is loaded and ready."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "The server returned an error. Your saved work is still there."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "I will inspect the log without changing the files."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "The classifier is ready. You can speak now."
+    },
+    {
+      "split": "heldout",
+      "expected": "speak",
+      "text": "That result is uncertain, so I am asking the main agent to decide."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The callback pipeline implements epoch-scoped response fencing with durable reservation reconciliation and shared device capability delegation."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "### Result\nThe connection is restored."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "You can reproduce this using `curl localhost:8000/status`."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The tensor graph fuses layer-normalization kernels with batched matrix multiplication and attention-mask propagation."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "I checked the code. I ran the tests. I updated the guide. I restarted the process."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "| Check | Result |"
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "| Download | Passed |"
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The function at /Users/demo/app/main.py controls startup."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The intermediary normalizes heterogeneous provider response envelopes into a typed message contract before event-bus propagation."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "1. Download the model."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "2. Start the worker."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The result is queued. The speaker starts next. A receipt will be written afterward."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "Implementation parameters are worker_timeout_ms, poll_interval_ms, retry_backoff_ms, model_revision, and minimum_probability."
+    },
+    {
+      "split": "heldout",
+      "expected": "rewrite",
+      "text": "The inference lifecycle uses lazy module imports and persistent subprocess residency to amortize checkpoint deserialization across steady-state classifier requests."
+    }
+  ]
+}

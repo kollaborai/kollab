@@ -85,6 +85,15 @@ class VoiceService:
         self.recorder_factory = recorder_factory
         self.segmenter_factory = segmenter_factory
         self.player = player
+        from .laya import LayaWorker
+        from .qwen import QwenWorker
+
+        # One local classifier is loaded at a time: the one last prepared.
+        self.classifiers = {w.name: w for w in (LayaWorker(root), QwenWorker(root))}
+        self.classifier = self.classifiers["laya"]
+        self.classifier_jobs = {}
+        self.speech_review_jobs = {}
+        self.speech_review_started = {}
         from .echo import PlaybackReference
         from .speaker import SpeakerGate
 
@@ -256,6 +265,7 @@ class VoiceService:
             "stream_id": self.instance_id,
             "ready": self.setup.get("state") == "ready"
             and (self.speech is None or self.speech.status()["state"] == "ready"),
+            "classifier": self.classifier.status(),
             "speech": (
                 self.speech.status()
                 if self.speech
@@ -277,6 +287,10 @@ class VoiceService:
         op = request.get("op")
         if op in {"hello", "status"}:
             return self.status()
+        if op == "classifier_prepare":
+            await self.select_classifier(request.get("model", "laya"))
+            self.classifier.prepare()
+            return self.classifier.status()
         if op == "withdraw":
             async with self.lifecycle:
                 self.withdrawn_claims = {
@@ -340,7 +354,12 @@ class VoiceService:
             return {"forgotten": self.gate.forget(), "speaker": self.gate.status()}
         delegated = self.delegates.get(request.get("token"))
         if delegated:
-            if op not in {"voice_out", "receipts"}:
+            if op not in {
+                "voice_out",
+                "receipts",
+                "speech_review_submit",
+                "speech_review_result",
+            }:
                 raise VoiceError(
                     "scope", "Delegated speech capability cannot control the microphone"
                 )
@@ -377,12 +396,100 @@ class VoiceService:
             return self.audio_ipc.mint(request, self.owner["epoch"])
         if op == "audio_stop":
             return self.audio_ipc.stop(request)
+        if op == "classifier_submit":
+            for key, task in list(self.classifier_jobs.items()):
+                if task.done():
+                    del self.classifier_jobs[key]
+            if self.classifier_jobs:
+                raise VoiceError(
+                    "classifier_busy", "A classifier decision is already pending"
+                )
+            if request.get("model", self.classifier.name) != self.classifier.name:
+                raise VoiceError(
+                    "classifier_not_ready",
+                    "Voice classifier changed; speech remains pending",
+                )
+            identity = uuid.uuid4().hex
+            if request.get("task") == "answer":
+                # The reply to "was that for me?"; only the Qwen model reads it.
+                if not hasattr(self.classifier, "answer"):
+                    raise VoiceError(
+                        "unsupported",
+                        f"{self.classifier.label} does not answer questions",
+                    )
+                job = self.classifier.answer(
+                    str(request["held"]), str(request["question"]), str(request["text"])
+                )
+            else:
+                job = self.classifier.decide(
+                    request["records"],
+                    str(request.get("context", "")),
+                    request.get("transcript_context", []),
+                    request.get("context_lines", 10),
+                )
+            task = asyncio.create_task(job)
+            task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+            self.classifier_jobs[identity] = task
+            return {"job_id": identity}
+        if op == "classifier_result":
+            task = self.classifier_jobs.get(request["job_id"])
+            if task is None or task.cancelled():
+                raise VoiceError(
+                    "classifier_expired",
+                    "Classifier result expired; speech remains pending",
+                )
+            return (
+                {"done": True, "result": task.result()}
+                if task.done()
+                else {"done": False}
+            )
         if op == "release":
             async with self.lifecycle:
                 # The owner may have changed while waiting for capture teardown.
                 self.authorize(request.get("token"), request.get("epoch"))
                 await self.release_owner()
             return self.status()
+        if op == "speech_review_submit":
+            from .speech_review import format_decision
+
+            for key, job in list(self.speech_review_jobs.items()):
+                if (
+                    job.done()
+                    and time.monotonic() - self.speech_review_started[key] > 30
+                ):
+                    del self.speech_review_jobs[key]
+                    del self.speech_review_started[key]
+            if len(self.speech_review_jobs) >= 64:
+                raise VoiceError("classifier_busy", "Speech review queue is full")
+            text = str(request["text"])
+            identity = uuid.uuid4().hex
+
+            async def review():
+                fixed = format_decision(text)
+                return (
+                    fixed.to_wire()
+                    if fixed
+                    else await self.classifier.review_speech(text)
+                )
+
+            task = asyncio.create_task(review())
+            task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+            self.speech_review_jobs[identity] = task
+            self.speech_review_started[identity] = time.monotonic()
+            return {"job_id": identity}
+        if op == "speech_review_result":
+            task = self.speech_review_jobs.get(request["job_id"])
+            if task is None or task.cancelled():
+                raise VoiceError("classifier_expired", "Speech review expired")
+            if not task.done():
+                return {"done": False}
+            del self.speech_review_jobs[request["job_id"]]
+            del self.speech_review_started[request["job_id"]]
+            return {"done": True, "result": task.result()}
         if op == "read":
             if not self.transcript:
                 return {"records": [], "cursor": 0, "stream_id": self.instance_id}
@@ -428,6 +535,14 @@ class VoiceService:
                 )
             }
         raise VoiceError("unknown_operation", "Unknown voice operation")
+
+    async def select_classifier(self, name):
+        """Load only the selected local classifier; switching closes the other."""
+        if name not in self.classifiers:
+            raise VoiceError("unknown_classifier", "Choose laya or qwen")
+        previous, self.classifier = self.classifier, self.classifiers[name]
+        if previous is not self.classifier:
+            await previous.close()
 
     def claim_result(self):
         return {
@@ -502,8 +617,17 @@ class VoiceService:
             self.segmenter = None
 
     async def release_owner(self):
+        for task in self.speech_review_jobs.values():
+            task.cancel()
+        await asyncio.gather(*self.speech_review_jobs.values(), return_exceptions=True)
+        self.speech_review_jobs.clear()
+        self.speech_review_started.clear()
         previous = self.owner
         await self.stop_capture()
+        for task in self.classifier_jobs.values():
+            task.cancel()
+        await asyncio.gather(*self.classifier_jobs.values(), return_exceptions=True)
+        self.classifier_jobs.clear()
         if previous and self.output:
             self.output.cancel(previous["epoch"], forget=True)
         self.gate.cancel()  # an unfinished enrollment belongs to that owner
@@ -815,6 +939,8 @@ class VoiceService:
             await asyncio.to_thread(self.speech.close)
         if self.stt:
             await asyncio.to_thread(self.stt.close)
+        for worker in self.classifiers.values():
+            await worker.close()
         path = socket_path(self.root)
         if path.exists():
             path.unlink()

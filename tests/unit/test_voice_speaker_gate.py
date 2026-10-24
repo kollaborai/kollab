@@ -7,11 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from kollabor_voice.speech_settings import load_speech_preferences as load_preferences
+from kollabor_voice.classifiers import load_preferences
 from kollabor_voice.store import utc
 
 from kollabor.commands.system_commands.handlers.voicemode import VoiceModeCommandHandler
 from kollabor.panels.voice import VoicePanel, voice_sections, voiceprint_text
+from plugins.altview.voice_classifier_altview import _word, detail_lines
 from plugins.voice_plugin import VoicePlugin
 
 
@@ -47,23 +48,48 @@ async def test_gated_lines_never_reach_the_agent(plugin):
     tv = line(1, "Breaking news tonight.", "other_speaker", speaker_score=0.12)
     reading = line(2, "On quiet mornings I make coffee.", "enrolling")
     request = line(3, "Can you check the tests?", "user", speaker_score=0.81)
-    delivered = []
+    observed, delivered = [], []
+    plugin.classifier_name = "provider"
     plugin.requested = True
     plugin._pending = [tv, reading, request]
+
+    async def observe(records, transcript_context):
+        observed.append((records, list(transcript_context)))
+        return records
 
     async def deliver(data):
         delivered.append(data)
         plugin.requested = False
         return {"status": "queued"}
 
+    plugin._observe_with_provider = observe
     plugin._deliver = deliver
     async with asyncio.timeout(2):
-        await plugin._deliver_loop()
-    # Only the user's words go straight to the agent; the TV line stays as
-    # context for later turns and the enrollment reading is dropped.
+        await plugin._observe_loop()
+    # Only the user's words are judged; the TV line is context, the reading is not.
+    assert observed == [([request], [tv])]
     assert [d["message"] for d in delivered] == [request["text"]]
-    assert delivered[0]["voice"]["transcript_context"] == [tv]
     assert plugin._recent_transcripts == [tv, request]
+    words = {_word(entry): entry["records"] for entry in plugin.classifier_log()}
+    assert words["not you"] == [tv] and words["enroll"] == [reading]
+
+
+def test_classifier_screen_explains_the_gate():
+    entry = {
+        "classifier": "laya",
+        "records": [
+            line(1, "Breaking news tonight.", "other_speaker", speaker_score=0.12)
+        ],
+        "other_speaker": True,
+    }
+    rows = detail_lines(entry)
+    assert ("warn", "  voice: another speaker (0.12)") in rows
+    assert ("dim", "  The speaker gate heard another voice: kept as context.") in rows
+    assert rows[-1] == ("dim", "  nothing")  # sent to the agent
+    heard = line(2, "Can you check the tests?", "user", speaker_score=0.81)
+    heard["echo_cancellation"] = True
+    rows = detail_lines({"classifier": "laya", "records": [heard], "decision": None})
+    assert ("good", "  voice: yours (0.81) · echo cancelled") in rows
 
 
 @pytest.mark.asyncio
