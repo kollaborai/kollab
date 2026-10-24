@@ -119,12 +119,13 @@ def resolve_build_provenance(
     environ: Mapping[str, str] | None = None,
     inherited: BuildProvenance | None = None,
 ) -> BuildProvenance:
-    """Capture the exact checkout, using environment or sdist data without Git.
+    """Capture exact checkout identity, falling back to environment or sdist data.
 
-    In a Git checkout the checked-out branch and HEAD are authoritative. Detached
-    checkouts have no branch name, but still retain their full HEAD SHA. When Git
-    metadata is absent, build variables are preferred, followed by values carried
-    in an sdist; unresolved fields are explicitly marked ``unknown``.
+    Git values are authoritative only when ``repo_root`` is the Git top-level.
+    Detached checkouts have no branch name, but retain their full HEAD SHA. A
+    surrounding repository is ignored; if Git metadata is absent, build
+    variables are preferred, followed by values carried in an sdist. Unresolved
+    fields are explicitly marked ``unknown``.
     """
 
     root = (
@@ -135,7 +136,8 @@ def resolve_build_provenance(
     environment = os.environ if environ is None else environ
 
     git_root = _git_output(root, "rev-parse", "--show-toplevel")
-    if git_root is not None:
+    # Ignore a surrounding checkout when this source tree is an unpacked sdist.
+    if git_root is not None and Path(git_root).resolve() == root.resolve():
         branch = normalize_branch(
             _git_output(root, "symbolic-ref", "--quiet", "--short", "HEAD")
         )

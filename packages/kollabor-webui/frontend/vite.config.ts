@@ -18,10 +18,10 @@ const __APP_VERSION__ = JSON.stringify(pkg.version);
 const repoRoot = path.resolve(frontendDir, "../../../");
 const BUILD_UNKNOWN = "unknown";
 
-function gitOutput(...args: string[]): string | null {
+function gitOutput(root: string, ...args: string[]): string | null {
   try {
     const output = execFileSync("git", args, {
-      cwd: repoRoot,
+      cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2_000,
@@ -51,18 +51,23 @@ function normalizeSha(value: string | undefined): string | null {
   return sha.toLowerCase();
 }
 
-function buildIdentity(): { branch: string; sha: string } {
-  const environmentBranch = normalizeBranch(process.env.KOLLAB_BUILD_BRANCH);
-  const environmentSha = normalizeSha(process.env.KOLLAB_BUILD_SHA);
-  const gitRoot = gitOutput("rev-parse", "--show-toplevel");
-  if (gitRoot) {
+export function buildIdentity(
+  root: string = repoRoot,
+  environment: NodeJS.ProcessEnv = process.env,
+): { branch: string; sha: string } {
+  const environmentBranch = normalizeBranch(environment.KOLLAB_BUILD_BRANCH);
+  const environmentSha = normalizeSha(environment.KOLLAB_BUILD_SHA);
+  const gitRoot = gitOutput(root, "rev-parse", "--show-toplevel");
+  // An enclosing checkout is not the source identity for an unpacked sdist.
+  if (gitRoot !== null && path.resolve(gitRoot) === path.resolve(root)) {
     return {
       // A detached checkout intentionally has no source branch label.
       branch:
-        normalizeBranch(gitOutput("symbolic-ref", "--quiet", "--short", "HEAD") ?? undefined) ??
-        BUILD_UNKNOWN,
+        normalizeBranch(
+          gitOutput(root, "symbolic-ref", "--quiet", "--short", "HEAD") ?? undefined,
+        ) ?? BUILD_UNKNOWN,
       sha:
-        normalizeSha(gitOutput("rev-parse", "--verify", "HEAD") ?? undefined) ??
+        normalizeSha(gitOutput(root, "rev-parse", "--verify", "HEAD") ?? undefined) ??
         environmentSha ??
         BUILD_UNKNOWN,
     };
@@ -169,8 +174,8 @@ const mainConfig = defineConfig({
     },
   },
   test: {
-    // The System Prompts page suite; the older tests stay on `node --test`.
-    include: ["tests/prompts-page.test.ts"],
+    // Keep focused Vitest suites here; most existing tests run with `node --test`.
+    include: ["tests/prompts-page.test.ts", "tests/build-provenance.test.ts"],
     environment: "node",
   },
 });

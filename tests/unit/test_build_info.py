@@ -101,6 +101,24 @@ def test_sdist_metadata_is_preserved_when_git_is_unavailable(tmp_path: Path) -> 
     assert resolved == inherited
 
 
+def test_sdist_inside_other_git_repo_uses_embedded_provenance(
+    tmp_path: Path,
+) -> None:
+    outer_root = tmp_path / "outer-checkout"
+    outer_sha = _repository(outer_root)
+    source_root = outer_root / "unpacked-sdist"
+    source_root.mkdir()
+    embedded = BuildProvenance("release/0.18.0", "b" * 40)
+    metadata = source_root / "kollabor" / "_build_info.py"
+    write_embedded_provenance(metadata, embedded)
+
+    loaded = read_embedded_provenance(metadata)
+    resolved = resolve_build_provenance(source_root, environ={}, inherited=loaded)
+
+    assert resolved == embedded
+    assert resolved.sha != outer_sha
+
+
 def test_embedded_metadata_reader_rejects_non_generated_code(tmp_path: Path) -> None:
     invalid = tmp_path / "_build_info.py"
     invalid.write_text("raise RuntimeError('do not execute')\n", encoding="utf-8")
