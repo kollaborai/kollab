@@ -141,7 +141,7 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         self.assertEqual(plugin._apply_pending_compaction.await_count, 1)
         self.assertEqual(plugin._turn_count, 91)
 
-    async def test_coordination_deferral_still_hard_caps_338181_prompt(self):
+    async def test_coordination_deferral_never_applies_at_hard_cap_338181(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=338_181)
         plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
         self.assertEqual(plugin._get_token_threshold(), 150_000)
@@ -151,10 +151,12 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         plugin._should_compact = MagicMock(return_value=True)
         plugin._start_compaction = MagicMock(return_value=False)
 
+        # 338K reported is already past the 272K hard cap, so pending
+        # coordination must not defer the trigger another turn.
         await plugin._on_llm_turn_complete({}, SimpleNamespace())
 
-        self.assertEqual(plugin._coordination_deferrals, 1)
-        plugin._start_compaction.assert_not_called()
+        self.assertEqual(plugin._coordination_deferrals, 0)
+        plugin._start_compaction.assert_called_once()
 
         original_history = list(llm_service.conversation_history)
         compacted_history = [
@@ -206,6 +208,96 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
         self.assertEqual(prompt_tokens["value"], 260_000)
         self.assertEqual(plugin._apply_pending_compaction.await_count, 1)
         self.assertEqual(plugin._turn_count, 1)
+
+    async def test_boundary_counts_history_appended_after_last_report(self):
+        """Issue #279: the provider count predates tool results and injected
+        hub messages. The boundary must also measure the current history, or a
+        prompt whose appended messages cross the cap sails through."""
+        plugin, _event_bus, llm_service = _plugin(prompt_tokens=270_000)
+        plugin.config.values["plugins.context_compaction.token_threshold_k"] = 150
+        self.assertEqual(plugin._get_hard_cap_threshold(), 272_000)
+        # Appended after the 270K response: the raw estimate of the current
+        # history is now ~300K, over the 272K hard cap.
+        llm_service.conversation_history.append(_message("user", "x" * 900_000))
+        original_len = len(llm_service.conversation_history)
+        prompt_tokens = {"value": 270_000}
+
+        async def run_compaction():
+            plugin._compaction_round += 1
+            plugin._pending_compaction = [
+                _message("system", "system prompt"),
+                _message("user", "[Previous Context Summary] task is still active"),
+                _message("user", "request 5"),
+                _message("assistant", "response 5"),
+            ]
+            plugin._pending_session_id = "session-410k"
+            plugin._pre_compaction_len = original_len
+            plugin._compaction_status = "ready_to_retry"
+            plugin._compaction_in_progress = False
+
+        def start_compaction(reason="threshold", **_kwargs):
+            plugin._compaction_reason = reason
+            plugin._compaction_in_progress = True
+            task = asyncio.create_task(run_compaction())
+            plugin._compaction_task = task
+            plugin._compaction_tasks.add(task)
+            task.add_done_callback(plugin._compaction_task_done)
+            return True
+
+        async def apply_pending(data, _event):
+            llm_service.conversation_history = list(plugin._pending_compaction)
+            plugin._pending_compaction = None
+            plugin._pending_session_id = None
+            plugin._compaction_status = "applied"
+            plugin._compaction_in_progress = False
+            prompt_tokens["value"] = 190_000
+            llm_service.session_stats["input_tokens"] = prompt_tokens["value"]
+            return data
+
+        plugin._get_prompt_tokens = lambda: prompt_tokens["value"]
+        plugin._start_compaction = start_compaction
+        plugin._apply_pending_compaction = AsyncMock(side_effect=apply_pending)
+
+        result = await plugin._on_tool_call_pre(
+            {"tool_data": {"tool_name": "terminal", "arguments": {}}},
+            SimpleNamespace(),
+        )
+
+        self.assertFalse((result or {}).get("cancelled", False))
+        self.assertEqual(plugin._apply_pending_compaction.await_count, 1)
+        self.assertEqual(len(llm_service.conversation_history), 4)
+        self.assertEqual(prompt_tokens["value"], 190_000)
+
+    async def test_preserved_task_floor_is_bounded_to_the_hard_cap(self):
+        """Preserved verbatim tasks must never rebuild a floor at or above the
+        hard cap: the newest survive, the dropped count is said in the summary."""
+        plugin, _event_bus, llm_service = _plugin()
+        llm_service.api_service._provider.config.context_window = 20_000
+        self.assertEqual(plugin._get_hard_cap_threshold(), 20_000)
+        newest = _message("user", "[hub task] newest assignment " + "x" * 3900)
+        preserved = [
+            _message("user", f"[hub task] old assignment {index} " + "y" * 3900)
+            for index in range(19)
+        ] + [newest]
+        to_keep = [_message("assistant", "recent " + "z" * 2000)]
+
+        compacted = plugin._build_compacted_history(
+            _message("system", "system prompt"),
+            "summary of the summarized turns",
+            to_keep,
+            preserved,
+            compaction_round=1,
+        )
+
+        self.assertLess(plugin._estimate_history_tokens(compacted), 20_000)
+        self.assertIn(newest, compacted)
+        dropped = len(preserved) - len([m for m in compacted if m in preserved])
+        self.assertGreater(dropped, 0)
+        drop_notes = [m for m in compacted if "[Dropped " in m.content]
+        self.assertEqual(len(drop_notes), 1)
+        self.assertIn(
+            f"[Dropped {dropped} oldest preserved task", drop_notes[0].content
+        )
 
     def test_manual_threshold_cannot_exceed_model_percentage(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=410_000)

@@ -1049,6 +1049,20 @@ class ContextCompactionPlugin(BasePlugin):
             return reported
         return self._estimated_current_prompt_tokens()
 
+    def _outgoing_prompt_tokens(
+        self, history: Optional[List[ConversationMessage]] = None
+    ) -> int:
+        """What the next request would actually carry.
+
+        The provider count covers only the history already sent; tool results
+        and injected hub messages append afterwards, so the outgoing prompt is
+        at least the calibrated estimate of the current history (issue #279).
+        """
+        return max(
+            self._effective_prompt_tokens(),
+            self._estimated_current_prompt_tokens(history),
+        )
+
     def _record_prompt_token_scale(self) -> None:
         """Calibrate the history estimate against the latest successful request."""
         reported = self._get_prompt_tokens()
@@ -1465,6 +1479,8 @@ class ContextCompactionPlugin(BasePlugin):
             elif (
                 self._coordination_pending()
                 and self._coordination_deferrals < MAX_COORDINATION_DEFERRALS
+                and self._outgoing_prompt_tokens(history)
+                < self._get_hard_cap_threshold()
             ):
                 self._coordination_deferrals += 1
                 logger.info(
@@ -1983,7 +1999,7 @@ class ContextCompactionPlugin(BasePlugin):
         """
         hard_cap = self._get_hard_cap_threshold()
         history = self._get_conversation_history() or []
-        current_tokens = self._effective_prompt_tokens()
+        current_tokens = self._outgoing_prompt_tokens(history)
         if current_tokens < hard_cap:
             return True
 
@@ -2094,7 +2110,7 @@ class ContextCompactionPlugin(BasePlugin):
             after_signature = self._history_signature(history)
             if after_signature != before_signature:
                 self._token_usage_stale_after_compaction = True
-            current_tokens = self._effective_prompt_tokens()
+            current_tokens = self._outgoing_prompt_tokens(history)
             if current_tokens < hard_cap:
                 self._last_hard_cap_guard_turn = self._turn_count
                 self._last_hard_cap_guard_signature = after_signature
@@ -3509,6 +3525,7 @@ class ContextCompactionPlugin(BasePlugin):
         ledger_handled: Optional[List[ConversationMessage]] = None,
         compaction_round: Optional[int] = None,
         pre_message_count: Optional[int] = None,
+        _dropped_preserved: int = 0,
     ) -> List[ConversationMessage]:
         """Build the new compacted history list.
 
@@ -3521,6 +3538,15 @@ class ContextCompactionPlugin(BasePlugin):
           [task reminder]        -- synthetic system note listing active tasks
           [to_keep messages]     -- recent messages kept intact
         """
+        if _dropped_preserved:
+            # Issue #279: say what was dropped so the model knows the
+            # preserved record is incomplete.
+            summary_text = (
+                (summary_text or "")
+                + f"\n\n[Dropped {_dropped_preserved} oldest preserved task "
+                "message(s) to fit the hard context cap; the full text remains "
+                "in the session transcript.]"
+            )
         # Every round writes a fresh reminder and older ones ride along (as kept
         # messages, or as "tasks" because they say "report back"), so five piled up
         # (23K chars) in the 2026-09-30 r8 checkpoint. Keep one: this round's, or
@@ -3613,6 +3639,30 @@ class ContextCompactionPlugin(BasePlugin):
             compacted.append(stale[-1])
 
         compacted.extend(to_keep)
+
+        # A preserved floor at or above the hard cap would defeat every later
+        # boundary guard: drop the oldest preserved tasks and keep the newest.
+        hard_cap = 0
+        try:
+            hard_cap = self._get_hard_cap_threshold()
+        except AttributeError:
+            pass
+        if (
+            hard_cap > 0
+            and preserved_tasks
+            and len(preserved_tasks) > 1
+            and self._estimate_history_tokens(compacted) >= hard_cap
+        ):
+            return self._build_compacted_history(
+                system_msg,
+                summary_text,
+                to_keep,
+                preserved_tasks[1:],
+                ledger_handled=ledger_handled,
+                compaction_round=compaction_round,
+                pre_message_count=pre_message_count,
+                _dropped_preserved=_dropped_preserved + 1,
+            )
 
         if pre_message_count is not None:
             summary_message.metadata["post_message_count"] = len(compacted)
