@@ -1408,6 +1408,25 @@ def _print_hub_help() -> None:
     print("  /hub bridge setup  /hub notify channel <...>  /hub feed")
 
 
+def _print_hub_health(health: Optional[dict]) -> None:
+    """Print the handoff health sections `kollab --hub status` asked for.
+
+    Issue #283: the same lines `/hub status` renders on the coordinator
+    (supervisor section with "handoff awaiting ack", recent dispatch
+    failures), printed verbatim. Nothing extra when the agent has none.
+    """
+    if not health:
+        return
+    lines = [str(line) for line in (health.get("supervisor") or [])]
+    lines += [str(line) for line in (health.get("dispatch") or [])]
+    lines = [line for line in lines if line]
+    if not lines:
+        return
+    print()
+    for line in lines:
+        print(line)
+
+
 async def _handle_cli_hub(hub_args: list) -> None:
     """Handle --hub CLI commands without starting the TUI.
 
@@ -1700,6 +1719,16 @@ async def _handle_cli_hub(hub_args: list) -> None:
                 detail = f"{state}: {task}" if task else state
                 online = "online" if row.get("online") else "offline"
                 print(f"  {handle} - {detail} ({online})")
+
+        # Handoff health (issue #283): the same sections `/hub status`
+        # shows on that agent -- supervisor cards, awaiting-ack handoffs,
+        # recent dispatch failures.
+        health = (
+            await AgentMessenger.request_health_status(asker["socket_path"])
+            if asker
+            else None
+        )
+        _print_hub_health(health)
 
     elif subcmd in ("stop", "kill"):
         if not rest:
