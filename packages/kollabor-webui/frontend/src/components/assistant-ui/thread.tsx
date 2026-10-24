@@ -34,7 +34,7 @@ import {
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
-import { VoiceRoomBar } from "@/voice/voice-room";
+import { useRoomVoiceMode, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -429,7 +429,10 @@ const Composer: FC<{
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
-  const voice = useVoiceMode();
+  // The mic starts the LiveKit room in this browser; /voice (the computer
+  // running the agent listens) stays a typed command, and its status line shows.
+  const terminalVoice = useVoiceMode();
+  const voice = useRoomVoiceMode() ?? terminalVoice;
   const placeholder = useContext(ComposerPlaceholderContext);
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
@@ -797,8 +800,8 @@ const Composer: FC<{
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
-            {voiceAvailable && voice.on ? (
-              <VoiceStatus activity={voice.activity} />
+            {voiceAvailable && terminalVoice.on ? (
+              <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
             {voiceAvailable ? <VoiceRoomBar /> : null}
             <div className="aui-composer-row flex items-end gap-1.5">
@@ -849,14 +852,14 @@ function prettyCommandName(name: string): string {
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
 // One trailing button slot that morphs: stop while a run is going, send once
-// there is something to send, otherwise the /voice toggle (a mic, or the
-// pulsing listening button while voice is on) where the session offers it.
+// there is something to send, otherwise the voice mic (a mic, or the
+// pulsing listening button while the voice room is up) where the session offers it.
 const composerSlotMode = (
   s: AssistantState,
   voice: VoiceMode | null,
   awaitingPermission = false,
 ): ComposerSlotMode => {
-  // A /voice command is itself a chat run; hold the mic still through it
+  // A room starting or stopping (or a /voice command run); hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
   if (!s.composer.isEmpty || !voice) return "send";

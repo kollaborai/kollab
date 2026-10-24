@@ -640,3 +640,18 @@ def voice_snapshot(view, text):
     from kollabor_engine.voice_types import VoiceTranscriptSnapshot
 
     return VoiceTranscriptSnapshot(**transcript(view, text=text))
+
+
+def test_child_output_goes_to_the_log_dir_and_starts_over_when_big(tmp_path):
+    runtime = LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "", log_dir=tmp_path / "logs")
+    with runtime._log("livekit-worker.log") as log:
+        log.write(b"worker died: boom\n")
+    path = tmp_path / "logs" / "livekit-worker.log"
+    assert path.read_bytes() == b"worker died: boom\n"
+    path.write_bytes(b"x" * 5_000_001)
+    with runtime._log("livekit-worker.log") as log:
+        log.write(b"fresh\n")
+    assert path.read_bytes() == b"fresh\n"
+    # no log dir (tests, embedders): output goes nowhere, as before
+    with LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "")._log("x") as log:
+        assert log == asyncio.subprocess.DEVNULL

@@ -168,3 +168,9 @@ test("a runtime that fails before ready never joins or asks for the mic", async 
   assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
 });
+
+test("only a page served from this computer can reach the voice room", async () => {
+  const { roomReachable } = await import("../src/voice/room-state.ts");
+  assert.ok(["localhost", "127.0.0.1", "[::1]"].every(roomReachable));
+  assert.ok(!["10.0.0.7", "kollabor.ai", "192.168.1.20"].some(roomReachable));
+});

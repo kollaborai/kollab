@@ -1,11 +1,11 @@
-import { AudioLinesIcon, SquareIcon } from "lucide-react";
+import { SquareIcon } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import type { EngineApi } from "../api";
+import type { VoiceMode } from "../voice-mode";
 import { createLiveKitRoom } from "./livekit-room";
 import { VoiceRoomController } from "./room-controller";
-import { isActive, isInterrupting, remoteNotice, type VoiceRoomState } from "./room-state";
+import { isActive, isInterrupting, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
 import { voiceApi } from "./voice-api";
-import { cn } from "@/lib/utils";
 
 type Ctx = { controller: VoiceRoomController; sessionId: string };
 const VoiceRoomContext = createContext<Ctx | null>(null);
@@ -29,6 +29,8 @@ export function VoiceRoomProvider({
 }
 
 const NO_SUBSCRIBE = () => () => undefined;
+
+const REACHABLE = typeof window !== "undefined" && roomReachable(window.location.hostname);
 
 export function useVoiceRoom() {
   const ctx = useContext(VoiceRoomContext);
@@ -74,15 +76,33 @@ export function latencyText(room: VoiceRoomState): string {
 }
 
 /**
- * The voice room strip above the composer: a mic icon to start, then state,
- * talk-over indicator, model download, latency and the remote-LLM notice.
- * The /voice toggle (voice-mode.tsx) is separate and unchanged.
+ * The room as the composer mic sees it: the mic starts the room in this browser
+ * (the phone's mic on a phone), the listening mic stops it.
+ */
+export function useRoomVoiceMode(): VoiceMode | null {
+  const { ctx, room } = useVoiceRoom();
+  return useMemo(() => {
+    if (!ctx || !room || !REACHABLE) return null;
+    const on = isActive(room);
+    return {
+      pending: room.state === "starting" || room.state === "stopping",
+      on,
+      toggle: () => void (on ? ctx.controller.stop() : ctx.controller.start(ctx.sessionId, null)),
+      activity: null,
+    };
+  }, [ctx, room]);
+}
+
+/**
+ * The voice room strip above the composer while a room is up: state, talk-over
+ * indicator, model download, latency, the remote-LLM notice and a stop button.
+ * The composer mic starts it.
  */
 export function VoiceRoomBar() {
   const { ctx, room } = useVoiceRoom();
-  if (!ctx || !room) return null;
-  const { controller, sessionId } = ctx;
+  if (!ctx || !room || !REACHABLE) return null;
   const active = isActive(room);
+  if (!active && !room.error) return null;
   const notice = remoteNotice(room);
   const interrupting = isInterrupting(room);
   const dl = room.download;
@@ -91,20 +111,19 @@ export function VoiceRoomBar() {
   return (
     <div data-slot="aui_voice-room" className="flex min-w-0 flex-col gap-1 px-1 text-xs text-muted-foreground">
       <div className="flex min-w-0 items-center gap-2">
-        <button
-          type="button"
-          disabled={busy}
-          aria-label={active ? "Stop voice room" : "Start voice room"}
-          title={active ? "Stop Voice Room" : "Start Voice Room"}
-          onClick={() => (active ? void controller.stop() : void controller.start(sessionId, null))}
-          className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-muted disabled:opacity-50",
-            active && "text-destructive",
-          )}
-        >
-          {active ? <SquareIcon className="size-3.5 fill-current" /> : <AudioLinesIcon className="size-4" />}
-        </button>
-        {active || room.state === "error" ? (
+        {active ? (
+          <button
+            type="button"
+            disabled={busy}
+            aria-label="Stop voice room"
+            title="Stop Voice"
+            onClick={() => void ctx.controller.stop()}
+            className="flex size-7 shrink-0 items-center justify-center rounded-full text-destructive hover:bg-muted disabled:opacity-50"
+          >
+            <SquareIcon className="size-3.5 fill-current" />
+          </button>
+        ) : null}
+        {active || room.error ? (
           <>
             <span className="shrink-0 font-medium text-foreground" data-slot="aui_voice-room-state">
               {interrupting ? "Interrupting" : (LABEL[room.state] ?? room.state)}

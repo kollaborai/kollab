@@ -46,6 +46,13 @@ export const initialRoomState: VoiceRoomState = {
 export const isActive = (s: VoiceRoomState) =>
   !["idle", "stopped", "error", "disconnected"].includes(s.state);
 
+/**
+ * livekit-server listens on this computer's loopback only (voice_livekit.py), so
+ * only a page served from this computer can join a room. Elsewhere (PhoneLink,
+ * a phone on the LAN) the mic stays the /voice toggle.
+ */
+export const roomReachable = (hostname: string) => ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+
 /** Talking while the assistant speaks: the "interrupt by talking" indicator. */
 export const isInterrupting = (s: VoiceRoomState) => s.userSpeaking && s.state === "speaking";
 

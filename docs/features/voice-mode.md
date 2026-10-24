@@ -13,12 +13,31 @@ features. Voice does not start or call them, and no voice screen (`/voice`,
 the status row, Settings → Voice, the web voice mode) shows classifier
 controls, status or decisions.
 
+## In the web UI
+
+The mic in the message box starts voice in the browser, with the browser's
+microphone. The agent greets you, hears you through Parakeet, and speaks its
+answer sentence by sentence with VibeVoice while the rest is still being
+written. Talk over it to stop it: the speech stops and its turn is cancelled.
+The strip above the message box shows what voice is doing (Listening, Hearing,
+Thinking, Speaking, Interrupted), model downloads and how long each step took
+(Hear, Think, Speak, Total). The pulsing mic or the stop button ends it. On
+first use the button waits while the models load or download.
+
+This works on a page served from the computer running the agent (Kollab.app,
+or the web UI at `127.0.0.1` or `localhost`). On a phone, PhoneLink included,
+the mic runs `/voice` on the computer instead; voice from the phone's own
+microphone is not available yet.
+
+## In the terminal
+
 Use `/voice status` to inspect setup/download progress, microphone activity,
 model warmup, transcription, speech playback and errors. The transcript file uses
 UTC timestamps. The compact status row shows a three-bar input level and what voice
 is doing (`starting`, `listening`, `hearing`, `transcribing`, `speaking`),
 `sending` or `stopped` with how many lines wait, and, when space permits, the
-latest transcript. The web UI shows the same line above the message box.
+latest transcript. The web UI shows the same line above the message box while
+`/voice` is on.
 
 - `/voice` toggles voice for this chat.
 - `/voice on` makes this chat the responding conversation.

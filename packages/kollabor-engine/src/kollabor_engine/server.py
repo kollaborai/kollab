@@ -217,6 +217,8 @@ async def _engine_lifespan(app: FastAPI):
 
 def _wire_voice(app: FastAPI, port: Optional[int]) -> None:
     """Build the voice runtime (nothing starts until a voice session is created)."""
+    from kollabor_voice.control import service_root
+
     from .auth import get_token, read_token_from_disk
     from .voice_control import VoiceControl
     from .voice_livekit import LiveKitRuntime
@@ -224,6 +226,7 @@ def _wire_voice(app: FastAPI, port: Optional[int]) -> None:
     runtime = LiveKitRuntime(
         engine_url=lambda: f"http://127.0.0.1:{port or 7433}",
         engine_token=lambda: get_token() or read_token_from_disk(),
+        log_dir=service_root() / "logs",
     )
     from .voice_settings import VoiceSettingsService
 

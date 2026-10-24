@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -103,8 +104,10 @@ class LiveKitRuntime:
         server_binary: str | None = None,
         worker_argv: Sequence[str] | None = None,
         worker_env: dict[str, str] | None = None,
+        log_dir: Path | None = None,
     ) -> None:
         self._engine_url = engine_url
+        self._log_dir = log_dir
         self._engine_token = engine_token
         self._server_binary = server_binary
         self._worker_argv = list(worker_argv) if worker_argv else None
@@ -116,6 +119,18 @@ class LiveKitRuntime:
         self._server: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
         self._workers: dict[tuple[str, int], WorkerHandle] = {}
+
+    def _log(self, name: str):
+        """Where a child's output goes: a log under log_dir, or nowhere without one.
+
+        A file past 5 MB starts over, so a crash reason stays and the log stays small.
+        """
+        if self._log_dir is None:
+            return contextlib.nullcontext(asyncio.subprocess.DEVNULL)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        path = self._log_dir / name
+        small = path.exists() and path.stat().st_size < 5_000_000
+        return open(path, "ab" if small else "wb")
 
     # --- RuntimeBackend -------------------------------------------------
 
@@ -151,23 +166,24 @@ class LiveKitRuntime:
                 )
             env = dict(os.environ)
             env["LIVEKIT_KEYS"] = f"{self._api_key}: {self._api_secret}"
-            self._server = await asyncio.create_subprocess_exec(
-                "/bin/sh",
-                "-c",
-                _SUPERVISE,
-                "sh",
-                str(os.getpid()),
-                binary,
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                str(self.port),
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            with self._log("livekit-server.log") as log:
+                self._server = await asyncio.create_subprocess_exec(
+                    "/bin/sh",
+                    "-c",
+                    _SUPERVISE,
+                    "sh",
+                    str(os.getpid()),
+                    binary,
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    str(self.port),
+                    env=env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
             deadline = time.monotonic() + SERVER_READY_TIMEOUT_S
             while time.monotonic() < deadline:
                 if self._server.returncode is not None:
@@ -244,14 +260,15 @@ class LiveKitRuntime:
         env.update(cmd_env)
         env.update(self._worker_env)
         env["KOLLAB_VOICE_WORKER_CONFIG"] = json.dumps(config)
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=env,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        with self._log("livekit-worker.log") as log:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log,
+                start_new_session=True,
+            )
         try:
             await asyncio.wait_for(self._read_ready(process), WORKER_READY_TIMEOUT_S)
         except BaseException:
