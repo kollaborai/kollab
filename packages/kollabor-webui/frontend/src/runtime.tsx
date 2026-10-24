@@ -31,10 +31,18 @@ import type {
   HistoryMessage,
   PermissionPrompt,
   Session,
+  SessionEvent,
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
 import { shownMessagesChanged } from "./history-merge";
+import {
+  applyLiveEvent,
+  emptyLiveTurn,
+  isLiveMessage,
+  liveMessage,
+  type LiveTurn,
+} from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
@@ -643,6 +651,7 @@ export function EngineRuntimeProvider({
   sessionId,
   initialState,
   onStale,
+  liveEvents,
   children,
 }: {
   api: EngineApi;
@@ -650,6 +659,8 @@ export function EngineRuntimeProvider({
   initialState: EngineState;
   /** Reload the thread whole: the prompt it waits on closed in another window. */
   onStale?: () => void;
+  /** Session-stream events, fed by App's followEvents loop. */
+  liveEvents?: { current: ((event: SessionEvent) => void) | null };
   children: ReactNode;
 }) {
   const turnRef = useRef<TurnClock>(newTurnClock());
@@ -758,6 +769,48 @@ export function EngineRuntimeProvider({
     }
   }, [api, sessionId, onStale, runtime]);
 
+  // A turn this page did not start (another window, the agent's terminal, a
+  // peer's message) streams through App's event subscription. Its events fold
+  // into one ephemeral assistant message so a passive window watches the
+  // reply arrive; nothing is persisted — the history reload at turn_complete
+  // replaces it, and a page that runs the turn itself ignores these.
+  const liveTurn = useRef<LiveTurn>(emptyLiveTurn());
+  useEffect(() => {
+    if (!liveEvents) return;
+    const importLiveState = (messages: ThreadMessageLike[]) => {
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      if (!shown) return;
+      runtime.thread.importExternalState({
+        ...shown,
+        messages,
+        synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
+      });
+    };
+    liveEvents.current = (event: SessionEvent) => {
+      const thread = runtime.thread.getState();
+      if (thread.isRunning) return;
+      if ((event.type ?? "") === "turn_complete") {
+        // Drop the ephemeral parts now: the reload this event triggers
+        // appends the finished turn from history, and keeping both would
+        // show it twice (assistant-ui keeps every message by id).
+        liveTurn.current = emptyLiveTurn();
+        const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+        if (shown && shown.messages.some(isLiveMessage)) {
+          importLiveState(shown.messages.filter((message) => !isLiveMessage(message)));
+        }
+        return;
+      }
+      const next = applyLiveEvent(liveTurn.current, event);
+      if (next === liveTurn.current) return;
+      liveTurn.current = next;
+      const live = liveMessage(next);
+      const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+      if (!live || !shown) return;
+      importLiveState([...shown.messages.filter((message) => !isLiveMessage(message)), live]);
+    };
+    return () => { liveEvents.current = null; };
+  }, [runtime, liveEvents]);
+
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
   // after them. Only the history past what the thread shows is appended:
@@ -806,7 +859,11 @@ export function EngineRuntimeProvider({
       return index !== null && index >= from.history && !currentIds.has(String(message.id ?? ""));
     });
     if (!older.length && !tail.length && nextStart >= currentStart) return;
-    const messages = [...older, ...shown.messages, ...tail];
+    // A live turn this page is only watching rides at the end, outside the
+    // synced bookkeeping; the next turn_complete drop removes it.
+    const liveShown = shown.messages.filter(isLiveMessage);
+    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const messages = [...older, ...kept, ...tail, ...liveShown];
     runtime.thread.importExternalState({
       ...shown,
       messages,
