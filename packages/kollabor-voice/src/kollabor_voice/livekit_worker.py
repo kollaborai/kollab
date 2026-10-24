@@ -57,7 +57,7 @@ STT_BATCH = 1600  # 100 ms, the KVA1 frame ceiling
 PLAY_RATE = 24000
 READINESS_POLL_S = 1.0
 READY_TIMEOUT_S = 1200
-GREETING = "Greet Marco briefly and ask what he wants to talk about."
+GREETING = "Greet the user briefly and ask what they want to talk about."
 
 
 @dataclass(frozen=True)
@@ -701,11 +701,15 @@ class Worker:
             if not handle.interrupted or self.stopping.is_set():  # closing is no talk-over
                 return
             for item in reversed(handle.chat_items):
-                if item.type == "message" and item.role == "assistant" and item.interrupted:
-                    text = (item.text_content or "").strip()
-                    if text:
-                        self.send(f"turns/{turn.id}/interrupted", {"text": text})
-                    return
+                if item.type == "message" and item.role == "assistant":
+                    if item.interrupted:
+                        self.send(
+                            f"turns/{turn.id}/interrupted",
+                            {"text": (item.text_content or "").strip()},
+                        )
+                    return  # not interrupted: it was all played
+            # LiveKit adds no message when nothing was played: nothing was heard.
+            self.send(f"turns/{turn.id}/interrupted", {"text": ""})
 
         speech.add_done_callback(done)
 

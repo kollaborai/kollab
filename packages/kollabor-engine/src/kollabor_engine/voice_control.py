@@ -652,11 +652,12 @@ class VoiceControl:
     async def record_interrupted_reply(
         self, voice_session_id: str, turn_id: str, text: str
     ) -> dict[str, Any]:
-        """A talk-over cut a reply short: keep the part the worker says was played."""
+        """A talk-over cut a reply short: keep the part the worker says was played.
+
+        An empty text is a talk-over before any of it was played: the reply goes.
+        """
         binding = await self.host.get_binding(OWNER_ID, voice_session_id)
         text = text.strip()
-        if not text:
-            return {"recorded": False}
         session = await self.router._get_session(binding)  # noqa: SLF001
         return await session.record_interrupted_reply(turn_id, text)
 
@@ -956,6 +957,9 @@ class VoiceControl:
                     await self._final_response(binding, generation, turn_id, reply, said)
                     raw, consumed, revision, partial_id = "", 0, 0, str(uuid4())
                 elif kind == "tool_start":
+                    # A reply's display message comes before its tools: none is
+                    # left to skip (a round of hub tags alone shows nothing).
+                    after_response = False
                     await emit(
                         "voice.tool",
                         {
@@ -965,6 +969,7 @@ class VoiceControl:
                         },
                     )
                 elif kind == "tool_result":
+                    after_response = False  # as at tool_start: a denied call has only this
                     await emit(
                         "voice.tool",
                         {

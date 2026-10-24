@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while its tools run.
 - Voice: talking over a reply keeps only the part that was played, marked
   interrupted, and the voice room stays up while the chat reloads to show it.
+  A reply that ran tools is cut where you stopped it and the unheard rest is
+  dropped, a reply you talked over before it was heard goes, the saved
+  conversation keeps the cut, and a typed reply is never touched.
+- Voice: a reply after a round of hub messages alone is spoken again; with a
+  provider that does not stream it stayed silent.
 - Voice: every reply speaks its last sentence, which was dropped, so a short
   reply such as the answer after a talk-over is heard. The latency line keeps
   Hear, Think and Speak when the reply's Total arrives.

@@ -5,6 +5,7 @@ Extracted from LLMService as part of the llm_service.py decomposition.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import sys
@@ -276,6 +277,15 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
             }
         )
     return entries
+
+
+def _voice_turn_id(origin: Any) -> str | None:
+    """The LiveKit voice turn an origin context belongs to, if any."""
+    if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
+        turn_id = origin.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    return None
 
 
 def _xml_display_metadata(
@@ -1019,7 +1029,6 @@ class QueueProcessor:
                 "voice_tool_policy": "invalid",
             }
         self.active_origin_context = merged_origin_context
-        self._stamp_voice_turn(self._voice_turn_metadata().get("voice_turn_id"))
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -1116,6 +1125,9 @@ class QueueProcessor:
         # to finish rather than running concurrently.
         async with self._turn_lock:
             self.last_turn_error = None
+            # Stamped under the lock: a turn still running when this one was
+            # queued clears its own stamp as it ends, never this one's.
+            self._stamp_voice_turn(_voice_turn_id(execution_context))
             try:
                 if execution_context is not None:
                     return await self._execute_llm_turn_inner(
@@ -1844,6 +1856,7 @@ class QueueProcessor:
                 thinking_content=thinking_list,
                 tool_calls=tool_call_entries,
                 provider_reasoning=_last_provider_reasoning(self.api_service),
+                voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
             )
 
             # Add assistant message to conversation history
@@ -2182,35 +2195,40 @@ class QueueProcessor:
     def _voice_turn_metadata(self) -> dict[str, Any]:
         """Which voice turn a reply belongs to: a talk-over after it finished cuts
         it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
-        origin = self.active_origin_context
-        if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
-            if isinstance(origin.get("turn_id"), str) and origin["turn_id"]:
-                return {"voice_turn_id": origin["turn_id"]}
-        return {}
+        turn_id = _voice_turn_id(self.active_origin_context)
+        return {"voice_turn_id": turn_id} if turn_id else {}
+
+    @contextlib.asynccontextmanager
+    async def between_turns(self):
+        """Hold the next turn off, entered once the running one has finished.
+
+        A turn writes its tool calls and their results under this lock, so a
+        history edit made inside never lands between them.
+        """
+        async with self._turn_lock:
+            yield
 
     async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.
 
         The user watched it stream; without it the next turn answers a question
-        the model no longer remembers asking. A voice turn adds nothing here:
-        the voice side records what was actually played. A Stop during the call
-        cuts its stream; one while tools run leaves `shown`, the reply on screen.
+        the model no longer remembers asking. A voice turn keeps it too, under
+        its voice turn id: the worker then cuts it to the part that was played
+        (LocalStateService.record_interrupted_voice_reply). A Stop during the
+        call cuts its stream; one while tools run leaves `shown`, the reply on
+        screen.
         """
         take = getattr(self._streaming_handler, "take_interrupted_text", None)
         text = take() if callable(take) else ""
         text = text if isinstance(text, str) and text.strip() else shown
         if not isinstance(text, str) or not text.strip():
             return
-        origin = self.active_origin_context
-        # Not validate_voice_admission_context: a talk-over revokes the grant
-        # before the cancel lands, and the turn keeps its voice source.
-        if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
-            return
+        voice = self._voice_turn_metadata()
         # History first: a second cancel can land on the await below, and the
         # engine reads history when turn_complete goes out.
         self._add_message_fn(
             ConversationMessage(
-                role="assistant", content=text, metadata={"interrupted": True}
+                role="assistant", content=text, metadata={"interrupted": True, **voice}
             ),
             parent_uuid=parent_uuid,
         )
@@ -2219,6 +2237,7 @@ class QueueProcessor:
                 text,
                 parent_uuid=parent_uuid,
                 model=getattr(self.api_service, "model", None),
+                voice_turn_id=voice.get("voice_turn_id"),
             )
         except Exception:
             logger.exception("Could not log the interrupted reply")

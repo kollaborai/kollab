@@ -247,17 +247,20 @@ class TestQueueProcessor(unittest.TestCase):
                 self.assertEqual(self._assistant_messages(), [])
                 self.conversation_logger.log_assistant_message.assert_not_awaited()
 
-    def test_a_stopped_voice_turn_keeps_no_text_here(self):
-        """The voice side records what was played; this text was never heard."""
-        voice = make_voice_origin_context()
+    def test_a_stopped_voice_turn_keeps_its_text_under_its_voice_turn(self):
+        """The worker then cuts it to the part that was played, which may be none."""
+        voice = make_voice_origin_context(turn_id="turn-9")
         # a talk-over revokes the grant before the cancel lands
         revoke_voice_admission_context(voice)
         self.processor.active_origin_context = voice
 
         self._stop_after_streaming("Hello wor")
 
-        self.assertEqual(self._assistant_messages(), [])
-        self.conversation_logger.log_assistant_message.assert_not_awaited()
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.content, "Hello wor")
+        self.assertEqual(reply.metadata, {"interrupted": True, "voice_turn_id": "turn-9"})
+        logged = self.conversation_logger.log_assistant_message
+        self.assertEqual(logged.await_args.kwargs["voice_turn_id"], "turn-9")
 
     def _reply_with(self, text):
         """A model call that answers `text` with no tools, through the real turn."""
@@ -337,6 +340,39 @@ class TestQueueProcessor(unittest.TestCase):
             ids,
             [("token", "turn-9"), ("turn_complete", "turn-9"), ("token", None)],
         )
+        self.assertNotIn("request_id", after)
+
+    def test_a_turn_that_ends_while_a_voice_turn_waits_leaves_its_stamp_alone(self):
+        """A hub turn still running when a voice turn queues ends by clearing its
+        own stamp: the voice turn's stays its own, and goes when it ends."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap, publish_semantic
+        from kollabor_tui.turn_context import current_turn
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("Sure.")
+        self.streaming_handler.call_llm = AsyncMock(return_value="Sure.")
+
+        async def voice_turn():
+            voice = QueuedInput(
+                "is it green", {}, origin_context=make_voice_origin_context("turn-9")
+            )
+            await self.processor.process_message_batch([voice], "parent")
+            publish_semantic(self.renderer, "token", text="typed reply")  # the next turn
+            return current_turn.get()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()  # a hub turn is running
+            waiting = asyncio.create_task(voice_turn())
+            await asyncio.sleep(0.01)
+            self.processor._stamp_voice_turn(None)  # the hub turn ends
+            self.processor._turn_lock.release()
+            return await waiting
+
+        after = self.loop.run_until_complete(scenario())
+        tokens = [e.get("request_id") for e in tap.get_snapshot() if e["type"] == "token"]
+        self.assertEqual(tokens, [None])  # the typed turn's token: not the old voice id
         self.assertNotIn("request_id", after)
 
     def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):

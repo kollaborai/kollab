@@ -645,6 +645,23 @@ async def test_a_reply_with_xml_tool_tags_is_said_once(rig):
     await rig.control.shutdown()
 
 
+async def test_a_reply_after_a_round_of_hub_tags_alone_is_still_said(rig):
+    # Such a round sends "response" with no text and nothing to display, then
+    # runs its tags; the next reply comes whole, from a provider that does not
+    # stream, as its display message alone.
+    rig.session.script = [
+        {"type": "response", "text": ""},
+        {"type": "tool_start", "tool_id": "h1", "tool_name": "hub_msg"},
+        {"type": "tool_result", "tool_id": "h1", "tool_name": "hub_msg", "success": True},
+        {**SHOWN, "content": "Sent it to lapis."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Sent it to lapis."]
+    await rig.control.shutdown()
+
+
 async def test_voice_settings_ride_on_the_turn_context(rig):
     async with client(rig.app) as http:
         view = await ready_session(rig, http)
@@ -740,13 +757,15 @@ async def test_a_talk_over_records_the_played_text_once(rig):
     await rig.control.shutdown()
 
 
-async def test_blank_played_text_never_reaches_the_daemon(rig):
+async def test_a_talk_over_before_any_audio_reaches_the_daemon(rig):
+    # Nothing was played: the daemon takes the unheard reply away.
     async with client(rig.app) as http:
         view = await ready_session(rig, http)
-        url = f"/voice/sessions/{view['voice_session_id']}/turns/{uuid4()}/interrupted"
+        turn = str(uuid4())
+        url = f"/voice/sessions/{view['voice_session_id']}/turns/{turn}/interrupted"
         blank = await http.post(url, json={"text": " \n "})
-        assert blank.status_code == 200 and blank.json() == {"recorded": False}
-        assert rig.session.interrupted == []
+        assert blank.status_code == 200 and blank.json() == {"recorded": True}
+        assert rig.session.interrupted == [(turn, "")]
     await rig.control.shutdown()
 
 

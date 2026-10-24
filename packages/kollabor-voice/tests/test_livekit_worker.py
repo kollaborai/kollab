@@ -551,7 +551,7 @@ def test_the_played_text_keeps_the_space_between_sentences():
     assert body["text"].startswith(f"{S1} It"), body["text"]  # not "now.It"
 
 
-def test_a_reply_that_was_never_played_leaves_nothing_to_post():
+def test_a_reply_that_was_never_played_posts_that_nothing_was_heard():
     async def scenario():
         async with Rig(
             scripts=[["wait", S1, "done"], ["Okay.", "done"]], transcript=True
@@ -564,7 +564,10 @@ def test_a_reply_that_was_never_played_leaves_nothing_to_post():
         return rig
 
     rig = run(scenario())
-    assert rig.adapter.spoken == ["Okay."] and not interrupted_posts(rig.poster)
+    first = rig.engine.requests[0]
+    assert rig.adapter.spoken == ["Okay."]
+    # the Engine takes the reply nobody heard away
+    assert interrupted_posts(rig.poster) == [(f"turns/{first['turn_id']}/interrupted", {"text": ""})]
 
 
 def test_the_played_text_is_bound_to_the_turn_that_registered_it():
@@ -593,7 +596,10 @@ def test_the_played_text_is_bound_to_the_turn_that_registered_it():
         return worker
 
     worker = run(scenario())
-    assert worker.poster.posts == [("turns/old-turn/interrupted", {"text": "So the build"})]
+    assert worker.poster.posts == [  # whole: played to the end, nothing to cut
+        ("turns/new-turn/interrupted", {"text": ""}),  # blank: nothing was heard
+        ("turns/old-turn/interrupted", {"text": "So the build"}),
+    ]
 
 
 def test_a_cough_over_the_reply_pauses_it_and_it_resumes():
@@ -616,7 +622,7 @@ def test_a_cough_over_the_reply_pauses_it_and_it_resumes():
 
 
 def test_greeting_on_join():
-    hello = "Hey Marco, what do you want to talk about?"
+    hello = "Hey there, what do you want to talk about?"
 
     async def scenario():
         async with Rig(scripts=[[hello, "done"]], tts_chunks=10) as rig:
@@ -639,7 +645,7 @@ def test_greeting_on_join():
 
 
 def test_the_production_turn_detector_runs_a_session_and_a_greeting():
-    hello = "Hey Marco."
+    hello = "Hey there."
 
     async def scenario():
         detector = inference.TurnDetector(version="v1-mini")

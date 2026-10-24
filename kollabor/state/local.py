@@ -17,6 +17,7 @@ Either way, there's exactly ONE place where the business logic lives.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -184,16 +185,53 @@ def _web_command_output(result: Any, command_name: str) -> str:
     return "\n".join(lines)
 
 
-def _heard_part(played: str, reply: str) -> str | None:
-    """The played text from where `reply`'s own words start, or None if they never did."""
-    words = re.findall(r"\w+", reply.lower())
+_MIN_MATCH = 3  # words a later reply's start must share with the played text
+
+
+def _played_cut(played: str, replies: list[str]) -> tuple[int, str] | None:
+    """Where playback of a voice turn's replies stopped: (reply index, its heard part).
+
+    `played` is what reached the speaker, the turn's replies in order, up to the
+    talk-over. A later reply is found by its first words, at least _MIN_MATCH
+    of them (all of a shorter one), so a common word at the very end of the
+    played text never starts one. None when nothing was heard.
+    """
     spans = list(re.finditer(r"\w+", played.lower()))
     heard = [m.group() for m in spans]
-    for i in range(len(heard)):
-        size = min(4, len(words), len(heard) - i)
-        if size and heard[i : i + size] == words[:size]:
-            return played[spans[i].start() :]
-    return None
+    cut: tuple[int, int] | None = None  # (reply index, played word it starts at)
+    for index, reply in enumerate(replies):
+        words = re.findall(r"\w+", reply.lower())
+        if not words or not heard:
+            continue  # a tool call with no prose says nothing
+        if cut is None:
+            cut = (index, 0)  # playback starts with the first reply that speaks
+            continue
+
+        def starts_at(i: int) -> bool:
+            size = min(4, len(words), len(heard) - i)
+            return heard[i : i + size] == words[:size]
+
+        need = min(_MIN_MATCH, len(words))
+        start = next(
+            (i for i in range(cut[1] + 1, len(heard) - need + 1) if starts_at(i)), None
+        )
+        if start is None:
+            break
+        cut = (index, start)
+    return None if cut is None else (cut[0], played[spans[cut[1]].start() :])
+
+
+def _reply_text(message: Any) -> str:
+    """What a reply shows and says: an XML tool reply keeps its tags in content."""
+    shown = (message.metadata or {}).get("display_content")
+    return shown if isinstance(shown, str) else content_to_text(message.content)
+
+
+def _set_reply_text(message: Any, text: str) -> None:
+    if "display_content" in (message.metadata or {}):
+        message.metadata["display_content"] = text  # the tags stay for the model
+    else:
+        message.content = text
 
 
 class LocalStateService(StateService):
@@ -3146,36 +3184,64 @@ class LocalStateService(StateService):
     ) -> dict[str, Any]:
         """Keep the part of a voice reply that was played before a talk-over.
 
-        The worker posts what reached the speaker; the history then holds what the
-        listener heard, marked interrupted, once per voice turn.
+        The worker posts what reached the speaker, possibly nothing. Once the
+        talked-over turn has finished unwinding, the history holds what the
+        listener heard, once per voice turn: the reply playback stopped in is cut
+        to it and marked interrupted, and the prose after it goes (a later tool
+        call stays, its tools ran). The conversation log gets the same cut.
         """
-        from kollabor_events.data_models import ConversationMessage
-
         llm = self._llm_service
         text = (text or "").strip()
-        if llm is None or not turn_id or not text:
+        if llm is None or not turn_id:
             return {"recorded": False}
+        # A turn writes its tool calls and their results under the turn lock, so
+        # waiting for it keeps the cut out from between them, and the reply's own
+        # rows are all in by then.
+        queue = getattr(llm, "_queue_processor", None)
+        between = getattr(queue, "between_turns", None)
+        async with between() if callable(between) else contextlib.nullcontext():
+            return await self._cut_voice_reply(llm, turn_id, text)
+
+    async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
+        from kollabor_events.data_models import ConversationMessage
+
+        history = llm.conversation_history
         if any(
             m.role == "assistant" and (m.metadata or {}).get("turn_id") == turn_id
-            for m in llm.conversation_history
+            for m in history
         ):
             return {"recorded": False, "duplicate": True}
         said = [
             m
-            for m in llm.conversation_history
-            if m.role == "assistant"
-            and (m.metadata or {}).get("voice_turn_id") == turn_id
+            for m in history
+            if m.role == "assistant" and (m.metadata or {}).get("voice_turn_id") == turn_id
         ]
         if said:
-            # The reply finished before playback did, the usual case: cut its last
-            # message to what was heard, in place, so history keeps one copy.
-            last = said[-1]
-            heard = text if len(said) == 1 else _heard_part(text, content_to_text(last.content))
-            if not heard:
-                return {"recorded": False}  # cut off before this message was heard
-            last.content = heard
-            last.metadata = {**last.metadata, "interrupted": True, "turn_id": turn_id}
-            return {"recorded": True, "replaced": True}
+            cut = _played_cut(text, [_reply_text(m) for m in said])
+            edits: dict[int, str | None] = {}  # reply position: its new text, None drops it
+            for position, message in enumerate(said):
+                metadata = message.metadata or {}
+                if cut is not None and position < cut[0]:
+                    continue  # heard whole
+                if cut is not None and position == cut[0]:
+                    _set_reply_text(message, cut[1])
+                    message.metadata = {**metadata, "interrupted": True, "turn_id": turn_id}
+                    edits[position] = cut[1]
+                elif metadata.get("tool_calls") or metadata.get("xml_tool_calls"):
+                    _set_reply_text(message, "")  # never heard, but its tools ran
+                    edits[position] = ""
+                else:
+                    history.remove(message)  # never heard
+                    edits[position] = None
+            rewrite = getattr(llm.conversation_logger, "rewrite_voice_turn", None)
+            if edits and callable(rewrite):
+                try:  # /resume and the engine's disk-seeded history read the log
+                    rewrite(turn_id, len(said), edits)
+                except Exception:
+                    logger.warning("could not log a voice talk-over cut", exc_info=True)
+            return {"recorded": bool(edits), "replaced": bool(edits)}
+        if not text:
+            return {"recorded": False}
         llm._add_conversation_message(
             ConversationMessage(
                 role="assistant",
