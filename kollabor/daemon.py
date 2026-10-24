@@ -32,6 +32,9 @@ LAUNCH_ARGS_ENV = "KOLLAB_LAUNCH_ARGS"
 # reports `service` from that.
 SERVICE_ENV = "KOLLAB_SERVICE"
 SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
+# Set by exec_detached_child: this process was forked, detached and exec'd
+# already, so cli_main's --detached branch must not fork again.
+DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
 
 
 class DaemonExited(RuntimeError):
@@ -40,6 +43,30 @@ class DaemonExited(RuntimeError):
     def __init__(self, exit_code: int):
         super().__init__(f"daemon exited with status {exit_code}")
         self.exit_code = exit_code
+
+
+def exec_detached_child(argv: list[str]) -> bool:
+    """Replace a forked, detached child with a fresh kollab; False if exec failed.
+
+    macOS aborts a forked child of a multithreaded parent that touches an
+    Objective-C class the parent had not initialized (Keychain reads, ctypes
+    into Security), so the child must never keep running Python from the forked
+    image. The caller falls back to running in-process when this returns.
+    """
+    from .binary import kollab_argv
+
+    args = [a for a in argv[1:] if a != "--daemon"]
+    if "--detached" not in args and "-d" not in args:
+        args.insert(0, "--detached")
+    cmd = [*kollab_argv(), *args]
+    os.environ[DETACHED_CHILD_ENV] = "1"
+    try:
+        os.execv(cmd[0], cmd)
+    except OSError as e:
+        os.environ.pop(DETACHED_CHILD_ENV, None)
+        logger.warning(f"exec of detached child failed, running in-process: {e}")
+        return False
+    return True  # unreachable once exec succeeds; keeps mocked execv testable
 
 
 def fork_daemon(argv: list[str]) -> tuple[int, str]:
@@ -83,6 +110,7 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
 
         # Pass the write fd to the child so hub plugin can signal
         os.environ[DAEMON_READY_FD_ENV] = str(write_fd)
+        os.set_inheritable(write_fd, True)  # survives the exec below
 
         # Redirect stdio AFTER setting up the fd env var
         devnull = os.open(os.devnull, os.O_RDWR)
@@ -91,8 +119,10 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         os.dup2(devnull, 2)  # stderr
         os.close(devnull)
 
-        # Run the full app headless (same as --detached)
-        # This function never returns in the child
+        # Exec a fresh kollab (see exec_detached_child); never returns on success.
+        exec_detached_child(argv)
+
+        # Exec failed: run the full app headless in this forked image
         _run_daemon(argv, write_fd)
         sys.exit(0)
 
