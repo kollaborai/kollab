@@ -2256,9 +2256,10 @@ class ContextCompactionPlugin(BasePlugin):
         """Build a bounded recovery note, prioritizing the latest user request.
 
         ``max_chars`` is the cap on the final injected message, including its
-        framing. Hub messages and standalone agent HUD updates are coordination
-        context, not human intent; raw task assignments are represented separately
-        by TaskLedger-selected excerpts and must not reappear as active work.
+        framing. Non-intended hub notices and standalone agent HUD updates are
+        coordination context. Intended direct hub requests without a TaskLedger
+        task ID remain human intent; raw task assignments are represented by
+        TaskLedger-selected excerpts and must not reappear as active work.
         """
         wrapper_chars = len(SUMMARY_INJECTION_PREFIX) + len(SUMMARY_INJECTION_SUFFIX)
         body_limit = max(0, max_chars - wrapper_chars)
@@ -2286,11 +2287,16 @@ class ContextCompactionPlugin(BasePlugin):
             if role not in {"user", "assistant"}:
                 continue
 
-            # These are separate user-role records injected by the hub or HUD
-            # queue, not human requests. Exclude them before latest-user
-            # prioritization so a later status notice cannot displace the ask.
+            # The hub injects both observed broadcasts and direct requests as
+            # user-role records. Ignore non-intended hub notices before
+            # latest-user prioritization, but preserve intended requests even
+            # when they are not attached to a TaskLedger entry. Standalone HUD
+            # records are coordination context, not user requests.
             if (
-                metadata.get("hub_message")
+                (
+                    metadata.get("hub_message")
+                    and not metadata.get("hub_is_intended")
+                )
                 or metadata.get("agent_hud")
                 or metadata.get("agent_hud_sources")
             ):
@@ -2306,11 +2312,16 @@ class ContextCompactionPlugin(BasePlugin):
             # Active task excerpts are added independently by
             # _build_compacted_history. Do not replay raw closed, superseded,
             # or duplicate hub assignments from the old prefix.
-            is_hub_task = bool(
-                metadata.get("hub_task_id")
-                or (metadata.get("task_id") and metadata.get("hub_is_intended"))
+            explicit_task_id = metadata.get("hub_task_id") or (
+                metadata.get("task_id") if metadata.get("hub_is_intended") else None
             )
-            if not is_hub_task:
+            is_untracked_direct_hub_request = bool(
+                metadata.get("hub_message")
+                and metadata.get("hub_is_intended")
+                and not explicit_task_id
+            )
+            is_hub_task = bool(explicit_task_id)
+            if not is_hub_task and not is_untracked_direct_hub_request:
                 try:
                     is_hub_task = self._is_hub_task(message)
                 except (AttributeError, TypeError):

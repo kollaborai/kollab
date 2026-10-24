@@ -33,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Context-compaction emergency recovery prioritizes the latest human request,
-  excludes injected hub/HUD records and stale assignments, and keeps the full
-  recovery message within the 8,000-character limit.
+  excludes non-intended hub/HUD notices and stale assignments, preserves
+  intended direct hub requests without TaskLedger IDs, and caps the wrapped
+  recovery message at 8,000 characters.
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
 
 ### Removed

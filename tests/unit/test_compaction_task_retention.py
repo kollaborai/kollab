@@ -582,6 +582,31 @@ def test_emergency_summary_excludes_later_hub_and_agent_hud_records() -> None:
     assert "STANDALONE_AGENT_HUD_CANARY" not in recovery_text
 
 
+def test_emergency_summary_preserves_intended_untracked_hub_request() -> None:
+    plugin = _plugin()
+    request_marker = "INTENDED_UNTRACKED_HUB_REQUEST_CANARY"
+    earlier_human_request = Message(
+        role="user",
+        content="OLDER_HUMAN_REQUEST_CANARY: first request.",
+    )
+    direct_hub_request = Message(
+        role="user",
+        content=(
+            "[hub channel: sender -> receiver] "
+            + request_marker
+            + ": Please investigate this issue carefully and report back."
+        ),
+        metadata={"hub_message": True, "hub_is_intended": True},
+    )
+
+    recovery_text = plugin._build_emergency_summary(
+        [earlier_human_request, direct_hub_request]
+    )
+
+    assert request_marker in recovery_text
+    assert "OLDER_HUMAN_REQUEST_CANARY" in recovery_text
+
+
 def test_emergency_summary_bound_includes_injection_wrapper() -> None:
     plugin = _plugin()
     messages = [
