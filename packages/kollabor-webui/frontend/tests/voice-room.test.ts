@@ -169,6 +169,12 @@ test("a runtime that fails before ready never joins or asks for the mic", async 
   assert.ok(h.calls.includes("stop:error"));
 });
 
+test("a late ready from the runtime does not undo the browser's connecting", () => {
+  const connecting = { ...initialRoomState, state: "connecting" as const };
+  assert.equal(reduceVoiceEvent(connecting, ev("voice.state", { state: "ready" })).state, "connecting");
+  assert.equal(reduceVoiceEvent(connecting, ev("voice.state", { state: "thinking" })).state, "thinking");
+});
+
 test("only a page served from this computer can reach the voice room", async () => {
   const { roomReachable } = await import("../src/voice/room-state.ts");
   assert.ok(["localhost", "127.0.0.1", "[::1]"].every(roomReachable));

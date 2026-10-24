@@ -95,7 +95,10 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
   const p = e.payload ?? {};
   switch (e.event) {
     case "voice.state": {
-      const next = (str(p.state) as VoiceSessionState | null) ?? s.state;
+      const said = (str(p.state) as VoiceSessionState | null) ?? s.state;
+      // The browser's own join steps outrank a late "ready" from the runtime.
+      const joining = s.state === "requesting_permission" || s.state === "connecting";
+      const next = said === "ready" && joining ? s.state : said;
       const dl = p.download as Record<string, unknown> | undefined;
       const download =
         next === "downloading_models" && dl
