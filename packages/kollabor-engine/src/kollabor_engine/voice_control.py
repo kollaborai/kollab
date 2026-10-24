@@ -140,8 +140,9 @@ def llm_disclosure(profile: Any) -> tuple[bool, str | None]:
 
 
 class RegistryTargetResolver:
-    def __init__(self, registry: Callable[[], dict[str, Any]]) -> None:
+    def __init__(self, registry: Callable[[], dict[str, Any]], settings: Any = None) -> None:
         self._registry = registry
+        self._settings = settings
 
     async def resolve(
         self, owner_id: str, control_session_id: str, selected_thread_id: str | None
@@ -158,15 +159,30 @@ class RegistryTargetResolver:
                 "The selected session is not running.",
                 retryable=True,
             )
+        if selected_thread_id is not None and selected_thread_id not in getattr(
+            session, "known_thread_ids", ()
+        ):
+            raise RuntimeHostError(
+                "target_mismatch",
+                409,
+                "The selected thread does not belong to this session.",
+            )
         daemon = getattr(session, "daemon", None)
         agent_id = session.agent or getattr(daemon, "agent_name", "") or "default"
         profile = getattr(session, "profile", None)
+        session_profile = str(getattr(profile, "name", "") or "default")
+        settings = self._settings
         return ResolvedVoiceTarget(
             agent_id=agent_id,
             thread_id=selected_thread_id,
-            voice_provider_profile_id=str(getattr(profile, "name", "") or "default"),
-            # ponytail: no voice-only prompt overlay or lease epoch exist engine-side yet
-            voice_prompt_revision="default",
+            # The voice profile and prompt overlay ride on voice turns only.
+            voice_provider_profile_id=(
+                settings.voice_profile_id(session_profile) if settings else session_profile
+            ),
+            voice_prompt_revision=(
+                settings.prompt_revision(agent_id) if settings else "default"
+            ),
+            # ponytail: no lease epoch exists engine-side yet
             service_lease_epoch=0,
         )
 
@@ -410,11 +426,13 @@ class VoiceControl:
         registry: Callable[[], dict[str, Any]],
         platform_supported: Callable[[], bool] | None = None,
         poll_interval: float = 0.2,
+        settings: Any = None,
     ) -> None:
+        self.settings = settings
         self.runtime = runtime
         self._registry = registry
         self.host = EngineRuntimeHost(
-            session_resolver=RegistryTargetResolver(registry),
+            session_resolver=RegistryTargetResolver(registry, settings),
             runtime=runtime,
             platform_supported=platform_supported,
             join_ticket_signer=runtime,
@@ -443,9 +461,10 @@ class VoiceControl:
         view = await self.host.create_session(OWNER_ID, control_session_id, request)
         if view.voice_session_id not in self._disclosure:
             session = self._registry().get(control_session_id)
-            self._disclosure[view.voice_session_id] = llm_disclosure(
-                getattr(session, "profile", None)
-            )
+            profile = getattr(session, "profile", None)
+            if self.settings is not None:
+                profile = self.settings.disclosure_profile(profile)
+            self._disclosure[view.voice_session_id] = llm_disclosure(profile)
         if view.voice_session_id not in self._watching:
             self._watching.add(view.voice_session_id)
             self._spawn(self._watch(view.voice_session_id))

@@ -225,7 +225,11 @@ def _wire_voice(app: FastAPI, port: Optional[int]) -> None:
         engine_url=lambda: f"http://127.0.0.1:{port or 7433}",
         engine_token=lambda: get_token() or read_token_from_disk(),
     )
-    app.state.voice = VoiceControl(runtime=runtime, registry=get_session_registry)
+    from .voice_settings import VoiceSettingsService
+
+    app.state.voice = VoiceControl(
+        runtime=runtime, registry=get_session_registry, settings=VoiceSettingsService()
+    )
 
 
 def create_app(port: Optional[int] = None) -> FastAPI:

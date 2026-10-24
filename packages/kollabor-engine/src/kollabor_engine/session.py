@@ -194,6 +194,8 @@ class EngineSession:
         # truth; this is refreshed on demand so synchronous readers (to_dict,
         # the history route) don't have to await mid-render.
         self.history: List[Dict[str, Any]] = []
+        # Thread ids a message was sent on; a voice room may bind only one of these.
+        self.known_thread_ids: set[str] = set()
         # The daemon's messages as sent, and the digest it gave for them: a
         # refresh asks for only what follows (an agent on another computer
         # would otherwise send its whole history over the network every turn).
@@ -818,12 +820,15 @@ class EngineSession:
         origin_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        return await self.state.send_message(
+        result = await self.state.send_message(
             content,
             request_id=request_id,
             thread_id=thread_id,
             origin_context=origin_context,
         )
+        if thread_id and isinstance(result, dict) and result.get("accepted"):
+            self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
+        return result
 
     def cancel_turn(self) -> None:
         """Ask the daemon to cancel the in-flight turn (fire and forget)."""

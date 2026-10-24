@@ -53,6 +53,73 @@ async def _guard(fn):
         return error_response(exc)
 
 
+def _settings(request: Request):
+    settings = _control(request).settings
+    if settings is None:
+        raise RuntimeHostError(
+            "runtime_unavailable", 503, "Voice settings are not available in this engine."
+        )
+    return settings
+
+
+def _prompt_agent(request: Request, session_id: str | None, thread_id: str | None):
+    """Agent whose voice prompt is addressed; None addresses the default prompt."""
+    if session_id is None:
+        return None
+    session = _control(request)._registry().get(session_id)  # noqa: SLF001
+    if session is None:
+        raise RuntimeHostError("session_not_found", 404, "Session was not found.")
+    if thread_id is not None and thread_id not in getattr(session, "known_thread_ids", ()):
+        raise RuntimeHostError(
+            "target_mismatch", 409, "The selected thread does not belong to this session."
+        )
+    daemon = getattr(session, "daemon", None)
+    return session.agent or getattr(daemon, "agent_name", "") or "default"
+
+
+@router.get("/voice/settings")
+async def get_voice_settings(request: Request):
+    async def run():
+        return JSONResponse(await _settings(request).get_settings())
+
+    return await _guard(run)
+
+
+@router.put("/voice/settings")
+async def put_voice_settings(request: Request, payload: dict = Body(...)):
+    async def run():
+        return JSONResponse(await _settings(request).update_settings(payload))
+
+    return await _guard(run)
+
+
+@router.get("/voice/settings/prompt")
+async def get_voice_prompt(
+    request: Request,
+    session_id: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+):
+    async def run():
+        agent = _prompt_agent(request, session_id, thread_id)
+        return JSONResponse(_settings(request).get_prompt(agent))
+
+    return await _guard(run)
+
+
+@router.put("/voice/settings/prompt")
+async def put_voice_prompt(
+    request: Request,
+    payload: dict = Body(...),
+    session_id: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+):
+    async def run():
+        agent = _prompt_agent(request, session_id, thread_id)
+        return JSONResponse(_settings(request).update_prompt(agent, payload))
+
+    return await _guard(run)
+
+
 @router.post("/sessions/{control_session_id}/voice", status_code=202)
 async def create_voice_session(
     request: Request,

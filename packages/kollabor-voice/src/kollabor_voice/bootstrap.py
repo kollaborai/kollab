@@ -75,6 +75,22 @@ def ensure_runtime(root, pins, imports, progress, detail="Preparing voice suppor
     return python
 
 
+def prepared_runtime_python(root=None):
+    """The service runtime's interpreter if setup finished for the current pins, else None.
+
+    Same signature/marker rule as ensure_runtime, without installing anything.
+    """
+    pins = manifest()["runtime"]
+    signature = hashlib.sha256(json.dumps(pins).encode()).hexdigest()[:16]
+    runtime = (root or service_root()) / "runtimes" / signature
+    python = runtime / "bin/python"
+    try:
+        ready = json.loads((runtime / "ready.json").read_text())
+    except (ValueError, OSError):
+        return None
+    return python if ready.get("requirements") == pins and python.exists() else None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=service_root())

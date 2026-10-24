@@ -18,10 +18,10 @@ import secrets
 import shutil
 import signal
 import socket
-import sys
 import time
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .voice_runtime_host import RuntimeHostError
@@ -214,18 +214,35 @@ class LiveKitRuntime:
                 retryable=True,
             )
 
-    def _worker_command(self) -> list[str]:
+    def preflight(self) -> None:
+        self._worker_command()
+
+    def _worker_command(self) -> tuple[list[str], dict[str, str]]:
         if self._worker_argv:
-            return list(self._worker_argv)
-        # ponytail: the voice runtime python is resolved from its bootstrap
-        # root once V2 lands; the engine interpreter is the fallback.
-        return [
-            os.environ.get("KOLLAB_VOICE_PYTHON") or sys.executable,
-            "-m",
-            "kollabor_voice.livekit_worker",
-        ]
+            return list(self._worker_argv), {}
+        # The voice service's own prepared runtime has livekit and numpy; the
+        # engine's interpreter has neither. KOLLAB_VOICE_PYTHON overrides.
+        python = os.environ.get("KOLLAB_VOICE_PYTHON")
+        if not python:
+            from kollabor_voice.bootstrap import prepared_runtime_python
+
+            prepared = prepared_runtime_python()
+            if prepared is None:
+                raise RuntimeHostError(
+                    "voice_runtime_not_ready",
+                    503,
+                    "Voice support is not set up yet. Turn on voice in Settings "
+                    "and wait for model setup to finish, then try again.",
+                    retryable=True,
+                )
+            python = str(prepared)
+        import kollabor_voice
+
+        src = str(Path(kollabor_voice.__file__).resolve().parent.parent)
+        return [python, "-m", "kollabor_voice.livekit_worker"], {"PYTHONPATH": src}
 
     async def start_session(self, binding: VoiceSessionBinding) -> WorkerHandle:
+        cmd, cmd_env = self._worker_command()  # fail before starting any server
         await self._ensure_server()
         room = room_name_for(binding)
         config = {
@@ -249,9 +266,9 @@ class LiveKitRuntime:
             "engine_token": self._engine_token(),
         }
         env = dict(os.environ)
+        env.update(cmd_env)
         env.update(self._worker_env)
         env["KOLLAB_VOICE_WORKER_CONFIG"] = json.dumps(config)
-        cmd = self._worker_command()
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
