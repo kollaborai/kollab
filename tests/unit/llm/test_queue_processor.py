@@ -259,6 +259,53 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self._assistant_messages(), [])
         self.conversation_logger.log_assistant_message.assert_not_awaited()
 
+    def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
+        """The reply joins history after its tools; a Stop in between kept nothing."""
+        self.streaming_handler.call_llm = AsyncMock(
+            return_value="Running it.\n<terminal>sleep 9</terminal>"
+        )
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.tool_executor.execute_tool = AsyncMock(
+            side_effect=asyncio.CancelledError("Request cancelled by user")
+        )
+        self.response_parser.parse_response.return_value = {
+            "content": "Running it.",
+            "components": {},
+            "turn_completed": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "sleep 9"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("Running it.", False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        replies = self._assistant_messages()
+        self.assertEqual(
+            [(m.content, m.metadata) for m in replies],
+            [("Running it.", {"interrupted": True})],
+        )
+
     def test_context_window_failure_emits_typed_error_without_retry(self):
         class ContextWindowExceeded(RuntimeError):
             error_code = "context_window_exceeded"

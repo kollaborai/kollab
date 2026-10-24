@@ -1195,6 +1195,7 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
+        shown_reply = ""  # on screen, not yet in history: a Stop during tools keeps it
 
         try:
             # Context service: attach context blocks (curator, snapshot,
@@ -1658,6 +1659,7 @@ class QueueProcessor:
                     tool_results=None,
                     thinking_content=thinking_blocks,
                 )
+                shown_reply = clean_response
                 voice = getattr(self, "active_voice", None)
                 has_spoken_text = clean_response.strip() or parsed_response.get("spoken_text")
                 if voice and has_spoken_text and not self.cancel_processing:
@@ -1880,6 +1882,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 # Native tool results: add to history in native API format
                 # so provider can reconstruct tool_result turns correctly
@@ -1985,6 +1988,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 history_results_xml = list(xml_tool_results)
                 if history_results_xml:
@@ -2064,7 +2068,7 @@ class QueueProcessor:
 
             self.turn_completed = True
             self.stats["total_thinking_time"] += thinking_duration
-            await self._keep_interrupted_reply(parent_uuid)
+            await self._keep_interrupted_reply(parent_uuid, shown_reply)
 
         except Exception as e:
             logger.error(f"Error processing message: {type(e).__name__}: {e}")
@@ -2152,15 +2156,17 @@ class QueueProcessor:
 
         return parent_uuid
 
-    async def _keep_interrupted_reply(self, parent_uuid: str) -> None:
+    async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.
 
         The user watched it stream; without it the next turn answers a question
         the model no longer remembers asking. A voice turn adds nothing here:
-        the voice side records what was actually played.
+        the voice side records what was actually played. A Stop during the call
+        cuts its stream; one while tools run leaves `shown`, the reply on screen.
         """
         take = getattr(self._streaming_handler, "take_interrupted_text", None)
         text = take() if callable(take) else ""
+        text = text if isinstance(text, str) and text.strip() else shown
         if not isinstance(text, str) or not text.strip():
             return
         origin = self.active_origin_context
