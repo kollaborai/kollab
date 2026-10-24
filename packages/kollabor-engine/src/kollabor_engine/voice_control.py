@@ -649,6 +649,17 @@ class VoiceControl:
     async def _finished(turn_id: str, *, duplicate: bool) -> AsyncIterator[dict[str, Any]]:
         yield {"done": True, "turn_id": turn_id, "duplicate": duplicate}
 
+    async def record_interrupted_reply(
+        self, voice_session_id: str, turn_id: str, text: str
+    ) -> dict[str, Any]:
+        """A talk-over cut a reply short: keep the part the worker says was played."""
+        binding = await self.host.get_binding(OWNER_ID, voice_session_id)
+        text = text.strip()
+        if not text:
+            return {"recorded": False}
+        session = await self.router._get_session(binding)  # noqa: SLF001
+        return await session.record_interrupted_reply(turn_id, text)
+
     async def ingest_event(self, voice_session_id: str, body: WorkerEvent) -> None:
         view = await self.status(voice_session_id)
         if body.generation is not None and body.generation != view.generation:

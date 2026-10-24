@@ -802,6 +802,16 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         return {"revoked": True}
 
     handlers["state.voice_admission"] = _voice_admission
+
+    async def _voice_interrupted_reply(params):
+        try:
+            return await state_service.record_interrupted_voice_reply(
+                str(params.get("turn_id") or ""), str(params.get("text") or "")
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+    handlers["state.voice_interrupted_reply"] = _voice_interrupted_reply
     async def _acp_configure_mcp(params):
         return await state_service.configure_client_mcp(params.get("servers") or [])
     handlers["state.acp_configure_mcp"] = _acp_configure_mcp

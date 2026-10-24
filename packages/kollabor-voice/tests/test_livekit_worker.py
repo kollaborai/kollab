@@ -268,8 +268,22 @@ class FakeAudioOutput(io.AudioOutput):
         self.on_playback_finished(playback_position=position, interrupted=True)
 
 
-class FakeRoom:
+class FakeTextOutput(io.TextOutput):
+    """The room's transcript sink: with one, LiveKit keeps the text it forwarded."""
+
     def __init__(self):
+        super().__init__(label="fake-transcript", next_in_chain=None)
+
+    async def capture_text(self, text):
+        pass
+
+    def flush(self):
+        pass
+
+
+class FakeRoom:
+    def __init__(self, transcript=False):
+        self.transcript = transcript
         self.closed, self.participant = asyncio.Event(), asyncio.Event()
         self.connected = self.output = None
         self.is_closed = False
@@ -281,6 +295,8 @@ class FakeRoom:
     async def attach(self, session, agent):
         session.input.audio = FakeAudioInput()
         self.output = session.output.audio = FakeAudioOutput()
+        if self.transcript:
+            session.output.transcription = FakeTextOutput()
         await session.start(agent=agent)
 
     async def wait_participant(self):
@@ -294,11 +310,17 @@ class FakeRoom:
 class Rig:
     """A running Worker: real AgentSession, real TurnClient, everything else fake."""
 
-    def __init__(self, utterances=(), scripts=(), tts_chunks=100, detector="vad"):
+    def __init__(
+        self, utterances=(), scripts=(), tts_chunks=100, detector="vad", transcript=False
+    ):
         self.engine, self.adapter = FakeEngine(scripts), FakeAdapter(
             utterances, tts_chunks=tts_chunks
         )
-        self.vad, self.room, self.poster = ScriptedVAD(), FakeRoom(), Recorder()
+        self.vad, self.room, self.poster = (
+            ScriptedVAD(),
+            FakeRoom(transcript),
+            Recorder(),
+        )
         self.detector = detector
         self.room.order = self.adapter.order
 
@@ -479,6 +501,78 @@ def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
     assert rig.room.output.paused >= 1  # the voice paused first, like the demo
     assert rig.engine.requests[1]["display_text"] == "stop that"
     assert S2 not in rig.adapter.spoken  # nothing late from the cancelled turn
+
+
+def interrupted_posts(poster):
+    return [(p, b) for p, b in poster.posts if p.endswith("/interrupted")]
+
+
+def test_a_talk_over_posts_the_played_text_once_with_its_own_turn_id():
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, "done"], ["Okay.", "done"]], transcript=True
+        ) as rig:
+            await rig.say("is the build green")
+            await until(
+                lambda: rig.adapter.spoken == [S1] and rig.room.output.frames >= 3
+            )
+            await rig.say("stop that")
+            await until(lambda: interrupted_posts(rig.poster))
+            await until(lambda: "Okay." in rig.adapter.spoken)
+            await rig.worker.drain()
+        return rig
+
+    rig = run(scenario())
+    first, second = rig.engine.requests
+    [(path, body)] = interrupted_posts(rig.poster)  # once, not once per turn
+    assert path == f"turns/{first['turn_id']}/interrupted"  # the cut reply's turn
+    assert path != f"turns/{second['turn_id']}/interrupted"
+    assert body["text"].startswith("Checking") and S2 not in body["text"]
+
+
+def test_a_reply_that_was_never_played_leaves_nothing_to_post():
+    async def scenario():
+        async with Rig(
+            scripts=[["wait", S1, "done"], ["Okay.", "done"]], transcript=True
+        ) as rig:
+            await rig.say("is the build green")
+            await until(lambda: len(rig.engine.requests) == 1)  # thinking, no audio
+            await rig.say("stop that")
+            await until(lambda: "Okay." in rig.adapter.spoken)
+            await rig.worker.drain()
+        return rig
+
+    rig = run(scenario())
+    assert rig.adapter.spoken == ["Okay."] and not interrupted_posts(rig.poster)
+
+
+def test_the_played_text_is_bound_to_the_turn_that_registered_it():
+    class Speech:
+        def __init__(self, text, interrupted=True):
+            self.interrupted = interrupted
+            self.chat_items = [
+                llm.ChatMessage(role="user", content=["hi"]),
+                llm.ChatMessage(role="assistant", content=[text], interrupted=interrupted),
+            ]
+
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    async def scenario():
+        worker = lw.Worker(CONFIG, FakeRoom(), FakeAdapter(), Recorder())
+        old, new = lw.Turn("old-turn", 0.0), lw.Turn("new-turn", 0.0)
+        cut, blank, whole = Speech("So the build"), Speech("  "), Speech("All done.", False)
+        for turn, speech in ((old, cut), (new, blank), (new, whole)):
+            worker.keep_played_text(turn, speech)
+        worker.keep_played_text(new, None)  # no handle to follow: nothing to register
+        # the new turn's callbacks fire first; the old reply's message came late
+        for speech in (blank, whole, cut):
+            speech.callback(speech)
+        await worker.drain()
+        return worker
+
+    worker = run(scenario())
+    assert worker.poster.posts == [("turns/old-turn/interrupted", {"text": "So the build"})]
 
 
 def test_a_cough_over_the_reply_pauses_it_and_it_resumes():

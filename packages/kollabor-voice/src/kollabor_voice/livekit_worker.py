@@ -45,6 +45,7 @@ from livekit.agents import (
 from livekit.agents.language import LanguageCode
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN
 from livekit.agents.voice import room_io
+from livekit.agents.voice.agent_activity import _SpeechHandleContextVar
 from livekit.plugins import silero
 
 from .speech_adapter import AdapterError, AudioFrame, RoomBinding, SpeechAdapter
@@ -389,6 +390,7 @@ class KollabAgent(Agent):
         if not text or worker.stopping.is_set():
             return
         turn = self.turn = worker.begin_turn(text, greeting)
+        worker.keep_played_text(turn, _SpeechHandleContextVar.get(None))
         try:
             async with contextlib.aclosing(worker.turns.stream(turn.body)) as sentences:
                 async for sentence in sentences:
@@ -498,22 +500,26 @@ class Worker:
     # -- events: one ordered queue to the Engine ------------------------------------
 
     def event(self, event: str, payload: dict, turn_id: str | None = None) -> None:
-        self.outbox.put_nowait(
+        self.send(
+            "events",
             {
                 "event": event,
                 "generation": self.generation,
                 "turn_id": turn_id,
                 "payload": payload,
-            }
+            },
         )
+
+    def send(self, path: str, body: dict) -> None:
+        self.outbox.put_nowait((path, body))
         if self.pump is None:
             self.pump = asyncio.create_task(self._pump(), name="voice-events")
 
     async def _pump(self) -> None:
         while True:
-            body = await self.outbox.get()
+            path, body = await self.outbox.get()
             try:
-                await self.poster.post("events", body)
+                await self.poster.post(path, body)
             finally:
                 self.outbox.task_done()
 
@@ -678,6 +684,28 @@ class Worker:
             return "", None
         self.stt_ms, self.language = stt_ms or None, language
         return " ".join(pieces), language
+
+    def keep_played_text(self, turn: Turn, speech) -> None:
+        """A talk-over leaves the reply cut short: tell the Engine the part that was played.
+
+        `speech` is the reply's own SpeechHandle (the context var is set where its
+        task is created). The next turn can start before this one's interrupted
+        message exists, so the turn id is bound here, never read off `self.turn`.
+        """
+        if speech is None:
+            return
+
+        def done(handle) -> None:
+            if not handle.interrupted or self.stopping.is_set():  # closing is no talk-over
+                return
+            for item in reversed(handle.chat_items):
+                if item.type == "message" and item.role == "assistant" and item.interrupted:
+                    text = (item.text_content or "").strip()
+                    if text:
+                        self.send(f"turns/{turn.id}/interrupted", {"text": text})
+                    return
+
+        speech.add_done_callback(done)
 
     def begin_turn(self, text: str, greeting: bool) -> Turn:
         turn = Turn(str(uuid.uuid4()), time.monotonic())  # the Engine takes canonical UUIDs only

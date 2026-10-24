@@ -863,6 +863,21 @@ class EngineSession:
             raise ValueError(str(result["error"]))
         return result
 
+    async def record_interrupted_reply(self, turn_id: str, text: str) -> Dict[str, Any]:
+        """Keep the part of a voice reply the listener heard before talking over it."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_interrupted_reply", {"turn_id": turn_id, "text": text}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_interrupted_reply expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if result.get("recorded"):
+            await self.refresh_history(notify=True)  # open windows hear the new row
+        return result
+
     def cancel_turn(self) -> None:
         """Ask the daemon to cancel the in-flight turn (fire and forget)."""
         if self.daemon is None:

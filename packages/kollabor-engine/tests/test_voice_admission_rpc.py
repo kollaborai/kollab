@@ -33,7 +33,20 @@ DAEMON = textwrap.dedent(
     from kollabor.state.local import LocalStateService
 
 
+    class Logger:
+        async def log_assistant_message(self, content, parent_uuid, **kwargs):
+            return "logged"
+
+
     class LLM:
+        def __init__(self):
+            self.conversation_history, self.current_parent_uuid = [], "root"
+            self.conversation_logger = Logger()
+
+        def _add_conversation_message(self, message, parent_uuid=None):
+            self.conversation_history.append(message)
+            return "added"
+
         async def submit_human_input(self, message, **kwargs):
             return {"status": "queued", "request_id": kwargs.get("request_id")}
 
@@ -54,9 +67,17 @@ DAEMON = textwrap.dedent(
             methods[name] = fn
 
 
+    llm = LLM()
     handlers.register_state_handlers(
-        Rpc(), LocalStateService(LLM(), profile_manager=object(), event_bus=Bus())
+        Rpc(), LocalStateService(llm, profile_manager=object(), event_bus=Bus())
     )
+
+
+    async def history(params):
+        return [[m.role, m.content, m.metadata] for m in llm.conversation_history]
+
+
+    methods["test.history"] = history
 
 
     async def main():
@@ -182,3 +203,23 @@ async def test_the_engine_will_not_mirror_a_capability_it_revoked(daemon):
     result = await daemon.send_message("hi", request_id="turn-f", thread_id=None, origin_context=context)
     assert result == {"accepted": False, "reason": "invalid voice admission capability"}
     revoke_voice_admissions_for_generation("voice-1", 1)
+
+
+async def test_engine_session_keeps_the_played_text_in_the_daemon_history(daemon):
+    refreshed = []
+
+    async def refresh_history(notify=False):
+        refreshed.append(notify)
+
+    daemon.refresh_history = refresh_history  # pulling the mirror is the history tests' business
+    assert await daemon.record_interrupted_reply("turn-i", "So the build") == {"recorded": True}
+    assert await daemon.record_interrupted_reply("turn-i", "So the build") == {
+        "recorded": False,
+        "duplicate": True,
+    }
+    assert await daemon.record_interrupted_reply("turn-j", " ") == {"recorded": False}
+    assert refreshed == [True]  # open windows hear about the one new row, and only it
+    held = await daemon.daemon.rpc.call("test.history", {})
+    assert held == [
+        ["assistant", "So the build", {"interrupted": True, "source": "voice", "turn_id": "turn-i"}]
+    ]

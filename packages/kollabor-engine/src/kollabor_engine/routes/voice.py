@@ -6,7 +6,7 @@ import json
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sse_starlette.sse import EventSourceResponse
 
 from ..voice_control import VoiceControl, WorkerEvent, encode_cursor
@@ -16,11 +16,16 @@ from ..voice_types import (
     CreateVoiceSessionRequest,
     JoinVoiceSessionRequest,
     StopVoiceSessionRequest,
+    TurnId,
     VoiceTranscriptSnapshot,
     VoiceTurnRequest,
 )
 
 router = APIRouter(tags=["voice"])
+
+
+class InterruptedReply(BaseModel):
+    text: str
 
 
 def _control(request: Request) -> VoiceControl:
@@ -228,6 +233,26 @@ async def worker_turn(request: Request, voice_session_id: str, body: VoiceTurnRe
             await turn.aclose()
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
+@router.post("/voice/sessions/{voice_session_id}/turns/{turn_id}/interrupted")
+async def worker_interrupted_reply(
+    request: Request, voice_session_id: str, turn_id: TurnId, body: InterruptedReply
+):
+    """A talk-over cut the reply short: the worker posts the part it played."""
+
+    async def run():
+        if len(body.text.encode()) > MAX_FINAL_TRANSCRIPT_BYTES:
+            raise RuntimeHostError(
+                "transcript_too_large", 413, "Voice transcript exceeds the size limit."
+            )
+        return JSONResponse(
+            await _control(request).record_interrupted_reply(
+                voice_session_id, turn_id, body.text
+            )
+        )
+
+    return await _guard(run)
 
 
 @router.post("/voice/sessions/{voice_session_id}/events")

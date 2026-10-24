@@ -3129,6 +3129,43 @@ class LocalStateService(StateService):
             llm.cancel_current_request()
         return {"cancelled": was_processing}
 
+    async def record_interrupted_voice_reply(
+        self, turn_id: str, text: str
+    ) -> dict[str, Any]:
+        """Keep the part of a voice reply that was played before a talk-over.
+
+        The worker posts what reached the speaker; the history then holds what the
+        listener heard, marked interrupted, once per voice turn.
+        """
+        from kollabor_events.data_models import ConversationMessage
+
+        llm = self._llm_service
+        text = (text or "").strip()
+        if llm is None or not turn_id or not text:
+            return {"recorded": False}
+        if any(
+            m.role == "assistant" and (m.metadata or {}).get("turn_id") == turn_id
+            for m in llm.conversation_history
+        ):
+            return {"recorded": False, "duplicate": True}
+        llm._add_conversation_message(
+            ConversationMessage(
+                role="assistant",
+                content=text,
+                metadata={"interrupted": True, "source": "voice", "turn_id": turn_id},
+            ),
+            parent_uuid=llm.current_parent_uuid,
+        )
+        try:  # the JSONL feeds /resume and the engine's disk-seeded history
+            llm.current_parent_uuid = await llm.conversation_logger.log_assistant_message(
+                text,
+                parent_uuid=llm.current_parent_uuid,
+                model=getattr(getattr(llm, "api_service", None), "model", None),
+            )
+        except Exception:
+            logger.warning("could not log an interrupted voice reply", exc_info=True)
+        return {"recorded": True}
+
     # === Resume (phase 4.5 step 7) ===
 
     async def resume_conversation(self, session_id: str) -> dict[str, Any]:

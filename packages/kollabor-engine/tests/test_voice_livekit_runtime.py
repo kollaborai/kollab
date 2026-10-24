@@ -61,6 +61,7 @@ class FakeSession:
         self.script = []
         self.cancels = 0
         self.revokes = []
+        self.interrupted = []
 
     def subscribe(self):
         q = asyncio.Queue()
@@ -93,6 +94,13 @@ class FakeSession:
     async def voice_admission(self, action, **params):
         self.revokes.append((action, params))
         return {"revoked": True}
+
+    async def record_interrupted_reply(self, turn_id, text):
+        # the daemon's answer: one interrupted reply per voice turn
+        if any(turn == turn_id for turn, _ in self.interrupted):
+            return {"recorded": False, "duplicate": True}
+        self.interrupted.append((turn_id, text))
+        return {"recorded": True}
 
 
 @pytest.fixture
@@ -636,6 +644,51 @@ async def test_disconnect_after_done_is_not_a_barge_in(rig):
         assert rig.session.cancels == 0
         ring = rig.control.hub._streams[view["voice_session_id"]].ring
         assert not any(e["payload"].get("barge_in") for e in ring)
+    await rig.control.shutdown()
+
+
+async def test_a_talk_over_records_the_played_text_once(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        turn = str(uuid4())
+        url = f"/voice/sessions/{view['voice_session_id']}/turns/{turn}/interrupted"
+        first = await http.post(url, json={"text": "  So the build  "})
+        assert first.status_code == 200 and first.json() == {"recorded": True}
+        again = await http.post(url, json={"text": "So the build"})
+        assert again.json() == {"recorded": False, "duplicate": True}
+        assert rig.session.interrupted == [(turn, "So the build")]  # trimmed, once
+    await rig.control.shutdown()
+
+
+async def test_blank_played_text_never_reaches_the_daemon(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        url = f"/voice/sessions/{view['voice_session_id']}/turns/{uuid4()}/interrupted"
+        blank = await http.post(url, json={"text": " \n "})
+        assert blank.status_code == 200 and blank.json() == {"recorded": False}
+        assert rig.session.interrupted == []
+    await rig.control.shutdown()
+
+
+async def test_the_interrupted_route_checks_session_turn_and_size(rig):
+    from kollabor_engine.voice_session_router import MAX_FINAL_TRANSCRIPT_BYTES
+
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid, text = view["voice_session_id"], {"text": "So the build"}
+        assert (
+            await http.post(f"/voice/sessions/{uuid4()}/turns/{uuid4()}/interrupted", json=text)
+        ).status_code == 404
+        assert (
+            await http.post(f"/voice/sessions/{sid}/turns/not-a-turn/interrupted", json=text)
+        ).status_code == 422
+        assert (
+            await http.post(f"/voice/sessions/{sid}/turns/{uuid4()}/interrupted", json={})
+        ).status_code == 422
+        big = {"text": "x" * (MAX_FINAL_TRANSCRIPT_BYTES + 1)}
+        refused = await http.post(f"/voice/sessions/{sid}/turns/{uuid4()}/interrupted", json=big)
+        assert refused.status_code == 413 and refused.json()["code"] == "transcript_too_large"
+        assert rig.session.interrupted == []
     await rig.control.shutdown()
 
 
