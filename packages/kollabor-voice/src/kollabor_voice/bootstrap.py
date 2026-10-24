@@ -103,7 +103,7 @@ def main() -> None:
         python = ensure_runtime(
             root,
             pins,
-            "import faster_whisper, kokoro_onnx, sounddevice, numpy",
+            "import faster_whisper, kokoro_onnx, sounddevice, numpy, livekit.rtc",
             progress,
         )
         progress("starting", "Starting shared voice service")

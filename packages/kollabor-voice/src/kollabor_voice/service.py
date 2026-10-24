@@ -105,6 +105,9 @@ class VoiceService:
         self.echo = None  # EchoCanceller while capturing with it on
         self.echo_error = None
         self._capture_preferences_revision = "unread"
+        from .audio_ipc import AudioIPC
+
+        self.audio_ipc = AudioIPC(self)  # LiveKit worker PCM, same model owner
 
     def progress(self, **state):
         self.setup = state
@@ -122,6 +125,7 @@ class VoiceService:
             self.handle, path=str(path), limit=MAX_REQUEST
         )
         os.chmod(path, 0o600)
+        await self.audio_ipc.start()
         self.tasks = [
             asyncio.create_task(self.watch(), name="voice-watch"),
             asyncio.create_task(self.transcribe(), name="voice-transcribe"),
@@ -327,6 +331,7 @@ class VoiceService:
                 self.error = None
                 self.last_transcript = None
                 self.owner = dict(
+                    capture=request.get("capture", True) is not False,
                     client_id=str(request["client_id"])[:200],
                     token=uuid.uuid4().hex,
                     epoch=uuid.uuid4().hex,
@@ -387,6 +392,10 @@ class VoiceService:
             self.gate.enroll()
             self.prepare_gate()
             return self.gate.status()
+        if op == "audio_capability":
+            return self.audio_ipc.mint(request, self.owner["epoch"])
+        if op == "audio_stop":
+            return self.audio_ipc.stop(request)
         if op == "classifier_submit":
             for key, task in list(self.classifier_jobs.items()):
                 if task.done():
@@ -571,6 +580,8 @@ class VoiceService:
     async def start_capture(self):
         if self.recorder or not self.owner or self.setup["state"] != "ready":
             return
+        if not self.owner.get("capture", True):
+            return  # a room lease: audio arrives over audio.sock, not this mic
         if self.speech and self.speech.status()["state"] != "ready":
             return
         try:
@@ -906,6 +917,7 @@ class VoiceService:
     async def close(self):
         async with self.lifecycle:
             await self.release_owner()
+        await self.audio_ipc.close()
         if self.server:
             self.server.close()
             await self.server.wait_closed()
