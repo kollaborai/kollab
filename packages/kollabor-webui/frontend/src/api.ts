@@ -106,8 +106,9 @@ export type HistoryMessage = {
 export type TurnError = { message: string; history_length: number };
 
 
-const configuredHistoryPageSize = Number(import.meta.env.VITE_HISTORY_PAGE_SIZE);
-const configuredHistoryPageBytes = Number(import.meta.env.VITE_HISTORY_MAX_PAGE_BYTES);
+// import.meta.env exists only under Vite; node:test imports this module without it.
+const configuredHistoryPageSize = Number(import.meta.env?.VITE_HISTORY_PAGE_SIZE);
+const configuredHistoryPageBytes = Number(import.meta.env?.VITE_HISTORY_MAX_PAGE_BYTES);
 export const HISTORY_MAX_PAGE_SIZE = 100;
 export const HISTORY_PAGE_SIZE = Number.isInteger(configuredHistoryPageSize) && configuredHistoryPageSize > 0
   ? Math.min(configuredHistoryPageSize, HISTORY_MAX_PAGE_SIZE)

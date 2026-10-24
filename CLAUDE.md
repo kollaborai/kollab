@@ -213,6 +213,8 @@ Peer-to-peer agent mesh with persistent identity.
 - `messenger.py` - Unix socket server/client + off-box TCP/TLS endpoint, message delivery
 - `dns/` - Agent DNS: discovery, Ed25519 identity, trust, capabilities (AID/ARDP/ANS-aligned)
 - `dns/endpoint.py` - Off-box A2A endpoint: TLS listener + federation bootstrap (well-known fetch/import)
+- `messaging_bridge.py` - Telegram bridge: long-poll inbox + send. It runs on `plugins.hub.bridge_target_agent` (empty = coordinator), like the email watcher (`_runs_inbox`), so a chat message wakes that agent and its replies go back through its own bridge; a bridge turned on in another agent (`/hub bridge enable`) sends what it receives on with `_route_message`. A reply to a bridge message goes out whole (`_answers_bridge_message`), anything else is mirrored cut to 500 chars (`_bridge_forward`). `tests/tmux/lib/fake_telegram.py` is a local Bot API for specs
+- `email_bridge.py` - Email wake: IMAP IDLE (stdlib) on one inbox, read-only with `BODY.PEEK`; mail that arrives after start becomes a direct hub message that wakes `plugins.hub.email_target_agent` (empty = coordinator). That agent runs the watcher itself (`_email_inbox_loop`, `_runs_email_watch`); it shares `_run_bridge_inbox` and `BridgePollLock` with the Telegram bridge. Guide `docs/guides/email-wake-setup.md`
 - `network_attach.py` - Open an agent on another device of the network as a full chat: its own socket over the sealed device channel. The device running it decides by its trust, as for messages (`RelayAgentBridge.attach_target`: `open` every member device, `agents` only the agents that device may message, `manual` none); the engine opens `agent@device` session ids through it (`kollabor_engine/remote_attach.py`)
 - `vault.py` - Three-tier persistent memory (stream, working, crystallized)
 - `crystal_store.py` - Structured crystal entries with IDs, keywords, dedup, nudge retrieval
@@ -862,8 +864,8 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 - Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
   `fixes #123`, `closes #123`, `resolves #123`, or `#123`
 - Main branch protected - no direct pushes
-- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco marks a PR
-  ready or approves it; auto-merge then merges it once checks pass.
+- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
+  koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
 - PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
   repo, opened by a person with write access, merges with a merge commit once the three
   required checks pass. Forks, bots and drafts never do: open a draft to hold one, and

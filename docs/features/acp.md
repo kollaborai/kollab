@@ -44,55 +44,16 @@ gates.
 ## Run a harness on the Hub
 
 Install the harness, log in on this device, and install its ACP adapter using
-the pinned guidance shown by `/llm`. Built-in profiles are `claude-code`,
-`codex-cli`, and `gemini-cli`.
+the pinned guidance shown by `/llm`. Built-in profiles are `claude-code`
+and `codex-cli`.
 
 ```sh
 kollab --as claude --llm claude-code --detached
 kollab --attach claude
 ```
 
-### Gemini authentication
-
-Consumer sign-in for Gemini CLI is retired. For API-key authentication:
-
-1. Set `GEMINI_API_KEY` in the environment that launches Kollab.
-2. Restart Kollab and launch with `kollab --llm gemini-cli`.
-
-   The built-in `gemini-cli` profile allowlists `GEMINI_API_KEY` and
-   `GOOGLE_API_KEY`, so the key reaches the Gemini CLI child without extra
-   configuration. Kollab still filters all other provider-key variables
-   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY`) from the child
-   environment. To name additional variables, add a named ACP profile under
-   `kollabor.llm.profiles` in `.kollab/config.json` and list the variable
-   names in `pass_env` (variable names only; never put key values in the
-   config):
-   ```json
-   {
-     "kollabor": {
-       "llm": {
-         "profiles": {
-           "gemini-api": {
-             "provider": "acp",
-             "command": ["gemini", "--acp"],
-             "pass_env": ["GEMINI_API_KEY"]
-           }
-         }
-       }
-     }
-   }
-   ```
-   Kollab filters provider-key variables from child environments unless they
-   are allowlisted. See [ACP profile setup](profiles.md).
-
-For Vertex AI, enable `GOOGLE_GENAI_USE_VERTEXAI` and make the project and
-credentials available to the Gemini CLI child. `GOOGLE_API_KEY` already
-passes to the built-in `gemini-cli` child; for other variables, name them in
-a named profile's `pass_env`. Restart Kollab before retrying.
-
 The related in-app overview is **Learn > Provider profiles** (topic ID
-`profiles`; route `/learn?topic=profiles`). This general profile guidance does
-not qualify Gemini authentication.
+`profiles`; route `/learn?topic=profiles`).
 
 Automated evidence currently covers missing-auth projection only. Positive
 authentication and prompt/tool/permission/cancel/shutdown qualification remain

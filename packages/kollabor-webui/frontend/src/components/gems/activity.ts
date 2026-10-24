@@ -71,6 +71,7 @@ export function nextLiveActivity(live: LiveActivity, event: { type?: string; [ke
     case "token":
       return { ...live, phase: "speaking" };
     case "turn_complete":
+    case "turn_cancelled": // a stopped turn may never report its running tool's result
     case "error":
       return NO_LIVE_ACTIVITY;
     default:

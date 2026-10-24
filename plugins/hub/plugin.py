@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
 from kollabor.user_input_source import UserInputSource
@@ -88,11 +88,15 @@ from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
     DEFAULT_ALERT_COOLDOWN,
+    DEFAULT_HANDOFF_ACK_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_STALL_THRESHOLD,
     DEFAULT_WAKE_COOLDOWN,
     DEFAULT_WAKE_INEFFICACY,
     SupervisorState,
+    ack_handoff,
+    begin_handoff,
+    unacked_handoffs,
 )
 from .supervisor import (
     evaluate as evaluate_supervisor,
@@ -653,8 +657,12 @@ class HubPlugin(BasePlugin):
         self._supervisor_state = SupervisorState()
         # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
         self._supervisor_alerts: List[Tuple[float, str]] = []
+        # Bounded (timestamp, text) pairs for sends that did not reach their
+        # target, shown by /hub status on every agent (issue #283).
+        self._dispatch_failures: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
+        self._email_task: Optional[asyncio.Task] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
         # graceful and forced paths can execute the replacement only once.
         self._self_restart_watchdog_task: Optional[asyncio.Task] = None
@@ -743,6 +751,8 @@ class HubPlugin(BasePlugin):
                     "supervisor_max_reassignments": 3,
                     "supervisor_wake_inefficacy": 3,
                     "supervisor_alert_cooldown": 900,
+                    "supervisor_handoff_ack_timeout": 120,
+                    "supervisor_handoff_resend": False,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -758,6 +768,12 @@ class HubPlugin(BasePlugin):
                     "bridge_user_id": "",
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
+                    "email_enabled": False,
+                    "email_imap_host": "imap.gmail.com",
+                    "email_address": "",
+                    "email_app_password": "",
+                    "email_filter": "category:primary",
+                    "email_target_agent": "",
                     "route_untagged_to_coordinator": True,
                     # Who wakes for a model call when an agent comes online:
                     # "all", "koordinator" (only the folder's coordinator) or
@@ -1009,8 +1025,8 @@ class HubPlugin(BasePlugin):
                     "type": "text_input",
                     "label": "Bridge Target Agent",
                     "config_path": "plugins.hub.bridge_target_agent",
-                    "placeholder": "auto (self)",
-                    "help": "Identity to route incoming bridge messages to",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by bridge messages; that agent runs the bridge",
                 },
                 {
                     "type": "slider",
@@ -1020,6 +1036,48 @@ class HubPlugin(BasePlugin):
                     "max_value": 30,
                     "step": 1,
                     "help": "Seconds between polls for incoming messages",
+                },
+                # --- Email Wake ---
+                {
+                    "type": "checkbox",
+                    "label": "Email Wake",
+                    "config_path": "plugins.hub.email_enabled",
+                    "help": "New mail in the inbox wakes an agent (IMAP IDLE; mail stays unread)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Address",
+                    "config_path": "plugins.hub.email_address",
+                    "placeholder": "you@gmail.com",
+                    "help": "Mailbox to watch",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email App Password",
+                    "config_path": "plugins.hub.email_app_password",
+                    "placeholder": "Gmail app password",
+                    "help": "App password, not the account password (myaccount.google.com/apppasswords)",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email IMAP Host",
+                    "config_path": "plugins.hub.email_imap_host",
+                    "placeholder": "imap.gmail.com",
+                    "help": "IMAP server of the mailbox",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Filter",
+                    "config_path": "plugins.hub.email_filter",
+                    "placeholder": "every new message",
+                    "help": "Gmail search new mail must match, e.g. category:primary",
+                },
+                {
+                    "type": "text_input",
+                    "label": "Email Target Agent",
+                    "config_path": "plugins.hub.email_target_agent",
+                    "placeholder": "auto (coordinator)",
+                    "help": "Agent woken by new mail; that agent runs the watcher",
                 },
                 # --- Routing ---
                 {
@@ -3431,6 +3489,28 @@ class HubPlugin(BasePlugin):
             ):
                 metadata["task_assignment"] = True
 
+        # A tagged handoff to a local agent is tracked on the ledger until
+        # the assignee acknowledges it (issue #283).
+        if (
+            metadata.get("task_assignment")
+            and task_id
+            and not handle
+            and not target.startswith("relay:")
+            and self._task_ledger
+            and self._identity
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                begin_handoff(
+                    self._task_ledger,
+                    task_id,
+                    self._identity.identity,
+                    target,
+                    content,
+                )
+            except Exception as e:
+                logger.debug("failed to track handoff %s: %s", task_id, e)
+
         # Route the message
         msg = HubMessage(
             action="message",
@@ -3482,6 +3562,7 @@ class HubPlugin(BasePlugin):
             parts = []
             for ident, reason in rejections:
                 parts.append(f"{ident}: {reason}")
+                self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
                 ""
@@ -3528,11 +3609,22 @@ class HubPlugin(BasePlugin):
                 )
         elif queued_for:
             output = f"queued for {', '.join(queued_for)} (offline)"
+            self._record_dispatch_failure(
+                ", ".join(queued_for), "offline, queued in its mailbox"
+            )
+        elif (msg.metadata or {}).get("_socket_failed"):
+            down = ", ".join(msg.metadata["_socket_failed"])
+            output = (
+                f"queued for {down} (socket send failed; it will read the"
+                " message from its mailbox)"
+            )
+            self._record_dispatch_failure(down, "socket send failed, queued")
         elif self._presence:
             known = self._presence.scan_all_presence()
             known_ids = {a.identity for a in known}
             if target not in known_ids and target not in ("all", "*", "everyone"):
                 warned = True
+                self._record_dispatch_failure(target, "not online, no match")
                 output = (
                     f"warning: '{target}' is not online. "
                     f"message broadcast but no matching agent. "
@@ -5513,14 +5605,12 @@ class HubPlugin(BasePlugin):
                 )
                 self._notify_task = asyncio.create_task(self._notifier.run())
 
-            # Start messaging bridge loop if enabled
-            bridge_enabled = False
-            if self.config:
-                bridge_enabled = self.config.get("plugins.hub.bridge_enabled", False)
-            # Only coordinator runs the bridge (avoids 409 conflict
-            # when multiple agents poll the same bot token)
-            if bridge_enabled and self._identity.is_coordinator:
+            # Each inbox runs on the agent it wakes, so its messages are a
+            # local delivery and its replies go out through its own bridge.
+            if self._runs_inbox("bridge"):
                 self._bridge_task = asyncio.create_task(self._messaging_bridge_loop())
+            if self._runs_email_watch():
+                self._email_task = asyncio.create_task(self._email_inbox_loop())
 
             # Start cron loop (always -- jobs are added at runtime)
             self._cron_task = asyncio.create_task(self._cron_loop())
@@ -6421,6 +6511,17 @@ class HubPlugin(BasePlugin):
             )
             if self.config
             else DEFAULT_ALERT_COOLDOWN,
+            handoff_ack_timeout=self.config.get(
+                "plugins.hub.supervisor_handoff_ack_timeout",
+                DEFAULT_HANDOFF_ACK_TIMEOUT,
+            )
+            if self.config
+            else DEFAULT_HANDOFF_ACK_TIMEOUT,
+            handoff_resend=bool(
+                self.config.get("plugins.hub.supervisor_handoff_resend", False)
+            )
+            if self.config
+            else False,
             state=self._supervisor_state,
         )
         if not decisions:
@@ -6486,6 +6587,31 @@ class HubPlugin(BasePlugin):
                         f" delivered to {decision.worker} (offline or"
                         " unreachable); the card will be requeued"
                     )
+            elif decision.kind == "retry_handoff":
+                card = self._task_ledger.get(decision.card_id)
+                retry = HubMessage(
+                    action="message",
+                    from_agent=my_id,
+                    from_identity=(card.assigner if card else "")
+                    or "idle-supervisor",
+                    to=decision.worker,
+                    content=decision.text,
+                    scope=MessageScope.DIRECT.value,
+                    metadata={
+                        "task_id": decision.card_id,
+                        "task_assignment": True,
+                    },
+                )
+                rejections = await self._route_message(retry)
+                if rejections:
+                    for ident, reason in rejections:
+                        self._record_dispatch_failure(ident, reason)
+                outcomes.append(f"retry_handoff -> {decision.worker}")
+            elif decision.kind == "alert_handoff_unacked":
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append(f"alert: handoff {decision.card_id} unacked")
             elif decision.kind == "alert_coordinator_stalled":
                 # Wake efficacy failed: the coordinator got the wakes and
                 # still produced no turn. Say it loudly — this is the
@@ -6581,7 +6707,84 @@ class HubPlugin(BasePlugin):
             return
 
         self._bridge = bridge
+        try:
+            await self._run_bridge_inbox(
+                bridge,
+                lock_key=f"{platform}:{token}",
+                poll_interval=poll_interval,
+                target=self.config.get("plugins.hub.bridge_target_agent", ""),
+                set_polling=self._set_bridge_polling,
+            )
+        finally:
+            self._bridge = None
 
+    async def _email_inbox_loop(self) -> None:
+        """Watch the configured inbox; each new email wakes this agent.
+
+        Runs only on the agent named by ``email_target_agent`` (or the
+        coordinator when it is empty), so the wake is a local delivery. The
+        machine-global poll lock keeps one watcher per mailbox.
+        """
+        if not self.config or not self._identity:
+            return
+        from .email_bridge import EmailBridge
+
+        address = self.config.get("plugins.hub.email_address", "")
+        password = self.config.get(
+            "plugins.hub.email_app_password", ""
+        ) or os.environ.get("KOLLAB_HUB_EMAIL_APP_PASSWORD", "")
+        if not address or not password:
+            logger.warning("email_enabled=True but email_address/email_app_password not set")
+            return
+        bridge = EmailBridge(
+            address,
+            password,
+            host=self.config.get("plugins.hub.email_imap_host", "imap.gmail.com"),
+            search=self.config.get("plugins.hub.email_filter", ""),
+        )
+        if not await bridge.connect():
+            return
+        await self._run_bridge_inbox(
+            bridge,
+            lock_key=f"email:{address.lower()}",
+            poll_interval=1,
+            target=self._identity.identity,
+        )
+
+    def _runs_email_watch(self) -> bool:
+        return self._runs_inbox("email")
+
+    def _runs_inbox(self, kind: str) -> bool:
+        """True when this agent runs the ``bridge`` or ``email`` inbox.
+
+        That is the agent named by ``<kind>_target_agent``, or the coordinator
+        when it is empty.
+        """
+        if not self.config or not self._identity:
+            return False
+        if not self.config.get(f"plugins.hub.{kind}_enabled", False):
+            return False
+        target = self.config.get(f"plugins.hub.{kind}_target_agent", "")
+        if target:
+            return target == self._identity.identity
+        return self._identity.is_coordinator
+
+    def _set_bridge_polling(self, polling: bool) -> None:
+        self._bridge_polling = polling
+
+    async def _run_bridge_inbox(
+        self,
+        bridge: MessagingBridge,
+        lock_key: str,
+        poll_interval: float,
+        target: str,
+        set_polling: Callable[[bool], None] = lambda _polling: None,
+    ) -> None:
+        """Own one bridge's inbox: poll it and route what arrives to ``target``.
+
+        Shared by the messaging bridge and the email watcher. Disconnects the
+        bridge when cancelled.
+        """
         # Machine-global poll lock keyed on the token (see BridgePollLock).
         # The hub elects a coordinator per project, so multiple kollab sessions
         # in different repos each elect their own coordinator and would each
@@ -6590,7 +6793,8 @@ class HubPlugin(BasePlugin):
         # to take over on holder death) while still able to send.
         from kollabor_config.config_utils import get_config_directory
 
-        poll_lock = BridgePollLock(f"{platform}:{token}", get_config_directory())
+        platform = bridge.name
+        poll_lock = BridgePollLock(lock_key, get_config_directory())
         standby_interval = max(int(poll_interval), 15)
         conflict_logged = False
         was_standby = False
@@ -6613,7 +6817,7 @@ class HubPlugin(BasePlugin):
                                 f"retry every {standby_interval}s"
                             )
                             was_standby = True
-                        self._bridge_polling = False
+                        set_polling(False)
                         await asyncio.sleep(standby_interval)
                         continue
 
@@ -6623,12 +6827,12 @@ class HubPlugin(BasePlugin):
                             f"polling every {poll_interval}s"
                         )
                         was_standby = False
-                    self._bridge_polling = True
+                    set_polling(True)
 
                     messages = await bridge.poll()
                     conflict_logged = False
                     for msg in messages:
-                        await self._handle_bridge_incoming(msg)
+                        await self._handle_bridge_incoming(msg, target)
                     # poll() already blocks via long-polling (30s for telegram).
                     # Only add extra sleep if no messages came back (backoff)
                     # or if the platform doesn't do long-polling.
@@ -6656,12 +6860,11 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError:
             pass
         finally:
-            self._bridge_polling = False
+            set_polling(False)
             poll_lock.release()
             await bridge.disconnect()
-            self._bridge = None
 
-    async def _handle_bridge_incoming(self, msg: IncomingMessage) -> None:
+    async def _handle_bridge_incoming(self, msg: IncomingMessage, target: str = "") -> None:
         """Route an incoming bridge message as a hub message.
 
         The message arrives from an external platform (e.g. Telegram)
@@ -6670,9 +6873,6 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
-        target = ""
-        if self.config:
-            target = self.config.get("plugins.hub.bridge_target_agent", "")
         if not target:
             target = self._identity.identity
 
@@ -6691,13 +6891,17 @@ class HubPlugin(BasePlugin):
             },
         )
 
-        logger.info(
-            f"bridge incoming ({msg.platform}): "
-            f"{msg.sender_name} -> {target}: {msg.text[:80]}"
-        )
+        # Email bodies and subjects stay out of the log; the uid identifies it.
+        preview = f"uid {msg.sender_id}" if msg.platform == "email" else msg.text[:80]
+        logger.info(f"bridge incoming ({msg.platform}): {msg.sender_name} -> {target}: {preview}")
 
-        # Route through the standard message handler
-        await self._on_message_received(hub_msg)
+        if target == self._identity.identity:
+            await self._on_message_received(hub_msg)
+            return
+        # Another agent's inbox (a bridge turned on here with /hub bridge on):
+        # receiving it here would only show it as observed, so send it on.
+        for recipient, reason in await self._route_message(hub_msg):
+            logger.warning(f"bridge incoming ({msg.platform}) not delivered to {recipient}: {reason}")
 
     async def bridge_send(self, text: str) -> bool:
         """Send a message through the active bridge (if connected).
@@ -6714,6 +6918,14 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"bridge_send failed: {e}")
             return False
+
+    def _answers_bridge_message(self) -> bool:
+        """True when the newest user message came in through the bridge."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        for msg in reversed(getattr(llm, "conversation_history", None) or []):
+            if msg.role == "user":
+                return bool((getattr(msg, "metadata", None) or {}).get("bridge_platform"))
+        return False
 
     async def _bridge_forward(self, text: str) -> None:
         """Forward a message to the bridge if connected. Truncates to 500 chars.
@@ -8269,6 +8481,7 @@ class HubPlugin(BasePlugin):
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
                         assigned_task_id = str(existing.id)
+                        ack_handoff(self._task_ledger, task_id, assignee)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -9373,6 +9586,30 @@ class HubPlugin(BasePlugin):
             except Exception:
                 logger.debug("supervisor alert publish failed", exc_info=True)
 
+    def _record_dispatch_failure(self, target: str, reason: str) -> None:
+        """Remember a send that did not reach ``target`` (issue #283).
+
+        The sender already reads the failure in its tool result; this keeps
+        it where `/hub status` (and so `kollab --hub status`) can show it.
+        """
+        failures = getattr(self, "_dispatch_failures", None)
+        if failures is None:
+            failures = self._dispatch_failures = []
+        failures.append((time.time(), f"{target}: {reason}"))
+        del failures[:-10]
+        logger.warning("hub dispatch failed: %s: %s", target, reason)
+
+    def _dispatch_failure_lines(self) -> List[str]:
+        failures = getattr(self, "_dispatch_failures", None) or []
+        if not failures:
+            return []
+        now = time.time()
+        lines = [f"dispatch failures: {len(failures)} recent"]
+        for ts, text in failures[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            lines.append(f"  ({ago}m ago) {' '.join(text.split())[:110]}")
+        return lines
+
     async def _notify_supervisor_alert(self, text: str) -> None:
         """Send the alert through the configured notifier channel, if any."""
         backend = getattr(getattr(self, "_notifier", None), "_backend", None)
@@ -9418,6 +9655,10 @@ class HubPlugin(BasePlugin):
                 f" turn; last completed turn {idle}m ago"
             )
         now = time.time()
+        for card in unacked_handoffs(self._task_ledger):
+            lines.append(
+                f"  handoff awaiting ack: {card.id} -> {card.assignee}"
+            )
         for ts, text in self._supervisor_alerts[-3:]:
             ago = max(1, int((now - ts) // 60))
             first = " ".join(text.split())[:110]
@@ -9786,8 +10027,12 @@ class HubPlugin(BasePlugin):
         # Hub messages from this agent are already forwarded at send time,
         # so only forward the cleaned text that remains after tag stripping
         # (the "natural language" part of the response).
+        # A reply to a bridge message goes out whole: it is the answer.
         if cleaned and not has_pending_tool_work:
-            await self._bridge_forward(cleaned)
+            if self._answers_bridge_message():
+                await self.bridge_send(cleaned)
+            else:
+                await self._bridge_forward(cleaned)
 
         # Route untagged responses to coordinator if enabled. This path is
         # only for terminal/final summaries from worker agents. Native tool
@@ -10366,6 +10611,11 @@ class HubPlugin(BasePlugin):
         )
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
+            # The sender has to hear that this was a mailbox drop, not a
+            # live delivery (issue #283).
+            failed = list((message.metadata or {}).get("_socket_failed", []))
+            if agent.identity not in failed:
+                message.metadata["_socket_failed"] = [*failed, agent.identity]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
@@ -13715,6 +13965,7 @@ class HubPlugin(BasePlugin):
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
         lines.extend(self._supervisor_status_lines())
+        lines.extend(self._dispatch_failure_lines())
         lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
 
@@ -15178,12 +15429,13 @@ class HubPlugin(BasePlugin):
             except asyncio.CancelledError:
                 pass
 
-        if self._bridge_task:
-            self._bridge_task.cancel()
-            try:
-                await self._bridge_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._bridge_task, self._email_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # Announce departure to peers before removing presence.
         # Each peer gets a unique HubMessage (unique id) so that

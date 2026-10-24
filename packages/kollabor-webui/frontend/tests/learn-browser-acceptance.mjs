@@ -144,7 +144,18 @@ function makeFixtures() {
       return json(route, { home: { path: "/learn-demo", name: "Learn demo", live: false }, recent: [] });
     }
     if (endpoint.endsWith("/history")) {
-      return json(route, { history: [], source: "mirror", stale: false, last_turn_error: null });
+      return json(route, {
+        history: [],
+        start_index: 0,
+        end_index: 0,
+        has_more_older: false,
+        older_cursor: null,
+        has_more_newer: false,
+        newer_cursor: null,
+        source: "mirror",
+        stale: false,
+        last_turn_error: null,
+      });
     }
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
@@ -313,7 +324,7 @@ async function main() {
     // Topic navigation is a reference flow without completion controls.
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     const topics = shell.page.getByRole("navigation", { name: "Learn topics" });
-    assert.equal(await topics.getByRole("button").count(), 10);
+    assert.equal(await topics.getByRole("button").count(), 11);
     await topics.getByRole("button", { name: "Agents", exact: true }).focus();
     await shell.page.keyboard.press("Enter");
     await shell.page.waitForFunction(() => location.search === "?topic=agents");
@@ -330,6 +341,8 @@ async function main() {
     await shell.page.getByRole("heading", { name: "That topic is not available" }).waitFor({ state: "visible" });
     await shell.page.getByRole("button", { name: "Browse topics" }).click();
     await shell.page.waitForFunction(() => location.search === "?topic=networks");
+    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/");
 
     // Release updates have their own route, close control, and retry path.
     await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();

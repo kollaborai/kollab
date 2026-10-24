@@ -342,7 +342,7 @@ class ACPOrchestrator:
         # Hub already drew incoming messages. The batched model context is
         # persisted as a HUD for web/history replay, never echoed as user input.
         if display is not None and source not in {"agent", "observation"}:
-            from kollabor_voice.observer import strip_voice_preamble
+            from kollabor_voice.voice_context import strip_voice_preamble
 
             # A mic turn shows what was said, never the voice rules sent with it.
             display.display_user_message(strip_voice_preamble(text))

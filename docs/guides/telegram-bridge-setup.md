@@ -116,7 +116,7 @@ All bridge config lives under `plugins.hub.*` and can be set via
 | `plugins.hub.bridge_chat_id` | `""` | Chat/channel ID (or use env var) |
 | `plugins.hub.bridge_user_id` | `""` | Optional: restrict to specific Telegram user |
 | `plugins.hub.bridge_poll_interval` | `2` | Seconds between polls for incoming messages |
-| `plugins.hub.bridge_target_agent` | `""` | Route incoming messages to this agent ("" = self) |
+| `plugins.hub.bridge_target_agent` | `""` | Agent woken by incoming messages; that agent runs the bridge and its replies go back to the chat ("" = coordinator) |
 
 **Environment variables** (override config values):
 

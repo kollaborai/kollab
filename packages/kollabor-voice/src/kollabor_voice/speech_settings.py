@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
 import sys
 from pathlib import Path
 
-from .control import manifest
+from .control import atomic_json, manifest, service_root
 
 # Cosine score at or above which a segment is the enrolled user (speaker.py).
 # Measured false accepts and rejects: bench/README.md.
@@ -140,6 +141,59 @@ def speech_errors(preferences, *, check_files=False):
                     "Choose an existing absolute .pt voice prompt, or leave blank for the preset"
                 )
     return errors
+
+
+def load_speech_preferences(root=None):
+    """Read validated speech settings without exposing classifier preferences."""
+    try:
+        value = json.loads(((root or service_root()) / "preferences.json").read_text())
+    except (OSError, ValueError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    defaults = speech_defaults()
+    preferences = {**defaults, **{key: value[key] for key in defaults if key in value}}
+    for key in speech_errors(preferences):
+        preferences[key] = defaults[key]
+    return preferences
+
+
+def save_speech_preferences(changes, root=None):
+    """Publish one validated speech update without losing unrelated preference keys."""
+    # The voice runtime is POSIX-only, but reading its settings must work elsewhere.
+    import fcntl
+
+    defaults = speech_defaults()
+    if not isinstance(changes, dict) or set(changes) - set(defaults):
+        raise ValueError("Unknown speech preference")
+
+    path = (root or service_root()) / "preferences.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (path.parent / "preferences.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            stored = json.loads(path.read_text())
+        except FileNotFoundError:
+            stored = {}
+        except ValueError as exc:
+            raise ValueError(
+                "Voice preferences are unreadable; repair preferences.json before saving"
+            ) from exc
+        if not isinstance(stored, dict):
+            raise ValueError("Voice preferences must be an object")
+
+        speech = {
+            **defaults,
+            **{key: value for key, value in stored.items() if key in defaults},
+            **changes,
+        }
+        errors = speech_errors(speech, check_files=True)
+        if errors:
+            raise ValueError(
+                "; ".join(f"{key}: {error}" for key, error in errors.items())
+            )
+        atomic_json(path, {**stored, **changes})
+    return load_speech_preferences(root)
 
 
 def speech_key(preferences):

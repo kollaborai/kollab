@@ -36,8 +36,10 @@ export function LearnPage({ route, onNavigate, onExit }: LearnPageProps) {
                 size="sm"
                 aria-current={topic?.id === item.id ? "page" : undefined}
                 onClick={() => onNavigate(item.id)}
-                className={`h-auto min-h-9 justify-start px-3 py-2 text-left font-normal md:w-full ${
-                  topic?.id === item.id ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+                className={`h-auto min-h-9 justify-start px-3 py-2 text-left hover:bg-transparent md:w-full ${
+                  topic?.id === item.id
+                    ? "font-medium text-foreground underline decoration-2 underline-offset-8 md:no-underline"
+                    : "font-normal text-muted-foreground hover:text-foreground"
                 }`}
               >
                 <span className="min-w-0 whitespace-nowrap md:whitespace-normal">{item.title}</span>

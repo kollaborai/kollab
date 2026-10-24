@@ -2588,9 +2588,17 @@ def cli_main() -> None:
     if "--detached" in sys.argv or "-d" in sys.argv:
         import os
 
-        from kollabor.daemon import SERVICE_ENV, SERVICE_PID_ENV
+        from kollabor.daemon import (
+            DETACHED_CHILD_ENV,
+            SERVICE_ENV,
+            SERVICE_PID_ENV,
+            exec_detached_child,
+        )
 
-        if os.environ.pop(SERVICE_ENV, "") == "1":
+        if os.environ.pop(DETACHED_CHILD_ENV, "") == "1":
+            # Already forked, detached and exec'd by the code below.
+            detached_runtime = True
+        elif os.environ.pop(SERVICE_ENV, "") == "1":
             detached_runtime = True
             # `kollab service`: systemd or launchd owns this process, so it
             # stays in the foreground (no fork, no setsid) and keeps stderr
@@ -2616,6 +2624,9 @@ def cli_main() -> None:
             os.dup2(devnull, 1)  # stdout
             os.dup2(devnull, 2)  # stderr
             os.close(devnull)
+            # Never keep running Python in a forked image on macOS (ObjC
+            # fork-safety abort); on exec failure carry on in-process.
+            exec_detached_child(sys.argv)
 
     # Daemon mode (default): auto-fork daemon + connect as attach client.
     # The daemon runs headless (like --detached). The parent becomes

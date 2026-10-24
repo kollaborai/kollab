@@ -1,9 +1,12 @@
+import { refreshesOnEvent } from "./live-follow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
+import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
@@ -146,6 +149,7 @@ function RuntimeShell({
   eventActivity,
   onOpenProperties,
   refreshSignal,
+  supervisorEvents,
   view,
   onViewChange: setView,
   locked,
@@ -172,6 +176,7 @@ function RuntimeShell({
   /** This session's Properties (its gem, double-clicked). */
   onOpenProperties: () => void;
   refreshSignal: number;
+  supervisorEvents: StreamEvent[];
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
@@ -288,6 +293,7 @@ function RuntimeShell({
               </ol>
             </details>
           )}
+          <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
             {view === "chat" ? (
               <Thread
@@ -458,6 +464,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
@@ -590,8 +597,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [workspacePath]);
 
   const loadState = useCallback(
-    async (sessionId: string, nextSessions: Session[]) => {
-      setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+    async (sessionId: string, nextSessions: Session[], quiet = false) => {
+      // A refresh of an open chat shows no banner: the thread is already there.
+      if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
       try {
         const [loaded, permissions] = await Promise.all([
           loadLatestHistoryPage(sessionId, api, historyPageCache),
@@ -746,7 +754,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
-        const nextState = await loadState(sessionId, nextSessions);
+        const nextState = await loadState(sessionId, nextSessions, true);
         if (controller.signal.aborted || activeId !== sessionId) return;
         // Still the seed: the daemon's answer comes as history_updated.
         if (seeded && staleHistoryRef.current.has(sessionId)) return;
@@ -763,42 +771,33 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setEventActivity(null);
     };
     const followEvents = async () => {
-      // A turn is streaming; its history is still growing.
-      let midTurn = false;
       resetEventActivity();
+      setSupervisorEvents([]);
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);
             if (compactionStatus !== undefined) {
               setContextCompactionStatus(compactionStatus);
             }
-            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
             setEventActivity(liveActivity(eventActivityRef.current));
-            // hub_message: another agent's message just landed in the
-            // history, ahead of the reply it wakes. One that lands mid-turn
-            // waits for turn_complete, which reloads the whole turn.
+            // hub_message / history_updated: another agent's or window's
+            // message just landed in the history, mid-turn or not.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (
-              type === "hub_message" || type === "history_updated"
-                ? !midTurn
-                : ["turn_complete", "error", "permission_request"].includes(type)
-            ) {
-              void refreshActiveState(activeId);
-            }
-            if (type === "turn_complete") midTurn = false;
+            if (refreshesOnEvent(type)) void refreshActiveState(activeId);
           }, () => {
             // A reconnect may have missed the last turn's end.
             resetEventActivity();
-            // Open, so nothing slips past from here. The history_updated that
-            // replaces a seed can have fired before this stream existed: ask
-            // again now.
-            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
+            // Open, so nothing slips past from here. An event fired while the
+            // stream was down (or before it existed, like the history_updated
+            // that replaces a seed) left no trace: reconcile from history.
+            void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -1374,6 +1373,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 liveAgents={liveAgents}
                 remoteAgents={network.remote}
                 refreshSignal={refreshSignal}
+                supervisorEvents={supervisorEvents}
                 onSessionUpdated={handleSessionUpdated}
                 onOpenSettings={openSettings}
                 onHistoryCleared={() => resetThread(activeSession.session_id)}

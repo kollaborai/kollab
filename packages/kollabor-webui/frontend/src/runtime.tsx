@@ -34,6 +34,7 @@ import type {
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
+import { shownMessagesChanged } from "./history-merge";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
@@ -44,6 +45,7 @@ import {
   type TurnClock,
 } from "./turn-timing";
 import { VoiceModeProvider } from "./voice-mode";
+import { VoiceRoomProvider } from "./voice/voice-room";
 
 export type EngineState = {
   sessionId: string;
@@ -781,6 +783,10 @@ export function EngineRuntimeProvider({
     // stream) leaves the thread to its next full load.
     if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
     if (!initialState.synced) return;
+    if (shownMessagesChanged(shown.messages, initialState.messages)) {
+      onStale?.();
+      return;
+    }
     const currentStart = from.start ?? 0;
     const nextStart = initialState.synced.start ?? currentStart;
     const currentIds = new Set(shown.messages.map((message) => String(message.id ?? "")));
@@ -823,7 +829,9 @@ export function EngineRuntimeProvider({
         >
           <PermissionToolUI />
           <VoiceModeProvider api={api} sessionId={sessionId}>
-            {children}
+            <VoiceRoomProvider api={api} sessionId={sessionId}>
+              {children}
+            </VoiceRoomProvider>
           </VoiceModeProvider>
         </InitialMessagesGate>
       </PermissionCancellationContext.Provider>

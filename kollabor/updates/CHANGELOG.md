@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error) in `/hub status`, the log, attached web clients, and the configured
   notifier channel. Undelivered worker nudges surface there too instead of
   vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
+- Hub: a task handed to an agent with a task id stays on the ledger as
+  "handoff awaiting ack" in `/hub status` until the agent acknowledges it;
+  unacknowledged after two minutes it is resent once, then alerted. Failed
+  sends are listed in `/hub status`, and a message that fell back to the
+  mailbox reports "queued for" instead of "delivered to".
+- Hub: email wake. New mail in one IMAP inbox becomes a direct hub message
+  that wakes the configured agent (read-only, IDLE). Guide:
+  `docs/guides/email-wake-setup.md`.
+- Web: hub supervisor alerts show as a dismissible banner above the chat.
 
 ### Changed
 - Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
@@ -35,10 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history pages locally, loads older messages on scroll, and fetches full tool
   output only after Show more. Negotiated compressed PhoneLink frames carry the
   150 KB first-page budget within the three-round-trip synthetic relay check.
-
 - Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed
+- Web: the open chat shows messages from other agents or windows while a turn
+  is running and re-syncs after every reconnect; a tool card shown mid-turn
+  picks up its result when the turn finishes.
+- Web: a stopped turn no longer leaves the agent's gem acting out a dead tool
+  call.
+- Hub: the Telegram bridge wakes its target agent, and disconnecting the email
+  bridge no longer waits out an IMAP IDLE.
 - Context-compaction emergency recovery prioritizes the latest human request,
   excludes non-intended, group, and other-agent hub notices plus standalone HUD
   and stale assignments, preserves direct-to-agent requests without TaskLedger

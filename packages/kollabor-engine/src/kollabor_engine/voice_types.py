@@ -96,6 +96,9 @@ class VoiceSessionView(_FrozenModel):
     generation: Generation
     detail: str | None = None
     retryable: bool = False
+    # Disclosure: transcript text goes to a non-local LLM endpoint.
+    remote_llm: bool = False
+    remote_llm_host: str | None = None
 
 
 class VoiceSessionBinding(_FrozenModel):

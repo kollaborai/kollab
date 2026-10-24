@@ -591,7 +591,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(
             return_value="assistant-uuid"
         )
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("test response", False, False)
@@ -650,7 +649,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("intermediate answer", False, False)
@@ -714,7 +712,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Running it.", False, False)
@@ -1040,7 +1037,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "xml-one", "type": "terminal", "command": "echo xml"},
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant-uuid")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("Checking", False, False))
         self.loop.run_until_complete(self.processor._execute_llm_turn_inner(
@@ -1113,7 +1109,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("On it.", False, False)
@@ -1202,7 +1197,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a-uuid")
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             side_effect=lambda raw, clean, *a, **k: (clean, False, False)
@@ -1248,7 +1242,6 @@ class TestQueueProcessor(unittest.TestCase):
         }
         self.response_parser.get_all_tools.return_value = []
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=(".", False, False)
@@ -1304,7 +1297,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "read", "type": "terminal", "command": "true"}
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("I'll recheck the voice mode files.", False, False)
@@ -1364,7 +1356,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Which file should I inspect?", False, False)
@@ -1561,155 +1552,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.assertEqual(result, ("x", False, False))
 
-    # ------------------------------------------------------------------
-    # Tests for _bridge_relay
-    # ------------------------------------------------------------------
-
-    def test_bridge_relay_no_event_bus(self):
-        """No-op when event_bus is None."""
-        self.processor.event_bus = None
-        # Should not raise
-        self.loop.run_until_complete(
-            self.processor._bridge_relay("some response")
-        )
-
-    def test_bridge_relay_empty_response(self):
-        """No-op when clean_response is empty."""
-        self.loop.run_until_complete(self.processor._bridge_relay(""))
-
-    def test_bridge_relay_no_hub_plugin(self):
-        """No-op when hub_plugin service is not available."""
-        self.event_bus.get_service = MagicMock(return_value=None)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-        self.event_bus.get_service.assert_called_with("hub_plugin")
-
-    def test_bridge_relay_hub_no_bridge(self):
-        """No-op when hub_plugin exists but has no _bridge."""
-        hub = MagicMock()
-        hub._bridge = None
-        self.event_bus.get_service = MagicMock(return_value=hub)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
-    def test_bridge_relay_sends_to_bridge(self):
-        """Sends clean_response to bridge when bridge platform found in history."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("relay this"))
-        hub.bridge_send.assert_called_once_with("relay this")
-
-    def test_bridge_relay_skips_non_bridge_users(self):
-        """Does not relay when no user message has bridge_platform metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata=None),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("should not relay"))
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_stops_at_first_bridge_user(self):
-        """Finds the most recent bridge user (reversed history search)."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "slack"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Should find discord (most recent bridge user) and send
-        hub.bridge_send.assert_called_once_with("msg")
-
-    def test_bridge_relay_stops_at_first_non_bridge_user(self):
-        """Stops searching at the first user message without bridge metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # non-bridge user
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # most recent, no bridge -> breaks loop
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Reversed: last user has metadata=None -> hits elif branch, breaks immediately
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_exception_handled_gracefully(self):
-        """Exceptions in bridge relay are caught and logged."""
-        self.event_bus.get_service = MagicMock(side_effect=RuntimeError("boom"))
-        # Should not raise
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
     def test_file_ingestion_uses_raw_hash_for_unchanged_read_detection(self):
         """Rendered read headers must not replace the disk-content hash."""
         from kollabor_ai.context_service.hash_utils import compute_hash
@@ -1771,7 +1613,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.tool_executor.is_cancelled.return_value = False
         self.tool_executor.take_executed_count.return_value = 0
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False))
 

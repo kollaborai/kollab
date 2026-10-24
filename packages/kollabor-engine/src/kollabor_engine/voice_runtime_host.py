@@ -193,6 +193,10 @@ class EngineRuntimeHost:
                 "Voice mode requires an Apple Silicon macOS host.",
             )
 
+        preflight = getattr(self._runtime, "preflight", None)
+        if preflight is not None:
+            preflight()  # missing worker runtime: answer now, not after a dead start
+
         target = await self._session_resolver.resolve(owner_id, control_session_id, request.selected_thread_id)
         if request.selected_thread_id is not None and target.thread_id != request.selected_thread_id:
             raise RuntimeHostError("target_mismatch", 409, "The selected thread is not active in this session.")
@@ -421,6 +425,15 @@ class EngineRuntimeHost:
                 raise RuntimeHostError("forbidden", 403, "Voice session belongs to another owner.")
             return _to_view(record)
 
+    async def get_binding(self, owner_id: OwnerId, voice_session_id: VoiceSessionId) -> VoiceSessionBinding:
+        """The stored binding for an owned session (what admit_turn compares against)."""
+        async with self._lock:
+            record = self._sessions.get(voice_session_id)
+            if record is None or record.binding.owner_id != owner_id:
+                # Never reveal another owner's session.
+                raise RuntimeHostError("session_not_found", 404, "Voice session was not found.")
+            return record.binding
+
     async def shutdown(self) -> None:
         """Fence all session generations, stop ready handles, and drain starts/stops."""
         async with self._lock:
@@ -633,14 +646,18 @@ class EngineRuntimeHost:
     async def _start_session(self, binding: VoiceSessionBinding) -> None:
         try:
             handle = await self._runtime.start_session(binding)
-        except Exception:
+        except Exception as exc:
             async with self._lock:
                 record = self._sessions.get(binding.voice_session_id)
                 if record is None:
                     return
                 if record.generation == binding.generation and record.state == "starting":
                     record.state = "error"
-                    record.detail = "The voice runtime could not be started."
+                    record.detail = (
+                        exc.detail
+                        if isinstance(exc, RuntimeHostError)
+                        else "The voice runtime could not be started."
+                    )
                     record.retryable = True
                     if self._active_by_key.get(record.idempotency_key) == binding.voice_session_id:
                         self._active_by_key.pop(record.idempotency_key, None)

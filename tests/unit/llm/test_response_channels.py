@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 import pytest
-from kollabor_voice.observer import voice_preamble
+from kollabor_voice.voice_context import voice_preamble
 
 from kollabor_ai.response_channels import (
     display_response_text,
