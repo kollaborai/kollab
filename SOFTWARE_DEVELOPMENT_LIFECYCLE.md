@@ -168,6 +168,9 @@ itself: it is merged by hand, with that approval.
 
 - All work for a release folds into a single draft release PR, `release/<ver>`
   into `main`, so the full impact gets one review.
+- The operator creates the release branch (`release/<ver>`) and opens that
+  release PR, or an agent does on the operator's explicit instruction: the same
+  gate as the tag.
 - New work lands on the release branch through lane branches and shows up in
   that PR, rather than spawning new long-lived PRs.
 
