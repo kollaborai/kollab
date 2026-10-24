@@ -203,34 +203,41 @@ async def test_a_repeated_phrase_or_a_short_reply_never_starts_inside_the_one_be
 
 
 class Turns:
-    """A queue processor's turn lock: the talked-over turn still holds it."""
+    """A queue processor's turn state with its real after_turn queue."""
 
-    def __init__(self, open_turn: str | None = None, timeout: float = 20.0) -> None:
+    def __init__(self, open_turn: str | None = None) -> None:
         import asyncio
 
         self._turn_lock = asyncio.Lock()
         self._open_voice_turn = open_turn  # a voice turn with rounds still to run
-        self.timeout = timeout
+        self._after_turn, self._after_turn_flush = [], None
 
-    def between_turns(self, voice_turn=None):
-        return QueueProcessor.between_turns(self, voice_turn, timeout=self.timeout)
+    after_turn = QueueProcessor.after_turn
+    _flush_after_turn = QueueProcessor._flush_after_turn
+    _run_after_turn = QueueProcessor._run_after_turn
+
+    async def next_round(self):
+        """What every round does first, under the lock (_execute_llm_turn)."""
+        async with self._turn_lock:
+            await self._run_after_turn()
 
 
-async def test_a_talk_over_during_a_tool_waits_for_the_turn_to_unwind():
-    import asyncio
+PENDING = {"recorded": False, "pending": True}
 
+
+async def test_a_talk_over_during_a_tool_is_queued_and_lands_before_the_next_round():
     llm = FakeLLM()
     llm._queue_processor = turns = Turns()
     await turns._turn_lock.acquire()  # the turn is running its tool
-    cut = asyncio.create_task(service(llm).record_interrupted_voice_reply("turn-1", "Let me"))
-    await asyncio.sleep(0.05)
-    assert not cut.done() and llm.conversation_history == []  # nothing lands mid-turn
+    # Answered at once: a Stop or an approval answer behind it on the connection never waits.
+    assert await service(llm).record_interrupted_voice_reply("turn-1", "Let me") == PENDING
+    assert llm.conversation_history == []  # nothing lands mid-turn
     # The cancelled tool returns: the turn writes its call row, then lets go.
     reply = voice_reply("Let me check.")
     reply.metadata.update(CALL)
     llm.conversation_history.append(reply)
     turns._turn_lock.release()
-    assert (await cut)["replaced"]
+    await turns.next_round()
     assert llm.conversation_history == [reply] and reply.content == "Let me"  # one copy
 
 
@@ -263,27 +270,34 @@ async def test_the_cut_reaches_the_conversation_log(tmp_path, monkeypatch):
     assert thanks["parent_uuid"] == parent  # threads under the reply that stays
 
 
+async def test_a_cut_with_no_round_running_lands_right_after_it_answers():
+    from kollabor_tui.display_tap import DisplayTap
+
+    llm, first, result, last = tool_turn()
+    llm._queue_processor = turns = Turns()  # the turn ended; nothing runs
+    state, events = service(llm), []
+    state._event_bus = DisplayTap(on_event=events.append)
+    assert await state.record_interrupted_voice_reply("turn-1", "Let me check") == PENDING
+    await turns._after_turn_flush
+    assert llm.conversation_history == [first, result]
+    assert [event["type"] for event in events] == ["voice_reply_cut"]  # open windows reload
+
+
 async def test_a_cut_waits_out_the_rounds_its_turn_still_has_to_run():
-    import asyncio
+    from kollabor_tui.display_tap import DisplayTap
 
     llm, first, result, last = tool_turn()
     llm._queue_processor = turns = Turns(open_turn="turn-1")  # its tools ran: one more round
-    cut = asyncio.create_task(service(llm).record_interrupted_voice_reply("turn-1", "Let me check"))
-    await asyncio.sleep(0.05)
-    assert not cut.done()  # the lock is free between rounds, but the turn is not over
-    turns._open_voice_turn = "turn-2"  # the next turn took over
-    assert (await cut)["replaced"] and llm.conversation_history == [first, result]
-
-
-async def test_a_turn_that_never_ends_drops_the_cut_and_frees_the_lock():
-    llm, first, result, last = tool_turn()
-    llm._queue_processor = turns = Turns(open_turn="turn-1", timeout=0.05)
-    assert await service(llm).record_interrupted_voice_reply("turn-1", "Let me check") == {
-        "recorded": False,
-        "busy": True,
-    }
-    assert llm.conversation_history == [first, result, last] and last.content.endswith("sunny.")
-    assert not turns._turn_lock.locked()
+    state, events = service(llm), []
+    state._event_bus = DisplayTap(on_event=events.append)
+    assert await state.record_interrupted_voice_reply("turn-1", "Let me check") == PENDING
+    assert not turns._turn_lock.locked()  # queued holding nothing: the turn's round runs
+    await turns.next_round()  # the talked-over turn's own last round
+    assert last.content.endswith("sunny.") and events == []  # never cut under it
+    turns._open_voice_turn = "turn-2"  # it ended; the next turn's first round starts
+    await turns.next_round()
+    assert llm.conversation_history == [first, result]  # cut before that round's model call
+    assert [event["type"] for event in events] == ["voice_reply_cut"]  # open windows reload
 
 
 async def logged_tool_turn(tmp_path, monkeypatch):

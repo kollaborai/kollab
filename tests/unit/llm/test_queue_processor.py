@@ -375,46 +375,133 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(tokens, [None])  # the typed turn's token: not the old voice id
         self.assertNotIn("request_id", after)
 
-    def test_a_talk_over_cut_waits_for_the_voice_turns_last_round(self):
-        """The turn lock is free between a turn's rounds: a cut taken there would
-        land before the rest of the turn, which its one post per turn never cuts."""
+    def _talk_over_turns(self):
+        """A voice reply in history, the cut's service, and what each model call saw."""
         from kollabor.state.local import LocalStateService
-        from kollabor_agent.queue_processor import QueuedInput
 
         self._reply_with("Let me check.")
         reply = ConversationMessage(
             role="assistant", content="Let me check.", metadata={"voice_turn_id": "turn-9"}
         )
+        self.conversation_history.append(reply)
         llm = SimpleNamespace(
-            _queue_processor=self.processor, conversation_history=[reply],
+            _queue_processor=self.processor, conversation_history=self.conversation_history,
             conversation_logger=SimpleNamespace(), current_parent_uuid="parent",
         )
-        state = LocalStateService(llm, profile_manager=object(), event_bus=None)
-        seen, waiting = [], []
+        seen = []
+
+        async def call_llm(*args, **kwargs):
+            seen.append(reply.content)
+            return "Let me check."
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        return reply, LocalStateService(llm, profile_manager=object(), event_bus=None), seen
+
+    def test_a_talk_over_cut_waits_for_the_voice_turns_last_round(self):
+        """The turn lock is free between a turn's rounds: a cut taken there would
+        land before the rest of the turn, which its one post per turn never cuts."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        answers = []
 
         async def batch(messages):
             await self.processor.process_message_batch(messages, "parent")
             self.processor.turn_completed = False  # its tools ran: one more round
-            waiting.append(asyncio.create_task(  # the talk-over, between the rounds
-                state.record_interrupted_voice_reply("turn-9", "Let me")
-            ))
-            await asyncio.sleep(0.05)
-
-        async def next_round():
-            async with self.processor._turn_lock:
-                seen.append(reply.content)  # what the turn's last round finds
-            self.processor.turn_completed = True
+            # The talk-over, between the rounds: answered at once, holding nothing.
+            answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
 
         async def scenario():
             voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
             await self.processor.enqueue(voice)
-            await self.processor.process_queue(MagicMock(), batch, next_round)
-            return await waiting[0]
+            await self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            )
 
-        self.assertTrue(self.loop.run_until_complete(scenario())["replaced"])
-        self.assertEqual(seen, ["Let me check."])  # the cut came after it
-        self.assertEqual(reply.content, "Let me")
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check.", "Let me check."])  # its last round ran uncut
+        self.assertEqual(reply.content, "Let me")  # then the cut landed
         self.assertIsNone(self.processor._open_voice_turn)
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_talk_over_then_speaking_again_cuts_before_the_next_turns_first_round(self):
+        """Talk over and speak again at once: the new turn's model call sees the cut."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        answers = []
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            if not answers:  # the reply is playing: the user talks over it, then speaks
+                answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
+                await self.processor.enqueue(QueuedInput(
+                    "and the blue one", {}, origin_context=make_voice_origin_context("turn-10")
+                ))
+                self.processor.turn_completed = False  # it still had a round to run
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            await self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            )
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check.", "Let me"])  # turn-10's first round: cut
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_cut_queued_during_another_round_lands_as_that_round_ends(self):
+        """A hub wake's round holds the lock when the talk-over comes: the cut
+        waits for it, then lands with no next turn needed."""
+        reply, state, seen = self._talk_over_turns()
+        answers = []
+        first_call = self.streaming_handler.call_llm.side_effect
+
+        async def call_llm(*args, **kwargs):
+            answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
+            return await first_call(*args, **kwargs)
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.loop.run_until_complete(self.processor.continue_conversation("parent"))
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check."])  # never cut under the round
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_cut_queued_behind_the_lock_lands_before_the_next_round(self):
+        reply, state, seen = self._talk_over_turns()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()  # something else is writing
+            answer = await state.record_interrupted_voice_reply("turn-9", "Let me")
+            self.processor._turn_lock.release()
+            await self.processor.continue_conversation("parent")
+            return answer
+
+        self.assertEqual(self.loop.run_until_complete(scenario()), {"recorded": False, "pending": True})
+        self.assertEqual(seen, ["Let me"])  # its model call saw the cut
+
+    def test_a_cut_never_waits_behind_a_round_about_to_take_the_lock(self):
+        """The lock is free but a woken round has it next: the cut still answers at
+        once, so nothing behind it on the connection waits out that round."""
+        reply, state, seen = self._talk_over_turns()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()
+            woken = asyncio.create_task(self.processor.continue_conversation("parent"))
+            await asyncio.sleep(0)  # it waits on the lock
+            self.processor._turn_lock.release()  # and takes it next
+            answer = await asyncio.wait_for(
+                state.record_interrupted_voice_reply("turn-9", "Let me"), 0.05
+            )
+            await woken
+            return answer
+
+        self.assertEqual(self.loop.run_until_complete(scenario()), {"recorded": False, "pending": True})
+        self.assertEqual(seen, ["Let me"])  # and it landed before that round's model call
 
     def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
         """The reply joins history after its tools; a Stop in between kept nothing."""

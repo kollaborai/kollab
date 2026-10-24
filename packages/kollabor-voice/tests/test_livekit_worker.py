@@ -530,6 +530,39 @@ def test_a_talk_over_posts_the_played_text_once_with_its_own_turn_id():
     assert body["text"].startswith("Checking") and S2 not in body["text"]
 
 
+def test_the_next_turn_goes_out_after_the_talked_over_replys_cut():
+    """The cut rides the event outbox, the next turn its own request: the turn waits
+    for the outbox, so the daemon has the cut before the next model call."""
+
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, "wait", S2, "done"], ["Okay.", "done"]], transcript=True
+        ) as rig:
+            order, post = [], rig.poster.post
+
+            async def slow_post(path, body):
+                if path.endswith("/interrupted"):
+                    await asyncio.sleep(0.5)  # an Engine slow to take the cut
+                    order.append("cut")
+                return await post(path, body)
+
+            class Requests(list):
+                def append(self, request):
+                    order.append(request["display_text"])
+                    super().append(request)
+
+            rig.poster.post, rig.engine.requests = slow_post, Requests()
+            await rig.say("is the build green")
+            await until(
+                lambda: rig.adapter.spoken == [S1] and rig.room.output.frames >= 3
+            )
+            await rig.say("stop that")
+            await until(lambda: "Okay." in rig.adapter.spoken)
+        return order
+
+    assert run(scenario()) == ["is the build green", "cut", "stop that"]
+
+
 def test_the_played_text_keeps_the_space_between_sentences():
     async def scenario():
         async with Rig(

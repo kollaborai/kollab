@@ -391,6 +391,7 @@ class KollabAgent(Agent):
             return
         turn = self.turn = worker.begin_turn(text, greeting)
         worker.keep_played_text(turn, _SpeechHandleContextVar.get(None))
+        await worker.drain()  # a talked-over reply's cut reaches the Engine first
         try:
             async with contextlib.aclosing(worker.turns.stream(turn.body)) as sentences:
                 async for sentence in sentences:

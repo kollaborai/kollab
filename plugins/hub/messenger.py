@@ -1853,33 +1853,6 @@ class AgentSocketServer:
         # _recv_input. Without this lock, NDJSON frames can interleave
         # mid-drain() and corrupt the wire protocol.
         write_lock = asyncio.Lock()
-        rpc_tasks: set[asyncio.Task] = set()
-
-        async def _answer_rpc(msg: dict) -> None:
-            try:
-                reply = await self._rpc_server.handle_wire(msg)
-                line = json.dumps(reply, default=str) + "\n"
-                async with write_lock:
-                    writer.write(line.encode("utf-8"))
-                    await writer.drain()
-            except Exception as exc:
-                logger.warning(
-                    "rpc request failed on attached connection: %s",
-                    exc,
-                    exc_info=True,
-                )
-                error_reply = {
-                    "action": "rpc_reply",
-                    "request_id": msg.get("request_id", ""),
-                    "error": repr(exc),
-                    "error_kind": "handler",
-                }
-                try:
-                    async with write_lock:
-                        writer.write((json.dumps(error_reply, default=str) + "\n").encode("utf-8"))
-                        await writer.drain()
-                except Exception:
-                    pass
 
         async def _send_events():
             # Generator variant of sub_queue.get for asyncio.to_thread: the
@@ -1950,12 +1923,30 @@ class AgentSocketServer:
                     # because rpc frames use "action", not "type".
                     if msg.get("action") == "rpc_request":
                         if self._rpc_server is not None:
-                            # Each request answers on its own: one that waits
-                            # (a talk-over's cut waits out the turn) must not
-                            # hold up a cancel or a permission answer after it.
-                            task = asyncio.create_task(_answer_rpc(msg))
-                            rpc_tasks.add(task)
-                            task.add_done_callback(rpc_tasks.discard)
+                            # Requests answer in the order they came (a Stop
+                            # sent after a Send runs after it), so no handler
+                            # may wait on a turn: a talk-over's cut is queued
+                            # on its turn instead (record_interrupted_voice_reply).
+                            try:
+                                reply = await self._rpc_server.handle_wire(msg)
+                            except Exception as exc:
+                                logger.warning(
+                                    "rpc request failed on attached connection: %s",
+                                    exc,
+                                    exc_info=True,
+                                )
+                                reply = {
+                                    "action": "rpc_reply",
+                                    "request_id": msg.get("request_id", ""),
+                                    "error": repr(exc),
+                                    "error_kind": "handler",
+                                }
+                            # A failed write is a closed connection: the
+                            # read loop's handler below ends it.
+                            line = json.dumps(reply, default=str) + "\n"
+                            async with write_lock:
+                                writer.write(line.encode("utf-8"))
+                                await writer.drain()
                         else:
                             # No RpcServer wired; return handler error so the
                             # client doesn't hang forever waiting for a reply.
@@ -2031,8 +2022,6 @@ class AgentSocketServer:
                                 logger.debug(f"Input inject error: {e}")
             except (ConnectionError, BrokenPipeError, OSError):
                 pass
-            # A request sent just before a detach still gets its answer.
-            await asyncio.gather(*rpc_tasks, return_exceptions=True)
 
         send_task = asyncio.create_task(_send_events())
         recv_task = asyncio.create_task(_recv_input())
@@ -2047,11 +2036,10 @@ class AgentSocketServer:
             # cancelled externally (for example during server shutdown). A
             # normal detach cancels the still-running sender; cancellation of
             # this coroutine must do the same or the sender leaks indefinitely.
-            tasks = (send_task, recv_task, *rpc_tasks)
-            for task in tasks:
+            for task in (send_task, recv_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(send_task, recv_task, return_exceptions=True)
             if self._display_tap is not None:
                 self._display_tap.unsubscribe(client_id)
             try:

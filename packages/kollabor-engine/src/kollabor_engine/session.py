@@ -982,6 +982,11 @@ class EngineSession:
                     # any burst. turn_complete does its own awaited refresh.
                     self._schedule_refresh()
 
+                elif etype == "voice_reply_cut":
+                    # A talk-over's cut queued while its turn unwound landed
+                    # after the RPC answered: open windows reload the cut reply.
+                    self._schedule_refresh(notify=True)
+
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw
                     # details: a client that reloads mid-prompt needs to

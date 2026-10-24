@@ -5,7 +5,6 @@ Extracted from LLMService as part of the llm_service.py decomposition.
 """
 
 import asyncio
-import contextlib
 import json
 import logging
 import sys
@@ -13,7 +12,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -455,6 +454,8 @@ class QueueProcessor:
         self.active_origin_context: dict[str, Any] | None = None
         self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
         self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
+        self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
+        self._after_turn_flush: asyncio.Task | None = None
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -938,6 +939,9 @@ class QueueProcessor:
 
                 # Done, cancelled or cut off by new input: no round of it is left.
                 self._open_voice_turn = None
+                if self._after_turn:
+                    async with self._turn_lock:
+                        await self._run_after_turn()
 
                 # Nothing left -- exit outer loop
                 if self.processing_queue.empty() or self.cancel_processing:
@@ -949,6 +953,8 @@ class QueueProcessor:
 
         finally:
             self.is_processing = False  # ends the chain (note_chain_end)
+            # ponytail: a drain that dies here leaves queued after-turn work (a
+            # talk-over cut) to the next round's start; a flush task if that bites.
             self._open_voice_turn = None
             self.current_processing_tokens = 0
             self.processing_start_time = None
@@ -1130,20 +1136,22 @@ class QueueProcessor:
         # The lock serializes turns; the second caller waits for the first
         # to finish rather than running concurrently.
         async with self._turn_lock:
+            await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
             # Stamped under the lock: a turn still running when this one was
             # queued clears its own stamp as it ends, never this one's.
             self._stamp_voice_turn(_voice_turn_id(execution_context))
             try:
                 if execution_context is not None:
-                    return await self._execute_llm_turn_inner(
+                    parent_uuid = await self._execute_llm_turn_inner(
                         user_message_provided,
                         current_parent_uuid,
                         execution_context=execution_context,
                     )
-                return await self._execute_llm_turn_inner(
-                    user_message_provided, current_parent_uuid
-                )
+                else:
+                    parent_uuid = await self._execute_llm_turn_inner(
+                        user_message_provided, current_parent_uuid
+                    )
             except BaseException as exc:
                 # The one place every driver's turn passes through: a turn that
                 # raises (a denied pre-request hook, a crash before the provider
@@ -1151,6 +1159,8 @@ class QueueProcessor:
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
                 raise
+            await self._run_after_turn()  # and what was queued while this round ran
+            return parent_uuid
 
     async def _execute_llm_turn_inner(
         self,
@@ -2204,28 +2214,32 @@ class QueueProcessor:
         turn_id = _voice_turn_id(self.active_origin_context)
         return {"voice_turn_id": turn_id} if turn_id else {}
 
-    @contextlib.asynccontextmanager
-    async def between_turns(self, voice_turn: str | None = None, timeout: float = 20.0):
-        """Hold the next turn off, entered once the running one has finished.
+    def after_turn(self, voice_turn: str, work: Callable[[], Awaitable[Any]]) -> None:
+        """Run `work` under the turn lock once `voice_turn` has no round left to run.
 
-        A turn writes its tool calls and their results under this lock, so a
-        history edit made inside never lands between them. With `voice_turn`,
-        that turn must have no round left to run, not just be between two.
-        TimeoutError after `timeout` seconds, inside the Engine's RPC timeout.
+        A turn writes its tool calls and their results under the lock, so a
+        history edit made in `work` never lands between them. Never waits: the
+        work is queued, holding nothing, and runs as the round holding the lock
+        ends, as its own turn ends, or first thing in the next round; with no
+        round running, right after this returns. No later round starts before it.
         """
-        async with asyncio.timeout(timeout):
-            while True:
-                await self._turn_lock.acquire()
-                if not voice_turn or self._open_voice_turn != voice_turn:
-                    break
-                self._turn_lock.release()
-                # ponytail: polls a turn that runs on uncancelled; a later turn
-                # can take the lock during the sleep. A turn-end event if it does.
-                await asyncio.sleep(0.01)
-        try:
-            yield
-        finally:
-            self._turn_lock.release()
+        self._after_turn.append((voice_turn, work))
+        if self._open_voice_turn != voice_turn and not self._turn_lock.locked():
+            self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
+
+    async def _flush_after_turn(self) -> None:
+        async with self._turn_lock:
+            await self._run_after_turn()
+
+    async def _run_after_turn(self) -> None:
+        """The queued work whose turn has no round left (under the turn lock)."""
+        due = [work for turn, work in self._after_turn if turn != self._open_voice_turn]
+        self._after_turn = [item for item in self._after_turn if item[0] == self._open_voice_turn]
+        for work in due:
+            try:
+                await work()
+            except Exception:
+                logger.exception("work queued after a turn failed")
 
     async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.

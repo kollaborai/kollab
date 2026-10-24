@@ -17,7 +17,6 @@ Either way, there's exactly ONE place where the business logic lives.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -3193,22 +3192,29 @@ class LocalStateService(StateService):
         listener heard, once per voice turn: the reply playback stopped in is cut
         to it and marked interrupted, and the prose after it goes (a later tool
         call stays, its tools ran). The conversation log gets the same cut.
+
+        Never waits on the turn: RPCs answer in order, so a Stop or an approval
+        answer sent after this one would wait too. The cut is queued on the turn
+        ({"recorded": False, "pending": True}) and lands once no round of it is
+        left, before any later round; open windows hear `voice_reply_cut`.
         """
         llm = self._llm_service
         text = (text or "").strip()
         if llm is None or not turn_id:
             return {"recorded": False}
-        # A turn writes its tool calls and their results under the turn lock, so
-        # waiting for it keeps the cut out from between them, and the reply's own
-        # rows are all in by then.
         queue = getattr(llm, "_queue_processor", None)
-        between = getattr(queue, "between_turns", None)
-        try:
-            async with between(turn_id) if callable(between) else contextlib.nullcontext():
-                return await self._cut_voice_reply(llm, turn_id, text)
-        except TimeoutError:
-            logger.warning("voice turn %s still running: its talk-over cut is dropped", turn_id)
-            return {"recorded": False, "busy": True}
+        if queue is None:
+            return await self._cut_voice_reply(llm, turn_id, text)
+
+        async def cut() -> None:
+            if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
+                from kollabor_tui.display_tap import publish_semantic
+
+                publish_semantic(self._event_bus, "voice_reply_cut", turn_id=turn_id)
+
+        # Under the turn lock, so the cut never lands between a tool call and its result.
+        queue.after_turn(turn_id, cut)
+        return {"recorded": False, "pending": True}
 
     async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
         from kollabor_events.data_models import ConversationMessage

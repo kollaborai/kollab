@@ -45,6 +45,21 @@ them, and no voice screen shows classifier controls, status or decisions.
   gets the room. Elsewhere the mic is the `/voice` toggle (the computer running
   the agent listens), as before.
 
+## Talk-over
+
+- 0.5 s of voice pauses the reply. Words cancel it and become the next turn; a
+  cough (no words within 2 s) resumes it.
+- The talked-over reply keeps only the part that was played, marked
+  interrupted: the worker posts `turns/{id}/interrupted`, the Engine calls
+  `state.voice_interrupted_reply`. Attach RPCs answer in the order they came, so
+  no handler waits on a turn: a cut whose turn still has a round to run is
+  queued on it (`QueueProcessor.after_turn`), answered at once, and lands under
+  the turn lock as soon as no round of that turn is left, always before the next
+  model call. A cut that lands late publishes `voice_reply_cut` and open windows
+  reload.
+- The worker drains its event outbox before it posts the next turn, so the
+  daemon has the cut first.
+
 ## Logs
 
 `<voice root>/logs/livekit-server.log` and `livekit-worker.log` (the voice root
@@ -63,9 +78,6 @@ is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
 - PhoneLink: the phone reaches the Engine through the encrypted relay channel,
   which carries no WebRTC media. Phone voice needs the phone's audio bridged over
   that channel into the room (or a reachable TURN path).
-- Before-latency for the old voice path was never recorded.
-- An interrupted reply leaves no text in history (text-chat cancel does the
-  same; the ACP path keeps what it observed).
 
 ## Checklist
 
@@ -76,4 +88,4 @@ is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
       the voice path never imports or calls them (tests).
 - [x] No orphaned worker or server after stop (process-group kill, tests).
 - [ ] PhoneLink voice.
-- [ ] Before/after latency.
+- [x] Before/after latency (#301, "Measurement").
