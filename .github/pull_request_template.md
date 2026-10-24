@@ -89,7 +89,7 @@ in `docs/product-ready-checklist.md`.
 - [ ] Work was done in a task-specific sibling worktree (for example,
   `../kollab-wt/issue-<N>-<slug>`) based on `origin/main`, leaving the shared
   checkout untouched.
-- [ ] The PR remains a draft until Marco marks it ready; agents do not merge or
+- [ ] The PR remains a draft until Marco or the koordinator marks it ready; agents do not merge or
   create release tags without explicit authorization.
 
 ## Risk and rollout notes

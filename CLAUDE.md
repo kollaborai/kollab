@@ -862,8 +862,8 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 - Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
   `fixes #123`, `closes #123`, `resolves #123`, or `#123`
 - Main branch protected - no direct pushes
-- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco marks a PR
-  ready or approves it; auto-merge then merges it once checks pass.
+- Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
+  koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
 - PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
   repo, opened by a person with write access, merges with a merge commit once the three
   required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
