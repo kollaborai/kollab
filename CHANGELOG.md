@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picks up its result when the turn finishes.
 - Web: a stopped turn no longer leaves the agent's gem acting out a dead tool
   call.
+- Web: a window watching an ACP agent's turn that started elsewhere streams its
+  reply and tools live, keeps a stopped reply on screen until the stored one
+  replaces it, and streams a turn queued right behind it. Prose the agent sends
+  after a cancel is neither shown nor stored.
 - Hub: the Telegram bridge wakes its target agent, and disconnecting the email
   bridge no longer waits out an IMAP IDLE.
 - Context-compaction emergency recovery prioritizes the latest human request,
