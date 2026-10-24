@@ -94,7 +94,12 @@ Preference boundary is a prerequisite, not a cleanup detail:
   migrated Engine/Agent/history/resume callers. `observer.py` remains for
   classifier/audio/admission behavior; no observer code was deleted. The 73
   targeted root/voice tests passed on Python 3.14.7; Ruff and Black checks pass.
-- [ ] LiveKit transport/Engine integration and classifier removal remain
+- [x] Classifier removal: the classifier, Laya and Qwen modules, workers, models,
+  manifest entries, review/ack/observer paths, `/voice classifier`, the decision
+  log screen and the classifier `said` field are gone; a final transcript goes
+  straight to the agent turn. `tests/unit/test_voice_classifier_removed.py` guards
+  it. Spoken-format checks and the single rewrite nudge stay.
+- [ ] LiveKit transport/Engine integration remains
   pending. Browser end-to-end acceptance is blocked because browser-control
   tooling is unavailable; do not substitute live audio or services.
 

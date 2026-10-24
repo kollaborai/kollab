@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import itertools
 import json
 import logging
 import os
@@ -19,21 +18,8 @@ from kollabor_plugins.base import BasePlugin
 
 logger = logging.getLogger(__name__)
 
-# Speech routed without a classifier call, as /voice classifier shows it.
-VOICE_ROUTES = {
-    "addressed": "Called by name, or the words right after a greeting",
-    "confirmed": 'Answered yes to "was that for me?"',
-    "declined": "Not for the agent (the answer to its question); quiet for two minutes",
-}
-
-# Turn-taking around the classifier's own lines (seconds).
-CLARIFY_WINDOW_S = 12  # "was that for me?" waits this long after voice stops talking
-CLARIFY_PAUSE_S = 30  # nobody answered it: likely the TV, stop asking a while
-QUIET_S = 120  # "no, it's the TV": no clarifying questions for two minutes
-FOLLOW_UP_S = 15  # after "hey aquamarine" alone, the next words are for the agent
-CONTEXT_MESSAGES = 6  # recent chat messages the classifier reads (three exchanges)
 PROGRESS_AFTER_S = (8, 17)  # still-working lines while the agent has said nothing
-# A stopped observer tries again on its own, waiting longer each time (seconds).
+# A stopped delivery tries again on its own, waiting longer each time (seconds).
 OBSERVER_RETRY_S, OBSERVER_RETRY_MAX_S = 5, 120
 # /voice enroll: about 30 seconds read aloud, covering most English sounds.
 ENROLL_PASSAGE = (
@@ -66,16 +52,11 @@ class VoicePlugin(BasePlugin):
         self._claim_id = None
         self._controller = None
         self._observer = None
-        self._api = None
-        self._api_profile = None
         self._pending = []
-        self._recent_ignored = []
         self._recent_transcripts = []
-        self._decision_transcript_context = []
         self._last_transcript_arrival = 0
         self._observer_error = None
         self._speech_error = None
-        self._observing = False
         self._retry = asyncio.Event()
         self._admissions = None
         self._admission_lock = asyncio.Lock()
@@ -84,21 +65,12 @@ class VoicePlugin(BasePlugin):
         self._remote_heartbeat_task = None
         self._routing_error = None
         self._bound_epoch = None
-        from kollabor_voice.classifiers import load_preferences
+        from kollabor_voice.speech_settings import load_speech_preferences
 
         self._preferences_revision = self._preference_revision()
-        preferences = load_preferences()
+        preferences = load_speech_preferences()
         self._voice_preferences = preferences
-        self.classifier_name = preferences["classifier"]
         self.context_lines = preferences["context_lines"]
-        self._needs_classifier_prepare = False
-        self._classifier_generation = 0
-        self._last_decision = None
-        self._decision_deferred_ids = []
-        # /voice classifier: each classifier call, oldest first.
-        self._classifier_log = deque(maxlen=50)
-        self._classifier_seq = itertools.count(1)
-        self._classifier_entry = None
         self._speech_api = None
         self._speech_api_profile = None
         self._speech_api_lock = asyncio.Lock()
@@ -108,18 +80,9 @@ class VoicePlugin(BasePlugin):
         self._speech_review_state = None
         self._remote_reply_queue = asyncio.Queue(maxsize=32)
         self._remote_reply_task = None
-        # The classifier's own lines (kollabor_voice.acks) and the turn-taking
-        # around them.
         self._agent_names = ["Kollab"]
-        self._clarifying = None  # {"records", "asked"}: awaiting "was that for me?"
-        self._quiet_until = self._clarify_pause_until = self._follow_up_until = 0.0
-        self._ignored_at = deque(maxlen=8)  # when speech was judged not for us
-        self._said = {}  # kind -> last line, so no line repeats back to back
-        self._last_said = None  # {"text", "at"}: the latest line, for the UI
         self._progress_task = None
         self._spoken_replies = deque(maxlen=64)
-        self._spoke_at = 0.0  # when voice last synthesized or played speech
-        self._acked = {}  # event ids -> the ack already said for them
         self._observer_backoff = OBSERVER_RETRY_S
         self._restart_delay = OBSERVER_RETRY_S  # before the client starts again
 
@@ -177,10 +140,7 @@ class VoicePlugin(BasePlugin):
             running=self.requested and state.get("state") == "listening",
             observer_error=self._observer_error,
             pending=len(self._pending),
-            observing=self._observing,
-            classifier_name=self.classifier_name,
             context_lines=self.context_lines,
-            last_decision=self._last_decision,
             last_speech_decision=self._last_speech_decision,
             speech_review_state=self._speech_review_state,
             pending_replies=self._remote_reply_queue.qsize(),
@@ -201,10 +161,6 @@ class VoicePlugin(BasePlugin):
             stage = "hearing"
         elif state.get("transcribing") or state.get("input_depth"):
             stage = "transcribing"
-        elif self._observing:
-            stage = "deciding"
-        elif self._clarifying and time.monotonic() <= self._question_ends():
-            stage = "asking"
         else:
             stage = "listening"
         speaker = state.get("speaker") or {}
@@ -216,21 +172,10 @@ class VoicePlugin(BasePlugin):
         level = float(state.get("level") or 0)
         # -60 dBFS (a quiet room) .. -15 dBFS (speech up close) as 0..1.
         loudness = (20 * math.log10(max(level, 1e-6)) + 60) / 45
-        said = self._last_said
         return {
             "stage": stage,
             "level": round(min(1.0, max(0.0, loudness)), 2),
-            "said": said["text"] if said and time.time() - said["at"] < 10 else None,
         }
-
-    def _question_ends(self):
-        """When "was that for me?" stops waiting: a while after voice last spoke.
-
-        Counted from the end of everything voice said after asking (the agent's
-        reply can play in between), so the human always gets the full window.
-        """
-        held = self._clarifying
-        return max(held["asked"], self._spoke_at) + CLARIFY_WINDOW_S if held else 0.0
 
     @staticmethod
     def _preference_revision():
@@ -247,50 +192,23 @@ class VoicePlugin(BasePlugin):
         revision = self._preference_revision()
         if revision == self._preferences_revision:
             return
-        from kollabor_voice.classifiers import LOCAL_CLASSIFIERS, load_preferences
+        from kollabor_voice.speech_settings import load_speech_preferences
 
-        preferences = load_preferences()
+        preferences = load_speech_preferences()
         changed = preferences != self._voice_preferences
         self._voice_preferences = preferences
-        if self.classifier_name != preferences["classifier"]:
-            self._needs_classifier_prepare = (
-                preferences["classifier"] in LOCAL_CLASSIFIERS
-            )
-        self.classifier_name = preferences["classifier"]
         self.context_lines = preferences["context_lines"]
         self._preferences_revision = revision
         if changed:
-            self._classifier_generation += 1
-            self._last_decision = None
             self._observer_error = self._routing_error
             self._retry.set()
             self._refresh()
 
     async def configure_voice(self, changes):
-        from kollabor_voice.classifiers import save_preferences
+        from kollabor_voice.speech_settings import save_speech_preferences
 
-        save_preferences(changes)
+        save_speech_preferences(changes)
         self.sync_preferences()
-        if "classifier" in changes:
-            # Selecting the current classifier also retries a stopped worker.
-            self._classifier_generation += 1
-            self._last_decision = None
-            self._observer_error = self._routing_error
-            self._needs_classifier_prepare = self._local_classifier
-            self._retry.set()
-        if self._needs_classifier_prepare and self._client and self.requested:
-            await self._prepare_classifier()
-            self._needs_classifier_prepare = False
-
-    async def set_classifier(self, name):
-        from kollabor_voice.classifiers import CLASSIFIERS
-
-        if name not in CLASSIFIERS:
-            raise ValueError("Choose laya, qwen or provider")
-        await self.configure_voice({"classifier": name})
-        self._retry.set()
-        self._refresh()
-        return f"Voice classifier: {CLASSIFIERS[name]}. Saved for this device; pending speech is preserved."
 
     async def enroll_voice(self):
         """Save the user's voiceprint from their next 30 seconds of speech."""
@@ -325,16 +243,16 @@ class VoicePlugin(BasePlugin):
         return "Voiceprint deleted" if forgotten else "No voiceprint was saved"
 
     def set_context_lines(self, value):
-        from kollabor_voice.classifiers import save_context_lines
+        from kollabor_voice.speech_settings import save_speech_preferences
 
-        save_context_lines(value)
+        save_speech_preferences({"context_lines": value})
         self.sync_preferences()
         return (
             f"Voice context: previous {value} transcript lines. Saved for this device."
         )
 
     def _transcript_context_for(self, records, additional=()):
-        """Prior microphone lines inform a decision but are never new candidates."""
+        """Prior microphone lines go to the agent as context, never as new requests."""
         ids = {r["event_id"] for r in records}
         epoch = (self._lease or {}).get("epoch")
         stream = (self._lease or {}).get("stream_id")
@@ -350,7 +268,7 @@ class VoicePlugin(BasePlugin):
         return list({r["event_id"]: r for r in prior}.values())[-self.context_lines :]
 
     def _remember_transcripts(self, records):
-        from kollabor_voice.classifiers import MAX_CONTEXT_LINES
+        from kollabor_voice.speech_settings import MAX_CONTEXT_LINES
 
         prior = {r["event_id"]: r for r in self._recent_transcripts}
         prior.update({r["event_id"]: r for r in records})
@@ -364,9 +282,7 @@ class VoicePlugin(BasePlugin):
         self._observer_error = None
         self._speech_error = None
         self._pending = []
-        self._recent_ignored = []
         self._recent_transcripts = []
-        self._decision_transcript_context = []
         self._controller = asyncio.create_task(self._run(), name="voice-client")
         self._refresh()
         return "Voice Starting — checking local service; setup runs in the background"
@@ -378,7 +294,6 @@ class VoicePlugin(BasePlugin):
         self._output_generation += 1
         self._seen_speech.clear()
         self.requested = False
-        self._clarifying, self._follow_up_until = None, 0.0
         if self._progress_task:
             self._progress_task.cancel()
         await self._stop_remote_replies()
@@ -411,9 +326,7 @@ class VoicePlugin(BasePlugin):
         self._claim_id = None
         self._state = {"state": "off"}
         self._pending = []
-        self._recent_ignored = []
         self._recent_transcripts = []
-        self._decision_transcript_context = []
         self._observer_error = None
         self._speech_error = None
         self._routing_error = None
@@ -421,44 +334,7 @@ class VoicePlugin(BasePlugin):
         self._refresh()
         return "Voice Off"
 
-    async def _prepare_classifier(self):
-        # Cache the state the service just entered. Until the next heartbeat the
-        # observer would read the old "error" and latch it again.
-        prepared = await self._patient_call(
-            "classifier_prepare", model=self.classifier_name
-        )
-        self._state = {**self._state, "classifier": prepared}
-
-    @property
-    def _local_classifier(self):
-        """Laya or Qwen: run by the device service's worker, not the provider."""
-        from kollabor_voice.classifiers import LOCAL_CLASSIFIERS
-
-        return self.classifier_name in LOCAL_CLASSIFIERS
-
-    def _classifier_status(self, state):
-        """The service's worker status for this chat's classifier.
-
-        "off" while the service has the other local classifier loaded; an error
-        when the service predates the selected one (it has no "name").
-        """
-        from kollabor_voice.classifiers import CLASSIFIERS
-
-        classifier = state.get("classifier") or {}
-        name = classifier.get("name")
-        if classifier and name is None and self.classifier_name != "laya":
-            return {
-                "state": "error",
-                "detail": f"The voice service predates {CLASSIFIERS[self.classifier_name]}; "
-                "restart the voice service after updating Kollab",
-            }
-        if (name or "laya") != self.classifier_name:
-            return {"state": "off"}
-        return classifier
-
     async def retry_voice(self):
-        if self._local_classifier and self._client and self.requested:
-            await self._prepare_classifier()
         if (
             self.requested
             and self._lease
@@ -509,25 +385,11 @@ class VoicePlugin(BasePlugin):
                 or initial.get("speech", {}).get("state") == "error"
             ):
                 initial = await self._patient_call("retry")
-            if self._local_classifier:
-                await self._prepare_classifier()
-                initial = await self._patient_call("status")
             # Model initialization can hold the Python runtime long enough to
             # exceed a capture lease. Acquire ownership only once loading ends.
             # Cancelling this task during setup therefore cannot open the mic.
-            while not initial.get("ready") or (
-                self._local_classifier
-                and self._classifier_status(initial).get("state") != "ready"
-            ):
-                classifier = self._classifier_status(initial)
-                if initial.get("ready") and self._local_classifier:
-                    update({**initial, **classifier})
-                    if classifier.get("state") == "error":
-                        raise RuntimeError(
-                            classifier.get("detail", "Voice classifier setup failed")
-                        )
-                else:
-                    update(initial)
+            while not initial.get("ready"):
+                update(initial)
                 speech = initial.get("speech", {})
                 if speech.get("state") == "error":
                     raise RuntimeError(
@@ -563,8 +425,6 @@ class VoicePlugin(BasePlugin):
                         "voice claim timed out (attempt %d/3); retrying", attempt + 1
                     )
                     await asyncio.sleep(0.5 * (attempt + 1))
-            if self._local_classifier:
-                await self._prepare_classifier()
             cursor = self._lease["cursor"]
             rpc = self._event_bus.get_service("rpc_client")
             if rpc:
@@ -576,18 +436,15 @@ class VoicePlugin(BasePlugin):
             else:
                 self._agent_names = self._local_agent_names()
             # Whisper spells the names it is told about ("Aquamarine", not
-            # "Awkwamari"), and the classifier hears them as a direct address.
+            # "Awkwamari").
             with contextlib.suppress(Exception):
                 await self._client.call("hint", **self._auth(), names=self._agent_names)
             self._observer = asyncio.create_task(
-                self._observe_loop(), name="voice-observer"
+                self._deliver_loop(), name="voice-delivery"
             )
             healthy_since = time.monotonic()
             while self.requested:
                 self.sync_preferences()
-                if self._needs_classifier_prepare:
-                    await self._prepare_classifier()
-                    self._needs_classifier_prepare = False
                 self._state = await self._patient_call("heartbeat", **self._auth())
                 if self._state.get("state") == "error":
                     # Capture stopped (the microphone or a worker failed):
@@ -595,9 +452,6 @@ class VoicePlugin(BasePlugin):
                     raise RuntimeError(self._state.get("error") or "Voice failed")
                 if time.monotonic() - healthy_since > 60:
                     self._restart_delay = OBSERVER_RETRY_S
-                output = self._state.get("output") or {}
-                if output.get("state") in {"synthesizing", "playing"}:
-                    self._spoke_at = time.monotonic()
                 if len(self._pending) < 32:
                     result = await self._patient_call(
                         "read",
@@ -611,7 +465,7 @@ class VoicePlugin(BasePlugin):
                             self._pending.append(record)
                             self._last_transcript_arrival = time.monotonic()
                     self._save_consumer(cursor)
-                # Otherwise the observer is 32 lines behind: read on once it
+                # Otherwise delivery is 32 lines behind: read on once it
                 # catches up. The transcript is durable, so nothing is lost.
                 self._refresh()
                 await asyncio.sleep(0.35)
@@ -741,7 +595,8 @@ class VoicePlugin(BasePlugin):
             },
         )
 
-    async def _observe_loop(self):
+    async def _deliver_loop(self):
+        """Send each final transcript straight to the agent turn: no intent gate."""
         from kollabor_voice.observer import is_playback_echo, strip_playback
 
         while self.requested:
@@ -749,21 +604,21 @@ class VoicePlugin(BasePlugin):
                 await asyncio.sleep(0.15)
                 continue
             # The microphone also hears this agent's own voice. Those lines stay
-            # in the voice transcript but are never classified or delivered.
+            # in the voice transcript but are never delivered.
             echoes = [r for r in self._pending if is_playback_echo(r)]
             if echoes:
                 dropped = {r["event_id"] for r in echoes}
                 self._pending[:] = [
                     r for r in self._pending if r["event_id"] not in dropped
                 ]
-                self._log_classifier(echoes, echo=True)
+                self._remember_transcripts(echoes)
                 logger.info(
                     "Dropped %d microphone line(s) echoing playback", len(echoes)
                 )
                 continue
             # The speaker gate heard another voice (the TV, other people), or
-            # the user reading for enrollment: never classified or delivered.
-            # Other voices stay as context for later decisions.
+            # the user reading for enrollment: never delivered. Other voices
+            # stay as context for later turns.
             gated = [
                 r
                 for r in self._pending
@@ -774,16 +629,12 @@ class VoicePlugin(BasePlugin):
                 self._pending[:] = [
                     r for r in self._pending if r["event_id"] not in dropped
                 ]
-                for kind in ("other_speaker", "enrolling"):
-                    lines = [r for r in gated if r["speaker"] == kind]
-                    if lines:
-                        self._log_classifier(lines, **{kind: True})
                 self._remember_transcripts(
                     [r for r in gated if r["speaker"] == "other_speaker"]
                 )
                 continue
             for record in self._pending:
-                # Talked over voice: judge and send only the human's words.
+                # Talked over voice: send only the human's words.
                 own = strip_playback(record)
                 if own and own != record["text"]:
                     record["heard_text"], record["text"] = record["text"], own
@@ -795,35 +646,17 @@ class VoicePlugin(BasePlugin):
                     await asyncio.wait_for(self._retry.wait(), self._observer_backoff)
                 except TimeoutError:
                     if not self._routing_error:
-                        logger.info("Voice observer retrying: %s", self._observer_error)
+                        logger.info("Voice delivery retrying: %s", self._observer_error)
                         self._observer_error = None
-                        self._needs_classifier_prepare = self._local_classifier and (
-                            self._classifier_status(self._state).get("state")
-                            in {"error", "off"}
-                        )
                         self._observer_backoff = min(
                             self._observer_backoff * 2, OBSERVER_RETRY_MAX_S
                         )
                         self._refresh()
                 self._retry.clear()
                 continue
-            if self._local_classifier:
-                classifier = self._classifier_status(self._state)
-                if classifier.get("state") == "error":
-                    self._observer_error = classifier.get(
-                        "detail", "Voice classifier failed; retrying"
-                    )
-                    self._refresh()
-                    continue
-                if classifier.get("state") != "ready":
-                    if classifier.get("state") == "off":
-                        # Another chat loaded the other local classifier.
-                        self._needs_classifier_prepare = True
-                    await asyncio.sleep(0.15)
-                    continue
             # Audio chunks are storage/Whisper boundaries, not conversational
-            # turns. Wait for capture and transcription to settle before asking
-            # whether the complete utterance addresses this chat.
+            # turns. Wait for capture and transcription to settle, then send
+            # the complete utterance.
             if (
                 self._state.get("speech_active")
                 or self._state.get("transcribing")
@@ -834,242 +667,37 @@ class VoicePlugin(BasePlugin):
                 continue
             records = self._pending[:8]
             epoch = self._lease["epoch"]
-            classifier_generation = self._classifier_generation
-            self._classifier_entry = None
             try:
-                self._observing = True
                 newest = datetime.fromisoformat(records[-1]["ended_at"]).timestamp()
                 if time.time() - newest > 30:
-                    # Heard while voice could not decide (an outage, a cold
+                    # Heard while voice could not deliver (an outage, a cold
                     # start): too late to answer now. It stays in the transcript
-                    # and informs what comes next, but is never sent.
-                    self._log_classifier(
-                        records,
-                        decision={
-                            "decision": "ignore",
-                            "detail": "Older than 30 seconds by the time voice "
-                            "could decide: kept as context, not sent",
-                        },
-                    )
+                    # as context, but is never sent.
                     del self._pending[: len(records)]
                     self._remember_transcripts(records)
                     continue
-                # An initially ignored lead-in can be followed by a question.
-                # Keep a bounded lookback so that early classification cannot
-                # erase the start of the user's next contiguous request.
-                from kollabor_voice.observer import connected_speech
-
-                earliest = datetime.fromisoformat(records[0]["started_at"]).timestamp()
-                previous = [
-                    r
-                    for r in self._recent_ignored
-                    if earliest - datetime.fromisoformat(r["ended_at"]).timestamp() <= 2
-                ]
-                candidates = previous + records
-                from kollabor_voice.acks import address
-
-                heard = " ".join(r["text"] for r in records)
-                held = self._clarifying
-                if held and time.monotonic() > self._question_ends():
-                    # Nobody answered "was that for me?": likely background.
-                    self._clarify_pause_until = self._question_ends() + CLARIFY_PAUSE_S
-                    held = self._clarifying = None
-                answered = {}
-                reply = await self._answer(heard, held, answered) if held else None
-                self._decision_deferred_ids = []
-                if reply == "no":
-                    selected, how = [], "declined"
-                elif reply == "yes":
-                    # A bare yes sends the held speech; a longer answer goes too.
-                    extra = records if len(heard.split()) > 3 else []
-                    selected, how = held["records"] + extra, "confirmed"
-                elif (
-                    address(heard, self._agent_names)[0]
-                    or time.monotonic() < self._follow_up_until
-                ):
-                    selected, how = connected_speech(candidates, records), "addressed"
-                else:
-                    selected = await asyncio.wait_for(
-                        self.observe_records(candidates), 10
-                    )
-                    if classifier_generation != self._classifier_generation:
-                        continue
-                    selected = connected_speech(candidates, selected)
-                    how = "unsure" if self._decision_deferred_ids else "classified"
-                # If more of the utterance arrived during inference, decide on
-                # the larger batch before admitting any fragment to the host.
+                # More of the utterance arrived while settling: send it whole.
                 if self._state.get("speech_active") or len(self._pending) > len(
                     records
                 ):
                     if len(records) < 8:
-                        if self._classifier_entry:
-                            self._classifier_entry["note"] = (
-                                "More speech arrived; decided again with it"
-                            )
                         continue
                 if not self.requested or epoch != self._lease["epoch"]:
                     return
-                # Recheck actual device ownership after inference, before dispatch.
+                # Recheck actual device ownership before dispatch.
                 await self._client.call("heartbeat", **self._auth())
-                # Speech that is neither an answer nor for the agent (the TV
-                # talking on) leaves the question open until its window ends.
-                asking = held is not None and not reply and how == "unsure"
-                if reply or (selected and how != "unsure"):
-                    self._clarifying = None
-                if how in VOICE_ROUTES:
-                    self._classifier_entry = self._log_classifier(
-                        records,
-                        decision={
-                            "decision": "ignore" if how == "declined" else "respond",
-                            "detail": VOICE_ROUTES[how],
-                            **(answered if how != "addressed" else {}),
-                        },
-                    )
-                if how == "declined":
-                    self._quiet_until = time.monotonic() + QUIET_S
-                elif selected and not asking:
-                    await self._respond(selected, candidates, how, epoch, newest)
-                else:
-                    self._ignored_at.append(time.time())
+                await self._admit_speech(records, epoch, newest)
                 del self._pending[: len(records)]
                 self._remember_transcripts(records)
-                chosen = {r["event_id"] for r in selected}
-                self._recent_ignored = [
-                    r for r in candidates if r["event_id"] not in chosen
-                ][-8:]
                 self._observer_backoff = OBSERVER_RETRY_S
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if classifier_generation != self._classifier_generation:
-                    continue
-                self._observer_error = str(exc) or "Voice observer timed out"
-                if self._classifier_entry is None:
-                    self._log_classifier(records, error=self._observer_error)
-                elif not self._classifier_entry.get("error"):
-                    self._classifier_entry["error"] = self._observer_error
-                logger.warning("Voice observation pending: %s", self._observer_error)
-            finally:
-                self._observing = False
+                self._observer_error = str(exc) or "Voice delivery timed out"
+                logger.warning("Voice delivery pending: %s", self._observer_error)
             self._refresh()
 
-    async def _respond(self, selected, candidates, how, epoch, newest):
-        """Answer at once in the classifier's own words; the agent gets what needs it.
-
-        how: "classified" (sure), "unsure", "addressed" (called by name) or
-        "confirmed" (yes to the classifier's question).
-        """
-        from kollabor_voice.acks import kind_of
-
-        text = " ".join(r["text"] for r in selected)
-        kind = "confirmed" if how == "confirmed" else kind_of(text, self._agent_names)
-        if how == "unsure" and kind != "mic_check":
-            now = time.monotonic()
-            if kind == "thanks" or now < max(
-                self._quiet_until, self._clarify_pause_until
-            ):
-                if self._classifier_entry is not None:
-                    self._classifier_entry["note"] = "Unsure, and not asking right now"
-                return
-            self._clarifying = {"records": selected, "asked": now}
-            # What the human heard; the Qwen model reads it with their answer.
-            self._clarifying["question"] = await self._say(
-                "clarify_background" if self._background_heard() else "clarify", epoch
-            )
-            return
-        key = tuple(r["event_id"] for r in selected)
-        if key not in self._acked:
-            # Said once even when admission fails and the observer retries.
-            self._acked[key] = await self._say(kind, epoch)
-            while len(self._acked) > 32:
-                self._acked.pop(next(iter(self._acked)))
-        # After a bare name, the next words are for the agent too.
-        self._follow_up_until = (
-            time.monotonic() + FOLLOW_UP_S if kind == "greeting" else 0.0
-        )
-        # A mic check, thanks or bare name was answered just now and still goes
-        # to the agent with that answer: it may add more or hold off.
-        await self._admit_speech(
-            selected,
-            candidates,
-            epoch,
-            newest,
-            self._acked[key],
-            answered=kind in {"mic_check", "thanks", "greeting"},
-        )
-
-    async def _answer(self, heard, held, answered):
-        """The reply to "was that for me?": "yes", "no", or None for other speech.
-
-        The Qwen model reads it with the held words and the question; the other
-        classifiers use the acks rules. ``answered`` gets the model's call for
-        /voice classifier.
-        """
-        from kollabor_voice.acks import answer
-
-        if self.classifier_name != "qwen":
-            return answer(heard)
-        from kollabor_voice.classifiers import LocalClassifier
-
-        said, question = (
-            " ".join(r["text"] for r in held["records"]),
-            held.get("question") or "",
-        )
-        result = await LocalClassifier(self._client, self._auth, "qwen").answer(
-            said, question, heard
-        )
-        confidence = round(result["probabilities"][result["answer"]], 3)
-        answered.update(
-            model=result.get("model", ""),
-            confidence=confidence,
-            # What the model read and said, shown by /voice classifier.
-            trace=[
-                {
-                    "state": {"held": said, "question": question, "reply": heard},
-                    "passes": [
-                        {
-                            "label": "answer",
-                            "choice": result["answer"],
-                            "probability": confidence,
-                        }
-                    ],
-                }
-            ],
-        )
-        return None if result["answer"] == "other" else result["answer"]
-
-    def _background_heard(self):
-        """Speech kept arriving that was not for us: probably a TV in the room."""
-        return sum(t > time.time() - 90 for t in self._ignored_at) >= 2
-
-    async def _say(self, kind, epoch):
-        """Speak one of the classifier's lines now; returns it, or "" if voice could not."""
-        from kollabor_voice.acks import pick
-
-        line = pick(kind, self._said.get(kind))
-        self._said[kind] = line
-        try:
-            # Curated lines skip the spoken-style review agent replies get.
-            await self._client.call(
-                "voice_out",
-                text=line,
-                reply_id=f"line-{uuid.uuid4().hex}",
-                epoch=epoch,
-                producer_id="voice-classifier",
-                token=self._lease["token"],
-            )
-        except Exception as exc:
-            logger.warning("Voice line %r not spoken: %s", line, exc)
-            return ""
-        self._last_said = {"text": line, "at": time.time()}
-        if self._classifier_entry is not None:
-            self._classifier_entry["said"] = line
-        self._refresh()
-        return line
-
-    async def _admit_speech(
-        self, selected, candidates, epoch, newest, ack, answered=False
-    ):
+    async def _admit_speech(self, selected, epoch, newest):
         from kollabor_voice.observer import admission_id, playback_text
 
         identity = admission_id(self.client_id, selected)
@@ -1083,19 +711,8 @@ class VoicePlugin(BasePlugin):
                 "client_id": self.client_id,
                 "event_ids": [r["event_id"] for r in selected],
                 "transcript_text": " ".join(r["text"] for r in selected),
-                # An earlier ignored utterance in this same batch informed
-                # classification too. Keep it for the host without replaying
-                # it as a fresh request.
-                "transcript_context": self._transcript_context_for(
-                    selected, candidates
-                ),
+                "transcript_context": self._transcript_context_for(selected),
                 "playback_context": playback_text(selected),
-                "classifier": self._last_decision,
-                # Already said aloud; the agent continues from it.
-                "spoken_ack": ack,
-                # Voice answered it (a mic check, thanks, a bare name): nobody
-                # is waiting, so no still-working lines.
-                "answered": answered,
                 "expires_at": newest + 30,
             },
         }
@@ -1109,191 +726,6 @@ class VoicePlugin(BasePlugin):
             raise RuntimeError(
                 f"Voice delivery {result.get('status', 'unknown')}; pending speech was not replayed"
             )
-        if self._classifier_entry:
-            self._classifier_entry["delivered"] = [r["event_id"] for r in selected]
-
-    async def observe_records(self, records):
-        from kollabor_voice.classifiers import (
-            DecisionRequest,
-            LocalClassifier,
-            ProviderClassifier,
-        )
-
-        if not records:
-            return []
-        if self._local_classifier:
-            classifier = LocalClassifier(self._client, self._auth, self.classifier_name)
-            rpc = self._event_bus.get_service("rpc_client")
-            context = (
-                (
-                    await rpc.call(
-                        "voice.context", {"epoch": self._lease["epoch"]}, timeout=2
-                    )
-                )["context"]
-                if rpc
-                else self._conversation_context()
-            )
-        else:
-            classifier = ProviderClassifier(self._observe_with_provider)
-            context = ""
-        self._decision_transcript_context = self._transcript_context_for(records)
-        entry = self._classifier_entry = self._log_classifier(
-            records,
-            context=context,
-            transcript_context=self._decision_transcript_context,
-        )
-        started = time.monotonic()
-        try:
-            decision = await classifier.decide(
-                DecisionRequest(
-                    records,
-                    context,
-                    self._decision_transcript_context,
-                    self.context_lines,
-                )
-            )
-            self._last_decision = entry["decision"] = decision.to_wire()
-            self._decision_deferred_ids = decision.deferred_event_ids
-            return decision.selected(records)
-        except Exception as exc:
-            entry["error"] = str(exc) or type(exc).__name__
-            raise
-        finally:
-            entry["seconds"] = round(time.monotonic() - started, 3)
-
-    def classifier_log(self):
-        """Each classifier call: the request, the answer, what reached the agent."""
-        return list(self._classifier_log)
-
-    def _log_classifier(self, records, **fields):
-        entry = {
-            "seq": next(self._classifier_seq),
-            "at": time.time(),
-            "classifier": self.classifier_name,
-            "records": records,
-            "decision": None,
-            "error": None,
-            "delivered": [],
-            **fields,
-        }
-        self._classifier_log.append(entry)
-        return entry
-
-    def _conversation_context(self):
-        from kollabor_ai.message_content import content_to_text
-
-        llm = self._event_bus.get_service("llm_service")
-        history = getattr(llm, "conversation_history", [])
-        recent = []
-        for message in reversed(history):
-            if message.role not in {"user", "assistant"}:
-                continue
-            metadata = getattr(message, "metadata", None) or {}
-            voice = metadata.get("voice") or {}
-            content = voice.get("transcript_text", message.content)
-            if isinstance(content, list):
-                content = [
-                    part
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-            if not isinstance(content, (str, list)):
-                continue
-            text = content_to_text(content).strip()
-            if voice and "transcript_text" not in voice:
-                import re
-
-                text = re.sub(
-                    r"<agent_hud>.*?</agent_hud>", "", text, flags=re.S
-                ).strip()
-                # Older saved voice turns embedded their routing instructions
-                # in content. They are not part of the human's spoken context.
-                before, marker, after = text.partition("[Voice instructions: ")
-                if marker:
-                    text = (before + after.partition("]\n")[2]).strip()
-            if text:
-                recent.append(f"{message.role}: {text[:200]}")
-                if len(recent) == CONTEXT_MESSAGES:
-                    break
-        return "\n".join(reversed(recent))
-
-    async def _observe_with_provider(self, records, transcript_context=None):
-        from kollabor_voice.observer import (
-            OBSERVE_INSTRUCTIONS,
-            parse_decision,
-        )
-
-        if not records:
-            return []
-        from kollabor_voice.classifiers import MAX_CONTEXT_LINES
-
-        transcript_context = transcript_context or []
-        if len(transcript_context) > MAX_CONTEXT_LINES:
-            raise ValueError("Transcript context exceeds 50 lines")
-
-        rpc = self._event_bus.get_service("rpc_client")
-        if rpc:
-            result = await self._remote_job(
-                rpc,
-                "voice.observe",
-                {
-                    "epoch": self._lease["epoch"],
-                    "records": records,
-                    "transcript_context": transcript_context,
-                },
-            )
-            if result.get("context_event_ids", []) != [
-                r["event_id"] for r in transcript_context
-            ]:
-                raise RuntimeError(
-                    "Attached agent did not acknowledge transcript context; restart that agent"
-                )
-            return [r for r in records if r["event_id"] in result["event_ids"]]
-        llm = self._event_bus.get_service("llm_service")
-        if llm is None:
-            raise RuntimeError("AI provider is not ready; speech remains pending")
-        api = getattr(llm, "api_service", None)
-        if api is None:
-            raise RuntimeError("AI provider is unavailable")
-        profile = api._profile
-        profile_key = hashlib.sha256(
-            json.dumps(profile.to_dict(), sort_keys=True, default=str).encode()
-        ).hexdigest()
-        if self._api is None or self._api_profile != profile_key:
-            import copy
-
-            from kollabor_ai.api_communication_service import APICommunicationService
-
-            if self._api:
-                await self._api.shutdown()
-            observer_profile = copy.deepcopy(profile)
-            observer_profile.max_tokens = 512
-            observer_profile.effort = "low"
-            self._api = APICommunicationService(self._config, None, observer_profile)
-            self._api.enable_streaming = False
-            if not await self._api.initialize():
-                raise RuntimeError(
-                    "Voice observer cannot initialize the configured AI provider"
-                )
-            self._api_profile = profile_key
-        # 2000 characters is a conservative bound below 2000 text tokens.
-        context = self._conversation_context()
-        messages = [
-            {"role": "system", "content": OBSERVE_INSTRUCTIONS},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "recent_conversation": context,
-                        "recent_transcripts": transcript_context,
-                        "transcripts": records,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
-        response = await self._api.call_llm(messages, tools=[])
-        return parse_decision(response, records)
 
     async def _deliver(self, data):
         result = await self._event_bus.emit_with_hooks(
@@ -1346,11 +778,7 @@ class VoicePlugin(BasePlugin):
             # If submit/commit is interrupted, delivery_unknown survives on disk.
             result = await submit()
             self._admissions.finish(voice["admission_id"], result["status"])
-            if (
-                result["status"] == "queued"
-                and voice.get("spoken_ack")
-                and not voice.get("answered")
-            ):
+            if result["status"] == "queued":
                 self._watch_progress(voice)
             return {**result, "admission_id": voice["admission_id"]}
 
@@ -1387,9 +815,11 @@ class VoicePlugin(BasePlugin):
                 return
 
     async def voice_out(
-        self, text, reply_id, owner_epoch, producer_id, rewrite_count=0, review=None
+        self, text, reply_id, owner_epoch, producer_id, rewrite_count=0
     ):
-        generation = (self._output_generation, self._classifier_generation)
+        from kollabor_voice.speech_review import SpeechDecision, format_decision
+
+        generation = self._output_generation
         voice = {"epoch": owner_epoch}
         await self.validate_turn(voice)
         if self._remote_binding and owner_epoch == self._remote_binding["epoch"]:
@@ -1405,23 +835,18 @@ class VoicePlugin(BasePlugin):
                 rewrite_count=rewrite_count,
             )
             return {"status": "forwarded_to_device"}
-        if review is None:
-            review = await self._review_speech(text, rewritten=bool(rewrite_count))
-        self._last_speech_decision = review.to_wire()
-        if generation != (self._output_generation, self._classifier_generation):
+        self._last_speech_decision = (
+            format_decision(text) or SpeechDecision("speak")
+        ).to_wire()
+        if generation != self._output_generation:
             return {"status": "cancelled", "ids": []}
         await self.validate_turn(voice)
         return await self._client.voice_out(
-            text,
-            reply_id,
-            owner_epoch,
-            producer_id,
-            self._lease["token"],
-            review=review.to_wire(),
+            text, reply_id, owner_epoch, producer_id, self._lease["token"]
         )
 
     async def _speech_request(self, instructions, data):
-        """Tool-free agent-side review/rewrite; credentials never enter the device worker."""
+        """Tool-free agent-side rewrite; credentials never enter the device worker."""
         import copy
 
         from kollabor_ai.api_communication_service import APICommunicationService
@@ -1431,7 +856,7 @@ class VoicePlugin(BasePlugin):
             api = getattr(llm, "api_service", None)
             if api is None:
                 raise RuntimeError(
-                    "The responding agent is unavailable for speech review"
+                    "The responding agent is unavailable to rewrite speech"
                 )
             profile = copy.deepcopy(api._profile)
             key = hashlib.sha256(
@@ -1444,7 +869,7 @@ class VoicePlugin(BasePlugin):
                 self._speech_api = APICommunicationService(self._config, None, profile)
                 self._speech_api.enable_streaming = False
                 if not await self._speech_api.initialize():
-                    raise RuntimeError("Cannot initialize speech review provider")
+                    raise RuntimeError("Cannot initialize the speech rewrite provider")
                 self._speech_api_profile = key
             return await asyncio.wait_for(
                 self._speech_api.call_llm(
@@ -1459,64 +884,6 @@ class VoicePlugin(BasePlugin):
                 ),
                 10,
             )
-
-    async def _review_speech(self, text, *, rewritten=False):
-        from kollabor_voice.speech_review import SpeechDecision, format_decision
-
-        fixed = format_decision(text)
-        if fixed:
-            return fixed
-        if self._local_classifier:
-            from kollabor_voice.classifiers import CLASSIFIERS
-
-            label = CLASSIFIERS[self.classifier_name]
-            local = await self._client.review_speech(
-                text, self._lease["epoch"], self._lease["token"]
-            )
-            adjudicate = rewritten and local.decision == "rewrite"
-            if local.decision != "defer" and not adjudicate:
-                return local
-            self._speech_review_state = (
-                "checking rewritten reply"
-                if adjudicate
-                else "checking uncertain spoken reply"
-            )
-            self._refresh()
-            # One provider decision breaks repeated local style rejection, while
-            # the format check above and the single rewrite budget stay intact.
-            result = await self._provider_speech_review(text, local.reason)
-            return SpeechDecision(
-                result.decision,
-                f"{label} {'rejected rewrite' if adjudicate else 'unsure'}; {result.reason}",
-                f"{self.classifier_name}+provider",
-            )
-        return await self._provider_speech_review(text)
-
-    async def _provider_speech_review(self, text, classifier_note=""):
-        from kollabor_voice.speech_review import SPEECH_REVIEW_PROMPT, SpeechDecision
-
-        rpc = self._event_bus.get_service("rpc_client")
-        if rpc:
-            result = await self._remote_job(
-                rpc,
-                "voice.review_speech",
-                {
-                    "epoch": self._lease["epoch"],
-                    "text": text,
-                    "classifier_note": classifier_note,
-                },
-            )
-            return SpeechDecision.from_wire(result)
-        raw = await self._speech_request(
-            SPEECH_REVIEW_PROMPT,
-            {"spoken_text": text, "classifier_note": classifier_note},
-        )
-        value = json.loads(raw)
-        if value.get("decision") not in {"speak", "rewrite"}:
-            raise RuntimeError("Speech provider returned an invalid decision")
-        return SpeechDecision(
-            value["decision"], str(value.get("reason", "")), "provider"
-        )
 
     async def _rewrite_speech(self, text, reason):
         from kollabor_voice.speech_review import SPEECH_NUDGE
@@ -1565,7 +932,7 @@ class VoicePlugin(BasePlugin):
         if len(self._seen_speech) >= 256:
             self._seen_speech.pop(next(iter(self._seen_speech)))
         self._seen_speech[identity] = True
-        generation = (self._output_generation, self._classifier_generation)
+        generation = self._output_generation
         try:
             await self.validate_turn(voice)
             self._speech_error = None
@@ -1582,11 +949,9 @@ class VoicePlugin(BasePlugin):
                 )
                 rewritten = True
             while True:
-                if generation != (self._output_generation, self._classifier_generation):
+                if generation != self._output_generation:
                     return data
                 await self.validate_turn(voice)
-                self._speech_review_state = "checking spoken reply"
-                self._refresh()
                 result = await self.voice_out(
                     spoken,
                     voice["reply_id"],
@@ -1603,7 +968,7 @@ class VoicePlugin(BasePlugin):
                 if rewritten:
                     # Never dropped after its one rewrite: said with code,
                     # links and paths taken out (Marco, 2026-10-18).
-                    from kollabor_voice.speech_review import SpeechDecision, speakable
+                    from kollabor_voice.speech_review import speakable
 
                     spoken = speakable(spoken)
                     if not spoken:
@@ -1616,9 +981,6 @@ class VoicePlugin(BasePlugin):
                         voice["epoch"],
                         data.get("producer_id", self.client_id),
                         rewrite_count=1,
-                        review=SpeechDecision(
-                            "speak", f"Spoken after one rewrite: {reason}"
-                        ),
                     )
                     self._speech_error = None
                     break
@@ -1645,7 +1007,7 @@ class VoicePlugin(BasePlugin):
             try:
                 self._remote_reply_queue.put_nowait(
                     (
-                        (self._output_generation, self._classifier_generation),
+                        self._output_generation,
                         {
                             "spoken_text": data["spoken_text"],
                             "voice": {
@@ -1675,7 +1037,7 @@ class VoicePlugin(BasePlugin):
             generation, data = self._remote_reply_queue.get_nowait()
             try:
                 if (
-                    generation == (self._output_generation, self._classifier_generation)
+                    generation == self._output_generation
                     and self.requested
                     and self._lease
                     and data["voice"]["epoch"] == self._lease["epoch"]
@@ -1749,11 +1111,8 @@ class VoicePlugin(BasePlugin):
             "voice.bind": self._remote_bind,
             "voice.unbind": self._remote_unbind,
             "voice.heartbeat": self._remote_heartbeat,
-            "voice.observe": self._remote_observe,
             "voice.admit": self._remote_admit,
             "voice.result": self._remote_result,
-            "voice.context": self._remote_context,
-            "voice.review_speech": self._remote_review_speech,
             "voice.rewrite_speech": self._remote_rewrite_speech,
         }
         for name, handler in methods.items():
@@ -1801,29 +1160,6 @@ class VoicePlugin(BasePlugin):
                 task.cancel()
         return {"released": True}
 
-    async def _remote_observe(self, params):
-        self._check_remote(params)
-        return self._start_remote_job(self._do_remote_observe(params))
-
-    async def _remote_review_speech(self, params):
-        self._check_remote(params)
-
-        async def review():
-            # Explicit provider selection and uncertain Laya decisions use the
-            # same tool-free reviewer on the host that owns the AI profile.
-            from kollabor_voice.speech_review import format_decision
-
-            fixed = format_decision(params["text"])
-            if fixed:
-                return fixed.to_wire()
-            result = await self._provider_speech_review(
-                params["text"], params.get("classifier_note", "")
-            )
-            self._check_remote(params)
-            return result.to_wire()
-
-        return self._start_remote_job(review())
-
     async def _remote_rewrite_speech(self, params):
         self._check_remote(params)
 
@@ -1833,22 +1169,6 @@ class VoicePlugin(BasePlugin):
             return {"spoken_text": text}
 
         return self._start_remote_job(rewrite())
-
-    async def _remote_context(self, params):
-        self._check_remote(params)
-        return {"context": self._conversation_context()}
-
-    async def _do_remote_observe(self, params):
-        history = params.get("transcript_context", [])
-        selected = await asyncio.wait_for(
-            self._observe_with_provider(params["records"], transcript_context=history),
-            10,
-        )
-        self._check_remote(params)
-        return {
-            "event_ids": [r["event_id"] for r in selected],
-            "context_event_ids": [r["event_id"] for r in history],
-        }
 
     async def _remote_admit(self, params):
         self._check_remote(params["voice"])
@@ -1903,8 +1223,6 @@ class VoicePlugin(BasePlugin):
         for task in self._remote_jobs.values():
             task.cancel()
         await asyncio.gather(*self._remote_jobs.values(), return_exceptions=True)
-        if self._api:
-            await self._api.shutdown()
         if self._speech_api:
             await self._speech_api.shutdown()
         if self._admissions:
