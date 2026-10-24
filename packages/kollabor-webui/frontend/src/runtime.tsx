@@ -45,6 +45,7 @@ import {
   type TurnClock,
 } from "./turn-timing";
 import { VoiceModeProvider } from "./voice-mode";
+import { VoiceRoomProvider } from "./voice/voice-room";
 
 export type EngineState = {
   sessionId: string;
@@ -828,7 +829,9 @@ export function EngineRuntimeProvider({
         >
           <PermissionToolUI />
           <VoiceModeProvider api={api} sessionId={sessionId}>
-            {children}
+            <VoiceRoomProvider api={api} sessionId={sessionId}>
+              {children}
+            </VoiceRoomProvider>
           </VoiceModeProvider>
         </InitialMessagesGate>
       </PermissionCancellationContext.Provider>

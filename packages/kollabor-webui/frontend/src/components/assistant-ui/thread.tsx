@@ -34,6 +34,7 @@ import {
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
+import { VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -799,6 +800,7 @@ const Composer: FC<{
             {voiceAvailable && voice.on ? (
               <VoiceStatus activity={voice.activity} />
             ) : null}
+            {voiceAvailable ? <VoiceRoomBar /> : null}
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
