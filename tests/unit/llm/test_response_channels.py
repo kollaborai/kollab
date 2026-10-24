@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 from kollabor_voice.observer import voice_preamble
 
@@ -106,3 +108,41 @@ def test_turn_display_texts_projects_voice_user_and_assistant_channels():
         None,
         None,
     ]
+
+
+def _without_voice(monkeypatch):
+    monkeypatch.setitem(sys.modules, "kollabor_voice", None)
+    monkeypatch.setitem(sys.modules, "kollabor_voice.observer", None)
+
+
+def test_turn_display_texts_without_voice_renders_plain_turns(monkeypatch):
+    _without_voice(monkeypatch)
+    messages = [
+        {"role": "user", "content": "Typed request.", "metadata": {}},
+        {
+            "role": "assistant",
+            "content": "<display_text>Visible.</display_text><spoken_text>Spoken.</spoken_text>",
+            "metadata": {},
+        },
+        {"role": "assistant", "content": "Plain.", "metadata": {}},
+    ]
+
+    assert turn_display_texts(messages) == [None, "Visible.", None]
+
+
+def test_turn_display_texts_without_voice_shows_a_voice_turn_as_stored(monkeypatch):
+    _without_voice(monkeypatch)
+    stored = "[voice rules]\nCheck the tests."
+    messages = [
+        {"role": "user", "content": stored, "metadata": {"voice": {"event_ids": ["t"]}}}
+    ]
+
+    assert turn_display_texts(messages) == [stored]
+
+
+def test_turn_display_texts_strips_the_preamble_when_voice_is_importable():
+    voice = {"event_ids": ["turn-1"]}
+    content = voice_preamble(voice, rules_sent=False) + "Check the tests."
+    messages = [{"role": "user", "content": content, "metadata": {"voice": voice}}]
+
+    assert turn_display_texts(messages) == ["Check the tests."]
