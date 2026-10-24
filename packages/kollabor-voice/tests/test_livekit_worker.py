@@ -530,6 +530,27 @@ def test_a_talk_over_posts_the_played_text_once_with_its_own_turn_id():
     assert body["text"].startswith("Checking") and S2 not in body["text"]
 
 
+def test_the_played_text_keeps_the_space_between_sentences():
+    async def scenario():
+        async with Rig(
+            scripts=[[S1, S2, "wait", "done"], ["Okay.", "done"]],
+            tts_chunks=10,
+            transcript=True,
+        ) as rig:
+            await rig.say("is the build green")
+            await until(  # the second sentence is playing
+                lambda: rig.adapter.spoken == [S1, S2] and rig.room.output.frames >= 13
+            )
+            await rig.say("stop that")
+            await until(lambda: interrupted_posts(rig.poster))
+            await rig.worker.drain()
+        return rig
+
+    rig = run(scenario())
+    [(_, body)] = interrupted_posts(rig.poster)
+    assert body["text"].startswith(f"{S1} It"), body["text"]  # not "now.It"
+
+
 def test_a_reply_that_was_never_played_leaves_nothing_to_post():
     async def scenario():
         async with Rig(

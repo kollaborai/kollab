@@ -394,7 +394,9 @@ class KollabAgent(Agent):
         try:
             async with contextlib.aclosing(worker.turns.stream(turn.body)) as sentences:
                 async for sentence in sentences:
-                    if not turn.heard_text:
+                    if turn.heard_text:
+                        sentence = " " + sentence  # LiveKit joins played text as sent
+                    else:
                         turn.heard_text = True
                         worker.metric("llm_first_token", turn.elapsed_ms(), turn.id)
                     yield sentence
@@ -409,7 +411,7 @@ class KollabAgent(Agent):
         worker, turn = self.worker, None
         async for sentence in text:
             turn = self.turn  # llm_node set it before it produced this sentence
-            async with self.session.tts.synthesize(sentence) as stream:
+            async with self.session.tts.synthesize(sentence.strip()) as stream:
                 async for event in stream:
                     if turn and not turn.heard_audio:
                         turn.heard_audio = True
