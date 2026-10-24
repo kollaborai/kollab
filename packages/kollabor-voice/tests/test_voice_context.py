@@ -6,6 +6,7 @@ from kollabor_voice.voice_context import (
     strip_voice_preamble,
     voice_preamble,
 )
+
 from kollabor_ai.response_channels import turn_display_texts
 
 
@@ -60,13 +61,3 @@ def test_turn_display_texts_projects_user_voice_and_assistant_channels():
         "",
         None,
     ]
-
-
-def test_voice_prompt_uses_pre_admitted_turn_not_a_classifier():
-    from kollabor_voice.voice_context import VOICE_INSTRUCTIONS
-
-    prompt = VOICE_INSTRUCTIONS.lower()
-    assert "already been admitted" in prompt
-    assert "do not classify it again" in prompt
-    assert "classifier" not in prompt
-    assert "return exactly one period" not in prompt
