@@ -885,7 +885,15 @@ Version managed centrally in `pyproject.toml`:
 
 Files reading version: `kollabor/application.py`, `kollabor/cli.py`, `kollabor_config.loader`
 
-To update: Only modify `pyproject.toml`.
+To update the semantic version: only modify `pyproject.toml`.
+
+Build provenance is separate from the release version. Python wheel/binary
+builds embed the exact source branch and full HEAD SHA in `kollabor._build_info`;
+Vite embeds the same identity in the WebUI and signed PhoneLink bundle. The CLI
+prints `Build: <branch> @ <8-character SHA>` before its final `kollab X.Y.Z`
+line. A detached checkout reports branch `unknown` while retaining its SHA
+when HEAD is resolvable; unavailable fields are `unknown`. Installed artifacts
+do not need runtime Git access.
 
 ### Cutting a Release
 

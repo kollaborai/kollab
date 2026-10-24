@@ -33,6 +33,17 @@ def webui_wheel(directory, assets):
     return wheel
 
 
+def kollab_wheel(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / "kollab-0.17.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "kollabor/_build_info.py",
+            f"BUILD_BRANCH = 'fixture-branch'\nBUILD_SHA = {'a' * 40!r}\n",
+        )
+    return wheel
+
+
 @pytest.mark.parametrize("mismatch", [None, "changed", "missing", "extra"])
 def test_binary_wheel_must_match_every_service_frontend_asset(tmp_path, frontend, mismatch):
     archive = tmp_path / "service.tar.gz"
@@ -86,7 +97,7 @@ def test_binary_build_scopes_the_chosen_frontend_to_its_wheel_build(
             if path.is_file()
         }
         webui_wheel(wheel_dir, assets)
-        (wheel_dir / "kollab-0.17.0-py3-none-any.whl").touch()
+        kollab_wheel(wheel_dir)
 
     def build(wheels, out, scratch):
         binary = tmp_path / "kollab-test"
@@ -95,11 +106,19 @@ def test_binary_build_scopes_the_chosen_frontend_to_its_wheel_build(
         return binary
 
     monkeypatch.setattr(build_binary, "run", run)
+    smoke_calls = []
+
+    def smoke(binary, version, build_line):
+        smoke_calls.append((binary, version, build_line))
+
     monkeypatch.setattr(build_binary, "build", build)
-    monkeypatch.setattr(build_binary, "smoke", lambda binary, version: None)
+    monkeypatch.setattr(build_binary, "smoke", smoke)
     monkeypatch.setattr(sys, "argv", argv)
     assert build_binary.main() == 0
     assert len(calls) == 1
+    assert smoke_calls == [
+        (tmp_path / "kollab-test", "0.17.0", "Build: fixture-branch @ aaaaaaaa")
+    ]
     assert calls[0][1]["env"]["KOLLAB_FRONTEND_DIST"] == str(frontend.absolute())
     assert os.environ.get("KOLLAB_FRONTEND_DIST") == original
 
@@ -110,7 +129,7 @@ def test_reusing_wheels_rejects_a_different_ui_before_building_the_binary(
 ):
     wheels = tmp_path / "wheels"
     webui_wheel(wheels, {"index.html": b"stale UI with the same 0.17.0 package version"})
-    (wheels / "kollab-0.17.0-py3-none-any.whl").touch()
+    kollab_wheel(wheels)
 
     def unexpected_build(*args, **kwargs):
         pytest.fail("mismatched frontend wheels must be rejected before any build")

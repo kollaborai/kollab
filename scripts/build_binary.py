@@ -15,14 +15,15 @@ wheel kollab needs, so it runs with no Python installed. It lands in --out as
 kollab-<os>-<arch> (macos-aarch64, linux-x86_64, ...) beside a .sha256 file,
 which install.sh and /upgrade check before installing it.
 
-Then the binary must report the expected version, import kollab's packages and
-verify an HTTPS certificate with its own Python. CI runs this on each platform
-(.github/workflows/binaries.yml).
+Then the binary must report embedded build provenance and the expected
+version, import kollab's packages, and verify an HTTPS certificate with its own
+Python. CI runs this on each platform (.github/workflows/binaries.yml).
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import platform
@@ -64,6 +65,62 @@ def kollab_version(wheels: list[Path]) -> str:
         if match:
             return match.group(1)
     raise SystemExit("no kollab wheel among: " + ", ".join(w.name for w in wheels))
+
+
+def kollab_build_line(wheels: list[Path]) -> str:
+    """Read the identity embedded in the exact wheel that enters the binary."""
+    wheel = next(
+        (path for path in wheels if path.name.startswith("kollab-")), None
+    )
+    if wheel is None:
+        raise SystemExit(
+            "no kollab wheel among: " + ", ".join(w.name for w in wheels)
+        )
+
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            source = archive.read("kollabor/_build_info.py").decode("utf-8")
+        module = ast.parse(source, filename=f"{wheel.name}:kollabor/_build_info.py")
+    except (KeyError, UnicodeDecodeError, SyntaxError, zipfile.BadZipFile) as error:
+        raise SystemExit(
+            f"{wheel.name} has no valid embedded build provenance: {error}"
+        ) from error
+
+    values: dict[str, object] = {}
+    for statement in module.body:
+        if (
+            not isinstance(statement, ast.Assign)
+            or len(statement.targets) != 1
+            or not isinstance(statement.targets[0], ast.Name)
+        ):
+            continue
+        name = statement.targets[0].id
+        if name in {"BUILD_BRANCH", "BUILD_SHA"}:
+            try:
+                values[name] = ast.literal_eval(statement.value)
+            except (ValueError, TypeError):
+                continue
+
+    branch = values.get("BUILD_BRANCH")
+    sha = values.get("BUILD_SHA")
+    if not isinstance(branch, str) or not isinstance(sha, str):
+        raise SystemExit(f"{wheel.name} is missing branch or full SHA metadata")
+    if branch != "unknown" and (
+        not branch
+        or len(branch) > 255
+        or any(
+            not character.isprintable() or character.isspace()
+            for character in branch
+        )
+    ):
+        raise SystemExit(f"{wheel.name} contains an invalid build branch")
+    if sha != "unknown" and not re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", sha
+    ):
+        raise SystemExit(f"{wheel.name} contains an invalid full build SHA")
+
+    short_sha = "unknown" if sha == "unknown" else sha[:8]
+    return f"Build: {branch} @ {short_sha}"
 
 
 def verify_frontend(wheels: list[Path], frontend: Path) -> None:
@@ -148,18 +205,32 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     return binary
 
 
-def smoke(binary: Path, version: str) -> None:
+def smoke(binary: Path, version: str, expected_build_line: str) -> None:
     """The binary starts outside any checkout, reports the version, imports kollab and verifies TLS."""
     # A binary built from another binary's shell must not inherit that one's identity.
-    env = {key: value for key, value in os.environ.items() if key not in ("SCIE", "SCIE_ARGV0", "PEX")}
+    build_env = {"KOLLAB_BUILD_BRANCH", "KOLLAB_BUILD_SHA"}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"SCIE", "SCIE_ARGV0", "PEX"} | build_env
+    }
     env["KOLLAB_NO_KEYRING"] = "1"
     with tempfile.TemporaryDirectory() as cwd:
         shown = subprocess.run(
             [str(binary), "--version"], cwd=cwd, env=env, capture_output=True, text=True, timeout=600
         )
-        # --version prints the file name it runs as: "kollab-macos-aarch64 0.15.1".
-        if shown.returncode != 0 or shown.stdout.split()[-1:] != [version]:
-            raise SystemExit(f"{binary.name} --version: expected {version}, got:\n{shown.stdout}{shown.stderr}")
+        lines = shown.stdout.rstrip().splitlines()
+        # The executable/version line remains last for users and shell consumers.
+        if (
+            shown.returncode != 0
+            or len(lines) != 2
+            or lines[0] != expected_build_line
+            or lines[-1].split()[-1:] != [version]
+        ):
+            raise SystemExit(
+                f"{binary.name} --version: expected {expected_build_line} before {version}, "
+                f"got:\n{shown.stdout}{shown.stderr}"
+            )
         checks = f"{IMPORTS}; import urllib.request; urllib.request.urlopen({TLS_URL!r}, timeout=60).close()"
         probe = subprocess.run(
             [str(binary), "-c", checks], cwd=cwd, env={**env, "PEX_INTERPRETER": "1"},
@@ -196,8 +267,9 @@ def main() -> int:
         version = kollab_version(wheels)
         if args.expect_version and args.expect_version.removeprefix("v") != version:
             raise SystemExit(f"the wheels are kollab {version}, not {args.expect_version}")
+        expected_build_line = kollab_build_line(wheels)
         binary = build(wheels, args.out.resolve(), Path(scratch))
-        smoke(binary, version)
+        smoke(binary, version, expected_build_line)
 
     digest = binary.with_name(binary.name + ".sha256").read_text().split()[0]
     size = binary.stat().st_size / 1e6

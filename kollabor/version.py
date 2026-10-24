@@ -5,6 +5,17 @@ from importlib.metadata import version as get_version
 from pathlib import Path
 from typing import Optional
 
+from .build_info import (
+    BuildProvenance,
+    read_embedded_provenance,
+    resolve_build_provenance,
+)
+
+# Read as data, never imported: the generated module is parsed by the AST literal reader.
+_EMBEDDED_PROVENANCE: BuildProvenance | None = read_embedded_provenance(
+    Path(__file__).with_name("_build_info.py")
+)
+
 
 def _get_version_from_pyproject() -> Optional[str]:
     """Read version from pyproject.toml for development mode."""
@@ -45,6 +56,14 @@ def get_kollabor_version() -> str:
         return get_version("kollab")
     except PackageNotFoundError:
         return "0.0.0-installed"
+
+
+def get_build_provenance() -> BuildProvenance:
+    """Return the identity captured for this artifact or source checkout."""
+
+    if _EMBEDDED_PROVENANCE is not None:
+        return _EMBEDDED_PROVENANCE
+    return resolve_build_provenance()
 
 
 __version__ = get_kollabor_version()
