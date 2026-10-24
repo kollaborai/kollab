@@ -90,7 +90,9 @@ async def test_device_move_conflicts_with_another_clients_agent_move(no_real_sid
         saved = await first_client.post("/sidebar/order", json={"order": agent_move, "revision": 1})
         assert saved.status_code == 200
         device_move = [*reversed(devices), *KEYS, latent]
-        rejected = await second_client.post("/sidebar/order", json={"order": device_move, "revision": stale["revision"]})
+        rejected = await second_client.post(
+            "/sidebar/order", json={"order": device_move, "revision": stale["revision"]}
+        )
         assert rejected.status_code == 409
         refreshed = (await second_client.get("/sidebar/order")).json()
         assert refreshed["order"] == agent_move
@@ -234,6 +236,27 @@ async def test_rejects_malformed_order_and_revision(no_real_sidebar_order):
             response = await client.post("/sidebar/order", json={"order": KEYS, "revision": bad_revision})
             assert response.status_code == 400
         assert (await client.get("/sidebar/order")).json() == {"order": [], "revision": 0, "warning": None}
+
+
+@pytest.mark.asyncio
+async def test_failed_writes_answer_500_without_the_os_error_or_path(no_real_sidebar_order, monkeypatch):
+    from kollabor_engine import hidden_agents  # type: ignore[import-not-found]
+
+    leak = OSError(13, "Permission denied", "/home/someone/.kollab/hub/.sidebar-order-x.json")
+
+    def refuse(*_args, **_kwargs):
+        raise leak
+
+    monkeypatch.setattr(sidebar_order, "write_order", refuse)
+    monkeypatch.setattr(hidden_agents, "hide", refuse)
+    async with new_engine() as client:
+        saved = await client.post("/sidebar/order", json={"order": KEYS, "revision": 0})
+        hidden = await client.post("/sidebar/hide", json={"key": KEYS[0], "label": "Lapis"})
+    for response in (saved, hidden):
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert "/home/someone" not in detail and "Errno" not in detail and "Permission denied" not in detail
+        assert "writable" in detail
 
 
 def test_duplicates_collapse():
