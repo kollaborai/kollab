@@ -1,7 +1,7 @@
 ---
 title: "Forked File-Aware Context Compaction Spec"
 created: 2026-03-05
-modified: 2026-03-05
+modified: 2026-10-22
 status: proposed
 ---
 # Forked File-Aware Context Compaction Spec
@@ -51,6 +51,17 @@ Under `plugins.context_compaction`:
 - `always_keep_recent_files`: int, default `12`
 - `require_valid_json`: bool, default `true`
 - `ask_user_confirm_drops`: bool, default `false` (future UI hook)
+
+Current cross-strategy guardrail settings:
+- `token_threshold_k`: optional lower automatic compaction trigger in thousands;
+  it cannot raise the trigger above the provider percentage.
+- `compaction_ratio`: fraction of the active provider context window for the
+  automatic compaction trigger (default `0.75`).
+- `max_session_turns`: optional visible/logged warning after this many model
+  turns (default `0`, which disables the warning).
+- `summarization_model`: optional compaction-only model override.
+- `hard_cap_compaction_attempts`: bounded synchronous retries at a hard-cap
+  boundary (default `2`).
 
 ## File Candidate Collection
 Input sources (priority order):
@@ -127,12 +138,66 @@ Event fields:
 - `validation_passed`
 - `aborted_reason` (optional)
 
+## Long-Session Guardrails (All Strategies)
+
+These guards apply to both the basic and forked strategies:
+
+- The automatic compaction trigger uses the active provider's
+  `context_window * compaction_ratio`; an optional `token_threshold_k` can
+  lower it but cannot raise it above the provider percentage. The boundary hard
+  cap is separate: `min(context_window, 272K)`, or 100K when the provider window
+  is unknown. The hard cap is not lowered by the automatic trigger settings.
+- Enforce the hard cap before executing `TOOL_CALL_PRE` and again before the
+  next model request. A no-shrink pause or coordination deferral may delay
+  ordinary background compaction, but neither bypasses a hard-cap boundary.
+- At a boundary, await an in-progress round, apply its staged history, and
+  retry forced compaction up to `hard_cap_compaction_attempts`. If provider
+  summarization still fails, roll the old prefix into a deterministic recovery
+  summary while preserving the system message, complete tool-call groups,
+  recent turns, and at most 24 active-task excerpts of 4,000 characters each.
+  If even that cannot fit, cancel the tool/request with a visible recovery
+  action instead of sending an oversized prompt. The 8,000-character limit
+  includes the complete injected recovery message and its framing. The latest
+  human request is prioritized. Non-intended, group, and other-recipient
+  `hub_message` notices and standalone `agent_hud` user records are excluded.
+  An untracked hub request is eligible as human intent only when direct-scope
+  recipient metadata names this agent. Raw hub task assignments with IDs are
+  excluded; active work is represented by TaskLedger-selected excerpts above.
+- `max_session_turns` is a visible/logged warning, not an automatic stop. Its
+  default is `0` (disabled); a positive configured value enables the warning.
+  Turn count and start time persist with session stats, restore on resume, and
+  reset when the session ID changes. Elapsed age is informational only: no
+  maximum-age duration or age-trigger action is defined. A maximum-age limit
+  requires an operator-specified duration and behavior before enforcement.
+- Summarization model precedence is plugin `summarization_model`, shared
+  `kollabor.llm.fast_model`, then the active session model. A configured
+  `summarization_profile` supplies credentials; it does not silently replace
+  that model precedence.
+- Every compaction round logs its agent label, hub identity when available,
+  selected summarization model, duration, round number, and outcome. The status
+  widget shows the paused/cap state with current and budget token counts.
+
+Context-window evidence must use the selected provider profile's runtime
+metadata, not assume the public bundled catalog applies to OAuth. At the
+2026-10-23T00:37Z verification, the OpenAI Codex OAuth `/models` response
+reported 272,000 tokens for `gpt-6-luna`; the bundled public catalog reports a
+larger window. A successful request log showed 326K input before a later
+overflow; keep usage accounting and OAuth metadata separately labeled until
+the runtime discrepancy is resolved. Use the lower provider metadata/percentage
+ceiling as the safety budget and log observed usage.
+
 ## Failure Handling
-On any failure (timeout, invalid JSON, provider error, invariant violation):
-- increment failure counter
+For ordinary background compaction failures (timeout, invalid JSON, provider
+error, invariant violation):
+- increment the failure counter
 - keep original history untouched
-- continue normal conversation flow
-- disable for session after 3 consecutive failures (existing behavior)
+- continue normal conversation flow while it is below the hard prompt budget
+- disable background compaction for the session after 3 consecutive failures
+
+At a hard-cap boundary, the bounded forced retry and deterministic rollover
+summary take precedence over the ordinary continue/disable behavior. If both
+fail to produce a prompt under budget, cancel the next tool/request and display
+an actionable recovery alert; do not send the oversized request.
 
 ## Rollout Plan
 Phase 1:
@@ -155,11 +220,19 @@ Unit:
 - JSON schema validation pass/fail
 - invariant enforcement
 - no-op on invalid fork response
+- a paused 410K prompt over a 272K budget at 91 turns is compacted before
+  `TOOL_CALL_PRE`
+- failed forced compaction retries and then rolls over with a recovery summary
+- 180 live tasks across 3 rounds remain bounded to 24 excerpts of 4,000
+  characters
+- the compacted task prompt estimate stays below 272K
+- summarization-model precedence and per-agent model/duration log fields
 
 Integration:
 - long session with many file reads/edits
 - compaction preserves active file set
 - post-compaction task continuation quality
+- tool boundary cancellation includes an actionable reason when recovery cannot fit
 
 Regression:
 - ensure no orphan tool-call state introduced by compaction rewrite

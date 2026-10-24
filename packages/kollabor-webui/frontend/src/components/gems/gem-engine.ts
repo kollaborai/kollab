@@ -42,13 +42,17 @@ import { gemMood, gemSpec, type GemCut, type GemMood, type GemSpec } from "./gem
 import {
   BLINK,
   DANCE,
+  TOOL_HOLD,
   blinkOpen,
   breathCurve,
   dance,
   danceClock,
   fitPaintCanvas,
   frameInterval,
+  frenzy,
   nextFrameAt,
+  peer,
+  ponder,
   Spring,
 } from "./gem-animation";
 
@@ -154,6 +158,12 @@ type Avatar = {
   activity: Activity;
   activitySince: number;
   prev: Activity;
+  /** The activity waiting out a tool's hold, and when it takes over. */
+  queued: Activity | null;
+  queuedAt: number;
+  /** The working moves (frenzy, peer, ponder) as last drawn, and as they were when the activity changed, to blend from. */
+  moves: Moves;
+  carry: Moves;
   /** When the current stretch of work began. */
   busySince: number;
   /** When the dance after a long stretch of work started. */
@@ -287,6 +297,24 @@ const BUSY: ReadonlySet<Activity> = new Set([
   "messaging",
   "tasking",
 ]);
+/** Activities a tool call shows; each holds the stage for at least TOOL_HOLD. */
+const TOOLS: ReadonlySet<Activity> = new Set(["typing", "reading", "searching", "messaging", "tasking"]);
+/** Seconds a thinking blip between two tool calls waits before it shows. */
+const TOOL_GAP = 0.35;
+/** Seconds the working moves take to blend from one activity's into the next. */
+const MOVE_BLEND = 0.3;
+type Moves = { slide: number; roll: number; pitch: number; lift: number; squash: number; spin: number };
+const NO_MOVES: Moves = { slide: 0, roll: 0, pitch: 0, lift: 0, squash: 0, spin: 0 };
+/**
+ * The tilt that goes with leaning toward the laptop (lean > 0) or jerking back
+ * from it. Mostly a slide in: tipping far toward the screen turns the face
+ * out of view, so only the jerk back tips the head right over.
+ */
+const leanRoll = (lean: number) => (lean > 0 ? 0.04 : 0.18) * lean;
+/** Sliding in toward the screen turns the face away from the viewer; turn back that much so it stays readable. */
+const leanTurn = (lean: number) => -0.35 * Math.max(0, lean);
+/** What cuts a tool's hold short. */
+const URGENT: ReadonlySet<Activity> = new Set(["error", "offline"]);
 /** Seconds of work before landing it earns the dance; a quick reply does not. */
 const CELEBRATE_AFTER = 2.5;
 const TAU = Math.PI * 2;
@@ -344,6 +372,7 @@ const COVERS: ReadonlySet<HatStyle> = new Set(["party", "top", "beanie", "wizard
 const GLINTS: Partial<Record<Activity, number>> = { dance: 3, waiting: 0.25, dreaming: 0.1, idle: 0.12, booting: 1.5 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const smoothstep = (x: number) => x * x * (3 - 2 * x);
 const luminance = (c: Color) => c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
 
 function colorFrom(props: GemProps, spec: GemSpec): Color {
@@ -663,6 +692,10 @@ class GemEngine {
       // Already in its state when the page opens, so no entrance replays.
       activitySince: now - 10,
       prev: activity,
+      queued: null,
+      queuedAt: 0,
+      moves: { ...NO_MOVES },
+      carry: { ...NO_MOVES },
       busySince: now,
       danceAt: -Infinity,
       atDesk: false,
@@ -735,7 +768,19 @@ class GemEngine {
     const now = performance.now() / 1000;
     const mood = gemMood(props.state, props.live !== false);
     const activity = activityFor(props, mood);
-    if (activity !== avatar.activity) this.changeActivity(avatar, activity, now);
+    if (activity === avatar.activity) {
+      // Back to the tool still on show: the blip in between never happened.
+      avatar.queued = null;
+    } else if (activity !== avatar.queued) {
+      // A tool's look holds the stage a moment, and a breath of thinking
+      // between two calls waits to see whether the next call follows.
+      const until = TOOLS.has(avatar.activity) && !URGENT.has(activity)
+        ? Math.max(avatar.activitySince + TOOL_HOLD, activity === "thinking" ? now + TOOL_GAP : 0)
+        : 0;
+      avatar.queued = now < until ? activity : null;
+      avatar.queuedAt = until;
+      if (!avatar.queued) this.changeActivity(avatar, activity, now);
+    }
     avatar.mood = mood;
     this.identify(avatar, props);
     avatar.dirty = true;
@@ -780,8 +825,9 @@ class GemEngine {
       avatar.glintCarry += 3;
     }
     // Thinking between two tool calls stays at the laptop instead of turning away and back.
-    avatar.atDesk = activity === "thinking" && avatar.desk > 0.5;
+    avatar.atDesk = activity === "thinking" && (avatar.desk > 0.5 || workPhase(was).laptop);
     avatar.prev = was;
+    avatar.carry = { ...avatar.moves };
     avatar.activity = activity;
     avatar.activitySince = now;
     // A blink marks the change, unless one just happened.
@@ -864,6 +910,11 @@ class GemEngine {
       const index = (offset + i) % list.length;
       const avatar = list[index];
       if (!avatar.visible) continue;
+      if (avatar.queued && t >= avatar.queuedAt) {
+        this.changeActivity(avatar, avatar.queued, t);
+        avatar.queued = null;
+        avatar.dirty = true;
+      }
       const activity = this.shownActivity(avatar, t);
       // Reduced motion and a settled offline gem repaint only when something changes.
       const interval =
@@ -1498,8 +1549,43 @@ class GemEngine {
       // Leaning into a fast turn, and a slow shift of weight.
       roll += clamp(-avatar.turn[0].v * 0.05, -0.12, 0.12) +
         (0.008 + 0.012 * avatar.spec.energy) * Math.sin(t * 0.4 + avatar.seed);
-      // A gentle rhythm while typing, a lift with each syllable.
-      if (activity === "typing") lift += 0.005 * Math.sin(t * 7) * avatar.desk;
+      // At the laptop: a frenzy at the keys, or nose to the screen reading
+      // (and thinking over what a tool sent back). Away from it, thinking
+      // rolls the head and nods along. Blended in from the last activity's.
+      const want = { ...NO_MOVES };
+      if (activity === "typing") {
+        const m = frenzy(since, avatar.seed);
+        want.slide = 0.14 * m.lean * avatar.desk;
+        want.roll = (m.roll - leanRoll(m.lean)) * avatar.desk;
+        want.spin = leanTurn(m.lean) * avatar.desk;
+        want.pitch = m.pitch * avatar.desk;
+        want.lift = m.lift * avatar.desk;
+        want.squash = m.squash * avatar.desk;
+      } else if (activity === "reading" || (activity === "thinking" && avatar.atDesk)) {
+        const m = peer(since, avatar.seed);
+        want.slide = 0.14 * m.lean * avatar.desk;
+        want.roll = -leanRoll(m.lean) * avatar.desk;
+        want.spin = leanTurn(m.lean) * avatar.desk;
+        want.pitch = m.pitch * avatar.desk;
+      } else if (activity === "thinking") {
+        const m = ponder(since, avatar.seed);
+        const away = 1 - avatar.desk;
+        want.slide = m.slide * away;
+        want.roll = m.roll * away;
+        want.pitch = m.pitch * away;
+        want.lift = m.lift * away;
+      }
+      const k = since >= MOVE_BLEND ? 1 : smoothstep(since / MOVE_BLEND);
+      for (const key of Object.keys(want) as (keyof Moves)[]) {
+        avatar.moves[key] = avatar.carry[key] + (want[key] - avatar.carry[key]) * k;
+      }
+      slide += avatar.moves.slide;
+      roll += avatar.moves.roll;
+      pitch += avatar.moves.pitch;
+      lift += avatar.moves.lift;
+      squash += avatar.moves.squash;
+      spin += avatar.moves.spin;
+      // A lift with each syllable.
       if (activity === "speaking" || activity === "messaging") lift += 0.008 * avatar.talk;
       // The dance plays out even if work starts again mid-way, so it never
       // cuts off; the Dance state loops it. Each gem turns its own way.

@@ -119,6 +119,43 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(llm_service.conversation_history[-1].metadata["agent_hud"])
         self.assertEqual(event_bus.emitted[0][0], EventType.TRIGGER_LLM_CONTINUE)
 
+    async def test_generated_hub_task_id_is_carried_into_conversation_metadata(self):
+        """A minted OPEN card must be linkable from its archived hub message."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        tasks_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tasks_dir.cleanup)
+        plugin._task_ledger = TaskLedger(tasks_dir.name)
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_hub_message = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+            state="idle",
+        )
+
+        await plugin._on_message_received(
+            HubMessage(
+                action="message",
+                from_agent="koordinator-id",
+                from_identity="koordinator",
+                to="sapphire",
+                content="[work assignment] inspect the compaction regression",
+                scope=MessageScope.DIRECT.value,
+                metadata={"task_assignment": True},
+            )
+        )
+
+        archived = llm_service.conversation_history[-1]
+        task_id = archived.metadata.get("task_id")
+        self.assertTrue(task_id)
+        self.assertEqual(plugin._task_ledger.get(task_id).status, "open")
+
+
     async def test_direct_operator_message_wakes_target_from_another_window(self):
         """A direct @ message is not suppressed as passive human broadcast."""
         llm_service = FakeLLMService()

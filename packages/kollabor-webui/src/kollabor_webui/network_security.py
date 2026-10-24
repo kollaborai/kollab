@@ -1,7 +1,7 @@
 """Private-only bind, Host/Origin, and exact-client-subnet checks for WebUI.
 
-Phone-access endpoints are intentionally supported through a direct private
-WebUI binding, not a public or arbitrary reverse-proxy deployment.
+The WebUI is intentionally supported through a direct private binding, not a
+public or arbitrary reverse-proxy deployment.
 """
 
 from __future__ import annotations
@@ -165,9 +165,6 @@ def interface_networks_for_hosts(bind_hosts: Sequence[str]):
     )
 
 
-
-
-
 def client_in_networks(
     host: str,
     networks: Iterable[ipaddress.IPv4Network | ipaddress.IPv6Network],
@@ -285,28 +282,3 @@ def request_origin_is_safe(request, allowed_hosts: Iterable[str]) -> bool:
         )
     except ValueError:
         return False
-
-
-def networks_for_phone_peers(peers: Iterable[dict[str, object]]):
-    """Trust only individual configured phone addresses, not the whole WG pool."""
-    networks: set[ipaddress.IPv4Network | ipaddress.IPv6Network] = set()
-    for peer in peers:
-        value = peer.get("address")
-        if not isinstance(value, str):
-            continue
-        address = _parse_ip(value)
-        if address is None or not _allowed_bind_address(str(address)):
-            continue
-        networks.add(
-            ipaddress.ip_network(f"{address}/{address.max_prefixlen}", strict=True)
-        )
-    return tuple(
-        sorted(
-            networks,
-            key=lambda network: (
-                network.version,
-                int(network.network_address),
-                network.prefixlen,
-            ),
-        )
-    )

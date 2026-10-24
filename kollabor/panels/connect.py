@@ -146,10 +146,16 @@ class ConnectPanel:
             ]
             return panel
         names = lambda items: ", ".join(items) or "None"  # noqa: E731
+        contact_route = snap.get("contact_route", "")
         panel["summary"] = [
             {"label": "Network", "value": network_label(snap["network"], snap["domain"])},
             {"label": "Trust", "value": snap["trust"]},
             {"label": "This Device", "value": snap["device"] or "Unnamed"},
+            {
+                "label": "Knocks Address",
+                "value": contact_route or "Unavailable",
+                **({"copyable": True} if contact_route else {}),
+            },
         ]
         if snap.get("read_only"):
             panel["notice"] = _READ_ONLY_NOTE

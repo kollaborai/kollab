@@ -115,6 +115,25 @@ class TestMessageHandler(unittest.TestCase):
         )
         self.assertEqual(result, {"status": "processed"})
 
+    def test_handle_livekit_input_forwards_trusted_origin_context(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+
+        self.loop.run_until_complete(
+            self.handler.handle_user_input(
+                {"message": "show status", "origin_context": origin_context},
+                event=None,
+            )
+        )
+
+        self.coordinator.process_user_input.assert_called_once_with(
+            "show status",
+            pre_displayed=False,
+            origin_context=origin_context,
+        )
+
+
     def test_handle_user_input_pre_displays_while_startup_pending(self):
         """Non-empty input should echo immediately while startup is still pending."""
         startup_ready = asyncio.Event()

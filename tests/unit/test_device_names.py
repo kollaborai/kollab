@@ -6,6 +6,7 @@ from plugins.hub.device_names import (
     contact_route_hex,
     default_device_name,
     device_key_fingerprint,
+    format_contact_route,
     format_handle,
     parse_handle,
     short_fingerprint,
@@ -80,3 +81,11 @@ def test_contact_route_is_16_lowercase_hex_and_fingerprint_is_a_full_digest():
     for helper in (contact_route_hex, device_key_fingerprint):
         with pytest.raises(ValueError):
             helper("not-a-key")
+
+
+def test_contact_route_uses_the_directory_authority_and_never_exposes_the_key():
+    key = "1" * 64
+    route = format_contact_route("directory.example:8443", key)
+    assert route == f"directory.example:8443/c/{contact_route_hex(key)}"
+    assert key not in route and not route.startswith("https://")
+    assert format_contact_route("", "") == ""

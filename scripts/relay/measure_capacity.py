@@ -29,9 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from plugins.hub.dns.discovery import discover  # noqa: E402
+from plugins.hub.dns.discovery import discover, relay_websocket_url  # noqa: E402
 from plugins.hub.relay_client import RelayClient, RelayError  # noqa: E402
-from plugins.hub.relay_commands import RelayCommands  # noqa: E402
 
 _RELAY_ERROR_CODES = {
     "peer requires explicit local approval": "approval_required",
@@ -337,7 +336,7 @@ async def measure(args) -> dict:
     usage_start = resource.getrusage(resource.RUSAGE_SELF)
     artifact = _artifact_metadata(getattr(args, "artifact", None))
     discovery = await discover(args.origin)
-    ws_url = RelayCommands._relay_url(discovery)
+    ws_url = relay_websocket_url(discovery)
     if not ws_url:
         raise ValueError("origin does not advertise a compatible relay")
     directory = Path(tempfile.mkdtemp(prefix="kollab-relay-capacity-"))

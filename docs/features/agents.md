@@ -234,6 +234,27 @@ Reference them from `.kollab/agents/my-agent/agent.json`:
 }
 ```
 
+## Web UI Agent Persistence
+
+Agents created from the Web UI are owned by the Web UI session and survive a Web
+UI or engine restart. The next engine on the same port reattaches to the same
+local daemon and restores its sidebar entry and conversation history. The engine
+stores a small, per-port manifest under `~/.kollab/engine/`; it contains process
+identity and session metadata only, is written atomically with restrictive file permissions (user-only on
+POSIX), and does not contain credentials or conversation contents.
+
+To stop a persistent Web UI agent, use Delete in the Web UI or send `/quit` to
+the agent. Closing or restarting the Web UI or engine detaches the connection
+but does not stop that daemon. This persistence applies only to sessions created
+through the Web UI; terminal/CLI-launched agents keep their existing lifecycle.
+The Web UI restart handover request flushes current metadata when available, but
+crash recovery does not depend on the request.
+
+If Delete stops the agent but cannot update its saved record, the agent stays in
+the sidebar with a warning (also shown in its session panel) and a retried
+Delete clears it without stopping the agent again.
+
+
 ## Using Agents
 
 ### CLI

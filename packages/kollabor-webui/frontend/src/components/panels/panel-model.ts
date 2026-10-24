@@ -7,9 +7,10 @@ export type SettingsTab =
   | "model"
   | "setup"
   | "network"
+  | "phonelink"
   | "voice"
   | "prompts";
-export type PanelTab = Exclude<SettingsTab, "session">;
+export type PanelTab = Exclude<SettingsTab, "session" | "phonelink">;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
 export type PanelIntent = "new_code" | "knocks";
@@ -44,6 +45,7 @@ export const SETTINGS_TABS: readonly {
     scope: "Adds a provider profile and makes it the active one",
   },
   { id: "network", label: "Network", scope: "This device's agent network" },
+  { id: "phonelink", label: "PhoneLink", scope: "Open this computer’s Kollab on your phone" },
   { id: "voice", label: "Voice", scope: "Saved for every chat on the device running Kollab" },
   {
     id: "prompts",

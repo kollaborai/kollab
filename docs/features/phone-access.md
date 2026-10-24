@@ -1,48 +1,173 @@
 ---
-title: "Phone Access"
+title: "PhoneLink"
 created: 2026-10-20
-modified: 2026-10-20
+modified: 2026-10-21
 status: active
 ---
-# Phone Access
+# PhoneLink
 
-Phone Access creates one WireGuard peer per phone and presents its client
-configuration as a one-time QR code in the WebUI. The phone can then reach the
-Kollab portal over the home network and install it as a standalone home-screen
-web app.
+PhoneLink opens this computer's Kollab app in a phone browser through the same
+signed discovery and outbound encrypted relay transport used by `/connect`.
+The normal flow is **Settings > PhoneLink > Link a Phone**, scan with the phone's
+camera, compare the pairing code and approve on the computer. No VPN app,
+router changes, API-key transfer, or personal server setup is required.
 
-Kollab manages only its generated phone peer snippet and the WebUI flow. It does
-not install or configure WireGuard, change an existing server or router config,
-set up DNS, open a firewall, or create a router UDP port-forward.
+Under the QR code, **Open on This Phone** opens the same invitation link in a new
+tab of the current browser and **Copy Link** copies it (with a visible, selectable
+fallback when the browser blocks the clipboard), for linking the phone you are
+already holding. It is the exact link the QR encodes, so it carries no extra
+secret, works five minutes and still needs approval of the pairing code on the
+computer. Only share it with yourself. Both buttons work from the keyboard (Tab,
+Enter or Space) with a visible focus ring; screenshots at
+[390](../screenshots/phone-access/phonelink-link-390.png),
+[820](../screenshots/phone-access/phonelink-link-820.png) and
+[1280](../screenshots/phone-access/phonelink-link-1280.png).
 
-## Prerequisites
+The computer and its engine must remain running and online. The selected
+`/connect` directory must serve the PhoneLink browser portal. Source support is
+not a claim that a public directory has been updated: the app checks its
+capability endpoint before offering a QR code.
 
-Before adding a phone, an operator must provide:
+## PhoneLink contract
 
-- A WireGuard server reachable by the phone, with a private tunnel subnet. Kollab
-  uses the first usable address for the server and assigns phone addresses after
-  it. The default is `10.77.0.0/24`; use a different private IPv4 subnet if it
-  conflicts with the home LAN or another tunnel.
-- The server's public key (never its private key) and a reachable endpoint in
-  `host:UDP-port` form. Bracket IPv6 endpoints, for example
-  `[2001:db8::1]:51820`.
-- A home router/firewall configured by its owner to forward the selected UDP port
-  to the WireGuard server, and permit that traffic. The server's listen port and
-  the endpoint port must match. Kollab never edits the router or firewall.
-- A public DNS name that resolves to the home's public address if the address is
-  dynamic or should not be typed into each phone. Configure dynamic DNS outside
-  Kollab. If the ISP uses carrier-grade NAT, ordinary inbound port forwarding may
-  not work; arrange a reachable VPN endpoint with the network provider.
-- A Kollab WebUI address reachable from the phone after the tunnel is up. For a
-  phone on the home Wi-Fi, that is usually the Kollab host's LAN address and the
-  WebUI port. For access over a VPN, use an address routed by that VPN.
-- A trusted host-admin apply helper, as described below. The helper must reconcile
-  Kollab's current peer snippet with the server and disconnect a peer that is no
-  longer present. Without it, add and revoke are disabled.
+- Pairing uses a fresh private relay room per phone, separate from the agent
+  network's room. The QR carries an expiring invitation in the URL fragment,
+  never a query parameter, engine token, or phone private key. The browser
+  generates its own identity and keeps it on that phone.
+- Scanning requests access. Only an explicit local approval pins that phone's
+  key. An invitation admits at most one phone and expires after five minutes.
+- A phone is a trusted app viewer/controller, not an agent-network member.
+  It is not enrolled for network configuration sync or given an agent identity.
+  Provider calls and tools still run on the computer; no credential setup is
+  needed on the phone. Approve only phones you trust with the app's controls.
+- The existing authenticated, session-bound relay envelopes carry a dedicated
+  phone channel. A fresh ephemeral key exchange protects the HTTP content per
+  connection; reconnect invalidates the old session and its requests.
+- The engine dispatches allowed app API calls internally. No public engine
+  listener, arbitrary destination proxy, or phone-management API is exposed.
+  Chat streaming, explicit Stop, history, and normal tool approvals retain
+  their existing engine behavior. Dropping a stream does not cancel agent work.
+- Saved phone identities reconnect after an engine restart, even without a
+  running terminal agent. Revoke immediately
+  withdraws that phone's access. No status says connected until the phone has
+  completed its authenticated session.
+- One engine owns PhoneLink for this computer at a time. Another running engine
+  directs you to manage phones in the owner instead of accepting changes to
+  stale phone state. Closing the owner releases it. Start the next engine, or
+  open PhoneLink in an already-running engine, to restore saved identities and
+  approvals without pairing again. Phone retries alone do not activate a
+  standby engine.
+- The PhoneLink tab owns linking and saved phones.
+- The QR display preserves the SVG's full drawing frame when resized, including
+  all three corner markers and the surrounding white margin.
 
-The endpoint, port-forward, WebUI portal address, and WireGuard tunnel are
-separate pieces: forwarding UDP makes the WireGuard server reachable; it does not
-make the Kollab WebUI public. Keep the WebUI on private addresses only.
+Verification must cover the real encrypted browser-to-engine path, rejected and
+expired invitations, wrong keys, replay, reconnect, revoke, streamed responses,
+and 390px/820px/desktop layouts. Public-service deployment and a physical phone
+scan remain separate acceptance gates.
+
+## Bounded chat history on the phone
+
+PhoneLink opens a conversation with the newest 50 messages. History pages are
+capped at 100 messages and 150,000 JSON bytes. The app prefetches the next older
+page after the first render and loads older pages as you scroll back. Cursors are
+opaque and bound to the session snapshot; a stale cursor triggers a fresh latest
+page rather than silently skipping or duplicating messages.
+
+The phone stores up to 12 bounded pages (1.8 MB per session) for up to 12
+sessions in IndexedDB. On reopen, it uses the cached latest page and requests
+only messages newer than the cached
+cursor. If the history changed in a way that invalidates that cursor, the app
+clears the stale cache and reloads the latest page. Loading, empty, and retryable
+error states are shown in the thread. Large historical tool output is previewed
+(up to 4 KiB); **Show more** fetches the full result only when requested.
+
+PhoneLink negotiates gzip frames and larger 160 KiB chunks when both peers
+support them. Decompression is bounded to 256 KiB per packet; legacy phones keep
+the 8 KiB, uncompressed behavior. Relay application payloads remain 24 KiB for
+ordinary messages, while PhoneLink frames use a separate 320 KiB payload bound
+and a 512 KiB relay frame bound. The history cursor-signing key is separate
+from the rotating engine token and is stored in the user's Kollab config
+directory with mode 0600.
+
+The synthetic acceptance path uses 220 messages (about 1.8 MB), including a
+1.2 MB tool result. The browser/relay/engine test measured a 148,047-byte,
+50-message first page and one coalesced history read; a fresh PhoneLink session
+adds one handshake before the HTTP start/read pair. See
+`tests/unit/test_phone_link_engine_streams.py::test_real_history_page_stays_bounded_and_loads_in_three_phone_roundtrips`,
+`packages/kollabor-webui/frontend/tests/history-cache.test.ts`, and the
+scratch-only Chromium/relay flow in
+`packages/kollabor-webui/frontend/tests/phonelink-browser-e2e.mjs`. This is not
+a substitute for the separate physical-phone/public-directory acceptance gate.
+
+
+## Signed app served from the computer
+
+The connection service never supplies the phone app. A QR opens a small
+**loader** from the directory (`/relay/v1/phone/`: `index.html`, `loader.js`,
+icons, manifest; built into `dist/phonelink/loader`). The loader holds no app
+UI. It joins the pairing room, waits for local approval, then fetches the app
+**from this computer** over the encrypted session (`GET /phone-app/...`, served
+by PhoneLink itself, never by the engine's routes, read-only, confined to the
+built files) and runs it from a verified copy.
+
+- **Signature.** The computer lists the app files (name, SHA-256, size) with a
+  build serial, hashes that list, and signs `kollab-phonelink-app/1`, the host
+  key and the hash with the room's Ed25519 device key: the host key from the QR.
+  The phone recomputes the hash itself (it never trusts the sender's), verifies
+  the signature against the QR's host key, then checks every file's SHA-256
+  before running anything. A wrong key, a changed file list or serial, a
+  changed file, a malformed list or an older serial than the copy already on
+  the phone is refused with a plain message and nothing runs.
+- **Fingerprint.** Both screens show the host key's fingerprint
+  (`XXXX-XXXX-XXXX-XXXX-XXXX`) beside a 12-character pairing code. Compare both
+  before approving.
+- **Updates.** A new signed app replaces the stored copy only after it
+  verifies. The verified copy is kept in the phone browser (IndexedDB) and is
+  checked again at every launch, so a modified copy is re-fetched from the
+  computer, or refused when the computer is out of reach.
+- **Build identity.** Settings > Versions shows the source branch and short
+  SHA embedded in the verified app bundle. This does not fetch the token-bearing
+  `/api/config` response; the build values are covered by the signed app files.
+- **Home Screen.** The loader is installable (manifest and icons), and the
+  verified app opens from its stored copy. Safari's Home Screen app has its own
+  storage (WebKit copies cookies, not local storage), so a phone linked in the
+  Safari tab is not linked inside a new iOS Home Screen app. On Android and
+  desktop browsers the installed app shares the link.
+- **Last seen and revoke.** The computer shows each phone's last-seen time and
+  a Revoke button per phone; revoke closes that phone's room at once.
+
+Screenshots (a scratch relay and host, a stubbed engine): Settings > PhoneLink
+at [390](../screenshots/phone-access/phonelink-panel-390.png),
+[820](../screenshots/phone-access/phonelink-panel-820.png) and
+[1280](../screenshots/phone-access/phonelink-panel-1280.png); the phone's pairing
+screen ([390](../screenshots/phone-access/phonelink-pairing-390.png)), the app
+served by the computer ([390](../screenshots/phone-access/phonelink-app-390.png),
+[820](../screenshots/phone-access/phonelink-app-820.png),
+[1280](../screenshots/phone-access/phonelink-app-1280.png)) and a refused copy
+([390](../screenshots/phone-access/phonelink-refused-390.png)).
+
+### Security notes
+
+- The first page, the loader, still comes from the directory: a browser cannot
+  verify the code that does the verifying. It is small, contains no app UI or
+  secrets, and the relay can no longer change what runs after it, but a
+  malicious directory could serve a modified loader to a new phone. Use a
+  directory you trust for the QR scan; compare the fingerprint on both screens.
+- The relay still sees only encrypted packets; it cannot sign for the computer.
+- The signature proves the computer built the file list, not that it is
+  harmless; approve only phones you trust with the app's controls.
+- Fingerprints and signatures use the room's device key, so they change when a
+  new invitation (a new room) is created.
+- The downgrade check is per phone: the signed serial must not go down. After
+  reinstalling an older Kollab, link the phone again.
+
+Verification: `tests/unit/test_phone_link_app.py` (signature, tampered bundle,
+wrong key, path confinement, last seen), `frontend/tests/phone-app-verify.test.ts`
+(the phone's verifier), `frontend/tests/phonelink-browser-e2e.mjs` (real
+Chromium, real relay service and PhoneLink host on scratch ports and a scratch
+HOME) and `tests/tmux/specs/phonelink_signed_app.json`. A physical phone scan on
+a public directory remains a separate acceptance gate.
 
 ## Make the WebUI reachable on the home network
 
@@ -60,111 +185,13 @@ The engine remains on loopback; browser requests reach it through the WebUI prox
 addresses only. Wildcards, unspecified/public addresses, and DNS names fail at
 startup with an actionable error. The WebUI verifies the Host and same-origin
 API request, then allows only clients in the exact CIDR assigned to a configured
-bind interface or the `/32` address of an active phone peer. Other addresses in
-the WireGuard pool and arbitrary RFC1918 networks do not inherit access.
+bind interface. Other addresses, including arbitrary RFC1918 networks, do not
+inherit access.
 
-Phone access supports direct private binding only. Uvicorn proxy-header rewriting
+The WebUI supports direct private binding only. Uvicorn proxy-header rewriting
 is disabled, and WebUI requests carrying `Forwarded` or `X-Forwarded-*` client
 chains are rejected. Do not place this WebUI behind a reverse proxy or public
 port-forward. A request must come from a configured private subnet and use the
 matching Host/Origin. The engine requires bearer authentication and accepts
-phone routes only through its loopback WebUI connection. `/api/config` provides
+engine routes only through its loopback WebUI connection. `/api/config` provides
 the token only to allowed clients and every success/error response is `no-store`.
-
-If the WebUI host is not the WireGuard server, configure the phone's `AllowedIPs`
-to include the home LAN network containing the WebUI host. Prefer the narrow LAN
-CIDR (for example `192.168.1.0/24`) instead of a broad route. Set the portal URL
-to the numeric private WebUI address and port, for example
-`http://192.168.1.20:8080`; DNS names are for the WireGuard endpoint, not the
-WebUI Host in this direct-bind mode. If the server itself hosts the WebUI, its
-tunnel address may be sufficient. Set the optional DNS field to an IP address
-reachable through the selected routes.
-
-This direct-bind mode serves HTTP on the private network. Kollab does not install
-TLS or change the router. If a phone's OS requires trusted HTTPS to add a home
-screen app, do not add a public reverse proxy; the TLS-terminating proxy path is
-not supported by this phone-access security boundary.
-
-## Configure the trusted server apply helper
-
-The engine reads `KOLLAB_PHONE_ACCESS_APPLY_COMMAND` from its host environment.
-This is intentionally not editable from the phone settings API: allowing a LAN
-client to choose an executable would turn peer management into remote command
-execution on the Kollab host.
-
-Configure it only for an operator-owned executable that reconciles the latest
-peer file with the intended WireGuard server. Each invocation receives the
-absolute path to `peers.conf` as its final argument and in the
-`KOLLAB_PHONE_ACCESS_PEERS_FILE` environment variable. The peer file contains
-only phone `[Peer]` blocks with public keys and tunnel addresses. The helper
-must preserve the operator's non-phone peers, apply the current phone peers, and
-remove a revoked phone peer from the running server before returning success.
-
-
-For a WireGuard interface on the Kollab host, a reviewed root-owned helper can
-combine the normal server config with the generated phone peer file and sync the
-complete peer set. For example, adapt this helper to the interface and config
-path on that host:
-
-```sh
-#!/usr/bin/env bash
-set -euo pipefail
-umask 077
-interface=wg0
-server_config=/etc/wireguard/wg0.conf
-phone_peers=${1:?expected the Kollab peers.conf path}
-workdir=$(mktemp -d)
-trap 'rm -rf "$workdir"' EXIT
-cat "$server_config" > "$workdir/combined.conf"
-printf '\n' >> "$workdir/combined.conf"
-cat "$phone_peers" >> "$workdir/combined.conf"
-wg-quick strip "$workdir/combined.conf" > "$workdir/wg.conf"
-wg syncconf "$interface" "$workdir/wg.conf"
-```
-
-Keep all non-phone peers in the normal server config so `syncconf` preserves
-them. Install the helper with the least privileges needed; if the engine calls
-a narrow `sudo` wrapper, restrict that authorization to this reviewed helper.
-Arrange for the same peer set to load after a server reboot. This example is
-not installed or run by Kollab, and does not change the router or server config
-file.
-
-
-The engine executes the configured argv without a shell, captures output without
-logging it, and imposes a 30-second timeout. A missing or invalid helper disables
-add/revoke. A non-zero exit is reported as a failure and Kollab restores the
-previous local peer file; if a helper partially changed a remote server before
-failing, inspect that server before retrying. Return success only after the server
-has applied the complete peer set. Kollab does not edit systemd, WireGuard service
-files, or existing server configs.
-
-The helper may need elevated privileges. Install and authorize it separately
-using the narrowest host policy appropriate for that machine. Never point this
-setting at an unreviewed script or accept its value from an API request. To
-change it, update the engine's trusted environment locally and restart the
-engine/WebUI process.
-
-## Add and revoke phones
-
-1. Open the WebUI from the private home network or a permitted VPN.
-2. Open the session settings panel and enter the server endpoint, server public
-   key, private tunnel subnet, phone routes, optional DNS, and portal address.
-   Save settings. Kollab validates IP networks, keys, ports, and peer names.
-3. Add a phone. The engine generates a fresh client keypair, writes only the
-   public-key peer block, asks the trusted helper to apply it, then returns the QR
-   once. The QR response is marked `no-store`; the private key is not included as
-   plaintext in the JSON response, stored in state, written to the server peer
-   file, included in later API responses, or logged. Do not screenshot or share
-   the QR: it contains the phone's private key in encoded form.
-4. On the phone, scan the QR from the WireGuard app and activate its tunnel. Then
-   open the configured private portal address in Safari and use Share > Add to
-   Home Screen. The Web App Manifest and Apple touch icon request standalone
-   full-screen launch. The WebUI still needs a network connection to work.
-5. Revoke a lost phone from its peer row. Kollab removes only that peer from its
-   snippet and requires the host helper to apply the reduced peer set. The API
-   returns success only after the helper exits successfully; on failure it keeps
-   the previous local peer record and shows an actionable error.
-
-The QR is held only in the browser component's in-memory state after creation.
-Hide it or leave the settings panel when it has been scanned. A later state,
-settings, or revoke response never contains that QR or client private key.

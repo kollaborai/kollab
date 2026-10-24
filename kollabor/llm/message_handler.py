@@ -15,6 +15,7 @@ from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
 )
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
 
 if TYPE_CHECKING:
@@ -164,6 +165,17 @@ class MessageHandler:
                     }
                 return {"status": "startup_hold", "requeued": True}
 
+        origin_context = data.get("origin_context")
+        claims_voice_origin = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
+        )
+        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+            return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+        if not claims_voice_origin:
+            origin_context = None
+        origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
@@ -171,12 +183,15 @@ class MessageHandler:
             return await plugin.admit(
                 data,
                 lambda: self._coordinator.process_user_input(
-                    message, pre_displayed=pre_displayed, voice=data["voice"]
+                    message,
+                    pre_displayed=pre_displayed,
+                    voice=data["voice"],
+                    **origin_kwargs,
                 ),
             )
 
         result = await self._coordinator.process_user_input(
-            message, pre_displayed=pre_displayed
+            message, pre_displayed=pre_displayed, **origin_kwargs
         )
         return result  # type: ignore[no-any-return]
 

@@ -20,6 +20,13 @@ from kollabor_ai.session_naming import generate_session_name
 
 from .. import hidden_agents, sidebar_order
 from ..daemon_pool import get_daemon_pool
+from ..history_paging import (
+    HistoryPageTooLarge,
+    InvalidHistoryCursor,
+    StaleHistoryCursor,
+    build_history_page,
+    resolve_history_output,
+)
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry
@@ -29,6 +36,26 @@ from .workspaces import remember_workspace
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+# The engine is a singleton process with a module-level session registry; its
+# active per-port store is configured by the server lifespan for route cleanup.
+_handover_store: Any = None
+
+
+def set_handover_store(store: Any) -> None:
+    global _handover_store
+    _handover_store = store
+
+
+
+def _request_handover_store(request: Request) -> Any:
+    try:
+        return getattr(request.app.state, "handover_store", _handover_store)
+    except (AttributeError, KeyError):
+        # Direct route-unit invocations may construct a minimal Starlette
+        # Request without an ASGI app in scope.
+        return _handover_store
 
 _session_reservation_lock = threading.Lock()
 _pending_session_ids: set[str] = set()
@@ -201,6 +228,8 @@ def _resolve_agent(name: str, workspace: Optional[str] = None) -> Optional[dict]
 @router.post("")
 async def create_session(body: CreateSessionRequest, request: Request):
     registry = get_session_registry()
+    is_webui_launch = request.headers.get("x-kollab-session-source") == "webui"
+    handover_store = _request_handover_store(request) if is_webui_launch else None
 
     # Resolve user_token: body takes priority, header is fallback (proxy injects it)
     user_token = body.user_token or request.headers.get("x-mentiko-session-token")
@@ -296,30 +325,54 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 # Bundles with "hub": false (product assistants) get a solo
                 # daemon: attachable by this engine, invisible to the mesh.
                 solo=bool(agent_data) and agent_data.get("hub") is False,
+                webui_owned=handover_store is not None,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+        if handover_store is not None:
+            session.on_persistence_changed = handover_store.register_session
+
+
         # Spawning the daemon is the slow part of session creation (plugin
         # discovery plus the hub join). Every failure after construction must
         # stop the candidate daemon before the error leaves this route.
+        async def persist_spawned(candidate: EngineSession) -> None:
+            if handover_store is not None:
+                handover_store.register_session(candidate)
+
         try:
-            await session.initialize()
+            if handover_store is None:
+                await session.initialize()
+            else:
+                await session.initialize(on_spawned=persist_spawned)
+            # Refresh metadata once initialization has a conversation ID and
+            # the daemon has had time to publish its session-log path. The first
+            # callback above remains the crash-safe early registration.
+            if handover_store is not None:
+                handover_store.register_session(session)
         except asyncio.CancelledError:
             await _shutdown_failed_session(session, session_id)
+            if handover_store is not None and session.daemon is None:
+                handover_store.remove_session(session_id)
             raise
         except ValueError as e:
             await _shutdown_failed_session(session, session_id)
+            if handover_store is not None and session.daemon is None:
+                handover_store.remove_session(session_id)
             raise HTTPException(status_code=409, detail=str(e)) from e
         except Exception as e:
             logger.exception("Session %s daemon failed to start", session_id)
             await _shutdown_failed_session(session, session_id)
+            if handover_store is not None and session.daemon is None:
+                handover_store.remove_session(session_id)
             raise HTTPException(
                 status_code=503,
                 detail=f"daemon failed to start: {e}",
             ) from e
 
         registry[session_id] = session
+
         logger.info("Session %s created", session_id)
         remember_workspace(getattr(session, "workspace", None))
         return session.to_dict()
@@ -327,7 +380,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
         _release_session_id(session_id)
 
 
-async def _reap_dead_sessions() -> None:
+async def _reap_dead_sessions(handover_store: Any = None) -> None:
     """Drop sessions whose daemon is gone.
 
     Nothing noticed daemons exiting, so the registry kept serving rows for
@@ -342,6 +395,8 @@ async def _reap_dead_sessions() -> None:
             continue
         try:
             await session.shutdown()
+            if handover_store is not None and session.webui_owned:
+                handover_store.remove_session(session_id)
         except Exception as e:
             logger.warning("reaping dead session %s: %s", session_id, e)
 
@@ -605,7 +660,7 @@ async def list_sessions():
     The others open on first use (server.open_named_session). This engine's own
     daemons are in presence too, so they are matched by pid and listed once.
     """
-    await _reap_dead_sessions()
+    await _reap_dead_sessions(_handover_store)
     registry = get_session_registry()
     found = HubBridge().discover_sessions(use_cache=False)
     # A terminal can switch conversations (/new, /resume): keep the name current.
@@ -645,7 +700,7 @@ async def list_sessions():
 
 @router.get("/{session_id}")
 async def get_session(session_id: str):
-    await _reap_dead_sessions()
+    await _reap_dead_sessions(_handover_store)
     registry = get_session_registry()
     session = registry.get(session_id)
     if session:
@@ -921,12 +976,59 @@ async def delete_session(session_id: str):
     session = registry.pop(session_id, None)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    await session.shutdown()
+    # A Delete whose owner-record removal failed already stopped the daemon:
+    # retry only the durable part, never stop a stopped agent again.
+    if not getattr(session, "deletion_pending", False):
+        try:
+            await session.shutdown()
+        except Exception as exc:
+            # Keep the live session and manifest discoverable when the PID could not
+            # be stopped; the user can retry Delete or send /quit in the agent.
+            registry[session_id] = session
+
+            logger.exception("failed to stop deleted session %s", session_id)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Could not confirm that agent {session_id} stopped. "
+                    "Retry Delete or send /quit to the agent."
+                ),
+            ) from exc
+    if _handover_store is not None and session.webui_owned:
+        # Delete is an explicit stop: remove the durable owner record only after
+        # the pool successfully stopped the daemon.
+        try:
+            _handover_store.remove_session(session_id)
+        except Exception as exc:
+            # The agent is stopped but still owns a durable record: keep the
+            # row listed so a restart cannot resurrect a zombie, and let the
+            # user clear it by retrying Delete.
+            session.deletion_pending = True
+            session.deletion_warning = (
+                "Stopped, but its saved owner record could not be removed. "
+                "It stays listed so it is not lost; retry Delete to clear it."
+            )
+            registry[session_id] = session
+            logger.exception(
+                "could not remove owner record for stopped session %s", session_id
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Agent {session_id} stopped, but its owner record could not "
+                    "be removed. It stays in the list; retry Delete to clear it."
+                ),
+            ) from exc
     return {"ok": True, "session_id": session_id}
 
 
 @router.get("/{session_id}/history")
-async def get_history(session_id: str, limit: Optional[int] = None):
+async def get_history(
+    session_id: str,
+    limit: Optional[int] = None,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+):
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
@@ -937,7 +1039,56 @@ async def get_history(session_id: str, limit: Optional[int] = None):
     # arrives as a history_updated event. source says where the history came
     # from and stale whether it is still the disk seed (every answer before
     # the daemon's replaces it, not only the first).
-    return await session.get_history_nonblocking(limit)
+    snapshot = await session.get_history_nonblocking()
+    history = snapshot.get("history", [])
+    base_payload = {key: value for key, value in snapshot.items() if key != "history"}
+    try:
+        page = build_history_page(
+            session_id,
+            history,
+            limit=limit,
+            before=before,
+            after=after,
+            base_payload=base_payload,
+        )
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except HistoryPageTooLarge as error:
+        raise HTTPException(status_code=413, detail=str(error)) from error
+
+    # Preserve the existing turn-error offset semantics, now relative to the
+    # bounded page. An error outside an older page is not duplicated there.
+    turn_error = page.get("last_turn_error")
+    if isinstance(turn_error, dict):
+        error_position = turn_error.get("history_length")
+        if isinstance(error_position, int) and not isinstance(error_position, bool):
+            if not page["start_index"] <= error_position <= page["end_index"]:
+                page["last_turn_error"] = None
+            else:
+                page["last_turn_error"] = {
+                    **turn_error,
+                    "history_length": error_position - page["start_index"],
+                }
+    return page
+
+
+@router.get("/{session_id}/history/output")
+async def get_history_output(session_id: str, ref: str):
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = await session.get_history_nonblocking()
+    try:
+        content = resolve_history_output(session_id, snapshot.get("history", []), ref)
+    except StaleHistoryCursor as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InvalidHistoryCursor as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "content": content}
 
 
 @router.delete("/{session_id}/history")

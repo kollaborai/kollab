@@ -1,15 +1,17 @@
 """Hatch build hook for the assistant-ui static web application.
 
-The frontend's ``dist`` directory is intentionally ignored in git.  When a
-package is built, regenerate it from the checked-in frontend source whenever
-npm is available, and force-include the generated assets in the wheel.  If a
-build environment has no Node.js toolchain (or npm cannot reach dependencies),
-keep any existing dist output intact so Python-only installs remain usable with
-the last generated UI or the legacy static fallback.
+Wheel builds compile the checked-in frontend source into an isolated temporary
+directory and force-include those assets. A missing toolchain or failed build is
+an error; an older checkout dist must never substitute for the selected app.
+
+Set ``KOLLAB_FRONTEND_DIST`` to package an explicit prebuilt frontend without
+running npm or changing the checkout's dist directory. An invalid explicit
+input fails the build instead of falling back to other assets.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +25,7 @@ class CustomBuildHook(BuildHookInterface):
     """Build and include the Vite output without tracking generated files."""
 
     PLUGIN_NAME = "custom"
+    _frontend_output: tempfile.TemporaryDirectory[str] | None = None
 
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
@@ -45,53 +48,63 @@ class CustomBuildHook(BuildHookInterface):
             )
 
     @staticmethod
-    def _restore_dist(dist: Path, backup: Path | None) -> None:
-        """Restore prior output or remove a failed partial build.
-
-        Vite may empty ``dist`` before reporting a compile failure. If no
-        previous build existed, leaving that partial directory behind makes a
-        later package build think frontend output is available and can cause
-        the source checkout to serve incomplete assets. Remove it so the
-        server cleanly falls back to the legacy static UI instead.
-        """
-
-        if dist.exists():
-            shutil.rmtree(dist)
-        if backup is not None:
-            shutil.copytree(backup, dist)
+    def _validate_dist(dist: Path) -> None:
+        if dist.is_symlink() or not (dist / "index.html").is_file():
+            raise ValueError("Frontend output must be a directory containing index.html")
+        if any(asset.is_symlink() for asset in dist.rglob("*")):
+            raise ValueError("Frontend assets must not be symlinks")
 
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
         del version
         package_root = Path(self.root)
         frontend = package_root / "frontend"
-        dist = frontend / "dist"
-        package_json = frontend / "package.json"
-
-        if package_json.exists():
+        # The Vite changelog module normally reads the monorepo's canonical
+        # file. Carry that input inside standalone source distributions too.
+        if self.target_name == "sdist":
+            changelog = package_root.parents[1] / "kollabor/updates/CHANGELOG.md"
+            if changelog.is_file():
+                force_include = build_data.setdefault("force_include", {})
+                force_include[str(changelog)] = "frontend/CHANGELOG.md"
+            elif not (frontend / "CHANGELOG.md").is_file():
+                raise RuntimeError("The canonical frontend changelog input is missing")
+            return
+        # Only a wheel needs generated assets; source publication must not
+        # compile the app a second time.
+        if self.target_name != "wheel":
+            return
+        prebuilt = os.environ.get("KOLLAB_FRONTEND_DIST")
+        if prebuilt is not None:
+            if not prebuilt:
+                raise ValueError("KOLLAB_FRONTEND_DIST must name a built frontend directory containing index.html")
+            dist = Path(prebuilt)
+            self._validate_dist(dist)
+        else:
+            if not (frontend / "package.json").is_file():
+                raise RuntimeError("Frontend source is missing; supply KOLLAB_FRONTEND_DIST")
             npm = shutil.which("npm")
-            if npm:
-                # Vite's emptyOutDir can remove a previously good build before
-                # discovering a compile error. Back it up so an offline or
-                # broken dependency install never leaves the package unusable.
-                with tempfile.TemporaryDirectory(prefix="kollabor-webui-dist-") as tmp:
-                    backup: Path | None = None
-                    if (dist / "index.html").is_file():
-                        backup = Path(tmp) / "dist"
-                        shutil.copytree(dist, backup)
-                    try:
-                        lockfile = frontend / "package-lock.json"
-                        install_command = [npm, "ci"] if lockfile.is_file() else [npm, "install"]
-                        install_command.extend(
-                            ["--ignore-scripts", "--no-audit", "--no-fund"]
-                        )
-                        self._run(install_command, frontend)
-                        self._run([npm, "run", "build"], frontend)
-                    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-                        self._restore_dist(dist, backup)
-                        print(f"WARNING: assistant-ui build skipped: {exc}")
-            else:
-                print("WARNING: npm not found; using existing/legacy WebUI static fallback")
+            if npm is None:
+                raise RuntimeError(
+                    "npm is required to build the frontend; supply KOLLAB_FRONTEND_DIST to reuse a build"
+                )
+            self._frontend_output = tempfile.TemporaryDirectory(prefix="kollabor-webui-dist-")
+            dist = Path(self._frontend_output.name) / "dist"
+            try:
+                lockfile = frontend / "package-lock.json"
+                install_command = [npm, "ci"] if lockfile.is_file() else [npm, "install"]
+                install_command.extend(["--ignore-scripts", "--no-audit", "--no-fund"])
+                self._run(install_command, frontend)
+                self._run([npm, "run", "build", "--", "--outDir", str(dist)], frontend)
+                self._validate_dist(dist)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                self._frontend_output.cleanup()
+                self._frontend_output = None
+                raise
 
-        if (dist / "index.html").is_file():
-            force_include = build_data.setdefault("force_include", {})
-            force_include[str(dist)] = "kollabor_webui/static/assistant"
+        force_include = build_data.setdefault("force_include", {})
+        force_include[str(dist)] = "kollabor_webui/static/assistant"
+
+    def finalize(self, version: str, build_data: dict[str, Any], artifact_path: str) -> None:
+        del version, build_data, artifact_path
+        if self._frontend_output is not None:
+            self._frontend_output.cleanup()
+            self._frontend_output = None

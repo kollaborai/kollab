@@ -7,9 +7,20 @@ status: active
 ---
 # Learn Kollab
 
-The browser UI has a Learn entry in the sidebar for people who are new to Kollab
-or want a quick reminder. Each lesson uses plain language, a short how-to, and an
-example. Topic URLs are stable and use `/learn?topic=<id>`.
+The browser UI has a Learn book icon in the sidebar footer for people who are new
+to Kollab or want a quick reminder. It opens a compact modal like Apps, with the
+chat preserved behind it. Each topic uses plain language, a short how-to,
+and an example. Topic URLs are stable and use `/learn?topic=<id>`.
+
+Learn uses borderless tonal surfaces for its navigation, topics, and callouts.
+Interactive controls retain keyboard focus
+indicators. Titles, body copy, and detail text use the same size scale as the
+Settings and Agents panels across desktop and mobile.
+
+The topic menu uses plain text labels without numbering. Page and section headings
+omit decorative icons, taglines, and lesson counters. The modal has a close icon
+in its top-right corner and scrolls internally. Escape also closes it. Topic URLs
+can be bookmarked or opened directly and browser Back/Forward restores navigation.
 
 | Topic ID | Lesson |
 | --- | --- |
@@ -22,12 +33,12 @@ example. Topic URLs are stable and use `/learn?topic=<id>`.
 | `hub-messaging` | Shared Hub messages |
 | `voice` | Voice mode |
 | `system-prompts` | Agent system prompts |
-| `phone-access` | WireGuard phone access |
+| `phone-access` | PhoneLink |
 
-Use a lesson link from a related sidebar, workspace, or agent surface to open the
-matching topic. Progress is saved only in the current browser's local storage; it
-is not an account or cross-device setting. If browser storage is blocked, lessons
-remain usable and the page explains that completion cannot be saved.
+Use the Learn icon to browse lessons, or a lesson link from a related workspace
+or profile control to open the matching topic. Learn is a reference with no
+completion tracking, progress bar, or Previous/Next footer. Navigate with the
+topic menu. Previously stored browser progress is left untouched.
 
 ## Kollab networks and devices
 
@@ -46,6 +57,13 @@ A workspace is a project folder. Pick the folder before starting a session so it
 sessions, local agents, and project context stay together. Use the workspace
 picker in the sidebar or New Session controls, choose an available agent, and
 start the session.
+
+Drag an agent row to reorder it within its workspace; the other rows move aside
+before you drop. Keyboard users can pick up a focused row with Space, move it with
+the arrow keys, and press Space to save or Escape to cancel.
+Drag past the sidebar's edge and release on the "Release to hide" cue to hide
+an agent. It shrinks into the Hidden Agents button and can be restored there. Move back inside
+or press Escape to cancel; hiding never deletes or stops an agent.
 
 Example: keep the Kollab repository and a customer repository in separate
 workspaces so their local agents and conversation history do not mix.
@@ -120,41 +138,25 @@ rendered result.
 Example: add a short “verify before reporting” section and include it with
 `<trender type="include" path="sections/verify.md" />`.
 
-## WireGuard phone access
+## PhoneLink
 
-WireGuard phone access joins a phone to an administrator-prepared private VPN so
-it can open the Web UI at a private address. It does not publish the Web UI.
+PhoneLink opens this computer's Kollab app in a phone browser through the same
+connection service used by `/connect`. Open **Settings > PhoneLink**, choose
+**Link a Phone**, scan with the phone's camera, compare the pairing code, and
+approve on the computer. The invitation expires after five minutes and links
+one phone. Bookmark the opened app to return in the same phone browser.
 
+Keep the computer awake, online and running Kollab. Agents, provider calls and
+tools still run on the computer. The phone is a trusted app controller, with no
+credential setup or agent-network enrollment. Removing the phone withdraws its app access.
+The directory must include the PhoneLink portal; the UI checks this before
+issuing a QR. Code in a checkout does not establish public deployment.
 
-The phone-management panel is a separate feature from Learn and may not be present
-in a build until that feature is integrated. This lesson documents prerequisites;
-it does not provision or modify a phone peer.
+## What's New
 
-1. Ask the host administrator to prepare a reachable WireGuard server, its public
-   key and endpoint, and a private tunnel address for the phone.
-2. The network owner configures any required router/firewall UDP forwarding, DNS,
-   and trusted HTTPS certificate outside Kollab.
-3. The host administrator keeps the Web UI private by allowing only its LAN IP
-   in `KOLLAB_WEBUI_HOSTS` before launch (for example,
-   `KOLLAB_WEBUI_HOSTS=192.168.1.20 kollab --web-ui`). The host also sets
-   `KOLLAB_PHONE_ACCESS_APPLY_COMMAND` to a reviewed peer-reconciliation helper;
-   this helper is not editable from the phone API. Without it, add/revoke controls
-   remain disabled.
-4. In a build that includes the Phone Access panel, add the phone and scan its
-   one-time QR code with the official WireGuard app. If the panel is absent, Learn
-   cannot provision a peer. The QR contains the phone's private key; keep it secret
-   and do not save it in screenshots or share it.
-5. Activate the VPN on the phone, then open the Web UI through its private
-   address (for example, `http://<private-host>:8080`).
-
-Kollab does not install WireGuard, configure routers, open firewalls, or set up
-DNS. Keep the Web UI restricted to the private network; do not expose it as a
-public service just to reach it from a phone.
-
-## What's New and progress
-
-The Learn page's What's New card reads `kollabor/updates/CHANGELOG.md` from the
-canonical source when the Web UI bundle is built. It shows Unreleased notes and
-the newest release section; it does not keep a separate copy of release notes.
+What's New is a separate `/whats-new` page, opened with the newspaper icon in the
+sidebar footer. It reads `kollabor/updates/CHANGELOG.md` from the canonical source
+when the Web UI bundle is built. It shows the full Unreleased notes and newest
+release section; it does not keep a separate copy of release notes.
 If notes are empty or cannot load, the page offers the full changelog and a
 retry. Unknown topic IDs show a recovery link to the lesson list.

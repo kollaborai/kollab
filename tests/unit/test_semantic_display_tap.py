@@ -460,7 +460,10 @@ class TestUserMessageEvent:
         service._add_conversation_message("user", "slowreply please")
 
         assert seen == [("user_message", 1)]
-        assert [e["type"] for e in _drain(q)] == ["user_message"]
+        events = _drain(q)
+        assert [e["type"] for e in events] == ["user_message"]
+        assert events[0]["role"] == "user"
+        assert events[0]["text"] == "slowreply please"
 
     def test_the_models_own_messages_are_not_announced(self):
         tap = DisplayTap()

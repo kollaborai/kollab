@@ -331,7 +331,12 @@ export const Thread: FC<{
   device?: string;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked?: string;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "" }) => (
+
+  historyStatus?: { kind: string; message: string };
+  onLoadOlder?: () => Promise<void>;
+  onRetryHistory?: () => void;
+  historyStartIndex?: number;
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -355,6 +360,11 @@ export const Thread: FC<{
             commands={commands}
             onOpenPanel={onOpenPanel}
             attachmentsEnabled={attachmentsEnabled}
+
+            historyStatus={historyStatus}
+            onLoadOlder={onLoadOlder}
+            onRetryHistory={onRetryHistory}
+            historyStartIndex={historyStartIndex}
           />
         </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>

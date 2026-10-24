@@ -35,7 +35,14 @@ from kollabor_events.models import (
 )
 from kollabor_plugins import BasePlugin
 
-from .capture import normalize_records, normalize_text, paginate, plain_text
+from .capture import (
+    group_transcript_records,
+    normalize_records,
+    normalize_text,
+    paginate,
+    plain_text,
+    render_transcript,
+)
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
 from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
 from .crystal_store import CrystalStore, normalize_crystal_id
@@ -80,9 +87,11 @@ from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
+    DEFAULT_ALERT_COOLDOWN,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_STALL_THRESHOLD,
     DEFAULT_WAKE_COOLDOWN,
+    DEFAULT_WAKE_INEFFICACY,
     SupervisorState,
 )
 from .supervisor import (
@@ -196,6 +205,18 @@ class _NetworkTurn:
     replies: int = 0  # hub_msgs already sent on its thread
     answer: str = ""  # text of the model's last response, if it ended the chain
     bound_ask: bool = False
+
+
+@dataclass(frozen=True)
+class _CaptureOutcome:
+    """Typed result for Hub capture command/tool dispatch."""
+
+    text: str
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 # Three lists per the agent network constitution (docs/specs/agent-network-
 # simple-flow.md, section 6): the shown palette, the advanced (help all,
@@ -630,6 +651,8 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._supervisor_state = SupervisorState()
+        # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
+        self._supervisor_alerts: List[Tuple[float, str]] = []
         self._bridge_task: Optional[asyncio.Task] = None
         self._bridge: Optional[MessagingBridge] = None
         # Self-restart coordination: retain the timeout watchdog and ensure
@@ -718,6 +741,8 @@ class HubPlugin(BasePlugin):
                     "supervisor_stall_threshold": 900,
                     "supervisor_wake_cooldown": 120,
                     "supervisor_max_reassignments": 3,
+                    "supervisor_wake_inefficacy": 3,
+                    "supervisor_alert_cooldown": 900,
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify_url": "",
@@ -4587,42 +4612,85 @@ class HubPlugin(BasePlugin):
         )
 
     async def _handle_hub_capture_tool(self, tool_data: dict):
-        """Execute a hub_capture tool."""
+        """Execute a hub_capture tool with typed target, line, and format args."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        # Native normalization keeps the executor's canonical ``name`` as
-        # ``hub_capture``. Read provider arguments from the nested payload
-        # first, while retaining the legacy XML extractor keys.
+        tool_id = tool_data.get("id", "unknown")
         request = tool_data.get("input") or tool_data.get("arguments") or {}
         if not isinstance(request, dict):
             request = {}
-        cap_name = tool_data.get("cap_name", "") or request.get("name", "")
-        cap_lines = (
-            tool_data.get("cap_lines", "")
-            or request.get("lines", "")
-            or tool_data.get("lines", "")
-            or "50"
+
+        def failure(message: str) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="hub_capture",
+                success=False,
+                error=message,
+            )
+
+        cap_name = tool_data.get("cap_name") or request.get("name") or ""
+        if not isinstance(cap_name, str) or not cap_name.strip():
+            return failure("hub_capture requires a non-empty agent name")
+        cap_name = cap_name.strip()
+
+        if tool_data.get("cap_lines") not in (None, ""):
+            raw_lines = tool_data["cap_lines"]
+        elif "lines" in request:
+            raw_lines = request["lines"]
+        elif "lines" in tool_data:
+            raw_lines = tool_data["lines"]
+        else:
+            raw_lines = 50
+        if isinstance(raw_lines, bool):
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if isinstance(raw_lines, int):
+            cap_lines = raw_lines
+        elif (
+            isinstance(raw_lines, str)
+            and raw_lines.strip().isascii()
+            and raw_lines.strip().isdigit()
+        ):
+            cap_lines = int(raw_lines.strip())
+        else:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        if cap_lines < 1:
+            return failure("hub_capture lines must be an integer between 1 and 100")
+        cap_lines = min(cap_lines, 100)
+
+        raw_format = request.get(
+            "format", tool_data.get("format", tool_data.get("cap_format", "transcript"))
         )
-        cap_format = str(
-            request.get("format", "") or tool_data.get("cap_format", "") or ""
-        ).strip().lower()
-        wants_raw = cap_format == "terminal" or bool(request.get("raw"))
-        args = cap_name.strip()
-        if cap_lines:
-            args += f" {cap_lines}"
-        if wants_raw:
-            args += " --raw"
-        result = await self._handle_capture_command(args)
-        # Truncate per-agent capture to 10k chars (2000 was too low —
-        # oldest entries consumed the entire budget before recent work
-        # became visible).  Entries are already newest-first.
-        if len(result) > 10000:
-            result = result[:10000] + "\n... (truncated)"
+        if raw_format in (None, ""):
+            raw_format = "transcript"
+        if not isinstance(raw_format, str):
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        cap_format = raw_format.strip().lower()
+        if cap_format not in {"transcript", "json", "plain", "terminal"}:
+            return failure("hub_capture format must be transcript, plain, or terminal")
+        raw_flag = request.get("raw", tool_data.get("raw", False))
+        if not isinstance(raw_flag, bool):
+            return failure("hub_capture raw must be a boolean")
+        if raw_flag or cap_format == "terminal":
+            capture_format = "terminal"
+        elif cap_format == "plain":
+            capture_format = "plain"
+        else:
+            capture_format = "json"
+
+        outcome = await self._capture_target(
+            cap_name,
+            cap_lines,
+            capture_format=capture_format,
+        )
+        output = outcome.text
+        if len(output) > 10_000:
+            output = output[:10_000] + "\n... (truncated)"
         return ToolExecutionResult(
-            tool_id=tool_data.get("id", "unknown"),
+            tool_id=tool_id,
             tool_type="hub_capture",
-            success=True,
-            output=result,
+            success=outcome.success,
+            output=output,
+            error=outcome.error,
         )
 
     async def register_hooks(self) -> None:
@@ -6293,6 +6361,9 @@ class HubPlugin(BasePlugin):
             "plugins.hub.supervisor_max_reassignments",
             3,
         )
+        # Boot counts as fresh activity: wake-efficacy alerts need real
+        # stall time after start, not a zero baseline (issue #283).
+        self._supervisor_state.last_turn_end = time.time()
         while True:
             try:
                 await asyncio.sleep(max(1.0, float(poll_interval)))
@@ -6338,6 +6409,18 @@ class HubPlugin(BasePlugin):
             stall_threshold=stall,
             wake_cooldown=cooldown,
             max_reassignments=max_reassign,
+            wake_inefficacy=self.config.get(
+                "plugins.hub.supervisor_wake_inefficacy",
+                DEFAULT_WAKE_INEFFICACY,
+            )
+            if self.config
+            else DEFAULT_WAKE_INEFFICACY,
+            alert_cooldown=self.config.get(
+                "plugins.hub.supervisor_alert_cooldown",
+                DEFAULT_ALERT_COOLDOWN,
+            )
+            if self.config
+            else DEFAULT_ALERT_COOLDOWN,
             state=self._supervisor_state,
         )
         if not decisions:
@@ -6396,6 +6479,21 @@ class HubPlugin(BasePlugin):
                         decision.worker,
                         decision.card_id,
                     )
+                    # A nudge nobody received must not vanish (issue #283):
+                    # surface it; the next pass requeues the card.
+                    self._record_supervisor_alert(
+                        f"nudge for task {decision.card_id} was not"
+                        f" delivered to {decision.worker} (offline or"
+                        " unreachable); the card will be requeued"
+                    )
+            elif decision.kind == "alert_coordinator_stalled":
+                # Wake efficacy failed: the coordinator got the wakes and
+                # still produced no turn. Say it loudly — this is the
+                # 2026-10-16/#283 stall that used to sit in silence.
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append("alert: coordinator stalled")
             else:  # requeue_stalled — already applied on the ledger
                 outcomes.append(
                     f"requeue_stalled: task {decision.card_id}"
@@ -8128,6 +8226,10 @@ class HubPlugin(BasePlugin):
             )
 
         # Auto-create TaskCard for incoming task assignments.
+        assigned_task_id = str(
+            (message.metadata or {}).get("task_id", "") or ""
+        ).strip()
+
         # Messages with task metadata or work-assignment patterns
         # get persisted to disk so they survive compaction.
         if (
@@ -8166,6 +8268,7 @@ class HubPlugin(BasePlugin):
                     task_id = str(message.metadata.get("task_id", "") or "").strip()
                     existing = self._task_ledger.get(task_id) if task_id else None
                     if existing:
+                        assigned_task_id = str(existing.id)
                         logger.info(
                             "Task assignment %s already exists; not minting duplicate card",
                             task_id,
@@ -8184,6 +8287,8 @@ class HubPlugin(BasePlugin):
                             card_id=task_id,
                         )
                         logger.info(f"Auto-created task {card.id} from" f" {assigner}")
+                        assigned_task_id = str(card.id)
+
                     else:
                         # Heuristic match (no tag): mint as OPEN so the
                         # worker must claim it and the idle supervisor
@@ -8202,6 +8307,8 @@ class HubPlugin(BasePlugin):
                             card.id,
                             assigner,
                         )
+                        assigned_task_id = str(card.id)
+
 
         # Auto-approve task_complete reports addressed to this agent.
         # When a worker calls task_complete, the report is sent to the
@@ -8499,6 +8606,9 @@ class HubPlugin(BasePlugin):
                     "hub_wake_mode": wake_decision.mode,
                     "hub_wake_reason": wake_decision.reason,
                 }
+                if assigned_task_id:
+                    msg_metadata["task_id"] = assigned_task_id
+
                 # Pass through bridge metadata for relay
                 if hasattr(message, "metadata") and message.metadata:
                     if message.metadata.get("bridge_platform"):
@@ -9221,6 +9331,7 @@ class HubPlugin(BasePlugin):
             self._running_tools.pop(tool_id, None)
         elif kind in ("turn_complete", "error"):
             self._running_tools.clear()
+            self._stamp_supervisor_turn(kind, event)
         else:
             return
         tool = next(reversed(self._running_tools.values()), {})
@@ -9229,6 +9340,89 @@ class HubPlugin(BasePlugin):
             identity.current_tool = tool
             if self._presence:
                 self._presence.publish()
+
+    def _stamp_supervisor_turn(self, kind: str, event: Dict[str, Any]) -> None:
+        """Feed the supervisor's wake-efficacy tracking (issue #283).
+
+        A completed turn proves the coordinator is alive; a failed turn
+        only explains why it is not. Errors are kept so the stall alert
+        names the actual blocker (context overflow, provider outage)
+        instead of silence.
+        """
+        state = getattr(self, "_supervisor_state", None)
+        if state is None:
+            return
+        if kind == "turn_complete":
+            state.last_turn_end = time.time()
+            state.wakes_since_turn = 0
+        else:
+            err = str(
+                event.get("error") or event.get("message") or ""
+            ).strip()
+            if err:
+                state.last_error = err[:200]
+
+    def _record_supervisor_alert(self, text: str) -> None:
+        """Keep the last few supervisor alerts for /hub status (issue #283)."""
+        self._supervisor_alerts.append((time.time(), text))
+        del self._supervisor_alerts[:-10]
+        tap = getattr(self, "_display_tap", None)
+        if tap is not None:
+            try:
+                tap.publish({"type": "supervisor_alert", "message": text})
+            except Exception:
+                logger.debug("supervisor alert publish failed", exc_info=True)
+
+    async def _notify_supervisor_alert(self, text: str) -> None:
+        """Send the alert through the configured notifier channel, if any."""
+        backend = getattr(getattr(self, "_notifier", None), "_backend", None)
+        if backend is None:
+            return
+        try:
+            await backend.send(
+                f"[idle-supervisor] {text}", {"kind": "supervisor_alert"}
+            )
+        except Exception as e:
+            logger.warning("supervisor alert delivery failed: %s", e)
+
+    def _supervisor_status_lines(self) -> List[str]:
+        """Idle-supervisor section for /hub status (issue #283).
+
+        Shown for a coordinator running the loop even while healthy: an
+        open stall must be visible on request, not only when it alerts.
+        """
+        if (
+            not self._identity
+            or not self._identity.is_coordinator
+            or self._task_ledger is None
+            or self._supervisor_task is None
+        ):
+            return []
+        state = self._supervisor_state
+        open_cards = self._task_ledger.get_open()
+        stalled = self._task_ledger.get_stalled(
+            self.config.get(
+                "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
+            )
+            if self.config
+            else DEFAULT_STALL_THRESHOLD
+        )
+        lines = [
+            f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
+            f" {len(self._supervisor_alerts)} alert(s)"
+        ]
+        if state.wakes_since_turn and state.last_turn_end:
+            idle = max(0, int((time.time() - state.last_turn_end) // 60))
+            lines.append(
+                f"  {state.wakes_since_turn} wake(s) without a completed"
+                f" turn; last completed turn {idle}m ago"
+            )
+        now = time.time()
+        for ts, text in self._supervisor_alerts[-3:]:
+            ago = max(1, int((now - ts) // 60))
+            first = " ".join(text.split())[:110]
+            lines.append(f"  alert ({ago}m ago): {first}")
+        return lines
 
     async def _broadcast_user_input(self, data, event=None):
         """Broadcast user input to all peers so they see what the human said."""
@@ -11803,12 +11997,13 @@ class HubPlugin(BasePlugin):
         format: str = "terminal",
         max_chars: Any = None,
         cursor: Any = None,
-    ) -> Any:
+    ) -> _CaptureOutcome:
         """Capture output directly from a live hub peer via its socket."""
         if not peer.socket_path:
             if self._presence:
                 self._presence.cleanup_agent(peer)
-            return f"agent '{peer.identity}' has no socket path, cleaned up"
+            message = f"agent '{peer.identity}' has no socket path, cleaned up"
+            return _CaptureOutcome(message, error=message)
 
         dial_target, dial_auth = self._resolve_dial_target(
             peer.identity, peer.socket_path
@@ -11824,12 +12019,20 @@ class HubPlugin(BasePlugin):
                 auth=dial_auth,
             )
             if capture_error:
-                return f"capture failed for '{peer.identity}': {capture_error}"
+                message = f"capture failed for '{peer.identity}': {capture_error}"
+                return _CaptureOutcome(message, error=message)
             if payload is None:
-                return f"no recent output from '{peer.identity}'"
+                return _CaptureOutcome(f"no recent output from '{peer.identity}'")
             if format == "json":
-                return payload
-            return self._render_plain_capture(peer.identity, payload)
+                text = render_transcript(
+                    payload,
+                    identity=peer.identity,
+                    max_lines=lines,
+                    max_chars=max_chars or 10_000,
+                )
+            else:
+                text = self._render_plain_capture(peer.identity, payload)
+            return _CaptureOutcome(text)
 
         output_lines, capture_error = await AgentMessenger.request_output_diagnostic(
             dial_target,
@@ -11838,21 +12041,21 @@ class HubPlugin(BasePlugin):
             auth=dial_auth,
         )
         if capture_error:
-            return f"capture failed for '{peer.identity}': {capture_error}"
+            message = f"capture failed for '{peer.identity}': {capture_error}"
+            return _CaptureOutcome(message, error=message)
         if not output_lines:
-            return f"no recent output from '{peer.identity}'"
+            return _CaptureOutcome(f"no recent output from '{peer.identity}'")
 
         header = f"[{peer.identity}]"
-        return header + "\n" + "\n".join(output_lines)
+        return _CaptureOutcome(header + "\n" + "\n".join(output_lines))
 
     @staticmethod
     def _render_plain_capture(identity: str, payload: Any) -> str:
-        """Render a plain capture envelope as escape-free text.
+        """Render an explicitly requested plain capture envelope.
 
-        Plain is the default chat/CLI format: it strips ANSI and control
-        codes so agent captures do not burn tokens on terminal styling.
-        Older peers may still answer the get_output request with bare
-        "lines" (no envelope); those lines are normalized here too.
+        This preserves the socket/API plain-text contract for callers that
+        request it. Default Hub capture commands use ``render_transcript``;
+        older peers may still answer with bare lines, normalized here too.
         """
         if not isinstance(payload, dict):
             return str(payload or f"no recent output from '{identity}'")
@@ -12178,68 +12381,99 @@ class HubPlugin(BasePlugin):
 
         return msg
 
-    async def _handle_capture_command(self, rest: str) -> str:
+    async def _capture_target(
+        self,
+        target: str,
+        lines: int,
+        *,
+        capture_format: str = "json",
+    ) -> _CaptureOutcome:
+        """Capture one validated target/line request without textual argument parsing."""
+        refusal = self._remote_target_refusal(target)
+        if refusal:
+            return _CaptureOutcome(refusal, error=refusal)
+        target_for_orchestrator = target
+        if target.lower() != "all":
+            own_identity = self._identity.identity if self._identity else ""
+            if target.lower() == own_identity.lower():
+                message = (
+                    f"self-capture not supported for '{own_identity}' "
+                    "(coordinator runs in the main process, not a "
+                    "spawned session). capture a spawned agent instead."
+                )
+                return _CaptureOutcome(message, error=message)
+
+            peer = self._get_peer_by_identity(target)
+            if peer is not None:
+                return await self._capture_peer_output(
+                    peer,
+                    lines,
+                    format=capture_format,
+                    max_chars=10_000 if capture_format == "json" else None,
+                )
+
+        orchestrator = self._get_orchestrator()
+        if not orchestrator:
+            message = "error: agent orchestrator not available"
+            return _CaptureOutcome(message, error=message)
+        if target.lower() != "all":
+            resolved = self._resolve_identity_to_agent_name(target)
+            if resolved is not None:
+                target_for_orchestrator = resolved
+            else:
+                try:
+                    known_names = list(
+                        orchestrator.orchestrator.get_all_agents().keys()
+                    )
+                except Exception:
+                    known_names = []
+                if target not in known_names:
+                    message = f"error: agent '{target}' not found"
+                    return _CaptureOutcome(message, error=message)
+
+        result = await orchestrator._cmd_capture([target_for_orchestrator, str(lines)])
+        message = str(result.message)
+        if getattr(result, "success", True) is False:
+            error = str(getattr(result, "error", None) or message)
+            return _CaptureOutcome(message, error=error)
+        if capture_format == "json":
+            message = render_transcript(
+                message,
+                identity=target,
+                max_lines=lines,
+                max_chars=10_000,
+            )
+        return _CaptureOutcome(message)
+
+    async def _handle_capture_command(
+        self, rest: str, *, capture_format: str = "json"
+    ) -> str:
         """Handle /hub capture <identity|name|all> [lines] [--raw].
 
-        Accepts hub identity names (e.g. "lapis"), orchestrator agent
-        names, or "all". Hub identities capture directly over peer sockets.
-        Orchestrator session names still route through agent_orchestrator.
-        Defaults to the plain format (ANSI/control codes stripped);
-        pass --raw for the raw terminal rendering.
+        Hub identities use the shared transcript renderer by default; --raw
+        preserves the terminal capture path. Tool callers use `_capture_target`
+        with validated identity and line arguments.
         """
         args = rest.split() if rest.strip() else []
-        # Plain (ANSI-stripped) is the default capture format; --raw opts
-        # back into the raw terminal rendering.
-        capture_format = "terminal" if "--raw" in args else "plain"
-        args = [a for a in args if a != "--raw"]
-        refusal = self._remote_target_refusal(args[0] if args else "")
-        if refusal:
-            return refusal
-        orch = self._get_orchestrator()
-        if not orch:
-            return "error: agent orchestrator not available"
         if not args:
             return "usage: /hub capture <identity|name|all> [lines] [--raw]"
-
+        if "--raw" in args:
+            capture_format = "terminal"
+            args = [arg for arg in args if arg != "--raw"]
+        if capture_format not in {"json", "plain", "terminal"}:
+            capture_format = "json"
         target = args[0]
         try:
             lines = int(args[1]) if len(args) > 1 else 50
         except (TypeError, ValueError):
             lines = 50
-
-        # Resolve hub identity first. Not every live peer is an orchestrator-
-        # owned subprocess in this process, so capture over the hub socket when
-        # we have a presence record.
-        if target.lower() != "all":
-            own_identity = self._identity.identity if self._identity else ""
-            if target.lower() == own_identity.lower():
-                return (
-                    f"self-capture not supported for '{own_identity}' "
-                    "(coordinator runs in the main process, not a "
-                    "spawned session). capture a spawned agent instead."
-                )
-
-            peer = self._get_peer_by_identity(target)
-            if peer is not None:
-                return await self._capture_peer_output(
-                    peer, lines, format=capture_format
-                )
-
-            resolved = self._resolve_identity_to_agent_name(target)
-            if resolved is not None:
-                args[0] = resolved
-            else:
-                known_agent_names = []
-                try:
-                    known_agent_names = list(orch.orchestrator.get_all_agents().keys())
-                except Exception:
-                    known_agent_names = []
-
-                if target not in known_agent_names:
-                    return f"error: agent '{target}' not found"
-
-        result = await orch._cmd_capture(args)
-        return str(result.message)
+        return (
+            await self._capture_target(
+                target,
+                lines,
+                capture_format=capture_format,
+            )
+        ).text
 
     async def _handle_wake_command(self, rest: str) -> str:
         """Handle /hub wake <identity> — manually wake a waiting agent."""
@@ -13480,6 +13714,7 @@ class HubPlugin(BasePlugin):
             for slot in pending[:5]:
                 lines.append(f"  [{slot.id}] {slot.task[:60]}")
 
+        lines.extend(self._supervisor_status_lines())
         lines.extend(self._format_cockpit_lines())
         return "\n".join(lines)
 
@@ -14291,26 +14526,75 @@ class HubPlugin(BasePlugin):
                 return ["(no recent output)"]
             return [str(e.get("rendered", "")) for e in rendered_events[-limit:]]
 
-        semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"]
+        semantic = [
+            e for e in raw_events if isinstance(e, dict) and e.get("type") != "output"
+        ]
         if not semantic:
-            semantic = [e for e in raw_events if isinstance(e, dict) and e.get("type") == "output"]
-        records = normalize_records(semantic[-limit:])
-        page, truncated, next_cursor = paginate(records, cursor=cursor, max_chars=max_chars)
+            semantic = [
+                e
+                for e in raw_events
+                if isinstance(e, dict) and e.get("type") == "output"
+            ]
+        records = group_transcript_records(normalize_records(semantic))
+        ring_truncated = False
+        first_seq = 0
+        latest_seq = 0
+        if raw_events:
+            try:
+                first_seq = int(raw_events[0].get("seq", 0))
+                ring_truncated = first_seq > 1
+                latest_seq = max(int(event.get("seq", 0)) for event in raw_events)
+            except (AttributeError, TypeError, ValueError):
+                first_seq = 0
+                ring_truncated = False
+                latest_seq = 0
+        cursor_reset = False
+        if cursor is not None:
+            try:
+                cursor_seq = int(cursor)
+            except (TypeError, ValueError):
+                cursor = None
+                cursor_reset = True
+            else:
+                if latest_seq and cursor_seq > latest_seq:
+                    cursor = None
+                    cursor_reset = True
+                elif ring_truncated and cursor_seq < first_seq - 1:
+                    # The requested sequence predates the in-memory ring.
+                    # Restart at the oldest retained event and signal the gap.
+                    cursor = first_seq - 1
+                    cursor_reset = True
+                elif not latest_seq:
+                    cursor = None
+                    cursor_reset = True
+        page, truncated, next_cursor = paginate(
+            records,
+            cursor=cursor,
+            max_chars=max_chars,
+            limit=limit,
+        )
+        truncated = truncated or ring_truncated or cursor_reset
+        if truncated and next_cursor is None and page:
+            next_cursor = str(page[-1].get("seq", "")) or None
         if format == "plain":
-            return {
+            response = {
                 "format": "plain",
                 "order": "oldest-first",
                 "text": plain_text(page),
                 "truncated": truncated,
                 "next_cursor": next_cursor,
             }
-        return {
-            "format": "json",
-            "order": "oldest-first",
-            "lines": page,
-            "truncated": truncated,
-            "next_cursor": next_cursor,
-        }
+        else:
+            response = {
+                "format": "json",
+                "order": "oldest-first",
+                "lines": page,
+                "truncated": truncated,
+                "next_cursor": next_cursor,
+            }
+        if cursor_reset:
+            response["cursor_reset"] = True
+        return response
 
     async def _inject_attacher_input(
         self,

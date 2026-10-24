@@ -6,6 +6,8 @@ It serves the assistant-ui single-page app, proxies engine configuration to the
 browser, and connects to the local engine API for sessions, assistant-transport
 streaming, permission prompts, profiles, MCP, and hub controls.
 
+Visual direction and review rules: [Web UI design guide](../../design.md).
+
 ## Architecture
 
 | Module/Asset | Responsibility |
@@ -13,19 +15,40 @@ streaming, permission prompts, profiles, MCP, and hub controls.
 | `src/kollabor_webui/__init__.py` | `kollabor-webui` command entrypoint and uvicorn launcher |
 | `src/kollabor_webui/server.py` | FastAPI config endpoint, Vite assets, and SPA fallback |
 | `frontend/src/` | assistant-ui React/TypeScript source |
-| `frontend/dist/` | local Vite output (ignored; regenerated for package builds) |
+| `frontend/dist/` | local Vite output served by source checkouts (ignored) |
 | `src/kollabor_webui/static/` | legacy static fallback and packaged assistant-ui output |
 
-The checked-in frontend source is the source of truth.  `hatch_build.py` runs
-`npm ci` and `npm run build` when npm is available, then force-includes Vite's
-`frontend/dist` output in a wheel under `kollabor_webui/static/assistant`.  The
-source checkout also serves `frontend/dist` directly, which makes editable
-installs useful without copying generated files into git. When `frontend/` holds a
-change newer than that build, `kollabor-webui` runs `npm run build` before it serves
-(and `kollab --web-ui` does too when the UI is already running), so the UI it serves
-is never older than its source.  Python-only builds
-continue to serve the legacy `static/index.html` and `static/app.js` fallback
-if Node/npm is unavailable.
+The checked-in frontend source is the source of truth. `hatch_build.py` runs
+`npm ci` and `npm run build` into an isolated temporary directory, then
+force-includes those assets in a wheel under `kollabor_webui/static/assistant`.
+The output stays available until Hatch finishes packaging. Missing npm or a
+failed compilation fails the build; an old dist or legacy UI cannot silently
+substitute. Source distributions contain frontend source, the lockfile and the
+canonical changelog input, and compile only when their wheel is built. The
+monorepo keeps using `kollabor/updates/CHANGELOG.md`; Hatch includes that same
+file as `frontend/CHANGELOG.md` for standalone source builds. A source checkout
+normally serves `frontend/dist` directly. When its source, public assets or
+changelog input is newer, startup rebuilds it; missing dependencies or a failed
+build stops startup instead of serving older output.
+
+To package the local app and PhoneLink service from one UI build, compile once
+into a fresh isolated directory with `npm --prefix packages/kollabor-webui/frontend run build -- --outDir /absolute/frontend-dist`
+from the repository root. Pass that same directory to
+`python scripts/build_binary.py --frontend-dist /absolute/frontend-dist` and
+`python scripts/relay/build_service.py /absolute/service.tar.gz --frontend-dist /absolute/frontend-dist`.
+Both builders reuse the selected assets without rebuilding them. The builders,
+WebUI wheel hook and runtime also accept `KOLLAB_FRONTEND_DIST=/absolute/frontend-dist`.
+At runtime this selection overrides both source and packaged assets and skips
+source rebuilds, including in editable installs. An invalid selection stops startup.
+An explicit `--frontend-dist` takes precedence over the environment input.
+Keep these outputs outside the shared checkout's `frontend/dist`.
+
+The release Binaries workflow compiles one `frontend-dist` artifact for all
+native binaries and the `connection-service` source archive. Desktop stages
+those same native binaries. PyPI publication downloads that frontend artifact
+and supplies `KOLLAB_FRONTEND_DIST` to the WebUI wheel build, so these packages
+share the same compiled UI. The connection-service artifact is deployment
+input; producing it does not update a running public service.
 
 ## Interface
 
@@ -68,16 +91,28 @@ if Node/npm is unavailable.
   `manual` none.
 
   Local live and offline rows group by workspace folder. Network agents stay
-  under their network and device, then group by workspace. Move Up and Move Down
-  in an agent row's menu set its order within that workspace, including separate
-  sessions of the same agent. The engine stores
+  under their network and device, then group by workspace. Drag an agent row to
+  reorder it within that workspace, including separate sessions of the same agent.
+  Rows move aside during mouse or touch dragging; drop to save. With the row focused,
+  Space picks it up, arrow keys move it, Space drops it, and Escape cancels.
+  Ordering cannot move an agent to a different workspace, device, or network.
+  Drag more than 32 pixels past the sidebar's edge to see "Release to hide".
+  Releasing there shrinks the row into the Hidden Agents button; moving back or pressing Escape
+  cancels. This also works for the last row in a workspace. It uses the same
+  recoverable Hide Agent action as the row menu: restore it from Hidden Agents.
+  A rejected hide restores the row and shows the engine's error. Hiding does not
+  delete a session or stop its agent. The footer button stays available even when
+  the hidden list is empty. Reduced motion skips the travel animation.
+  The engine stores
   this order in `~/.kollab/hub/sidebar-order.json`, shared across browser
   clients and durable across page, web UI, and engine restarts; it is not
   browser-local storage. Revision checks reject stale-window writes rather
-  than overwrite newer moves. If the stored JSON is unreadable, the engine
+  than overwrite newer moves. Polling cannot change the ranks during a drag;
+  cancelled and unchanged drops do not write. Failed saves restore the confirmed
+  order and show an error. If the stored JSON is unreadable, the engine
   preserves it and shows a recovery warning; a missing first-run file is normal.
-  The sidebar's Learn links open the Agents and Workspaces lessons for plain-language
-  guidance about agent roles, project folders, and how the sidebar order is saved.
+  The Learn book icon in the sidebar footer opens lessons about agent roles,
+  project folders, and how the sidebar order is saved.
 - **Hidden agents**: Hide Agent in a row's menu takes it off the sidebar in
   every window that uses this engine (Kollab.app, browsers, the phone); the
   footer's Hidden Agents list shows it again. The engine keeps the list
@@ -102,8 +137,9 @@ if Node/npm is unavailable.
   Waterfall built on `@assistant-ui/react-o11y` (one block per turn, tools
   under their model request, each turn on its own time scale).
 - **Settings**: daemon-owned panels, see `docs/features/web-settings-panels.md`.
-- **Learn**: the sidebar opens a responsive, ten-topic guide at `/learn`; deep
-  links use `/learn?topic=<id>`, and lesson completion is stored in this browser.
+- **Learn**: the book icon in the sidebar footer opens a responsive, ten-topic
+  guide at `/learn`; deep links use `/learn?topic=<id>`, and lesson completion is
+  stored in this browser.
   What's New comes from the canonical changelog. See
   [`docs/features/learn.md`](../../docs/features/learn.md).
 - **Gem Studio** (sidebar footer): every agent is born with a random look (eyes
@@ -167,16 +203,28 @@ For an editable checkout without installed console scripts:
 python -c "from kollabor_webui import main; main()"
 ```
 
-## Phone Access
+## PhoneLink
 
-The session settings panel can provision one WireGuard peer per phone and show
-its one-time QR code. The feature is restricted to authenticated clients on
-exact private subnets and requires direct private WebUI binding plus a host-admin
-apply helper; forwarded client chains and reverse proxies are not supported. See
-[`docs/features/phone-access.md`](../../docs/features/phone-access.md) for the
-server, UDP forwarding, DNS, private LAN, and revocation prerequisites. Kollab
-never configures a router or exposes the helper command in the WebUI.
+**Settings > PhoneLink** pairs a phone browser through the connection service
+already used by `/connect`. Scan the expiring QR with the phone camera, compare
+the pairing codes, and approve locally. Saved phones reconnect and can be
+removed independently. Provider calls and tools run on the computer; the phone
+needs no credential setup. Approve only phones you trust with the app's controls.
 
+The directory serves the same built frontend at `/relay/v1/phone/` and accepts
+same-origin browser registrations at `/relay/v1/phone/ws`. Each phone has an
+isolated private room; the engine's own ASGI application handles encrypted app
+requests and streamed responses. The engine token never leaves the computer.
+Native `/relay/v1/ws` continues to reject browser Origin headers. The directory
+capability endpoint must confirm support before a pairing QR can be created.
+
+Phone chats open with the newest 50 messages, fetch older pages as you scroll
+back, and keep a bounded IndexedDB cache so reopening requests only new messages.
+Large historical tool results are fetched only after Show more.
+
+
+See [`docs/features/phone-access.md`](../../docs/features/phone-access.md) for
+the contract and its deployment/physical-phone verification gates.
 
 ## Frontend development
 
@@ -248,7 +296,7 @@ live engine, router, or user configuration. Install a browser once with
 `npx playwright-core install chromium`, or set `CHROME_PATH` to an existing
 Chrome/Chromium executable, then run `npm run test:e2e:learn` from `frontend/`.
 The harness checks startup, Hub/network listing, profile selection and agent
-session launch, Learn navigation/focus/progress, storage errors, changelog
+session launch, Learn navigation/focus, the separate What’s New page, changelog
 failure/retry, and responsive layouts. It writes the three viewport screenshots
 to the repository's `docs/screenshots/`; set `LEARN_CAPTURE_SCREENSHOTS=0` to
 run the checks without rewriting images.

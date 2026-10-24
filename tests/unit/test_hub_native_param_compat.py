@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -47,7 +48,11 @@ def _make_plugin(identity_name="sapphire"):
 class TestHubNativeParamCompat(unittest.TestCase):
     def test_state_update_accepts_canonical_state_param(self):
         plugin = _make_plugin()
-        result = _run(plugin._handle_state_update_tool({"id": "tc1", "state": "working on bugfix"}))
+        result = _run(
+            plugin._handle_state_update_tool(
+                {"id": "tc1", "state": "working on bugfix"}
+            )
+        )
         self.assertTrue(result.success)
         plugin._session_state_mgr.update_state.assert_called_once()
         args = plugin._session_state_mgr.update_state.call_args[0]
@@ -68,11 +73,11 @@ class TestHubNativeParamCompat(unittest.TestCase):
         plugin = _make_plugin()
         calls = []
 
-        async def _fake_handle_capture_command(arg):
-            calls.append(arg)
-            return "captured"
+        async def _fake_capture_target(target, lines, *, capture_format="json"):
+            calls.append((target, lines, capture_format))
+            return SimpleNamespace(text="captured", error=None, success=True)
 
-        plugin._handle_capture_command = _fake_handle_capture_command
+        plugin._capture_target = _fake_capture_target
         result = _run(
             plugin._handle_hub_capture_tool(
                 {
@@ -85,24 +90,24 @@ class TestHubNativeParamCompat(unittest.TestCase):
             )
         )
         self.assertTrue(result.success)
-        self.assertEqual(calls, ["lapis 80"])
+        self.assertEqual(calls, [("lapis", 80, "json")])
 
     def test_hub_capture_retains_legacy_xml_extractor_keys(self):
         plugin = _make_plugin()
         calls = []
 
-        async def _fake_handle_capture_command(arg):
-            calls.append(arg)
-            return "captured"
+        async def _fake_capture_target(target, lines, *, capture_format="json"):
+            calls.append((target, lines, capture_format))
+            return SimpleNamespace(text="captured", error=None, success=True)
 
-        plugin._handle_capture_command = _fake_handle_capture_command
+        plugin._capture_target = _fake_capture_target
         result = _run(
             plugin._handle_hub_capture_tool(
                 {"id": "capture-xml", "cap_name": "sapphire", "cap_lines": "25"}
             )
         )
         self.assertTrue(result.success)
-        self.assertEqual(calls, ["sapphire 25"])
+        self.assertEqual(calls, [("sapphire", 25, "json")])
 
     def test_hub_vault_reads_native_nested_name(self):
         plugin = _make_plugin()
@@ -125,13 +130,10 @@ class TestHubNativeParamCompat(unittest.TestCase):
         plugin = _make_plugin()
         plugin._format_vault = MagicMock(return_value="vault")
         result = _run(
-            plugin._handle_hub_vault_tool(
-                {"id": "vault-xml", "vault_name": "sapphire"}
-            )
+            plugin._handle_hub_vault_tool({"id": "vault-xml", "vault_name": "sapphire"})
         )
         self.assertTrue(result.success)
         plugin._format_vault.assert_called_once_with("sapphire")
-
 
     def test_crystal_read_does_not_use_tool_call_id_as_entry_id(self):
         plugin = _make_plugin()
@@ -181,7 +183,9 @@ class TestHubNativeParamCompat(unittest.TestCase):
 
     def test_crystal_read_accepts_canonical_id_param(self):
         plugin = _make_plugin()
-        plugin._crystal_store.add_entry("summary text\n\nbody text", manual_keywords=["alpha"])
+        plugin._crystal_store.add_entry(
+            "summary text\n\nbody text", manual_keywords=["alpha"]
+        )
         result = _run(plugin._handle_crystal_read_tool({"entry_id": "crys-001"}))
         self.assertTrue(result.success)
         self.assertIn("summary text", result.output)
@@ -189,7 +193,9 @@ class TestHubNativeParamCompat(unittest.TestCase):
 
     def test_crystal_edit_accepts_canonical_body_and_id_params(self):
         plugin = _make_plugin()
-        plugin._crystal_store.add_entry("old summary\n\nold body", manual_keywords=["alpha"])
+        plugin._crystal_store.add_entry(
+            "old summary\n\nold body", manual_keywords=["alpha"]
+        )
         result = _run(
             plugin._handle_crystal_edit_tool(
                 {"entry_id": "crys-001", "body": "new body", "summary": "new summary"}
@@ -202,7 +208,9 @@ class TestHubNativeParamCompat(unittest.TestCase):
 
     def test_crystal_delete_accepts_canonical_id_param(self):
         plugin = _make_plugin()
-        plugin._crystal_store.add_entry("summary text\n\nbody text", manual_keywords=["alpha"])
+        plugin._crystal_store.add_entry(
+            "summary text\n\nbody text", manual_keywords=["alpha"]
+        )
         result = _run(plugin._handle_crystal_delete_tool({"entry_id": "crys-001"}))
         self.assertTrue(result.success)
         self.assertIsNone(plugin._crystal_store.get_by_id("crys-001"))

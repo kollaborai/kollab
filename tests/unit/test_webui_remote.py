@@ -175,20 +175,13 @@ def test_bind_hosts_are_explicit_local_addresses_only():
             network_security.validate_bind_hosts([address])
 
 
-def test_interface_cidr_and_active_phone_peer_addresses_are_exact(monkeypatch):
+def test_interface_cidrs_are_exact(monkeypatch):
     fake_entry = SimpleNamespace(address="192.168.1.20", netmask="255.255.255.0")
     monkeypatch.setattr(network_security.psutil, "net_if_addrs", lambda: {"en0": [fake_entry]})
     networks = network_security.interface_networks_for_hosts(["192.168.1.20"])
     assert network_security.client_in_networks("192.168.1.40", networks)
     assert not network_security.client_in_networks("192.168.2.40", networks)
     assert not network_security.client_in_networks("10.0.0.4", networks)
-    phone_peers = network_security.networks_for_phone_peers(
-        [{"address": "10.77.0.2"}]
-    )
-    allowed = (*networks, *phone_peers)
-    assert network_security.client_in_networks("10.77.0.2", allowed)
-    assert not network_security.client_in_networks("10.77.0.3", allowed)
-    assert not network_security.client_in_networks("10.78.0.2", allowed)
 
 
 @pytest.mark.asyncio
@@ -255,7 +248,6 @@ async def test_uvicorn_proxy_headers_are_disabled_and_forwarded_chains_fail_clos
     assert "secret-token" not in response.text
 
 
-
 @pytest.mark.asyncio
 async def test_unreachable_engine_diagnostic_is_redacted(monkeypatch):
     def engine(request: httpx.Request) -> httpx.Response:
@@ -286,81 +278,33 @@ async def test_private_but_unconfigured_subnet_cannot_bootstrap_token(monkeypatc
     assert "secret-token" not in response.text
 
 
-@pytest.mark.asyncio
-async def test_active_wireguard_phone_network_can_bootstrap_then_revocation_removes_it(
-    monkeypatch, tmp_path
-):
-    import base64
-
-    from kollabor_engine.phone_access import PhoneAccess, set_phone_access
-
-    monkeypatch.setattr("kollabor_engine.auth.read_token_from_disk", lambda: "test-token")
-    access = PhoneAccess(
-        tmp_path / "phone-access",
-        runner=lambda _command, _peers_file: None,
-        apply_command="/trusted/fake-apply",
-    )
-    set_phone_access(access)
-    try:
-        access.update_settings(
-            {
-                "endpoint": "vpn.example.net:51820",
-                "server_public_key": base64.b64encode(bytes(32)).decode("ascii"),
-                "subnet": "10.77.0.0/24",
-            }
-        )
-        peer = access.create_peer("test-phone")["peer"]
-        app = make_app(
-            monkeypatch,
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, json={"version": "0.17.0"})
-            ),
-        )
-
-        active = await call(
-            app,
-            peer["address"],
-            "GET",
-            "/api/config",
-            headers={"Origin": TEST_ORIGIN},
-        )
-        unrelated_private = await call(
-            app,
-            "10.77.1.2",
-            "GET",
-            "/api/config",
-            headers={"Origin": TEST_ORIGIN},
-        )
-
-        untracked_phone = await call(
-            app,
-            "10.77.0.3",
-            "GET",
-            "/api/config",
-            headers={"Origin": TEST_ORIGIN},
-        )
-        assert active.status_code == 200
-        assert active.headers["cache-control"] == "no-store"
-        assert unrelated_private.status_code == 403
-
-        assert untracked_phone.status_code == 403
-        assert "test-token" not in unrelated_private.text
-
-        access.revoke_peer(peer["id"])
-        revoked = await call(
-            app,
-            peer["address"],
-            "GET",
-            "/api/config",
-            headers={"Origin": TEST_ORIGIN},
-        )
-        assert revoked.status_code == 403
-    finally:
-        set_phone_access(None)
-
-
 def test_webui_bind_environment_rejects_public_and_wildcard_addresses(monkeypatch):
     for value in ("0.0.0.0", "::", "203.0.113.8", "8.8.8.8"):
         monkeypatch.setenv("KOLLAB_WEBUI_HOSTS", value)
         with pytest.raises(ValueError, match="KOLLAB_WEBUI_HOSTS"):
             network_security.configured_bind_hosts()
+
+
+@pytest.mark.asyncio
+async def test_legacy_phone_access_environment_does_not_restore_peer_access(
+    monkeypatch, tmp_path
+):
+    """Removed phone-access settings must not widen private WebUI trust."""
+    monkeypatch.setattr("kollabor_engine.auth.read_token_from_disk", lambda: "secret-token")
+    legacy_peers = tmp_path / "legacy-phone-peers.conf"
+    legacy_peers.write_text("AllowedIPs = 10.77.0.2/32\n", encoding="utf-8")
+    monkeypatch.setenv("KOLLAB_PHONE_ACCESS_APPLY_COMMAND", "/bin/false")
+    monkeypatch.setenv("KOLLAB_PHONE_ACCESS_PEERS_FILE", str(legacy_peers))
+
+    app = make_app(monkeypatch)
+    response = await call(
+        app,
+        "10.77.0.2",
+        "GET",
+        "/api/config",
+        headers={"Origin": TEST_ORIGIN},
+    )
+
+    assert response.status_code == 403
+    assert response.headers["cache-control"] == "no-store"
+    assert "secret-token" not in response.text

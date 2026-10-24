@@ -254,8 +254,12 @@ hub_spawn = ToolDefinition(
     xml_attributes=["name", "type", "llm"],
     xml_body_param="task",
     parameters=[
-        ToolParameter(name="llm", type="string", required=False,
-                      description="LLM profile or loadout; ACP profiles include claude-code, codex-cli and gemini-cli."),
+        ToolParameter(
+            name="llm",
+            type="string",
+            required=False,
+            description="LLM profile or loadout; ACP profiles include claude-code, codex-cli and gemini-cli.",
+        ),
         ToolParameter(
             name="name",
             type="string",
@@ -320,7 +324,7 @@ hub_agents = ToolDefinition(
 
 hub_capture = ToolDefinition(
     name="hub-capture",
-    description="View an agent's recent output (plain text by default).",
+    description="View an agent's recent activity as a readable transcript by default.",
     category="hub",
     risk_level="low",
     requires_permission=False,
@@ -337,30 +341,31 @@ hub_capture = ToolDefinition(
         ToolParameter(
             name="lines",
             type="integer",
-            description="Number of recent lines to capture (default: 50)",
+            description="Number of recent transcript records to capture (default: 50)",
             required=False,
         ),
         ToolParameter(
             name="format",
             type="string",
             description=(
-                "Output format: 'plain' (default, strips ANSI escape codes) "
-                "or 'terminal' for raw terminal rendering"
+                "Output format: 'transcript' (default), 'plain' (text without "
+                "transcript labels), or 'terminal' (raw terminal rendering)"
             ),
             required=False,
         ),
     ],
     examples=[
         '<hub_capture name="lapis" lines="100" />',
+        '<hub_capture name="lapis" format="plain" />',
         '<hub_capture name="lapis" format="terminal" />',
     ],
-    result_format="Recent output from the agent as plain text (default) or raw terminal lines.",
+    result_format="Recent bounded transcript (default), plain text, or raw terminal lines.",
     key_rules=[
         "useful for checking what another agent is working on before assigning new tasks",
         "default 50 lines — increase if you need more context",
         "only captures recent output, not full history",
-        "output defaults to plain text (ANSI escape codes stripped); "
-        "pass format='terminal' only when raw rendering is explicitly needed",
+        "output defaults to a bounded readable transcript; pass format='plain' "
+        "for unlabeled text or format='terminal' for raw terminal output",
     ],
 )
 
@@ -784,7 +789,7 @@ hub_cron_add = ToolDefinition(
     examples=[
         '<hub_cron_add interval="5m">check build status</hub_cron_add>',
         '<hub_cron_add to="infra@home-server" interval="1h">'
-        "check the wireguard tunnel and report the handshake age</hub_cron_add>",
+        "check the backup job and report the last run status</hub_cron_add>",
     ],
     result_format="Cron job ID.",
     key_rules=[
