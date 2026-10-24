@@ -96,7 +96,7 @@ class FakeSession:
 
 
 @pytest.fixture
-def rig(tmp_path, monkeypatch):
+async def rig(tmp_path, monkeypatch):
     server = tmp_path / "livekit-server"
     server.write_text(FAKE_SERVER.format(py=sys.executable))
     server.chmod(0o755)
@@ -121,9 +121,12 @@ def rig(tmp_path, monkeypatch):
     app = FastAPI()
     app.state.voice = control
     app.include_router(voice_routes.router)
-    return SimpleNamespace(
+    yield SimpleNamespace(
         control=control, runtime=runtime, session=session, app=app, log=log
     )
+    # The fake server and workers run in their own process groups; a test that
+    # fails before its own shutdown must not leave them running.
+    await control.shutdown()
 
 
 def client(app):
