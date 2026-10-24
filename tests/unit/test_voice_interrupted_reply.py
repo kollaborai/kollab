@@ -185,15 +185,35 @@ async def test_a_talk_over_before_any_audio_takes_the_unheard_reply_away():
     assert plain.conversation_history == []
 
 
+async def test_a_repeated_phrase_or_a_short_reply_never_starts_inside_the_one_before():
+    llm = FakeLLM()
+    first, last = voice_reply("Checking now, checking now."), voice_reply("Checking now.")
+    first.metadata.update(CALL)
+    llm.conversation_history.extend([first, last])
+    played = "Checking now, checking now. Checking now"
+    assert (await service(llm).record_interrupted_voice_reply("turn-1", played))["replaced"]
+    assert (first.content, last.content) == ("Checking now, checking now.", "Checking now")
+
+    llm = FakeLLM()
+    first, last = voice_reply("Sure, sure."), voice_reply("Sure.")
+    first.metadata.update(CALL)
+    llm.conversation_history.extend([first, last])
+    assert (await service(llm).record_interrupted_voice_reply("turn-1", "Sure, sure. Sure"))["replaced"]
+    assert (first.content, last.content) == ("Sure, sure.", "Sure")
+
+
 class Turns:
     """A queue processor's turn lock: the talked-over turn still holds it."""
 
-    between_turns = QueueProcessor.between_turns
-
-    def __init__(self) -> None:
+    def __init__(self, open_turn: str | None = None, timeout: float = 20.0) -> None:
         import asyncio
 
         self._turn_lock = asyncio.Lock()
+        self._open_voice_turn = open_turn  # a voice turn with rounds still to run
+        self.timeout = timeout
+
+    def between_turns(self, voice_turn=None):
+        return QueueProcessor.between_turns(self, voice_turn, timeout=self.timeout)
 
 
 async def test_a_talk_over_during_a_tool_waits_for_the_turn_to_unwind():
@@ -241,3 +261,90 @@ async def test_the_cut_reaches_the_conversation_log(tmp_path, monkeypatch):
     assert not any("sunny" in content for _, content in replies)  # /resume brings no answer back
     thanks = next(m for m in loaded if m["content"] == "thanks")
     assert thanks["parent_uuid"] == parent  # threads under the reply that stays
+
+
+async def test_a_cut_waits_out_the_rounds_its_turn_still_has_to_run():
+    import asyncio
+
+    llm, first, result, last = tool_turn()
+    llm._queue_processor = turns = Turns(open_turn="turn-1")  # its tools ran: one more round
+    cut = asyncio.create_task(service(llm).record_interrupted_voice_reply("turn-1", "Let me check"))
+    await asyncio.sleep(0.05)
+    assert not cut.done()  # the lock is free between rounds, but the turn is not over
+    turns._open_voice_turn = "turn-2"  # the next turn took over
+    assert (await cut)["replaced"] and llm.conversation_history == [first, result]
+
+
+async def test_a_turn_that_never_ends_drops_the_cut_and_frees_the_lock():
+    llm, first, result, last = tool_turn()
+    llm._queue_processor = turns = Turns(open_turn="turn-1", timeout=0.05)
+    assert await service(llm).record_interrupted_voice_reply("turn-1", "Let me check") == {
+        "recorded": False,
+        "busy": True,
+    }
+    assert llm.conversation_history == [first, result, last] and last.content.endswith("sunny.")
+    assert not turns._turn_lock.locked()
+
+
+async def logged_tool_turn(tmp_path, monkeypatch):
+    """tool_turn() with its replies in a real conversation log, the answer logged last."""
+    from kollabor_ai.conversation_logger import KollaborConversationLogger
+
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr("kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path / "data")
+    log = KollaborConversationLogger(tmp_path / "conversations")
+    llm, first, result, last = tool_turn()
+    llm.conversation_logger = log
+    user = await log.log_user_message("weather?", parent_uuid=None)
+    call = await log.log_assistant_message(
+        "Let me check the weather.", user, voice_turn_id="turn-1",
+        tool_calls=[{"id": "t1", "name": "weather", "input": {}}],
+    )
+    await log.log_system_message(
+        "20C sunny", call, subtype="tool_result", tool_use_id="t1",
+        tool_result={"content": "20C sunny", "tool_type": "weather"},
+    )
+    llm.current_parent_uuid = await log.log_assistant_message(
+        "**It's 20** and sunny.", call, voice_turn_id="turn-1"
+    )
+    return llm, log, call
+
+
+async def test_a_dropped_reply_leaves_no_dangling_parent_or_empty_block(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    llm, log, call = await logged_tool_turn(tmp_path, monkeypatch)
+    assert (await service(llm).record_interrupted_voice_reply("turn-1", ""))["replaced"]
+    assert llm.current_parent_uuid == call  # the dropped answer is no one's parent
+    records = [json.loads(line) for line in Path(log.session_file).read_text().splitlines()]
+    [kept] = [r for r in records if r.get("voice_turn_id") == "turn-1"]
+    assert kept["message"]["content"] == [{"type": "tool_use", "id": "t1", "name": "weather", "input": {}}]
+    assert [p.name for p in Path(log.session_file).parent.iterdir() if p.suffix == ".tmp"] == []
+
+
+async def test_a_resumed_cut_turn_is_a_valid_anthropic_request(tmp_path, monkeypatch):
+    from kollabor_ai.api_communication_service import APICommunicationService
+    from kollabor_ai.conversation_manager import ConversationManager
+    from kollabor_ai.providers.anthropic_provider import AnthropicProvider
+    from kollabor_ai.providers.models import AnthropicConfig
+
+    llm, log, call = await logged_tool_turn(tmp_path, monkeypatch)
+    assert (await service(llm).record_interrupted_voice_reply("turn-1", ""))["replaced"]
+    await log.log_user_message("thanks", parent_uuid=llm.current_parent_uuid)
+
+    config = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations", get=lambda key, default=None: default
+    )
+    loaded = ConversationManager(config, log)._load_from_jsonl(log.session_file)["messages"]
+    messages = APICommunicationService._prepare_messages(SimpleNamespace(
+        _strip_leading_orphans=APICommunicationService._strip_leading_orphans
+    ), loaded)
+    provider = AnthropicProvider(
+        AnthropicConfig(api_key="k", model="claude-x", max_tokens=16, base_url="https://example.com")
+    )
+    sent = provider._prepare_request(messages)["messages"]
+    assert [m["role"] for m in sent] == ["user"]  # the tool-only reply has nothing to send
+    for message in sent:
+        blocks = message["content"]
+        assert blocks and all(b.get("text") for b in blocks if b.get("type") == "text")

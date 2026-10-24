@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A reply that ran tools is cut where you stopped it and the unheard rest is
   dropped, a reply you talked over before it was heard goes, the saved
   conversation keeps the cut, and a typed reply is never touched.
+- Voice: talking over a reply while its tool waits on your approval or runs a
+  long command no longer stalls the agent's connection: the stop, the approval
+  answer and the next turn all still get through.
+- Chat: a resumed conversation sends a saved reply that only ran tools as
+  nothing, not as an empty message, which the Anthropic API rejects.
 - Voice: a reply after a round of hub messages alone is spoken again; with a
   provider that does not stream it stayed silent.
 - Voice: every reply speaks its last sentence, which was dropped, so a short

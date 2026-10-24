@@ -199,25 +199,29 @@ def _played_cut(played: str, replies: list[str]) -> tuple[int, str] | None:
     spans = list(re.finditer(r"\w+", played.lower()))
     heard = [m.group() for m in spans]
     cut: tuple[int, int] | None = None  # (reply index, played word it starts at)
+    after = 0  # the first played word past the last reply found
     for index, reply in enumerate(replies):
         words = re.findall(r"\w+", reply.lower())
         if not words or not heard:
             continue  # a tool call with no prose says nothing
-        if cut is None:
-            cut = (index, 0)  # playback starts with the first reply that speaks
-            continue
+        start = 0  # playback starts with the first reply that speaks
+        if cut is not None:
 
-        def starts_at(i: int) -> bool:
-            size = min(4, len(words), len(heard) - i)
-            return heard[i : i + size] == words[:size]
+            def starts_at(i: int) -> bool:
+                size = min(4, len(words), len(heard) - i)
+                return heard[i : i + size] == words[:size]
 
-        need = min(_MIN_MATCH, len(words))
-        start = next(
-            (i for i in range(cut[1] + 1, len(heard) - need + 1) if starts_at(i)), None
-        )
-        if start is None:
-            break
+            need = min(_MIN_MATCH, len(words))
+            start = next((i for i in range(after, len(heard) - need + 1) if starts_at(i)), None)
+            if start is None:
+                break
         cut = (index, start)
+        # The next reply starts past the words of this one that were heard, so a
+        # repeated phrase or a short reply never matches inside it.
+        said = 0
+        while said < len(words) and start + said < len(heard) and heard[start + said] == words[said]:
+            said += 1
+        after = start + max(1, said)
     return None if cut is None else (cut[0], played[spans[cut[1]].start() :])
 
 
@@ -3199,8 +3203,12 @@ class LocalStateService(StateService):
         # rows are all in by then.
         queue = getattr(llm, "_queue_processor", None)
         between = getattr(queue, "between_turns", None)
-        async with between() if callable(between) else contextlib.nullcontext():
-            return await self._cut_voice_reply(llm, turn_id, text)
+        try:
+            async with between(turn_id) if callable(between) else contextlib.nullcontext():
+                return await self._cut_voice_reply(llm, turn_id, text)
+        except TimeoutError:
+            logger.warning("voice turn %s still running: its talk-over cut is dropped", turn_id)
+            return {"recorded": False, "busy": True}
 
     async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
         from kollabor_events.data_models import ConversationMessage
@@ -3236,9 +3244,13 @@ class LocalStateService(StateService):
             rewrite = getattr(llm.conversation_logger, "rewrite_voice_turn", None)
             if edits and callable(rewrite):
                 try:  # /resume and the engine's disk-seeded history read the log
-                    rewrite(turn_id, len(said), edits)
+                    dropped = rewrite(turn_id, len(said), edits) or {}
                 except Exception:
                     logger.warning("could not log a voice talk-over cut", exc_info=True)
+                    dropped = {}
+                # The next record threads under what is left, never a dropped one.
+                while llm.current_parent_uuid in dropped:
+                    llm.current_parent_uuid = dropped[llm.current_parent_uuid]
             return {"recorded": bool(edits), "replaced": bool(edits)}
         if not text:
             return {"recorded": False}

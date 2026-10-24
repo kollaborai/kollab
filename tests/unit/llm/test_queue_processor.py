@@ -375,6 +375,47 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(tokens, [None])  # the typed turn's token: not the old voice id
         self.assertNotIn("request_id", after)
 
+    def test_a_talk_over_cut_waits_for_the_voice_turns_last_round(self):
+        """The turn lock is free between a turn's rounds: a cut taken there would
+        land before the rest of the turn, which its one post per turn never cuts."""
+        from kollabor.state.local import LocalStateService
+        from kollabor_agent.queue_processor import QueuedInput
+
+        self._reply_with("Let me check.")
+        reply = ConversationMessage(
+            role="assistant", content="Let me check.", metadata={"voice_turn_id": "turn-9"}
+        )
+        llm = SimpleNamespace(
+            _queue_processor=self.processor, conversation_history=[reply],
+            conversation_logger=SimpleNamespace(), current_parent_uuid="parent",
+        )
+        state = LocalStateService(llm, profile_manager=object(), event_bus=None)
+        seen, waiting = [], []
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            self.processor.turn_completed = False  # its tools ran: one more round
+            waiting.append(asyncio.create_task(  # the talk-over, between the rounds
+                state.record_interrupted_voice_reply("turn-9", "Let me")
+            ))
+            await asyncio.sleep(0.05)
+
+        async def next_round():
+            async with self.processor._turn_lock:
+                seen.append(reply.content)  # what the turn's last round finds
+            self.processor.turn_completed = True
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            await self.processor.process_queue(MagicMock(), batch, next_round)
+            return await waiting[0]
+
+        self.assertTrue(self.loop.run_until_complete(scenario())["replaced"])
+        self.assertEqual(seen, ["Let me check."])  # the cut came after it
+        self.assertEqual(reply.content, "Let me")
+        self.assertIsNone(self.processor._open_voice_turn)
+
     def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
         """The reply joins history after its tools; a Stop in between kept nothing."""
         self.streaming_handler.call_llm = AsyncMock(

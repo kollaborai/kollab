@@ -10,6 +10,7 @@ import logging
 import os
 import stat
 import subprocess
+import tempfile
 import time
 import tomllib
 from copy import deepcopy
@@ -679,19 +680,21 @@ class KollaborConversationLogger:
 
     def rewrite_voice_turn(
         self, turn_id: str, count: int, edits: Dict[int, Optional[str]]
-    ) -> bool:
+    ) -> Optional[Dict[str, Any]]:
         """Apply a talk-over's cut to a voice turn's logged replies, in place.
 
         The turn's replies are its assistant records with this voice_turn_id, in
         order: `count` of them, or nothing changes. `edits` maps a reply's
         position to its new text, or None to drop it (its children then thread
         under its parent). Synchronous, so no append lands mid-rewrite.
+        Returns each dropped record's uuid with its parent's, None when the log
+        was not cut.
         """
         path = Path(self.session_file)
         try:
             lines = path.read_text().splitlines()
         except OSError:
-            return False
+            return None
         records: List[Any] = []
         for line in lines:
             try:
@@ -710,23 +713,25 @@ class KollaborConversationLogger:
                 "voice turn %s: %d logged replies, %d in history; log not cut",
                 turn_id, len(replies), count,
             )
-            return False
+            return None
         dropped: Dict[str, Any] = {}  # uuid: its parent
         skip = set()
         for position, text in edits.items():
             record = replies[position]
-            if text is None:
-                skip.add(id(record))
-                if record.get("uuid"):
-                    dropped[record["uuid"]] = record.get("parentUuid")
-                continue
             message = record.get("message") or {}
             calls = [
                 item
                 for item in message.get("content") or []
                 if isinstance(item, dict) and item.get("type") == "tool_use"
             ]
-            message["content"] = [{"type": "text", "text": text}, *calls]
+            # No empty text block: providers refuse one.
+            content = [{"type": "text", "text": text}] if text else []
+            if text is None or not (content or calls):
+                skip.add(id(record))
+                if record.get("uuid"):
+                    dropped[record["uuid"]] = record.get("parentUuid")
+                continue
+            message["content"] = [*content, *calls]
         kept = []
         for record in records:
             if isinstance(record, dict):
@@ -738,12 +743,15 @@ class KollaborConversationLogger:
                 if "parentUuid" in record:
                     record["parentUuid"] = parent
             kept.append(record if isinstance(record, str) else json.dumps(record))
-        temp = path.with_name(path.name + ".tmp")
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("".join(line + "\n" for line in kept))
-        os.replace(temp, path)
-        return True
+        fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("".join(line + "\n" for line in kept))
+            os.replace(temp, path)
+        except BaseException:
+            Path(temp).unlink(missing_ok=True)
+            raise
+        return dropped
 
     async def log_system_message(
         self,

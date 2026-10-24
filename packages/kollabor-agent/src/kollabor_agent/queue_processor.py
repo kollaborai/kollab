@@ -454,6 +454,7 @@ class QueueProcessor:
         self.turn_completed = False
         self.active_origin_context: dict[str, Any] | None = None
         self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
+        self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -935,6 +936,9 @@ class QueueProcessor:
                         self.turn_completed = True
                         break
 
+                # Done, cancelled or cut off by new input: no round of it is left.
+                self._open_voice_turn = None
+
                 # Nothing left -- exit outer loop
                 if self.processing_queue.empty() or self.cancel_processing:
                     break
@@ -945,6 +949,7 @@ class QueueProcessor:
 
         finally:
             self.is_processing = False  # ends the chain (note_chain_end)
+            self._open_voice_turn = None
             self.current_processing_tokens = 0
             self.processing_start_time = None
 
@@ -1029,6 +1034,7 @@ class QueueProcessor:
                 "voice_tool_policy": "invalid",
             }
         self.active_origin_context = merged_origin_context
+        self._open_voice_turn = _voice_turn_id(merged_origin_context)
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -2199,14 +2205,27 @@ class QueueProcessor:
         return {"voice_turn_id": turn_id} if turn_id else {}
 
     @contextlib.asynccontextmanager
-    async def between_turns(self):
+    async def between_turns(self, voice_turn: str | None = None, timeout: float = 20.0):
         """Hold the next turn off, entered once the running one has finished.
 
         A turn writes its tool calls and their results under this lock, so a
-        history edit made inside never lands between them.
+        history edit made inside never lands between them. With `voice_turn`,
+        that turn must have no round left to run, not just be between two.
+        TimeoutError after `timeout` seconds, inside the Engine's RPC timeout.
         """
-        async with self._turn_lock:
+        async with asyncio.timeout(timeout):
+            while True:
+                await self._turn_lock.acquire()
+                if not voice_turn or self._open_voice_turn != voice_turn:
+                    break
+                self._turn_lock.release()
+                # ponytail: polls a turn that runs on uncancelled; a later turn
+                # can take the lock during the sleep. A turn-end event if it does.
+                await asyncio.sleep(0.01)
+        try:
             yield
+        finally:
+            self._turn_lock.release()
 
     async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
         """Keep the reply text a Stop cut off, marked interrupted.
