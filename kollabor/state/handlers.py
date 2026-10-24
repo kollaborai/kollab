@@ -774,6 +774,44 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     handlers["state.acp_submit"] = _acp_submit
     handlers["state.acp_cancel"] = _acp_cancel
+
+    async def _voice_admission(params):
+        # The engine issues a voice turn's capability in its own process; this
+        # keeps the daemon's registry in step so the turn validates here and an
+        # engine revoke (barge-in, stop) also stops it here.
+        from kollabor_agent import voice_admission as admissions
+
+        action = params.get("action")
+        try:
+            if action == "admit":
+                return {"admitted": admissions.register_voice_admission_context(params.get("context"))}
+            if action == "revoke":
+                admissions.revoke_voice_admission_context(params.get("context"))
+            elif action == "revoke_turn":
+                admissions.revoke_voice_admissions_for_turn(
+                    str(params["voice_session_id"]), int(params["generation"]), str(params["turn_id"])
+                )
+            elif action == "revoke_generation":
+                admissions.revoke_voice_admissions_for_generation(
+                    str(params["voice_session_id"]), int(params["generation"])
+                )
+            else:
+                return {"error": "unknown voice admission action"}
+        except (KeyError, TypeError, ValueError):
+            return {"error": "invalid voice admission request"}
+        return {"revoked": True}
+
+    handlers["state.voice_admission"] = _voice_admission
+
+    async def _voice_interrupted_reply(params):
+        try:
+            return await state_service.record_interrupted_voice_reply(
+                str(params.get("turn_id") or ""), str(params.get("text") or "")
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+    handlers["state.voice_interrupted_reply"] = _voice_interrupted_reply
     async def _acp_configure_mcp(params):
         return await state_service.configure_client_mcp(params.get("servers") or [])
     handlers["state.acp_configure_mcp"] = _acp_configure_mcp

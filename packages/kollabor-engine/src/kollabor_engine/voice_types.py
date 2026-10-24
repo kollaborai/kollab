@@ -147,6 +147,12 @@ class VoiceTranscriptSnapshot(_FrozenModel):
 FinalTranscript = VoiceTranscriptSnapshot
 
 
+class VoiceTurnRequest(VoiceTranscriptSnapshot):
+    """A /turns body: the final transcript, or kind "greeting" (a hidden instruction turn)."""
+
+    kind: Literal["speech", "greeting"] = "speech"
+
+
 class VoiceTurnContext(_FrozenModel):
     source: Literal["livekit_voice"]
     voice_session_id: VoiceSessionId

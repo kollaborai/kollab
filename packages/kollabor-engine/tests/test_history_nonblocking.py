@@ -430,6 +430,38 @@ async def test_a_user_message_taken_by_the_daemon_warms_the_mirror(
 
 
 @pytest.mark.asyncio
+async def test_a_voice_cut_that_lands_late_reloads_the_open_windows(registry, conversations):
+    """A talk-over's cut queued on a turn still unwinding lands after its RPC
+    answered: the daemon says voice_reply_cut, and open windows reload."""
+    _, workspace_root = conversations
+    state = GrowingState()
+    state.messages.append(_wire("assistant", "Let me check the weather.", "t1"))
+    events: asyncio.Queue = asyncio.Queue()
+    announced: list = []
+    daemon = _daemon(state)
+    daemon.subscribe = lambda: events
+    daemon.fan_out = announced.append
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = daemon
+    registry[session.session_id] = session
+    await session.refresh_history()
+    session._event_task = asyncio.create_task(session._track_events())
+    try:
+        state.messages[-1] = _wire("assistant", "Let me", "t1")  # the cut landed
+        events.put_nowait({"type": "voice_reply_cut", "turn_id": "turn-1"})
+        for _ in range(200):
+            if session.history[-1]["content"] == "Let me":
+                break
+            await asyncio.sleep(0.01)
+        await _settled(session)
+        assert session.history[-1]["content"] == "Let me"
+        assert [e for e in announced if e["type"] == "history_updated"] != []
+    finally:
+        session._event_task.cancel()
+        await asyncio.gather(session._event_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_asked_for_during_one_in_flight_runs_again(
     registry, conversations
 ):

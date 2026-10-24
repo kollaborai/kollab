@@ -1,6 +1,7 @@
 """Device boundary checks; doubles here do not prove real speech or playback."""
 
 import asyncio
+import contextlib
 import json
 import queue
 import subprocess
@@ -17,7 +18,7 @@ from kollabor_voice import service as service_module
 from kollabor_voice.audio import AudioSegment, SpeechSegmenter
 from kollabor_voice.client import VoiceClient
 from kollabor_voice.control import VoiceError, manifest
-from kollabor_voice.observer import AdmissionStore, parse_decision
+from kollabor_voice.observer import AdmissionStore
 from kollabor_voice.output import SpeechQueue, sentences
 from kollabor_voice.service import VoiceService
 from kollabor_voice.store import TranscriptLog
@@ -348,21 +349,6 @@ def test_admission_crash_and_duplicate_never_blindly_replay(root):
     store.close()
 
 
-def test_decision_cannot_invent_events_or_execute_invalid_output():
-    records = [{"event_id": "a", "text": "turn the page"}]
-    assert parse_decision('{"decision":"ignore","event_ids":["a"]}', records) == []
-    assert (
-        parse_decision('{"decision":"respond","event_ids":["a"]}', records) == records
-    )
-    for raw in (
-        "not json",
-        '{"decision":"respond","event_ids":["missing"]}',
-        '{"decision":"respond","event_ids":[]}',
-    ):
-        with pytest.raises(VoiceError):
-            parse_decision(raw, records)
-
-
 @pytest.mark.asyncio
 async def test_retry_clears_failed_setup_before_reporting_progress(root):
     attempts = 0
@@ -635,8 +621,8 @@ async def test_explicit_and_final_speech_deduplicate_only_matching_sentences(roo
     assert speaker.spoken == ["First sentence.", "The final result."]
 
 
-def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request():
-    from kollabor_voice.observer import connected_speech, utterance_groups
+def test_grouping_keeps_playback_echo_apart_from_the_request():
+    from kollabor_voice.observer import utterance_groups
 
     request = {
         "event_id": "request",
@@ -654,8 +640,6 @@ def test_grouping_preserves_echo_for_classifier_without_merging_it_into_request(
         "playback_overlap": [{"reply_id": "reply", "text": "I'll check the files."}],
     }
     assert utterance_groups([request, echo]) == [[request], [echo]]
-    assert connected_speech([request, echo], [request]) == [request]
-    assert connected_speech([request, echo], [echo]) == [echo]
 
 
 @pytest.mark.asyncio
@@ -675,13 +659,6 @@ async def test_silent_period_never_reaches_synthesizer_or_speech_receipts(root):
 
 @pytest.mark.asyncio
 async def test_delegated_output_cannot_open_mic_read_or_extend_lease(service, root):
-    from unittest.mock import AsyncMock
-
-    from kollabor_voice.speech_review import SpeechDecision
-
-    service.classifier.review_speech = AsyncMock(
-        return_value=SpeechDecision("speak", provider="laya").to_wire()
-    )
     client = VoiceClient(root)
     owner = await claim(client)
     capability = await client.call("delegate", **auth(owner), producer_id="worker")
@@ -948,6 +925,52 @@ async def test_local_classifier_jobs_do_not_block_capture_or_allow_output_delega
     assert result["result"]["event_ids"] == ["a"]
     await client.call("release", **auth)
     assert service.classifier_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_voice_never_starts_or_calls_a_classifier_worker(service, root):
+    """Claiming, listening, speaking and releasing leave every worker untouched (#301).
+
+    The classifier ops stay for other features (tested above); voice never asks.
+    """
+    from unittest.mock import AsyncMock, Mock, patch
+
+    workers = list(service.classifiers.values())
+    assert {w.name for w in workers} == {"laya", "qwen"}
+    calls = Mock()
+    with contextlib.ExitStack() as stack:
+        for worker in workers:
+            for name in ("prepare", "decide", "answer", "review_speech", "close"):
+                if hasattr(worker, name):
+                    stack.enter_context(
+                        patch.object(
+                            worker,
+                            name,
+                            getattr(calls, f"{worker.name}_{name}"),
+                        )
+                    )
+        stack.enter_context(
+            patch.object(service, "select_classifier", AsyncMock(side_effect=AssertionError))
+        )
+        client = VoiceClient(root)
+        owner = await claim(client)
+        capability = await client.call("delegate", **auth(owner), producer_id="agent")
+        status = await client.call("heartbeat", **auth(owner))
+        assert "classifier" not in status and "classifier" not in await client.call("status")
+        spoken = await client.voice_out(
+            "Done.", "reply", capability["epoch"], "agent", capability["token"]
+        )
+        assert spoken["ids"]
+        # Code cannot be said: the spoken-format rules ask for a rewrite, no model reviews it.
+        code = await client.voice_out(
+            "See `main.py` for details.", "code", capability["epoch"], "agent", capability["token"]
+        )
+        assert code["status"] == "rewrite" and code["ids"] == []
+        await client.call("release", **auth(owner))
+    assert calls.method_calls == []
+    for worker in workers:
+        assert worker.process is None and worker.setup_task is None
+        assert worker.status()["state"] == "off"
 
 
 def stuck_server(root, recorder_factory):

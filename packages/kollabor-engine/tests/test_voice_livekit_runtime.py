@@ -34,20 +34,16 @@ while True: time.sleep(1)
 """
 
 FAKE_WORKER = """\
-import http.server, json, os, sys, threading
+import json, os, signal, sys, time
 cfg = json.loads(os.environ["KOLLAB_VOICE_WORKER_CONFIG"])
 log = os.environ["FAKE_WORKER_LOG"]
 with open(log + ".cfg", "w") as f: json.dump(cfg, f)
-class H(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
-        with open(log, "a") as f: f.write(self.path + " " + body + "\\n")
-        self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
-        if self.path == "/stop": threading.Thread(target=srv.shutdown).start()
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-print("WORKER_READY http://127.0.0.1:%d" % srv.server_address[1], flush=True)
-srv.serve_forever()
+def stop(*_):
+    with open(log, "a") as f: f.write("sigterm\\n")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+print("WORKER_READY -", flush=True)
+while True: time.sleep(0.1)
 """
 
 
@@ -63,6 +59,9 @@ class FakeSession:
         self.queues = []
         self.sent = []
         self.script = []
+        self.cancels = 0
+        self.revokes = []
+        self.interrupted = []
 
     def subscribe(self):
         q = asyncio.Queue()
@@ -89,9 +88,23 @@ class FakeSession:
     async def cancel_owned_turn(self, request_id):
         return {"cancelled": True}
 
+    def cancel_turn(self):
+        self.cancels += 1
+
+    async def voice_admission(self, action, **params):
+        self.revokes.append((action, params))
+        return {"revoked": True}
+
+    async def record_interrupted_reply(self, turn_id, text):
+        # the daemon's answer: one interrupted reply per voice turn
+        if any(turn == turn_id for turn, _ in self.interrupted):
+            return {"recorded": False, "duplicate": True}
+        self.interrupted.append((turn_id, text))
+        return {"recorded": True}
+
 
 @pytest.fixture
-def rig(tmp_path, monkeypatch):
+async def rig(tmp_path, monkeypatch):
     server = tmp_path / "livekit-server"
     server.write_text(FAKE_SERVER.format(py=sys.executable))
     server.chmod(0o755)
@@ -116,9 +129,12 @@ def rig(tmp_path, monkeypatch):
     app = FastAPI()
     app.state.voice = control
     app.include_router(voice_routes.router)
-    return SimpleNamespace(
+    yield SimpleNamespace(
         control=control, runtime=runtime, session=session, app=app, log=log
     )
+    # The fake server and workers run in their own process groups; a test that
+    # fails before its own shutdown must not leave them running.
+    await control.shutdown()
 
 
 def client(app):
@@ -199,10 +215,17 @@ def test_jwt_is_hs256_with_grants():
 
 async def test_full_voice_turn(rig):
     rig.session.script = [
-        {"type": "token", "text": "Sure thing."},
+        {"type": "thinking"},
+        {"type": "token", "text": "<display_text>Sure thing, **done**. All good.</display_text>"},
+        {"type": "token", "text": "<spoken_text>Sure thing, done. "},
+        {"type": "token", "text": "All good now."},
+        {"type": "token", "text": "</spoken_text>"},
         {
             "type": "response",
-            "text": "<display_text>Sure thing, **done**.</display_text><spoken_text>Sure thing, done.</spoken_text>",
+            "text": (
+                "<display_text>Sure thing, **done**. All good.</display_text>"
+                "<spoken_text>Sure thing, done. All good now.</spoken_text>"
+            ),
         },
         {"type": "turn_complete"},
     ]
@@ -239,14 +262,21 @@ async def test_full_voice_turn(rig):
         task = asyncio.create_task(collect())
         body = transcript(view)
         resp = await http.post(
-            f"/voice/sessions/{view['voice_session_id']}/transcripts", json=body
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
         )
-        assert resp.status_code == 200 and resp.json()["accepted"] is True
-        # duplicate turn = idempotent receipt, no second send
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/x-ndjson")
+        lines = [json.loads(ln) for ln in resp.text.splitlines()]
+        assert lines == [
+            {"text": "Sure thing, done."},
+            {"text": "All good now."},
+            {"done": True, "turn_id": body["turn_id"]},
+        ]
+        # duplicate turn = idempotent, no second send and no second reply
         dup = await http.post(
-            f"/voice/sessions/{view['voice_session_id']}/transcripts", json=body
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
         )
-        assert dup.json()["duplicate"] is True and len(rig.session.sent) == 1
+        assert json.loads(dup.text)["duplicate"] is True and len(rig.session.sent) == 1
         message, request_id, _thread, ctx = rig.session.sent[0]
         assert (
             message == "hello there"
@@ -254,38 +284,37 @@ async def test_full_voice_turn(rig):
             and ctx["source"] == "livekit_voice"
         )
 
-        await wait_for(lambda: any(e["event"] == "voice.metrics" for e in events))
-        finals = [
-            e
+        await wait_for(
+            lambda: any(
+                e["event"] == "voice.transcript"
+                and e["payload"]["speaker"] == "assistant"
+                and e["payload"]["final"]
+                for e in events
+            )
+        )
+        assert not any(e["event"] == "voice.metrics" for e in events)  # the worker's
+        assistant = [
+            e["payload"]
             for e in events
             if e["event"] == "voice.transcript"
             and e["payload"]["speaker"] == "assistant"
-            and e["payload"]["final"]
         ]
-        assert (
-            len(finals) == 1
-            and finals[0]["payload"]["spoken_text_chunk"] == "Sure thing, done."
-        )
-        assert "**" in finals[0]["payload"]["display_text_chunk"]
-        seqs = [
-            e["sequence"]
-            for e in events
-            if e["event"] != "voice.state" or e["sequence"]
-        ]
+        finals = [p for p in assistant if p["final"]]
+        partials = [p for p in assistant if not p["final"]]
+        assert len(finals) == 1 and assistant[-1] is finals[0]
+        assert finals[0]["spoken_text_chunk"] == "Sure thing, done. All good now."
+        assert "**" in finals[0]["display_text_chunk"]
+        # a non-final revision per sentence, growing; the final comes after them all
+        assert [p["spoken_text_chunk"] for p in partials if p["spoken_text_chunk"]][
+            :2
+        ] == ["Sure thing, done.", "Sure thing, done. All good now."]
+        assert [p["revision"] for p in partials] == sorted(p["revision"] for p in partials)
+        seqs = [e["sequence"] for e in events if e["event"] != "voice.state" or e["sequence"]]
         assert seqs == sorted(seqs)
-        spoken = await wait_for(
-            lambda: rig.log.exists()
-            and [
-                ln for ln in rig.log.read_text().splitlines() if ln.startswith("/speak")
-            ]
-        )
-        assert (
-            json.loads(spoken[0].split(" ", 1)[1])["spoken_text"] == "Sure thing, done."
-        )
-        # final transcript published before speech started
-        assert events.index(finals[0]) < next(
-            i for i, e in enumerate(events) if e["payload"].get("state") == "speaking"
-        )
+        # past admission the worker reports states from LiveKit's own; the model's
+        # thinking event (late, maybe mid-speech) adds no second "thinking"
+        states = [e["payload"].get("state") for e in events if e["event"] == "voice.state"]
+        assert states.count("thinking") == 1 and "speaking" not in states
 
         stopped = await http.request(
             "DELETE",
@@ -300,7 +329,13 @@ async def test_full_voice_turn(rig):
         await wait_for(lambda: not rig.control.runtime._workers)
         await asyncio.wait_for(task, 3)
         assert events[-1]["payload"].get("state") == "stopped"
-        assert rig.log.read_text().count("/stop") == 1
+        # the worker stops on SIGTERM, nothing is posted to it
+        await wait_for(lambda: rig.log.exists() and "sigterm" in rig.log.read_text())
+        assert rig.log.read_text().count("sigterm") == 1
+        # a stop revokes the generation's capabilities in the daemon too
+        await wait_for(
+            lambda: any(a == "revoke_generation" for a, _ in rig.session.revokes)
+        )
 
     server_pid = rig.runtime._server.pid
     await rig.control.shutdown()
@@ -422,9 +457,6 @@ async def test_worker_events_and_control_auth(rig):
             "bytes_done": 5,
             "bytes_total": 10,
         }
-        assert await rig.runtime.speak(
-            sid, 1, {"turn_id": "t", "spoken_text": "hi", "generation": 1}
-        )
     await rig.control.shutdown()
 
 
@@ -468,3 +500,313 @@ def test_server_dies_with_engine_even_when_engine_is_killed(tmp_path):
         except ProcessLookupError, PermissionError:
             pass
         sup.wait()
+
+
+# --- /turns: progressive speech, greeting, barge-in -------------------------------
+
+
+def test_spoken_text_reads_an_open_channel_and_sentences_cut_on_whitespace():
+    from kollabor_engine.voice_control import cut_sentences, spoken_so_far
+
+    # split_response_channels(partial=True) says "" for this; the stream must not.
+    assert spoken_so_far("<display_text>a</display_text><spoken_text>Hi there. Wh") == "Hi there. Wh"
+    assert spoken_so_far("<spoken_text>Hi.</spo") == "Hi."  # closing tag still arriving
+    assert spoken_so_far("<spoken_text>Hi.</spoken_text>tail") == "Hi."
+    assert spoken_so_far("<display_text>only display so far") is None
+    assert spoken_so_far("plain words <displ") == "plain words "  # no channel: all speech
+    assert cut_sentences("One. Two! Thr", final=False) == (["One.", "Two!"], " Thr")
+    assert cut_sentences("version 3.5 is out", final=False) == ([], "version 3.5 is out")
+    assert cut_sentences("last words", final=True) == (["last words"], "")
+
+
+async def test_latency_stage_names_map(rig):
+    for stage in ("stt", "llm_first_token", "first_audio", "total_turn"):
+        merged = rig.control._merge_latency("t1", {"stage": stage, "ms": 5})
+    assert merged == {
+        "stt_ms": 5,
+        "llm_first_token_ms": 5,
+        "first_audio_ms": 5,
+        "total_turn_ms": 5,
+    }
+    await rig.control.shutdown()
+
+
+async def test_turn_refusal_is_an_http_error_not_a_stream(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        body = transcript(view)
+        body["generation"] = 9
+        resp = await http.post(
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
+        )
+        assert resp.status_code == 409 and resp.json()["code"] == "stale_generation"
+        assert rig.session.sent == []
+    await rig.control.shutdown()
+
+
+async def test_greeting_is_a_hidden_instruction_turn(rig):
+    from kollabor_engine.voice_control import GREETING_INSTRUCTION
+
+    rig.control.settings = None
+    rig.session.script = [
+        {"type": "response", "text": "Hey, what do you want to talk about?"},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        body = {**transcript(view, text=""), "kind": "greeting"}
+        resp = await http.post(
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
+        )
+        lines = [json.loads(ln) for ln in resp.text.splitlines()]
+        assert lines[0] == {"text": "Hey, what do you want to talk about?"}
+        assert lines[-1] == {"done": True, "turn_id": body["turn_id"]}
+        message, _rid, _thread, ctx = rig.session.sent[0]
+        assert message == GREETING_INSTRUCTION and ctx["voice_hidden"] is True
+        ring = rig.control.hub._streams[view["voice_session_id"]].ring
+        users = [
+            e
+            for e in ring
+            if e["event"] == "voice.transcript" and e["payload"]["speaker"] == "user"
+        ]
+        assert users == []  # no user bubble for an instruction
+    await rig.control.shutdown()
+
+
+SHOWN = {"type": "message", "message_type": "assistant"}  # the daemon's display event
+
+
+async def said(rig, http, view):
+    resp = await http.post(
+        f"/voice/sessions/{view['voice_session_id']}/turns", json=transcript(view)
+    )
+    lines = [json.loads(ln) for ln in resp.text.splitlines()]
+    assert lines[-1]["done"] is True
+    return [line["text"] for line in lines[:-1]]
+
+
+async def test_a_reply_says_its_last_sentence_once_it_is_shown(rig):
+    # What the daemon sends: its echo of the user, the reply's tokens, then the
+    # reply's display message. A last sentence has no space after it to cut on.
+    rig.session.script = [
+        {"type": "message", "message_type": "user", "content": "hello there"},
+        {"type": "token", "text": "Sure thing. "},
+        {"type": "token", "text": "All good now."},
+        {**SHOWN, "content": "Sure thing. All good now."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Sure thing.", "All good now."]
+    await rig.control.shutdown()
+
+
+async def test_a_turns_latency_outlives_its_reply_stream(rig):
+    # The worker reports the last audio after the turn's reply stream ended: that
+    # Total joins the turn's other stages, all of them the worker's own.
+    rig.session.script = [
+        {"type": "token", "text": "Done."},
+        {**SHOWN, "content": "Done."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        body = transcript(view)
+        rig.control._merge_latency(body["turn_id"], {"stage": "stt", "ms": 40})
+        resp = await http.post(
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=body
+        )
+        assert json.loads(resp.text.splitlines()[-1])["done"] is True
+        merged = rig.control._merge_latency(
+            body["turn_id"], {"stage": "total_turn", "ms": 900}
+        )
+    assert merged == {
+        "stt_ms": 40,
+        "llm_first_token_ms": None,
+        "first_audio_ms": None,
+        "total_turn_ms": 900,
+    }
+    await rig.control.shutdown()
+
+
+async def test_a_reply_with_xml_tool_tags_is_said_once(rig):
+    # Its "response" (the clean text) comes before its display message.
+    rig.session.script = [
+        {"type": "token", "text": "Checking now."},
+        {"type": "response", "text": "Checking now."},
+        {**SHOWN, "content": "Checking now."},
+        {"type": "token", "text": "It is green."},
+        {**SHOWN, "content": "It is green."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Checking now.", "It is green."]
+    await rig.control.shutdown()
+
+
+async def test_a_reply_after_a_round_of_hub_tags_alone_is_still_said(rig):
+    # Such a round sends "response" with no text and nothing to display, then
+    # runs its tags; the next reply comes whole, from a provider that does not
+    # stream, as its display message alone.
+    rig.session.script = [
+        {"type": "response", "text": ""},
+        {"type": "tool_start", "tool_id": "h1", "tool_name": "hub_msg"},
+        {"type": "tool_result", "tool_id": "h1", "tool_name": "hub_msg", "success": True},
+        {**SHOWN, "content": "Sent it to lapis."},
+        {"type": "turn_complete"},
+    ]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        assert await said(rig, http, view) == ["Sent it to lapis."]
+    await rig.control.shutdown()
+
+
+async def test_voice_settings_ride_on_the_turn_context(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        rig.control.settings = SimpleNamespace(
+            overlay=lambda agent: f"overlay for {agent}", reasoning=lambda: "low"
+        )
+        rig.session.script = [{"type": "turn_complete"}]
+        await http.post(
+            f"/voice/sessions/{view['voice_session_id']}/turns", json=transcript(view)
+        )
+        ctx = rig.session.sent[0][3]
+        assert ctx["voice_prompt_overlay"] == "overlay for lapis"
+        assert ctx["voice_reasoning"] == "low" and "voice_hidden" not in ctx
+        # settings can add keys, never replace the identity fields
+        assert ctx["source"] == "livekit_voice"
+    rig.control.settings = None
+    await rig.control.shutdown()
+
+
+@pytest.mark.parametrize("how", ["aclose", "cancel"])
+async def test_disconnect_before_done_is_a_barge_in(rig, how):
+    from kollabor_agent.voice_admission import validate_voice_admission_context
+
+    rig.session.script = [{"type": "token", "text": "Sure thing. And then I"}]  # never finishes
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid = view["voice_session_id"]
+        snapshot = voice_snapshot(view, "tell me a long story")
+        turn = await rig.control.open_turn(sid, snapshot)
+        turn_queue, view_turn = rig.session.queues[0], snapshot.turn_id
+        first = asyncio.Event()
+
+        async def consume():
+            async for line in turn:
+                if "text" in line:
+                    first.set()
+
+        if how == "aclose":
+            assert await anext(turn) == {"text": "Sure thing."}
+            await turn.aclose()
+        else:
+            task = asyncio.create_task(consume())
+            await asyncio.wait_for(first.wait(), 3)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        ring = rig.control.hub._streams[sid].ring
+        await wait_for(
+            lambda: any(e["payload"].get("barge_in") for e in ring)
+        )
+        barge = [e for e in ring if e["payload"].get("barge_in")]
+        assert len(barge) == 1 and barge[0]["payload"]["state"] == "listening"
+        assert rig.session.cancels == 1  # the in-flight turn, once
+        assert not rig.session.queues  # nobody listens to the daemon any more
+        # the capability is gone here and in the daemon
+        assert validate_voice_admission_context(rig.session.sent[0][3]) is False
+        await wait_for(lambda: any(a == "revoke_turn" for a, _ in rig.session.revokes))
+        # whatever the cancelled turn says later is published nowhere
+        seen = len(ring)
+        turn_queue.put_nowait(
+            {"type": "response", "text": "late reply", "request_id": view_turn}
+        )
+        turn_queue.put_nowait({"type": "turn_complete", "request_id": view_turn})
+        await asyncio.sleep(0.2)
+        assert len(rig.control.hub._streams[sid].ring) == seen
+    await rig.control.shutdown()
+
+
+async def test_disconnect_after_done_is_not_a_barge_in(rig):
+    rig.session.script = [{"type": "response", "text": "Done."}, {"type": "turn_complete"}]
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        turn = await rig.control.open_turn(view["voice_session_id"], voice_snapshot(view, "hi"))
+        seen = [line async for line in turn]
+        await turn.aclose()
+        assert seen[-1]["done"] is True
+        assert rig.session.cancels == 0
+        ring = rig.control.hub._streams[view["voice_session_id"]].ring
+        assert not any(e["payload"].get("barge_in") for e in ring)
+    await rig.control.shutdown()
+
+
+async def test_a_talk_over_records_the_played_text_once(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        turn = str(uuid4())
+        url = f"/voice/sessions/{view['voice_session_id']}/turns/{turn}/interrupted"
+        first = await http.post(url, json={"text": "  So the build  "})
+        assert first.status_code == 200 and first.json() == {"recorded": True}
+        again = await http.post(url, json={"text": "So the build"})
+        assert again.json() == {"recorded": False, "duplicate": True}
+        assert rig.session.interrupted == [(turn, "So the build")]  # trimmed, once
+    await rig.control.shutdown()
+
+
+async def test_a_talk_over_before_any_audio_reaches_the_daemon(rig):
+    # Nothing was played: the daemon takes the unheard reply away.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        turn = str(uuid4())
+        url = f"/voice/sessions/{view['voice_session_id']}/turns/{turn}/interrupted"
+        blank = await http.post(url, json={"text": " \n "})
+        assert blank.status_code == 200 and blank.json() == {"recorded": True}
+        assert rig.session.interrupted == [(turn, "")]
+    await rig.control.shutdown()
+
+
+async def test_the_interrupted_route_checks_session_turn_and_size(rig):
+    from kollabor_engine.voice_session_router import MAX_FINAL_TRANSCRIPT_BYTES
+
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid, text = view["voice_session_id"], {"text": "So the build"}
+        assert (
+            await http.post(f"/voice/sessions/{uuid4()}/turns/{uuid4()}/interrupted", json=text)
+        ).status_code == 404
+        assert (
+            await http.post(f"/voice/sessions/{sid}/turns/not-a-turn/interrupted", json=text)
+        ).status_code == 422
+        assert (
+            await http.post(f"/voice/sessions/{sid}/turns/{uuid4()}/interrupted", json={})
+        ).status_code == 422
+        big = {"text": "x" * (MAX_FINAL_TRANSCRIPT_BYTES + 1)}
+        refused = await http.post(f"/voice/sessions/{sid}/turns/{uuid4()}/interrupted", json=big)
+        assert refused.status_code == 413 and refused.json()["code"] == "transcript_too_large"
+        assert rig.session.interrupted == []
+    await rig.control.shutdown()
+
+
+def voice_snapshot(view, text):
+    from kollabor_engine.voice_types import VoiceTranscriptSnapshot
+
+    return VoiceTranscriptSnapshot(**transcript(view, text=text))
+
+
+def test_child_output_goes_to_the_log_dir_and_starts_over_when_big(tmp_path):
+    runtime = LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "", log_dir=tmp_path / "logs")
+    with runtime._log("livekit-worker.log") as log:
+        log.write(b"worker died: boom\n")
+    path = tmp_path / "logs" / "livekit-worker.log"
+    assert path.read_bytes() == b"worker died: boom\n"
+    path.write_bytes(b"x" * 5_000_001)
+    with runtime._log("livekit-worker.log") as log:
+        log.write(b"fresh\n")
+    assert path.read_bytes() == b"fresh\n"
+    # no log dir (tests, embedders): output goes nowhere, as before
+    with LiveKitRuntime(engine_url=lambda: "", engine_token=lambda: "")._log("x") as log:
+        assert log == asyncio.subprocess.DEVNULL

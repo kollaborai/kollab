@@ -12,7 +12,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -27,6 +27,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
+from kollabor_tui.turn_context import current_turn
 
 from .tool_call_contract import is_text_written_call, resolve_text_tool_call
 from .tool_output_budget import (
@@ -277,6 +278,15 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
     return entries
 
 
+def _voice_turn_id(origin: Any) -> str | None:
+    """The LiveKit voice turn an origin context belongs to, if any."""
+    if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
+        turn_id = origin.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    return None
+
+
 def _xml_display_metadata(
     all_tools: List[Dict[str, Any]],
     response: str,
@@ -442,6 +452,10 @@ class QueueProcessor:
         self.is_processing = False
         self.turn_completed = False
         self.active_origin_context: dict[str, Any] | None = None
+        self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
+        self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
+        self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
+        self._after_turn_flush: asyncio.Task | None = None
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -923,6 +937,12 @@ class QueueProcessor:
                         self.turn_completed = True
                         break
 
+                # Done, cancelled or cut off by new input: no round of it is left.
+                self._open_voice_turn = None
+                if self._after_turn:
+                    async with self._turn_lock:
+                        await self._run_after_turn()
+
                 # Nothing left -- exit outer loop
                 if self.processing_queue.empty() or self.cancel_processing:
                     break
@@ -933,6 +953,9 @@ class QueueProcessor:
 
         finally:
             self.is_processing = False  # ends the chain (note_chain_end)
+            # ponytail: a drain that dies here leaves queued after-turn work (a
+            # talk-over cut) to the next round's start; a flush task if that bites.
+            self._open_voice_turn = None
             self.current_processing_tokens = 0
             self.processing_start_time = None
 
@@ -1017,6 +1040,7 @@ class QueueProcessor:
                 "voice_tool_policy": "invalid",
             }
         self.active_origin_context = merged_origin_context
+        self._open_voice_turn = _voice_turn_id(merged_origin_context)
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
@@ -1112,17 +1136,22 @@ class QueueProcessor:
         # The lock serializes turns; the second caller waits for the first
         # to finish rather than running concurrently.
         async with self._turn_lock:
+            await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
+            # Stamped under the lock: a turn still running when this one was
+            # queued clears its own stamp as it ends, never this one's.
+            self._stamp_voice_turn(_voice_turn_id(execution_context))
             try:
                 if execution_context is not None:
-                    return await self._execute_llm_turn_inner(
+                    parent_uuid = await self._execute_llm_turn_inner(
                         user_message_provided,
                         current_parent_uuid,
                         execution_context=execution_context,
                     )
-                return await self._execute_llm_turn_inner(
-                    user_message_provided, current_parent_uuid
-                )
+                else:
+                    parent_uuid = await self._execute_llm_turn_inner(
+                        user_message_provided, current_parent_uuid
+                    )
             except BaseException as exc:
                 # The one place every driver's turn passes through: a turn that
                 # raises (a denied pre-request hook, a crash before the provider
@@ -1130,6 +1159,8 @@ class QueueProcessor:
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
                 raise
+            await self._run_after_turn()  # and what was queued while this round ran
+            return parent_uuid
 
     async def _execute_llm_turn_inner(
         self,
@@ -1195,6 +1226,7 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
+        shown_reply = ""  # on screen, not yet in history: a Stop during tools keeps it
 
         try:
             # Context service: attach context blocks (curator, snapshot,
@@ -1658,6 +1690,7 @@ class QueueProcessor:
                     tool_results=None,
                     thinking_content=thinking_blocks,
                 )
+                shown_reply = clean_response
                 voice = getattr(self, "active_voice", None)
                 has_spoken_text = clean_response.strip() or parsed_response.get("spoken_text")
                 if voice and has_spoken_text and not self.cancel_processing:
@@ -1839,6 +1872,7 @@ class QueueProcessor:
                 thinking_content=thinking_list,
                 tool_calls=tool_call_entries,
                 provider_reasoning=_last_provider_reasoning(self.api_service),
+                voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
             )
 
             # Add assistant message to conversation history
@@ -1872,6 +1906,7 @@ class QueueProcessor:
                 assistant_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                assistant_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1880,6 +1915,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 # Native tool results: add to history in native API format
                 # so provider can reconstruct tool_result turns correctly
@@ -1977,6 +2013,7 @@ class QueueProcessor:
                 xml_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                xml_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1985,6 +2022,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 history_results_xml = list(xml_tool_results)
                 if history_results_xml:
@@ -2064,6 +2102,7 @@ class QueueProcessor:
 
             self.turn_completed = True
             self.stats["total_thinking_time"] += thinking_duration
+            await self._keep_interrupted_reply(parent_uuid, shown_reply)
 
         except Exception as e:
             logger.error(f"Error processing message: {type(e).__name__}: {e}")
@@ -2148,8 +2187,93 @@ class QueueProcessor:
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
                 or "end_turn",
             )
+            self._stamp_voice_turn(None)
 
         return parent_uuid
+
+    def _stamp_voice_turn(self, turn_id: str | None) -> None:
+        """Every event of a voice turn carries its id, its turn_complete last.
+
+        The Engine streams a voice turn's reply by that id (request_id): the
+        next turn's stream starts before a talked-over turn's late events are
+        out, and its turn_complete would end that stream before the reply.
+        """
+        token, self._voice_turn_token = self._voice_turn_token, None
+        if token is not None:
+            try:
+                current_turn.reset(token)
+            except ValueError:  # set in another task: nothing of it is here
+                pass
+        if turn_id:
+            fields = {**current_turn.get(), "request_id": turn_id}
+            self._voice_turn_token = current_turn.set(fields)
+
+    def _voice_turn_metadata(self) -> dict[str, Any]:
+        """Which voice turn a reply belongs to: a talk-over after it finished cuts
+        it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
+        turn_id = _voice_turn_id(self.active_origin_context)
+        return {"voice_turn_id": turn_id} if turn_id else {}
+
+    def after_turn(self, voice_turn: str, work: Callable[[], Awaitable[Any]]) -> None:
+        """Run `work` under the turn lock once `voice_turn` has no round left to run.
+
+        A turn writes its tool calls and their results under the lock, so a
+        history edit made in `work` never lands between them. Never waits: the
+        work is queued, holding nothing, and runs as the round holding the lock
+        ends, as its own turn ends, or first thing in the next round; with no
+        round running, right after this returns. No later round starts before it.
+        """
+        self._after_turn.append((voice_turn, work))
+        if self._open_voice_turn != voice_turn and not self._turn_lock.locked():
+            self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
+
+    async def _flush_after_turn(self) -> None:
+        async with self._turn_lock:
+            await self._run_after_turn()
+
+    async def _run_after_turn(self) -> None:
+        """The queued work whose turn has no round left (under the turn lock)."""
+        due = [work for turn, work in self._after_turn if turn != self._open_voice_turn]
+        self._after_turn = [item for item in self._after_turn if item[0] == self._open_voice_turn]
+        for work in due:
+            try:
+                await work()
+            except Exception:
+                logger.exception("work queued after a turn failed")
+
+    async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
+        """Keep the reply text a Stop cut off, marked interrupted.
+
+        The user watched it stream; without it the next turn answers a question
+        the model no longer remembers asking. A voice turn keeps it too, under
+        its voice turn id: the worker then cuts it to the part that was played
+        (LocalStateService.record_interrupted_voice_reply). A Stop during the
+        call cuts its stream; one while tools run leaves `shown`, the reply on
+        screen.
+        """
+        take = getattr(self._streaming_handler, "take_interrupted_text", None)
+        text = take() if callable(take) else ""
+        text = text if isinstance(text, str) and text.strip() else shown
+        if not isinstance(text, str) or not text.strip():
+            return
+        voice = self._voice_turn_metadata()
+        # History first: a second cancel can land on the await below, and the
+        # engine reads history when turn_complete goes out.
+        self._add_message_fn(
+            ConversationMessage(
+                role="assistant", content=text, metadata={"interrupted": True, **voice}
+            ),
+            parent_uuid=parent_uuid,
+        )
+        try:
+            await self.conversation_logger.log_assistant_message(
+                text,
+                parent_uuid=parent_uuid,
+                model=getattr(self.api_service, "model", None),
+                voice_turn_id=voice.get("voice_turn_id"),
+            )
+        except Exception:
+            logger.exception("Could not log the interrupted reply")
 
     # ------------------------------------------------------------------
     # Shared helpers (used by both native and XML tool paths)

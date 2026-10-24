@@ -7,6 +7,7 @@ capability (`audio_capability` op), opens `audio.sock`, and streams PCM frames.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import hmac
 import logging
@@ -303,6 +304,11 @@ class AudioIPC:
 
         watcher = asyncio.create_task(watch())
         chunks = speech.stream(text)
+        # The generator holds the speech engine's RLock across its yields, so every
+        # step and the close run on this one thread: an RLock refuses a release
+        # from any thread but the one that took it.
+        thread = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="voice-speak")
+        loop = asyncio.get_running_loop()
         done = object()
         sequence, started = 0, time.monotonic()
         first_audio_ms = None
@@ -310,7 +316,7 @@ class AudioIPC:
             while not cancelled.is_set():
                 if not self.live(grant):
                     raise kva.FrameError("stale_generation", "Voice room was replaced")
-                item = await asyncio.to_thread(next, chunks, done)
+                item = await loop.run_in_executor(thread, next, chunks, done)
                 if item is done:
                     break
                 samples, rate = item
@@ -351,4 +357,7 @@ class AudioIPC:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
             # Drain the sync generator off the loop so the VibeVoice worker resets.
-            await asyncio.to_thread(chunks.close)
+            try:
+                await loop.run_in_executor(thread, chunks.close)
+            finally:
+                thread.shutdown(wait=False)

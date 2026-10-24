@@ -119,7 +119,8 @@ def main() -> None:
         python = ensure_runtime(
             root,
             pins,
-            "import faster_whisper, kokoro_onnx, sounddevice, numpy, livekit.rtc",
+            "import faster_whisper, kokoro_onnx, sounddevice, numpy, livekit.rtc, "
+            "livekit.agents, livekit.plugins.silero, livekit.local_inference",
             progress,
         )
         progress("starting", "Starting shared voice service")

@@ -91,7 +91,9 @@ test("barge_in and latency events land in state", () => {
   assert.equal(s.latency?.llm_first_token_ms, null);
 });
 
-function harness(opts: { joinFails?: boolean } = {}) {
+type Script = Array<Record<string, unknown>>;
+
+function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script } = {}) {
   const calls: string[] = [];
   let speaking: (b: boolean) => void = () => undefined;
   const room = {
@@ -102,15 +104,21 @@ function harness(opts: { joinFails?: boolean } = {}) {
     onDisconnected: () => undefined,
   };
   const api = {
-    create: async () => (calls.push("create"), view()),
+    create: async () => (calls.push("create"), view({ state: opts.startsAs ?? "ready" })),
     join: async () => {
       calls.push("join");
       if (opts.joinFails) throw new Error("409: models not ready");
       return { voice_session_id: "v1", generation: 1, room_name: "r", livekit_url: "ws://x", participant_token: "t", expires_at_utc_ms: 0 };
     },
     stop: async (_id: string, _g: number, reason: string) => (calls.push(`stop:${reason}`), view()),
-    events: (_id: string, _c: string | null, signal: AbortSignal) =>
-      new Promise<void>((_, reject) => signal.addEventListener("abort", () => reject(new Error("abort")))),
+    events: (_id: string, _c: string | null, signal: AbortSignal, onEvent: (e: never) => void) =>
+      new Promise<void>((_, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("abort")));
+        // the engine's later states, one per tick, as the SSE stream delivers them
+        (opts.events ?? []).forEach((payload, i) =>
+          setTimeout(() => (calls.push(`event:${payload.state}`), onEvent(ev("voice.state", payload))), 5 * (i + 1)),
+        );
+      }),
   };
   return { calls, api, room, speaking: (b: boolean) => speaking(b), controller: new VoiceRoomController(api, async () => room) };
 }
@@ -134,4 +142,41 @@ test("a refused join surfaces the error and never asks for the mic", async () =>
   assert.match(s.error ?? "", /models not ready/);
   assert.ok(!h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
+});
+
+test("a cold start joins only once the engine says ready", async () => {
+  const h = harness({
+    startsAs: "starting",
+    events: [{ state: "downloading_models", download: { model: "parakeet", bytes_done: 1, bytes_total: 2 } }, { state: "ready" }],
+  });
+  await h.controller.start("s1", null);
+  assert.deepEqual(h.calls, ["create", "event:downloading_models", "event:ready", "join", "connect", "mic:true"]);
+  await h.controller.stop();
+});
+
+test("a worker state that lands before ready still lets the room join", async () => {
+  const h = harness({ startsAs: "starting", events: [{ state: "listening" }] });
+  await h.controller.start("s1", null);
+  assert.deepEqual(h.calls, ["create", "event:listening", "join", "connect", "mic:true"]);
+  await h.controller.stop();
+});
+
+test("a runtime that fails before ready never joins or asks for the mic", async () => {
+  const h = harness({ startsAs: "starting", events: [{ state: "error" }] });
+  await h.controller.start("s1", null);
+  assert.equal(h.controller.getState().state, "error");
+  assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
+  assert.ok(h.calls.includes("stop:error"));
+});
+
+test("a late ready from the runtime does not undo the browser's connecting", () => {
+  const connecting = { ...initialRoomState, state: "connecting" as const };
+  assert.equal(reduceVoiceEvent(connecting, ev("voice.state", { state: "ready" })).state, "connecting");
+  assert.equal(reduceVoiceEvent(connecting, ev("voice.state", { state: "thinking" })).state, "thinking");
+});
+
+test("only a page served from this computer can reach the voice room", async () => {
+  const { roomReachable } = await import("../src/voice/room-state.ts");
+  assert.ok(["localhost", "127.0.0.1", "[::1]"].every(roomReachable));
+  assert.ok(!["10.0.0.7", "kollabor.ai", "192.168.1.20"].some(roomReachable));
 });

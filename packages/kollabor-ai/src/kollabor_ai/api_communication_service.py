@@ -1549,6 +1549,10 @@ class APICommunicationService:
             if meta.get("agent_hud_sources"):
                 formatted["agent_hud_sources"] = meta["agent_hud_sources"]
 
+            if role == "assistant" and not content and "tool_calls" not in formatted:
+                # A reply with nothing to say and no native call (a resumed
+                # tool-only reply, a talked-over one): providers refuse it.
+                continue
             messages.append(formatted)
 
         return self._strip_leading_orphans(messages)

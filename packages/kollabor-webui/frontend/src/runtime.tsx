@@ -45,7 +45,6 @@ import {
   type TurnClock,
 } from "./turn-timing";
 import { VoiceModeProvider } from "./voice-mode";
-import { VoiceRoomProvider } from "./voice/voice-room";
 
 export type EngineState = {
   sessionId: string;
@@ -67,6 +66,8 @@ export type EngineState = {
 };
 
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
+// The converter reads convertConfig off a message: "none" ends its join group.
+type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
 const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
 
 const PermissionCancellationContext = createContext<{
@@ -364,6 +365,28 @@ function historyToMessages(
     }
   };
 
+  // A voice turn can start with its reply (the greeting has no user message),
+  // and assistant-ui joins adjacent assistant messages: the reply before a new
+  // voice turn ends its group, so the two turns show apart.
+  let lastReply: { index: number; voiceTurn: string | null } | undefined;
+  const startReply = (metadata: Record<string, unknown> | null) => {
+    const voiceTurn = asString(metadata?.voice_turn_id) ??
+      (metadata?.interrupted === true ? asString(metadata?.turn_id) : null);
+    if (voiceTurn && lastReply && lastReply.voiceTurn !== voiceTurn) {
+      messages[lastReply.index] = {
+        ...messages[lastReply.index],
+        convertConfig: { joinStrategy: "none" },
+      } as JoinableMessage;
+      closeTurn();
+    }
+    return voiceTurn;
+  };
+  const pushReply = (message: ThreadMessageLike, voiceTurn: string | null) => {
+    messages.push(message);
+    lastReply = { index: messages.length - 1, voiceTurn };
+    firstReply ??= messages.length - 1;
+  };
+
   const toolOutputResult = (message: HistoryMessage) => {
     const metadata = asRecord(message.metadata);
     const reference = asString(metadata?.history_output_ref);
@@ -412,6 +435,7 @@ function historyToMessages(
       });
       // A turn that was only agent status stays in the Trajectory tab.
       if (!content.length) return;
+      lastReply = undefined;  // a shown prompt already ends the reply's group
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
@@ -427,17 +451,18 @@ function historyToMessages(
         // Nothing to show: the agent chose not to answer (e.g. a hub message
         // that was only an acknowledgement).
         if (!content.length) return;
-        messages.push({
+        const voiceTurn = startReply(metadata);
+        pushReply({
           id: `history-${sourceIndex}`,
           role: "assistant",
           content,
           status: restoredStatus(metadata),
-        });
-        firstReply ??= messages.length - 1;
+        }, voiceTurn);
         finalReplyAt = message.timestamp;
         return;
       }
       // A step with tool calls; the turn's final reply comes after it.
+      const voiceTurn = startReply(metadata);
       turnTools += calls.length;
       finalReplyAt = undefined;
 
@@ -460,13 +485,12 @@ function historyToMessages(
         callsById.set(call.toolCallId, call);
         content.push(call);
       }
-      messages.push({
+      pushReply({
         id: `history-${sourceIndex}`,
         role: "assistant",
         content,
         status: restoredStatus(metadata),
-      });
-      firstReply ??= messages.length - 1;
+      }, voiceTurn);
       return;
     }
 
@@ -829,9 +853,7 @@ export function EngineRuntimeProvider({
         >
           <PermissionToolUI />
           <VoiceModeProvider api={api} sessionId={sessionId}>
-            <VoiceRoomProvider api={api} sessionId={sessionId}>
-              {children}
-            </VoiceRoomProvider>
+            {children}
           </VoiceModeProvider>
         </InitialMessagesGate>
       </PermissionCancellationContext.Provider>

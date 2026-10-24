@@ -1,132 +1,91 @@
-# Issue #301: classifier-free LiveKit voice cutover
+# Issue #301: LiveKit voice, classifier out of the voice path
 
-Status: implementation checklist; not evidence of acceptance or a live rollout.
-Source baseline: `release/0.18.0` at `b1c8c514`.
+Status: built on `issue-301-livekit-cutover` (PR #318), proven live in a scratch
+web UI on 2026-10-23. PhoneLink voice and the before-latency baseline are open.
 
-## Fixed integration contract
+## Scope
 
-- Use one Engine-managed LiveKit room path and the owner-sealed #299 contract:
-  one `VoiceService` / `SpeechAdapter` / KVA1 streaming-PCM owner.
-- Room audio goes through Parakeet-MLX STT, then into the selected session and
-  thread through the existing RuntimeHost/session history, admission, and
-  `PermissionManager` path. The configured LLM provider handles the turn with
-  thinking low/off. VibeVoice Carter at five steps streams the reply back to the
-  same room.
-- WebUI and PhoneLink use this same path. Do not add a second LiveKit
-  integration, model manager, worker-side LLM/tool path, or permission bypass.
-  Keep the existing dangerous-command blocklist in the normal guarded turn.
-- Keep each user's existing provider, API-key, and model settings intact.
-  Live E2E, Engine/WebUI restarts, and audio demos are gated on explicit
-  approval; #299 currently forbids them.
+Voice runs on the LiveKit Agents stack the livekit-demo uses. The intent and
+style classifiers stay in Kollab for other features; voice never starts or calls
+them, and no voice screen shows classifier controls, status or decisions.
 
-## Removal and refactor inventory
+## Pipeline
 
-Classifier-only code and model assets to remove after replacement coverage is
-in place:
+- The Engine owns one local `livekit-server` (loopback, per-run key) and one
+  agent worker per voice session (`kollabor_engine/voice_livekit.py`).
+- The worker (`kollabor_voice/livekit_worker.py`) runs an `AgentSession`:
+  Silero VAD, the v1-mini turn detector, VAD interruption. Parakeet does
+  speech-to-text and VibeVoice Carter text-to-speech, both through the one voice
+  service owner.
+- A final transcript becomes a turn of the selected Kollab session: the worker's
+  `llm_node` POSTs `/voice/sessions/{id}/turns` and reads NDJSON lines
+  (`{"text"}` per sentence, then `{"done", "turn_id"}`). Replies are spoken
+  sentence by sentence while the rest is still generating.
+- Talking over the agent works like the demo (LiveKit's defaults, `mode: vad`):
+  half a second of speech pauses the voice. Words in it commit a user turn,
+  which interrupts the reply: the worker closes the `/turns` stream, and the
+  Engine revokes the turn's admission and cancels the session turn. No words
+  within 2 s (a cough) and the voice resumes where it paused.
+  `kind: "greeting"` is a hidden instruction turn that opens the room.
+- The worker reports `listening`, `hearing`, `thinking` and `speaking` from
+  LiveKit's own state changes; the Engine never guesses them.
+- Turn ids are canonical UUIDs. Thinking runs at the lowest level the model
+  takes (`kollabor/llm/voice_turn.py`); the user's provider, key and model stay.
+- Voice turns run through the same guarded turn path as typed ones, so the
+  dangerous-command block list applies (no voice-specific test proves it yet).
 
-- `packages/kollabor-voice/src/kollabor_voice/classifiers.py`, `laya.py`,
-  `qwen.py`, `laya_voice_model.py`, `laya_worker.py`, and `qwen_worker.py`.
-- Tracked `voice-intent-v1.safetensors` and `spoken-style-v1.safetensors`; the
-  classifier/Laya/Qwen model descriptors, pins, and assets in `manifest.json`.
-  Retain the Parakeet and VibeVoice manifest configuration.
-- Classifier-specific review/ack/observer paths in `speech_review.py`,
-  `acks.py`, and `observer.py`; remove the `voice-classifier` speech-cache
-  producer, not unrelated progress/audio caching.
+## Web UI
 
-Refactor callers; do not remove their non-classifier lifecycle blindly:
+- The composer mic starts the room in this browser, and the pulsing mic stops
+  it. The strip above the composer shows the state, Interrupted, model
+  downloads, latency (Hear, Think, Speak, Total) and a stop button.
+- The browser joins only once the runtime is ready, so a cold start that is
+  still loading or downloading models waits instead of failing.
+- `livekit-server` listens on loopback, so only a page served from this computer
+  gets the room. Elsewhere the mic is the `/voice` toggle (the computer running
+  the agent listens), as before.
 
-- `packages/kollabor-voice/src/kollabor_voice/service.py`: classifier and
-  speech-review state/jobs, RPC ops, preparation/submission/result handling,
-  and owned worker lifecycle. `client.py`: `voice_out` and `review_speech`
-  review polling.
-- `plugins/voice_plugin.py`: classifier selection/preparation, decision and
-  observer/log state, classifier acknowledgements, and speech-review path.
-  Preserve or replace capture/session lifecycle as one coherent path rather
-  than deleting it without an integration owner.
-- `kollabor/panels/voice.py`: classifier-only settings/status. Preserve other
-  voice settings only where still supported by the target design.
-- `kollabor/commands/system_commands/handlers/voicemode.py`: classifier
-  command/status/log surfaces; `plugins/altview/voice_classifier_altview.py`:
-  classifier decision UI. Update the classifier-specific `said` activity field
-  in `kollabor/state/snapshots.py` and WebUI `voice-mode.tsx`.
-- Audit classifier-only tests and `packages/kollabor-voice/bench/` training,
-  data, and result artifacts. Keep unrelated STT, echo, and speaker-gate
-  coverage/assets.
+## Talk-over
 
-Preference boundary is a prerequisite, not a cleanup detail:
+- 0.5 s of voice pauses the reply. Words cancel it and become the next turn; a
+  cough (no words within 2 s) resumes it.
+- The talked-over reply keeps only the part that was played, marked
+  interrupted: the worker posts `turns/{id}/interrupted`, the Engine calls
+  `state.voice_interrupted_reply`. Attach RPCs answer in the order they came, so
+  no handler waits on a turn: a cut whose turn still has a round to run is
+  queued on it (`QueueProcessor.after_turn`), answered at once, and lands under
+  the turn lock as soon as no round of that turn is left, always before the next
+  model call. A cut that lands late publishes `voice_reply_cut` and open windows
+  reload.
+- The worker drains its event outbox before it posts the next turn, so the
+  daemon has the cut first.
 
-- `classifiers.py` currently provides `load_preferences` used by `speech.py`,
-  `transcription.py`, and `speech_cache.py` for general speech settings and TTS
-  cache identity. Move that persistence seam to a classifier-independent
-  settings module first; preserve stored STT/TTS/VibeVoice values and cache
-  behavior.
-- Keep and extend `speech_settings.py` for supported speech-engine settings.
-  Do not move or overwrite LLM credentials: direct turns must keep resolving the
-  user's existing provider/API-key/model profile through the Engine.
-- Remove only tracked classifier source/model assets in this task branch. Do
-  not purge user model caches, delete external model/runtime artifacts, or
-  terminate a live external process.
+## Logs
 
-## Commit sequence
+`<voice root>/logs/livekit-server.log` and `livekit-worker.log` (the voice root
+is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
 
-1. Freeze the source inventory/contract and establish a reproducible baseline.
-2. Integrate the LiveKit room/audio adapter with the #299 owner path; route
-   Parakeet transcripts through the selected session/thread.
-3. Connect direct LLM turns and streaming VibeVoice; preserve user settings,
-   low/off thinking, blocklist, and permission fencing.
-4. Remove classifier workers/models/preferences/review/ack/observer callers and
-   dead UI paths only after replacement tests cover them.
-5. Finish regression, lifecycle, import-residue, latency, and product-readiness
-   gates; update final user-facing documentation.
+## Live evidence (2026-10-23, scratch stack, `say` audio as the browser mic)
 
-## Implementation progress
+- Greeting spoken, the question heard by Parakeet, the reply streamed sentence
+  by sentence, at 1280, 820 and 390 px.
+- Every talk-over stopped the audio within ~0.1 s and cancelled the turn (the
+  model saw its client go away mid-stream), with no "Audio stream failed".
+- Latency per turn: Hear 0.1-0.7 s, Think 0.9-1.0 s, Speak 1.1-1.8 s.
 
-- [x] In the #301 lane, general speech-preference persistence now lives in
-  `speech_settings.py` through `load_speech_preferences` and
-  `save_speech_preferences`. Reads expose only speech settings; locked atomic
-  writes preserve unrelated stored keys. Speech engine, transcription, cache,
-  and service preference-watch callers use the speech-only API. Classifier
-  preference APIs remain in place until classifier surfaces are removed.
-- [x] `packages/kollabor-voice/tests`: 152 passed on Python 3.14.7;
-  Ruff check passed. This is a local task-branch checkpoint, not a pushed build.
-- [x] Extracted `voice_preamble`, `strip_voice_preamble`,
-  `turn_display_texts`, and `VOICE_RULES_MARK` to `voice_context.py` and
-  migrated Engine/Agent/history/resume callers. `observer.py` remains for
-  classifier/audio/admission behavior; no observer code was deleted. The 73
-  targeted root/voice tests passed on Python 3.14.7; Ruff and Black checks pass.
-- [ ] LiveKit transport/Engine integration and classifier removal remain
-  pending. Browser end-to-end acceptance is blocked because browser-control
-  tooling is unavailable; do not substitute live audio or services.
+## Open
 
-## Validation and latency plan
+- PhoneLink: the phone reaches the Engine through the encrypted relay channel,
+  which carries no WebRTC media. Phone voice needs the phone's audio bridged over
+  that channel into the room (or a reachable TURN path).
 
-- Unit/integration coverage: room lifecycle and failure handling; Parakeet
-  transcripts; selected session/thread; provider/key/model preservation;
-  dangerous-command blocklist and `PermissionManager`; VibeVoice streaming and
-  errors; repeated owned-service shutdown with no orphan workers.
-- Add a negative import/reference check proving classifier modules, operations,
-  dependencies, and model assets are absent. Run voice, engine-safety, WebUI,
-  and PhoneLink suites.
-- Before/after latency: same approved host, fixed fixture-turn corpus,
-  provider/model/settings, and documented warm/cold conditions. Use three
-  unmeasured warmups and at least 30 measured turns per condition. Record
-  environment and sample counts plus p50/p95 for transport/capture, STT, LLM
-  first-token, TTS first-chunk, and end-to-end response. Do not capture or upload
-  live audio for this benchmark.
-- Live WebUI + PhoneLink E2E remains pending explicit approval while
-  #299's no-live-audio/demo/restart restrictions apply. Until then, use fixtures
-  and mocked rooms and do not claim live acceptance.
+## Checklist
 
-## Product-ready checklist
-
-- [ ] Both WebUI and PhoneLink use the same Engine-owned LiveKit flow.
-- [ ] Transcript and response stay on the selected session/thread and normal
-      history/admission/permission path.
-- [ ] Dangerous-command blocklist and per-user provider/API-key/model settings
-      are preserved; thinking stays low/off by default.
-- [ ] No classifier imports, settings, workers, model assets, review/ack routes,
-      or stale UI commands remain.
-- [ ] Service lifecycle tests show no task or owned worker leaks after shutdown.
-- [ ] Before/after p50/p95 latency results and test environment are recorded.
-- [ ] Live E2E is run only after approval; otherwise its pending status is clear.
-- [ ] User docs describe setup, settings, errors, and the supported voice flow.
+- [x] One Engine-owned LiveKit flow; no second integration or model manager.
+- [x] Turns stay on the selected session and thread, through admission and
+      permissions; provider, key and model settings kept; thinking low.
+- [x] Classifier modules, models, workers and manifest entries still present;
+      the voice path never imports or calls them (tests).
+- [x] No orphaned worker or server after stop (process-group kill, tests).
+- [ ] PhoneLink voice.
+- [x] Before/after latency (#301, "Measurement").

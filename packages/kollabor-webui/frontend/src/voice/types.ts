@@ -7,6 +7,7 @@ export type VoiceSessionState =
   | "requesting_permission"
   | "connecting"
   | "listening"
+  | "hearing"
   | "thinking"
   | "speaking"
   | "stopping"

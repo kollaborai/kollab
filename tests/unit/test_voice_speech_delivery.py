@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from kollabor_voice.client import VoiceClient
-from kollabor_voice.speech_review import SpeechDecision
 
 from plugins.voice_plugin import VoicePlugin
 
@@ -20,11 +19,7 @@ def plugin():
     value = VoicePlugin(event_bus=Bus(), config={})
     value._lease = {"epoch": "owner", "token": "capability"}
     value.validate_turn = AsyncMock()
-    value.classifier_name = "laya"
     value._client = VoiceClient()
-    value._client.review_speech = AsyncMock(
-        return_value=SpeechDecision("speak", provider="laya")
-    )
     value._client.call = AsyncMock(return_value={"ids": ["sentence"]})
     value._rewrite_speech = AsyncMock(return_value="The short answer is ready.")
     return value
@@ -40,7 +35,7 @@ def reply(spoken, display="Visible code: ```python\nprivate_example()\n```", **e
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["rewrite", "review"])
+@pytest.mark.parametrize("operation", ["rewrite"])
 async def test_attached_speech_does_not_block_its_own_rpc_reply(operation):
     from kollabor_rpc import RpcClient
 
@@ -56,11 +51,7 @@ async def test_attached_speech_does_not_block_its_own_rpc_reply(operation):
             if request["method"] == "voice.result":
                 result = {
                     "done": True,
-                    "result": (
-                        {"spoken_text": "The short answer is ready."}
-                        if operation == "rewrite"
-                        else SpeechDecision("speak", provider="provider").to_wire()
-                    ),
+                    "result": {"spoken_text": "The short answer is ready."},
                 }
             incoming.put_nowait(
                 {
@@ -86,10 +77,6 @@ async def test_attached_speech_does_not_block_its_own_rpc_reply(operation):
     value._event_bus = SimpleNamespace(
         get_service=lambda n: rpc if n == "rpc_client" else None
     )
-    if operation == "review":
-        value._client.review_speech.return_value = SpeechDecision(
-            "defer", provider="laya"
-        )
 
     async def device_call(op, **params):
         if op == "voice_out":
@@ -205,11 +192,11 @@ async def test_cancel_or_stop_clears_current_and_queued_remote_speech(action):
     value.requested = True
     started = asyncio.Event()
 
-    async def wait_for_review(*args):
+    async def wait_for_output(*args):
         started.set()
         await asyncio.Event().wait()
 
-    value._client.review_speech.side_effect = wait_for_review
+    value._client.voice_out = wait_for_output
     for name in ["first", "second"]:
         await value.handle_remote_reply(
             {
@@ -231,7 +218,7 @@ async def test_cancel_or_stop_clears_current_and_queued_remote_speech(action):
         call.args[0] == "voice_out" for call in value._client.call.call_args_list
     )
     if action == "cancel":
-        value._client.review_speech.side_effect = None
+        del value._client.voice_out
         await value.handle_remote_reply(
             {
                 "owner_epoch": "owner",
@@ -267,22 +254,19 @@ async def test_remote_reply_queue_has_explicit_bound_and_rejects_stale_owners():
         )
     assert value.status()["pending_replies"] == 32
     assert "queue is full" in value.status()["output"]["error"]
-    # A provider/context change invalidates work queued before the switch.
-    value._classifier_generation += 1
+    # A cancel invalidates work queued before it.
+    value._output_generation += 1
     await value._remote_reply_queue.join()
     value._spoken_reply.assert_not_awaited()
     await value.stop_voice()
 
 
 @pytest.mark.asyncio
-async def test_only_spoken_field_reaches_classifier_and_device_and_duplicates_do_not_replay():
+async def test_only_spoken_field_reaches_the_device_and_duplicates_do_not_replay():
     value = plugin()
     data = reply("The example is on screen.")
     await value._spoken_reply(data)
     await value._spoken_reply(data)
-    value._client.review_speech.assert_awaited_once_with(
-        "The example is on screen.", "owner", "capability"
-    )
     value._client.call.assert_awaited_once()
     assert value._client.call.call_args.kwargs["text"] == "The example is on screen."
     assert "private_example" not in repr(value._client.call.call_args)
@@ -294,169 +278,35 @@ async def test_only_spoken_field_reaches_classifier_and_device_and_duplicates_do
 async def test_explicit_silence_never_uses_display_fallback(spoken):
     value = plugin()
     await value._spoken_reply(reply(spoken))
-    value._client.review_speech.assert_not_awaited()
     value._client.call.assert_not_awaited()
     value._rewrite_speech.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_missing_spoken_field_is_created_on_host_before_classification():
+async def test_missing_spoken_field_is_created_on_host_before_it_is_spoken():
     value = plugin()
     await value._spoken_reply(reply(None))
     assert "private_example" in value._rewrite_speech.call_args.args[0]
-    value._client.review_speech.assert_awaited_once_with(
-        "The short answer is ready.", "owner", "capability"
-    )
+    assert value._client.call.call_args.kwargs["text"] == "The short answer is ready."
     assert "private_example" not in repr(value._client.call.call_args)
 
 
 @pytest.mark.asyncio
-async def test_uncertain_laya_style_gets_tool_free_provider_review_of_spoken_only():
-    value = plugin()
-    value._client.review_speech.return_value = SpeechDecision(
-        "defer", "Laya is unsure", "laya", confidence=0.56
-    )
-    value._speech_request = AsyncMock(
-        return_value='{"decision":"speak","reason":"Brief conversational reply"}'
-    )
-    await value._spoken_reply(reply("The code example is on your screen."))
-    request = value._speech_request.call_args.args[1]
-    assert request == {
-        "spoken_text": "The code example is on your screen.",
-        "classifier_note": "Laya is unsure",
-    }
-    assert "private_example" not in repr(value._speech_request.call_args)
-    assert value._last_speech_decision["provider"] == "laya+provider"
-    value._client.call.assert_awaited_once()
-    value._rewrite_speech.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_uncertain_style_provider_failure_does_not_speak_or_retry_forever():
-    value = plugin()
-    value._client.review_speech.return_value = SpeechDecision("defer", provider="laya")
-    value._speech_request = AsyncMock(side_effect=RuntimeError("Review unavailable"))
-    await value._spoken_reply(reply("The code example is on your screen."))
-    value._client.call.assert_not_awaited()
-    value._rewrite_speech.assert_not_awaited()
-    assert "Review unavailable" in value.status()["output"]["error"]
-
-
-@pytest.mark.asyncio
-async def test_uncertain_rewrite_is_reviewed_without_spending_another_rewrite():
-    value = plugin()
-    value._client.review_speech.return_value = SpeechDecision("defer", provider="laya")
-    value._speech_request = AsyncMock(
-        return_value='{"decision":"speak","reason":"Brief conversational reply"}'
-    )
-    await value._spoken_reply(reply("Run `pytest` now."))
-    value._rewrite_speech.assert_awaited_once()
-    value._speech_request.assert_awaited_once()
-    value._client.call.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_laya_rejected_rewrite_gets_one_provider_review_of_spoken_only():
-    value = plugin()
-    value._client.review_speech.return_value = SpeechDecision(
-        "rewrite",
-        "Use brief conversational language suitable for speech",
-        "laya",
-        confidence=0.99,
-    )
-    value._speech_request = AsyncMock(
-        return_value='{"decision":"speak","reason":"Brief conversational reply"}'
-    )
-    await value._spoken_reply(reply("I found the cause. I am checking the fix."))
-    value._rewrite_speech.assert_awaited_once()
-    value._speech_request.assert_awaited_once()
-    assert (
-        value._speech_request.call_args.args[1]["spoken_text"]
-        == "The short answer is ready."
-    )
-    assert "private_example" not in repr(value._speech_request.call_args)
-    assert value._last_speech_decision["provider"] == "laya+provider"
-    value._client.call.assert_awaited_once()
-    assert value._client.call.call_args.kwargs["text"] == "The short answer is ready."
-    assert value._speech_error is None
-
-
-@pytest.mark.asyncio
-async def test_attached_rewrite_gets_provider_review_without_another_rewrite():
-    value = plugin()
-    value._client.review_speech.return_value = SpeechDecision(
-        "rewrite", "Too technical", "laya"
-    )
-    value._speech_request = AsyncMock(return_value='{"decision":"speak"}')
-    await value._spoken_reply(reply("The short answer is ready.", rewrite_count=1))
-    value._rewrite_speech.assert_not_awaited()
-    value._speech_request.assert_awaited_once()
-    value._client.call.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("decision", ["rewrite", "unavailable"])
-async def test_rejected_rewrite_does_not_block_the_next_queued_reply(decision):
-    value = plugin()
-    value.requested = True
-    value._client.review_speech.side_effect = [
-        SpeechDecision("rewrite", "Too technical", "laya"),
-        SpeechDecision("speak", provider="laya"),
-    ]
-    value._speech_request = AsyncMock(
-        return_value='{"decision":"rewrite","reason":"Still too technical"}',
-        side_effect=(
-            RuntimeError("Provider unavailable") if decision == "unavailable" else None
-        ),
-    )
-    await value.handle_remote_reply(
-        {
-            "owner_epoch": "owner",
-            "reply_id": "rejected",
-            "spoken_text": "The short answer is ready.",
-            "rewrite_count": 1,
-        }
-    )
-    await value._remote_reply_queue.join()
-    value._speech_request.assert_awaited_once()
-    if decision == "unavailable":
-        assert "skipped" in value.status()["output"]["error"]
-        value._client.call.assert_not_awaited()
-    else:
-        # Still rejected after its one rewrite: spoken anyway, never dropped.
-        text = value._client.call.call_args.kwargs["text"]
-        assert text == "The short answer is ready."
-    assert value._observer_error is None
-    await value.handle_remote_reply(
-        {
-            "owner_epoch": "owner",
-            "reply_id": "next",
-            "spoken_text": "Yes, I can hear you.",
-        }
-    )
-    await value._remote_reply_queue.join()
-    assert value._client.call.call_args.kwargs["text"] == "Yes, I can hear you."
-    assert value._speech_error is None
-    value._rewrite_speech.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_previous_output_error_clears_when_the_next_review_starts():
+async def test_previous_output_error_clears_when_the_next_reply_starts():
     value = plugin()
     value._speech_error = "Spoken reply skipped: old rejection"
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def review(*args):
+    async def output(*args):
         started.set()
         await release.wait()
-        return SpeechDecision("speak", provider="laya")
+        return {"status": "queued", "ids": ["sentence"]}
 
-    value._client.review_speech.side_effect = review
+    value._client.voice_out = output
     task = asyncio.create_task(value._spoken_reply(reply("Yes, I can hear you.")))
     try:
         await started.wait()
         assert value._speech_error is None
-        assert value.status()["speech_review_state"] == "checking spoken reply"
     finally:
         release.set()
         await task
@@ -540,80 +390,6 @@ async def test_attached_rewrite_budget_cannot_restart_on_the_device():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", ["cancel", "classifier"])
-async def test_late_review_cannot_speak_after_cancellation_or_classifier_switch(cancel):
-    value = plugin()
-    started, release = asyncio.Event(), asyncio.Event()
-
-    async def review(*args):
-        started.set()
-        await release.wait()
-        return SpeechDecision("speak", provider="laya")
-
-    value._client.review_speech.side_effect = review
-    task = asyncio.create_task(value._spoken_reply(reply("The tests passed.")))
-    await started.wait()
-    if cancel == "cancel":
-        value._output_generation += 1
-    else:
-        value._classifier_generation += 1
-    release.set()
-    await task
-    value._client.call.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", ["cancel", "classifier", "owner"])
-async def test_provider_adjudication_cannot_speak_after_cancellation_or_owner_change(
-    cancel,
-):
-    value = plugin()
-    del value.validate_turn
-    value.requested = True
-    value._client.review_speech.return_value = SpeechDecision(
-        "rewrite", "Too technical", "laya"
-    )
-    started, release = asyncio.Event(), asyncio.Event()
-
-    async def review(*args):
-        started.set()
-        await release.wait()
-        return '{"decision":"speak"}'
-
-    value._speech_request = review
-    task = asyncio.create_task(
-        value._spoken_reply(reply("The check is complete.", rewrite_count=1))
-    )
-    await started.wait()
-    if cancel == "cancel":
-        value._output_generation += 1
-    elif cancel == "classifier":
-        value._classifier_generation += 1
-    else:
-        value._lease["epoch"] = "another-owner"
-    release.set()
-    await task
-    assert not any(
-        call.args[0] == "voice_out" for call in value._client.call.call_args_list
-    )
-
-
-@pytest.mark.asyncio
-async def test_provider_classifier_keeps_single_rewrite_budget():
-    value = plugin()
-    value.classifier_name = "provider"
-    value._speech_request = AsyncMock(
-        return_value='{"decision":"rewrite","reason":"Too technical"}'
-    )
-    await value._spoken_reply(reply("The check is complete."))
-    value._client.review_speech.assert_not_awaited()
-    value._rewrite_speech.assert_awaited_once()
-    assert value._speech_request.await_count == 2
-    # The one rewrite is spent and the reply is spoken, not dropped.
-    assert value._client.call.call_args.kwargs["text"] == "The short answer is ready."
-
-
-@pytest.mark.asyncio
 async def test_rewrite_provider_request_has_no_tools_and_reuses_one_client(monkeypatch):
     calls = []
     created = []
@@ -651,19 +427,3 @@ async def test_rewrite_provider_request_has_no_tools_and_reuses_one_client(monke
     assert all(kwargs == {"tools": []} for _, kwargs in calls)
     assert "Do not perform actions" in calls[0][0][0]["content"]
 
-
-@pytest.mark.asyncio
-async def test_unsure_qwen_style_gets_the_provider_check_with_its_name():
-    value = plugin()
-    value.classifier_name = "qwen"
-    value._client.review_speech = AsyncMock(
-        return_value=SpeechDecision(
-            "defer", "unsure", "qwen", "qwen3-0.6b-voice-v1", 0.6
-        )
-    )
-    value._provider_speech_review = AsyncMock(
-        return_value=SpeechDecision("speak", "reads naturally", "provider")
-    )
-    result = await value._review_speech("The build passed and the deploy is next.")
-    assert result.decision == "speak" and result.provider == "qwen+provider"
-    assert result.reason == "Fine-Tuned Qwen3 0.6B unsure; reads naturally"
