@@ -9,7 +9,7 @@ import type { ReadonlyJSONObject } from "assistant-stream/utils";
  * stream (token / acp_update / tool events). These build an ephemeral
  * assistant message here so a passive window sees the reply as it streams.
  * Nothing is persisted: the history reload at turn_complete replaces it, so
- * the id must stay fixed and stay out of the synced bookkeeping.
+ * the id must stay fixed through a turn and stay out of the synced bookkeeping.
  */
 
 export const LIVE_MESSAGE_ID = "live-turn";
@@ -213,17 +213,30 @@ export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<Hist
 export const replacedLiveTurn = (turn: LiveTurn): LiveTurn =>
   (turn.held ?? []).reduce(applyLiveEvent, { parts: [], requestId: turn.requestId, settled: "replaced" });
 
-/** The ephemeral assistant message, or null while nothing has streamed. */
+/**
+ * The ephemeral assistant message, or null while nothing has streamed.
+ *
+ * `isOptimistic` tells assistant-ui this message stands in for one that has
+ * not landed yet. It keeps every message it was given, so a live reply that
+ * history replaces would stay behind as a sibling of the stored one and show as
+ * a "2 / 2" branch picker. For an optimistic message it evicts the left-behind
+ * copy itself once the thread's last message is somewhere else.
+ *
+ * Each request gets its own message: a queued turn's reply mounts fresh, never
+ * as the previous reply's element re-rendering, which showed that reply twice
+ * beside its stored copy until the deferred markdown caught up.
+ */
 export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
   const parts = turn.parts.filter(
     (part) => (part.type === "text" && part.text) || part.type === "tool-call",
   );
   if (!parts.length) return null;
   return {
-    id: LIVE_MESSAGE_ID,
+    id: turn.requestId ? `${LIVE_MESSAGE_ID}:${turn.requestId}` : LIVE_MESSAGE_ID,
     role: "assistant",
     content: parts,
     status: SETTLED_STATUS[turn.settled ?? ""] ?? { type: "running" },
+    metadata: { isOptimistic: true },
   };
 }
 
@@ -234,5 +247,31 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
  */
 export const endsLiveTurn = (type: string): boolean => type === "turn_complete" || type === "error";
 
-export const isLiveMessage = (message: { id?: unknown }): boolean =>
-  String(message.id ?? "") === LIVE_MESSAGE_ID;
+export const isLiveMessage = (message: { id?: unknown }): boolean => {
+  const id = String(message.id ?? "");
+  return id === LIVE_MESSAGE_ID || id.startsWith(`${LIVE_MESSAGE_ID}:`);
+};
+
+const apartCopies = new WeakMap<object, object>();
+
+/**
+ * Keeps the live reply a message of its own. assistant-ui joins adjacent
+ * assistant messages into one, so a live reply that follows a stored one would
+ * be a part of it, then leave it and mount again as a message of its own when
+ * history lands a user row between them: the text blinks out for a few frames.
+ * The join strategy `none` on a message keeps the next one out of it. The copy
+ * is made per message, so a stored reply that no longer has the live one behind
+ * it joins again.
+ */
+export function apartFromLive<T extends { id?: unknown; role?: string }>(messages: readonly T[]): T[] {
+  return messages.map((message, index) => {
+    const next = messages[index + 1];
+    if (message.role !== "assistant" || !next || !isLiveMessage(next)) return message;
+    let copy = apartCopies.get(message);
+    if (!copy) {
+      copy = { ...message, convertConfig: { joinStrategy: "none" } };
+      apartCopies.set(message, copy);
+    }
+    return copy as T;
+  });
+}

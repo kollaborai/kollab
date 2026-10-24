@@ -37,6 +37,7 @@ import type {
 import { isToolOutputBatch } from "./api";
 import { shownMessagesChanged } from "./history-merge";
 import {
+  apartFromLive,
   applyLiveEvent,
   emptyLiveTurn,
   historyReplacesLiveTurn,
@@ -565,7 +566,7 @@ const converter = (
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = state.messages.map((message) => {
+  const stored = apartFromLive(state.messages).map((message) => {
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)

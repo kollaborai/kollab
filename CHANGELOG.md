@@ -55,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: a window watching an ACP agent's turn that started elsewhere streams its
   reply and tools live, keeps a stopped reply on screen until the stored one
   replaces it, and streams a turn queued right behind it. Prose the agent sends
-  after a cancel is neither shown nor stored.
+  after a cancel is neither shown nor stored. The reply shows no stray "2 / 2"
+  branch picker once it is stored, and it no longer blanks out and retypes, or
+  shows twice, when rows land before it.
 - Hub: the Telegram bridge wakes its target agent, and disconnecting the email
   bridge no longer waits out an IMAP IDLE.
 - Context-compaction emergency recovery prioritizes the latest human request,
