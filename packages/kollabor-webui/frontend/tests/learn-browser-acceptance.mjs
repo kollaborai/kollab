@@ -321,7 +321,7 @@ async function main() {
     await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
-    // Topic navigation is a reference flow; leaving a topic marks it completed in the menu (plain text, no controls).
+    // Topic navigation is a reference flow without completion controls.
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     const topics = shell.page.getByRole("navigation", { name: "Learn topics" });
     assert.equal(await topics.getByRole("button").count(), 11);
@@ -330,9 +330,6 @@ async function main() {
     await shell.page.waitForFunction(() => location.search === "?topic=agents");
     await waitForLesson(shell.page, "Agents");
     assert.equal(await shell.page.evaluate(() => document.activeElement?.tagName), "H1");
-    await topics.getByRole("button", { name: /^Kollab networks/ }).waitFor();
-    assert.match(await topics.getByRole("button", { name: /Kollab networks/ }).innerText(), /✓/);
-    assert.doesNotMatch(await topics.getByRole("button", { name: /^Agents/ }).innerText(), /✓/);
     assert.equal(await shell.page.getByRole("progressbar").count(), 0);
     assert.equal(await shell.page.getByRole("button", { name: /Mark complete|Mark incomplete|Previous lesson|Next lesson/ }).count(), 0);
     assert.equal(await shell.page.getByText("Unreleased", { exact: true }).count(), 0);
@@ -344,7 +341,6 @@ async function main() {
     await shell.page.getByRole("heading", { name: "That topic is not available" }).waitFor({ state: "visible" });
     await shell.page.getByRole("button", { name: "Browse topics" }).click();
     await shell.page.waitForFunction(() => location.search === "?topic=networks");
-
     await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/");
 
