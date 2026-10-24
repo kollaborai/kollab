@@ -882,11 +882,7 @@ const VOICE_METER = [0.1, 0.3, 0.55, 0.8];
 /** Voice mode at a glance: the mic level, what voice is doing, the last line. */
 const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
   const level = activity?.level ?? 0;
-  const line = activity?.said
-    ? `Said “${activity.said}”`
-    : activity?.heard
-      ? `Heard “${activity.heard}”`
-      : "";
+  const line = activity?.heard ? `Heard “${activity.heard}”` : "";
   return (
     <div
       data-slot="aui_voice-status"

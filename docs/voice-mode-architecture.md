@@ -1,6 +1,6 @@
 # Kollab Voice Mode Architecture (Spec)
 
-Status: Draft spec only. Nothing here is built yet.
+Status: Historical draft. Superseded by issue 301: the intent classifier is no longer part of voice and every final transcript goes straight to the agent turn (see features/voice-mode.md). The classifier modules stay for other features.
 Author: Marco (dictated), written up by Marclone.
 
 ## Goal

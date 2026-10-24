@@ -88,7 +88,9 @@ class VoiceService:
         from .laya import LayaWorker
         from .qwen import QwenWorker
 
-        # One local classifier is loaded at a time: the one last prepared.
+        # Local classifier workers for the on-demand classifier ops. Voice never
+        # prepares one: no process starts until a classifier op names it, and
+        # status() leaves them out. One is loaded at a time: the last prepared.
         self.classifiers = {w.name: w for w in (LayaWorker(root), QwenWorker(root))}
         self.classifier = self.classifiers["laya"]
         self.classifier_jobs = {}
@@ -265,7 +267,6 @@ class VoiceService:
             "stream_id": self.instance_id,
             "ready": self.setup.get("state") == "ready"
             and (self.speech is None or self.speech.status()["state"] == "ready"),
-            "classifier": self.classifier.status(),
             "speech": (
                 self.speech.status()
                 if self.speech

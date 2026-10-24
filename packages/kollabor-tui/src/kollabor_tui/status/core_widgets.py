@@ -142,28 +142,19 @@ class WidgetContext:
 # =============================================================================
 
 
-VOICE_DECISION_WORDS = {"respond": "sent", "ignore": "ignored", "defer": "unsure"}
+def voice_delivery_label(state: dict) -> str:
+    """Whether heard words reach the agent, e.g. "stopped 2 pending".
 
-
-def voice_classifier_label(state: dict) -> str:
-    """What the speech classifier did with the last words, e.g. "laya sent 2 pending".
-
-    "" when no classifier is configured. "stopped" means its request failed
-    and speech waits until /voice retry.
+    "" while speech flows. "stopped" means delivery failed and speech waits
+    until it recovers or /voice retry.
     """
-    name = str(state.get("classifier_name") or "").strip().lower()
-    if not name:
-        return ""
-    name = "ai" if name == "provider" else name
-    if state.get("observer_error"):
-        word = "stopped"
-    elif state.get("observing"):
-        word = "deciding"
-    else:
-        decision = (state.get("last_decision") or {}).get("decision")
-        word = VOICE_DECISION_WORDS.get(decision, "ready")
+    stopped = bool(state.get("observer_error"))
     pending = int(state.get("pending") or 0)
-    return f"{name} {word}" + (f" {pending} pending" if pending else "")
+    if not stopped and not pending:
+        return ""
+    return ("stopped" if stopped else "sending") + (
+        f" {pending} pending" if pending else ""
+    )
 
 
 def _level_meter(level: float) -> str:
@@ -185,22 +176,18 @@ def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
         if voice_state not in {"off", "starting", "listening", "error"}:
             voice_state = "error" if state.get("observer_error") else "off"
         label = f"mic {voice_state}"
-        # Live while listening: the level, and hearing / deciding / asking /
+        # Live while listening: the level, and hearing / transcribing /
         # speaking as the voice plugin works (VoicePlugin._activity).
         activity = state.get("activity") or {}
         if voice_state == "listening" and activity:
             meter = _level_meter(float(activity.get("level") or 0))
             label = f"mic {meter} {activity.get('stage') or 'listening'}"
-        classifier = voice_classifier_label(state) if voice_state != "off" else ""
-        if classifier:
-            label = f"{label} · {classifier}"
+        delivery = voice_delivery_label(state) if voice_state != "off" else ""
+        if delivery:
+            label = f"{label} · {delivery}"
         transcript = state.get("last_transcript") or {}
         heard = str(transcript.get("text") or "").strip()
-        said = activity.get("said") if voice_state == "listening" else None
-        if said and width >= 16:
-            available = max(4, width - len(label) - 9)
-            label = f"{label} · said: {_middle_truncate(said, available)}"
-        elif heard and voice_state in {"listening", "error"} and width >= 16:
+        if heard and voice_state in {"listening", "error"} and width >= 16:
             available = max(4, width - len(label) - 2)
             label = f"{label}: {_middle_truncate(heard, available)}"
         color = {
@@ -208,7 +195,7 @@ def render_microphone(width: int, ctx: Optional[WidgetContext]) -> str:
             "starting": T().warning[0],
             "error": T().warning[0],
         }.get(voice_state, T().text_dim)
-        if classifier and state.get("observer_error"):
+        if delivery and state.get("observer_error"):
             color = T().warning[0]
         return _fg(_middle_truncate(label, max(1, width)), color)
     except Exception as e:

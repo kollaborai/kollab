@@ -1,4 +1,4 @@
-"""General speech preferences stay independent of classifier settings."""
+"""Device voice preferences: speech engines and the transcript context."""
 
 import json
 import os
@@ -14,41 +14,44 @@ from kollabor_voice.speech_settings import (
 )
 
 
-def test_load_defaults_and_hide_classifier_preferences(tmp_path):
+def test_load_keeps_known_values_and_drops_the_rest(tmp_path):
     (tmp_path / "preferences.json").write_text(
         json.dumps({"classifier": "qwen", "context_lines": 23, "other": True})
     )
 
     preferences = load_speech_preferences(tmp_path)
 
-    assert preferences == speech_defaults()
+    assert preferences == {**speech_defaults(), "context_lines": 23}
     assert "classifier" not in preferences
-    assert "context_lines" not in preferences
     assert "other" not in preferences
 
 
-def test_save_merges_speech_settings_without_losing_other_stored_keys(tmp_path):
+def test_bad_context_lines_fall_back_to_the_default(tmp_path):
+    (tmp_path / "preferences.json").write_text(json.dumps({"context_lines": 500}))
+
+    assert load_speech_preferences(tmp_path)["context_lines"] == 10
+    with pytest.raises(ValueError, match="context_lines"):
+        save_speech_preferences({"context_lines": 0}, tmp_path)
+
+
+def test_save_merges_settings_without_losing_other_stored_keys(tmp_path):
     path = tmp_path / "preferences.json"
     path.write_text(
-        json.dumps(
-            {
-                "classifier": "qwen",
-                "context_lines": 23,
-                "future_setting": {"keep": True},
-            }
-        )
+        json.dumps({"classifier": "qwen", "future_setting": {"keep": True}})
     )
 
-    preferences = save_speech_preferences({"kokoro_voice": "bf_emma"}, tmp_path)
+    preferences = save_speech_preferences(
+        {"kokoro_voice": "bf_emma", "context_lines": 23}, tmp_path
+    )
 
     assert preferences["kokoro_voice"] == "bf_emma"
+    assert preferences["context_lines"] == 23
     assert set(preferences) == set(speech_defaults())
-    stored = json.loads(path.read_text())
-    assert stored == {
-        "classifier": "qwen",
-        "context_lines": 23,
+    assert json.loads(path.read_text()) == {
+        "classifier": "qwen",  # another feature's key, kept untouched
         "future_setting": {"keep": True},
         "kokoro_voice": "bf_emma",
+        "context_lines": 23,
     }
 
 
