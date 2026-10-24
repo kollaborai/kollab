@@ -864,8 +864,9 @@ class VoiceControl:
                 if not line:
                     continue
                 said.append(line)
-                # speaking and listening come from the worker, which knows when
-                # audio plays; a sentence handed over here has not been heard yet
+                # voice states (thinking, speaking, listening) come from the worker,
+                # which follows LiveKit's own; a sentence handed over here has not
+                # been heard yet
                 revision += 1
                 await self._publish_assistant(
                     binding,
@@ -930,8 +931,6 @@ class VoiceControl:
                         yield item
                     await self._final_response(binding, generation, turn_id, reply, said)
                     raw, consumed, revision, partial_id = "", 0, 0, str(uuid4())
-                elif kind == "thinking":
-                    await emit("voice.state", {"state": "thinking"})
                 elif kind == "tool_start":
                     await emit(
                         "voice.tool",

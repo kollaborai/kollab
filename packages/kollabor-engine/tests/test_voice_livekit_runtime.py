@@ -207,6 +207,7 @@ def test_jwt_is_hs256_with_grants():
 
 async def test_full_voice_turn(rig):
     rig.session.script = [
+        {"type": "thinking"},
         {"type": "token", "text": "<display_text>Sure thing, **done**. All good.</display_text>"},
         {"type": "token", "text": "<spoken_text>Sure thing, done. "},
         {"type": "token", "text": "All good now."},
@@ -294,8 +295,10 @@ async def test_full_voice_turn(rig):
         assert [p["revision"] for p in partials] == sorted(p["revision"] for p in partials)
         seqs = [e["sequence"] for e in events if e["event"] != "voice.state" or e["sequence"]]
         assert seqs == sorted(seqs)
-        # the worker reports speaking when audio plays; the engine never guesses it
-        assert not any(e["payload"].get("state") == "speaking" for e in events)
+        # past admission the worker reports states from LiveKit's own; the model's
+        # thinking event (late, maybe mid-speech) adds no second "thinking"
+        states = [e["payload"].get("state") for e in events if e["event"] == "voice.state"]
+        assert states.count("thinking") == 1 and "speaking" not in states
 
         stopped = await http.request(
             "DELETE",
