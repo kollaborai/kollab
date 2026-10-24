@@ -1,8 +1,10 @@
 """KVA1, the speech adapter and the service audio socket, with no network or audio device."""
 
 import asyncio
+import concurrent.futures
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -297,3 +299,70 @@ def test_a_cancelled_synthesis_task_still_drains_the_generator(service):
 
     run(with_room(service, scenario))
     assert service.speech.closed
+
+
+class LockedSpeech(FakeSpeech):
+    """Holds an RLock across its yields, as SpeechEngine.stream does."""
+
+    def __init__(self, chunks):
+        super().__init__(chunks)
+        self.lock = threading.RLock()
+
+    def stream(self, text):
+        with self.lock:
+            yield from super().stream(text)
+
+
+class Alternating(concurrent.futures.ThreadPoolExecutor):
+    """A default executor that never runs two calls in a row on the same thread."""
+
+    def __init__(self):
+        super().__init__(1)  # asyncio insists on the type; the work goes to the pools
+        self.pools = [concurrent.futures.ThreadPoolExecutor(1) for _ in range(2)]
+        self.turn = 0
+
+    def submit(self, fn, /, *args, **kwargs):
+        self.turn ^= 1
+        return self.pools[self.turn].submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait=True, **kwargs):
+        for pool in self.pools:
+            pool.shutdown(wait=wait)
+        super().shutdown(wait=wait)
+
+
+def lock_is_free(lock):
+    """True when another thread can take the lock: nothing was left holding it."""
+    got = []
+
+    def take():
+        if lock.acquire(timeout=1):
+            lock.release()
+            got.append(True)
+
+    worker = threading.Thread(target=take)
+    worker.start()
+    worker.join()
+    return got == [True]
+
+
+@pytest.mark.parametrize("talk_over", [False, True])
+def test_the_speech_lock_is_released_by_the_thread_that_took_it(service, caplog, talk_over):
+    service.speech = LockedSpeech(chunks=500 if talk_over else 3)
+
+    async def scenario(adapter):
+        asyncio.get_running_loop().set_default_executor(Alternating())
+        cancel, frames = asyncio.Event(), []
+        async for frame in adapter.synthesize(BINDING, "hi there", cancel):
+            frames.append(frame)
+            if talk_over and len(frames) == 3:
+                cancel.set()  # the listener talked over the reply
+        for _ in range(100):
+            if service.speech.closed:
+                break
+            await asyncio.sleep(0.01)
+
+    run(with_room(service, scenario))
+    assert service.speech.closed
+    assert "Audio stream failed" not in caplog.text
+    assert lock_is_free(service.speech.lock)

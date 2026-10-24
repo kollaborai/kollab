@@ -636,12 +636,12 @@ class Worker:
         return " ".join(pieces), language
 
     def begin_turn(self, text: str, greeting: bool) -> Turn:
-        turn = Turn(uuid.uuid4().hex, time.monotonic())
+        turn = Turn(str(uuid.uuid4()), time.monotonic())  # the Engine takes canonical UUIDs only
         if not greeting:
             self.metric("stt", self.stt_ms, turn.id)
             self.stt_ms = None
         turn.body = {
-            "transcript_id": uuid.uuid4().hex,
+            "transcript_id": str(uuid.uuid4()),
             "voice_session_id": self.config.voice_session_id,
             "turn_id": turn.id,
             "generation": self.generation,

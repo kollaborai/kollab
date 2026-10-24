@@ -839,7 +839,6 @@ class VoiceControl:
         partial_id = str(uuid4())
         first_token_ms: int | None = None
         last_partial = 0.0
-        speaking = False
         completed = False
 
         async def emit(event: str, payload: dict[str, Any]) -> None:
@@ -847,7 +846,7 @@ class VoiceControl:
 
         async def say(*, final: bool) -> AsyncIterator[dict[str, Any]]:
             """Sentences of the reply so far; the speakable text may still grow."""
-            nonlocal consumed, speaking, revision
+            nonlocal consumed, revision
             speakable = spoken_so_far(raw)
             start = consumed
             if speakable is None:
@@ -865,9 +864,8 @@ class VoiceControl:
                 if not line:
                     continue
                 said.append(line)
-                if not speaking:
-                    speaking = True
-                    await emit("voice.state", {"state": "speaking"})
+                # speaking and listening come from the worker, which knows when
+                # audio plays; a sentence handed over here has not been heard yet
                 revision += 1
                 await self._publish_assistant(
                     binding,
@@ -989,7 +987,6 @@ class VoiceControl:
                 elif kind == "turn_complete":
                     stages["total_turn_ms"] = int((time.monotonic() - started) * 1000)
                     await emit("voice.metrics", self._metrics(stages))
-                    await emit("voice.state", {"state": "listening"})
                     completed = True
                     yield {"done": True, "turn_id": turn_id}
                     return

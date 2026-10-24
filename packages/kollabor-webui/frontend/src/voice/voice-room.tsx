@@ -45,6 +45,7 @@ const LABEL: Record<string, string> = {
   requesting_permission: "Waiting For Mic",
   connecting: "Connecting",
   listening: "Listening",
+  hearing: "Hearing",
   thinking: "Thinking",
   speaking: "Speaking",
   stopping: "Stopping",

@@ -294,7 +294,8 @@ async def test_full_voice_turn(rig):
         assert [p["revision"] for p in partials] == sorted(p["revision"] for p in partials)
         seqs = [e["sequence"] for e in events if e["event"] != "voice.state" or e["sequence"]]
         assert seqs == sorted(seqs)
-        assert any(e["payload"].get("state") == "speaking" for e in events)
+        # the worker reports speaking when audio plays; the engine never guesses it
+        assert not any(e["payload"].get("state") == "speaking" for e in events)
 
         stopped = await http.request(
             "DELETE",

@@ -7,6 +7,7 @@ import dataclasses
 import itertools
 import json
 import os
+import re
 import signal
 import socket
 import time
@@ -27,6 +28,8 @@ from livekit import rtc  # noqa: E402
 from livekit.agents import inference, llm, vad  # noqa: E402
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS  # noqa: E402
 from livekit.agents.voice import io  # noqa: E402
+
+ENGINE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 CONFIG = lw.WorkerConfig(
     "ws://x", "jwt", "room", "room-1", 1, "http://127.0.0.1:1", "tok"
@@ -428,6 +431,8 @@ def test_sentences_stream_into_tts_before_the_reply_finishes():
     rig = run(scenario())
     [body] = rig.engine.requests
     assert body["display_text"] == "is the build green" and body["speaker"] == "user"
+    # the Engine's id rule (voice_types.VoiceSessionId) answers 422 to anything else
+    assert ENGINE_ID.match(body["turn_id"]) and ENGINE_ID.match(body["transcript_id"])
     assert (
         body["generation"] == 1
         and body["voice_session_id"] == "room-1"

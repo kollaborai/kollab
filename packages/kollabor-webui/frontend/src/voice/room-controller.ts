@@ -15,6 +15,8 @@ export type RoomLike = {
 };
 
 const MAX_STREAM_RETRIES = 3;
+/** States that mean the runtime is up; the worker can report one before "ready" is seen. */
+const LIVE = new Set(["ready", "listening", "hearing", "thinking", "speaking"]);
 
 const errorText = (reason: unknown) =>
   (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");
@@ -65,6 +67,10 @@ export class VoiceRoomController {
       this.view = view;
       this.set({ view, state: view.state, detail: view.detail });
       this.follow(view, epoch);
+      // The engine refuses a join until its runtime is ready (models may still be
+      // loading or downloading); the event stream says when it is.
+      await this.untilReady(epoch);
+      if (epoch !== this.epoch) return;
       const ticket = await this.api.join(view.voice_session_id, view.generation);
       if (epoch !== this.epoch) return;
       this.set({ state: "requesting_permission" });
@@ -81,6 +87,24 @@ export class VoiceRoomController {
       this.set({ state: "error", error: errorText(reason), retryable: true });
       await this.teardown("error");
     }
+  }
+
+  /** Resolve once the runtime is ready (or the start was superseded); reject if it fails first. */
+  private untilReady(epoch: number) {
+    return new Promise<void>((resolve, reject) => {
+      const check = () => {
+        const { state, error, detail } = this.state;
+        if (epoch !== this.epoch || LIVE.has(state)) {
+          unsubscribe();
+          resolve();
+        } else if (state === "error" || state === "stopped" || state === "disconnected") {
+          unsubscribe();
+          reject(new Error(error || detail || "Voice could not start."));
+        }
+      };
+      const unsubscribe = this.subscribe(check);
+      check();
+    });
   }
 
   async stop(reason: VoiceStopReason = "user") {
