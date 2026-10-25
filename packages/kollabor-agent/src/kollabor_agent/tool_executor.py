@@ -25,7 +25,7 @@ from .voice_tool_policy import (
     VoiceToolDecision,
     VoiceToolExecutionGuard,
 )
-from .yes_approval import NEEDS_YES, YesApprovals, call_approval
+from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +458,13 @@ class ToolExecutor:
         self._executed_count = 0
         return count
 
+    def _ask_for_yes(self, tool_data: Dict[str, Any], context: Dict[str, Any] | None) -> str:
+        """Keep a call for the user's yes; what the model reads in place of its result."""
+        self.yes_approvals.ask(tool_data, context)  # never a hidden turn's call
+        if isinstance(context, dict) and context.get("voice_hidden") is True:
+            return NOT_IN_HIDDEN_TURN
+        return NEEDS_YES
+
     async def execute_tool(
         self,
         tool_data: Dict[str, Any],
@@ -485,15 +492,19 @@ class ToolExecutor:
             if approval is None:
                 approval = "ask"  # a voice turn asks for a yes, never waits on a prompt
             elif voice_decision.reason_code == "confirmation_required":
-                # Their yes was the confirmation: it runs as a typed command would.
-                voice_decision = VoiceToolDecision(allowed=True)
+                # Their yes OK'd it: the guard plans it again, argv with no shell.
+                voice_decision = self._voice_tool_guard.evaluate(
+                    tool_data,
+                    execution_context,
+                    repository_root=self.workspace or Path.cwd(),
+                    approved=True,
+                )
             if not voice_decision.allowed:
                 reason_code = voice_decision.reason_code or "command_blocked"
                 message = voice_decision.message or "Voice tool policy denied this action."
                 error = f"{reason_code}: {message}"
                 if reason_code == "confirmation_required":
-                    self.yes_approvals.ask(tool_data)
-                    error = NEEDS_YES
+                    error = self._ask_for_yes(tool_data, execution_context)
                 result = ToolExecutionResult(
                     tool_id=tool_id,
                     tool_type=tool_data.get("type", "unknown"),
@@ -562,8 +573,6 @@ class ToolExecutor:
                 result = await self._execute_tool_inner(tool_data, **inner_kwargs)
             finally:
                 call_approval.reset(approval_token)
-            if result.error == NEEDS_YES:  # a permission prompt it did not wait on
-                self.yes_approvals.ask(tool_data)
             self._executed_count += 1
 
             if self._tool_output_store is not None:
@@ -690,6 +699,10 @@ class ToolExecutor:
                 final_data = pre_call_results.get("main", {}).get("final_data", {})
                 permission_decision = final_data.get("permission_decision", {})
                 reason = permission_decision.get("reason", "Permission denied")
+                if permission_decision.get("needs_yes") is True:
+                    # A prompt it did not wait on: the manager's own decision, never
+                    # a tool's text, keeps the call for the user's yes.
+                    reason = self._ask_for_yes(tool_data, execution_context)
 
                 logger.warning(f"Tool {tool_id} execution denied: {reason}")
                 return ToolExecutionResult(

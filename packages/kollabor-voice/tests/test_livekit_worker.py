@@ -501,6 +501,23 @@ def test_words_over_the_reply_cancel_it_and_become_the_next_turn():
     assert rig.room.output.paused >= 1  # the voice paused first, like the demo
     assert rig.engine.requests[1]["display_text"] == "stop that"
     assert S2 not in rig.adapter.spoken  # nothing late from the cancelled turn
+    # said over the agent: a yes in it never answers what the reply asked
+    assert "talk_over" not in rig.engine.requests[0]
+    assert rig.engine.requests[1]["talk_over"] is True
+
+
+def test_words_after_the_reply_is_done_are_no_talk_over():
+    async def scenario():
+        async with Rig(scripts=[["Okay.", "done"], ["Sure.", "done"]]) as rig:
+            await rig.say("is the build green")
+            await until(lambda: rig.adapter.spoken == ["Okay."])
+            await until(lambda: rig.worker.agent_state == "listening")
+            await rig.say("yes do it")
+            await until(lambda: len(rig.engine.requests) == 2)
+        return rig
+
+    rig = run(scenario())
+    assert not any("talk_over" in body for body in rig.engine.requests)
 
 
 def interrupted_posts(poster):
@@ -727,6 +744,30 @@ def test_the_played_text_is_bound_to_the_turn_that_registered_it():
         ("turns/new-turn/interrupted", {"text": ""}),  # blank: nothing was heard
         ("turns/old-turn/interrupted", {"text": "So the build"}),
     ]
+
+
+def test_a_talk_over_marks_its_own_turn_only():
+    def state(new_state):
+        return SimpleNamespace(new_state=new_state)
+
+    async def scenario():
+        worker = lw.Worker(CONFIG, FakeRoom(), FakeAdapter(), Recorder())
+        worker._agent_state(state("speaking"))
+        worker._user_state(state("speaking"))  # over the reply, even one LiveKit lets play on
+        turns = [worker.begin_turn("yeah", False)]
+        worker._agent_state(state("listening"))
+        worker._user_state(state("speaking"))
+        turns.append(worker.begin_turn("yes", False))
+        worker._agent_state(state("thinking"))
+        worker._user_state(state("speaking"))
+        turns.append(worker.begin_turn(lw.GREETING, True))
+        turns.append(worker.begin_turn("yes", False))  # a greeting resets it too
+        await worker.drain()
+        return turns
+
+    over, after, greeting, later = run(scenario())
+    assert over.body["talk_over"] is True
+    assert not any("talk_over" in turn.body for turn in (after, greeting, later))
 
 
 def test_a_cough_over_the_reply_pauses_it_and_it_resumes():

@@ -28,6 +28,7 @@ from typing import Any, Callable, List
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
 from kollabor_agent.voice_admission import validate_voice_admission_context
+from kollabor_agent.yes_approval import YesApprovals
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -3202,6 +3203,9 @@ class LocalStateService(StateService):
         text = (text or "").strip()
         if llm is None or not turn_id:
             return {"recorded": False}
+        approvals = getattr(getattr(llm, "tool_executor", None), "yes_approvals", None)
+        if isinstance(approvals, YesApprovals):
+            approvals.reply_cut(turn_id)  # its ask was never heard whole: no yes answers it
         queue = getattr(llm, "_queue_processor", None)
         if queue is None:
             return await self._cut_voice_reply(llm, turn_id, text)

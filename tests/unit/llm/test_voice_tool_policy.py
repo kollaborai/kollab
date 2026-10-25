@@ -1,5 +1,9 @@
 """Regression tests for the fail-closed LiveKit voice tool guard."""
 
+import os
+import shlex
+import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -218,3 +222,156 @@ def test_voice_policy_blocks_recursive_or_symlink_following_ls(tmp_path: Path, c
 
     assert decision.allowed is False
     assert decision.reason_code == "unsafe_syntax"
+
+
+# A yes runs what the guard planned (argv, no shell), so nothing that runs other
+# commands may get past it: an interpreter, a wrapper, git config or a git alias.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'rm -rf ~'",
+        "sh -c 'rm -rf ~'",
+        "zsh -c 'rm -rf ~'",
+        "env rm -rf ~",
+        "python3 -c 'import shutil'",
+        "python3.14 -c 'import os'",
+        "node -e 'process.exit(0)'",
+        "perl -e 'unlink 1'",
+        "ruby -e 'exit'",
+        "osascript -e 'beep'",
+        "awk 'BEGIN { system(1) }'",
+        "xargs rm",
+        "timeout 5 rm notes.txt",
+        "nice rm notes.txt",
+        "nohup rm notes.txt",
+        "npx some-package",
+        "find . -delete",
+        "find . -exec rm {} +",
+        "rm --force notes.txt",
+        "git -C . push --force",
+        "git --git-dir=.git push",
+        "git -c alias.x=!rm x",
+        "git -c core.pager=rm log",
+        "git --config-env=core.pager=X log",
+        "git --exec-path=/tmp log",
+        "git stash",
+        "git pull",
+        "git config core.pager rm",
+        "git ship",
+        "git fetch --upload-pack=rm origin",
+        "git grep -Orm x",
+    ],
+)
+def test_a_yes_never_runs_an_interpreter_a_wrapper_or_git_config(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+    )
+    assert (decision.allowed, decision.reason_code) == (False, "command_blocked")
+
+
+def test_a_yes_runs_the_command_without_a_shell(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PATH", os.defpath)
+    guard, context = VoiceToolExecutionGuard(), _voice_context()
+    call = {"type": "terminal", "command": "touch 'my notes.txt'", "cwd": str(tmp_path)}
+
+    asked = guard.evaluate(call, context, repository_root=tmp_path)
+    approved = guard.evaluate(call, context, repository_root=tmp_path, approved=True)
+
+    assert (asked.allowed, asked.reason_code) == (False, "confirmation_required")
+    assert approved.allowed and approved.plan.classification == "approved"
+    touch = Path(shutil.which("touch", path=os.defpath)).resolve()
+    assert approved.plan.argv == (str(touch), "my notes.txt")
+    assert approved.plan.canonical_cwd == tmp_path.resolve()
+
+
+@pytest.mark.parametrize(
+    ("where", "command"),
+    [
+        ("", "git -C /tmp status"),
+        ("", "git -C .. log"),
+        ("", "git -C . -C .. log"),
+        ("", "git --git-dir=/tmp/other/.git log"),
+        ("", "git --work-tree /tmp commit -m x"),
+        ("sub", "git -C .. --git-dir=../x status"),  # counted from where -C left git
+    ],
+)
+def test_a_yes_never_points_git_outside_the_project(tmp_path: Path, where: str, command: str):
+    root = tmp_path / "repo"
+    (root / "sub").mkdir(parents=True)
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(root / where)},
+        _voice_context(),
+        repository_root=root,
+        approved=True,
+    )
+    assert (decision.allowed, decision.reason_code) == (False, "command_blocked")
+
+
+@pytest.mark.parametrize(
+    "command", ["git commit -m 'notes'", "git -C . log --oneline", "git --git-dir=.git status"]
+)
+def test_a_yes_runs_a_git_commit_past_globals(tmp_path: Path, monkeypatch, command: str):
+    monkeypatch.setenv("PATH", os.defpath)
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+        approved=True,
+    )
+    assert decision.allowed and decision.plan.argv[1:] == tuple(shlex.split(command))[1:]
+
+
+def test_a_yes_finds_a_tool_on_path_outside_the_project(tmp_path: Path, monkeypatch):
+    root, tool = tmp_path / "repo", tmp_path / "tools" / "mytool"
+    root.mkdir()
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    if any(parent.stat().st_mode & stat.S_IWOTH for parent in tool.parents):
+        pytest.skip("this host's temp dir is world-writable: no tool under it is trusted")
+    monkeypatch.setenv("PATH", f"{tool.parent}{os.pathsep}{os.defpath}")
+
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": "mytool --list", "cwd": str(root)},
+        _voice_context(),
+        repository_root=root,
+        approved=True,
+    )
+    assert decision.allowed and decision.plan.argv == (str(tool.resolve()), "--list")
+
+
+def test_a_read_only_tool_off_the_system_path_asks_and_a_yes_runs_it(tmp_path: Path, monkeypatch):
+    root, tool = tmp_path / "repo", tmp_path / "tools" / "kollab"
+    root.mkdir()
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tool.parent}{os.pathsep}{os.defpath}")
+    call = {"type": "terminal", "command": "kollab --hub status", "cwd": str(root)}
+
+    asked = VoiceToolExecutionGuard().evaluate(call, _voice_context(), repository_root=root)
+    assert (asked.allowed, asked.reason_code) == (False, "confirmation_required")
+    if any(parent.stat().st_mode & stat.S_IWOTH for parent in tool.parents):
+        pytest.skip("this host's temp dir is world-writable: no tool under it is trusted")
+    decision = VoiceToolExecutionGuard().evaluate(call, _voice_context(), repository_root=root, approved=True)
+    assert decision.allowed and decision.plan.argv == (str(tool.resolve()), "--hub", "status")
+
+
+def test_a_yes_never_runs_an_executable_from_the_project(tmp_path: Path, monkeypatch):
+    planted = tmp_path / "bin" / "touch"
+    planted.parent.mkdir()
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted.parent}{os.pathsep}{os.defpath}")
+
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": "touch notes.txt", "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+        approved=True,
+    )
+    assert (decision.allowed, decision.reason_code) == (False, "command_blocked")

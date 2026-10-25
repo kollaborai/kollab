@@ -2,13 +2,15 @@
 
 This is the low-level executor boundary. A mutating or externally communicative
 action comes back ``confirmation_required``: the agent asks for the user's OK in
-its reply, and their yes runs that exact call (``yes_approval``).
+its reply, and their yes runs that exact call (``yes_approval``), planned again
+as approved: argv with no shell, past the same hard blocks.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -68,22 +70,47 @@ _HARD_BLOCKED_COMMANDS = frozenset(
         "service",
     }
 )
-_HARD_BLOCKED_GIT_COMMANDS = frozenset(
+# They run whatever their arguments say, so the checks on the first word never
+# see the real command: `bash -c '...'`, `env rm ...`, `python3 -c '...'`.
+_INTERPRETERS_AND_WRAPPERS = frozenset(
     {
-        "push",
-        "tag",
-        "reset",
-        "clean",
-        "checkout",
-        "restore",
-        "switch",
-        "merge",
-        "rebase",
-        "cherry-pick",
+        "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
+        "env", "xargs", "timeout", "gtimeout", "nice", "nohup", "exec", "eval",
+        "command", "builtin", "time", "caffeinate",
+        "node", "nodejs", "deno", "bun", "php", "lua", "osascript", "awk", "gawk", "nawk",
+        "npx", "bunx", "uvx", "pipx",
+    }
+)
+_VERSIONED_INTERPRETER = re.compile(r"(?:python|pypy|perl|ruby|node|php|lua)[0-9.]*w?")
+_FIND_RUNS_OR_DELETES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete"})
+# git's options before the subcommand. -c, --config-env and --exec-path set config
+# or the helper path, and config can make a pager, an alias or a hook run anything.
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {"-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--attr-source", "--list-cmds"}
+)
+_GIT_CONFIG_OPTIONS = frozenset({"-c", "--config-env", "--exec-path"})
+# The ones that point git at a directory: it must stay inside the project, like the cwd.
+_GIT_PATH_OPTIONS = frozenset({"-C", "--git-dir", "--work-tree"})
+# The git subcommands a yes may run. Anything else is blocked: the ones that drop
+# work or history (push, reset, stash...), config, and any alias or git-* helper,
+# which runs whatever its own config says.
+_VOICE_GIT_COMMANDS = frozenset(
+    {
+        "add", "blame", "branch", "commit", "describe", "diff", "fetch", "grep",
+        "log", "ls-files", "mv", "rev-parse", "rm", "shortlog", "show", "status",
     }
 )
 _HARD_BLOCKED_GIT_FLAGS = frozenset(
-    {"--output", "--ext-diff", "--textconv", "--external-diff"}
+    {
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--external-diff",
+        "--upload-pack",
+        "--receive-pack",
+        "--exec",
+        "--open-files-in-pager",
+    }
 )
 
 
@@ -117,7 +144,9 @@ class VoiceToolExecutionGuard:
         execution_context: Mapping[str, Any] | None,
         *,
         repository_root: str | Path | None,
+        approved: bool = False,
     ) -> VoiceToolDecision:
+        """``approved``: the user's yes OK'd this call; it still passes every hard block."""
         if not isinstance(execution_context, Mapping) or execution_context.get("source") != "livekit_voice":
             return VoiceToolDecision(allowed=True)
         if not validate_voice_admission_context(execution_context):
@@ -134,11 +163,13 @@ class VoiceToolExecutionGuard:
         if tool_type in {"hub_status", "hub_capture"}:
             return VoiceToolDecision(allowed=True)
         if tool_type == "hub_msg":
+            if approved:
+                return VoiceToolDecision(allowed=True)
             return self._deny(
                 "confirmation_required",
                 "Sending a hub message requires a separate spoken confirmation.",
             )
-        return self._evaluate_terminal(tool_data, execution_context, repository_root)
+        return self._evaluate_terminal(tool_data, execution_context, repository_root, approved)
 
     @staticmethod
     def _has_valid_binding_context(context: Mapping[str, Any]) -> bool:
@@ -159,6 +190,7 @@ class VoiceToolExecutionGuard:
         tool_data: Mapping[str, Any],
         context: Mapping[str, Any],
         repository_root: str | Path | None,
+        approved: bool = False,
     ) -> VoiceToolDecision:
         command = tool_data.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -207,18 +239,25 @@ class VoiceToolExecutionGuard:
                 "command_blocked",
                 "This terminal action is permanently blocked for voice-originated turns.",
             )
+        if _git_leaves_project(argv, canonical_cwd, root):
+            return self._deny("command_blocked", "Voice git commands must stay inside the project.")
 
-        if not _is_read_only_action(argv, canonical_cwd, root):
-            return self._deny(
-                "confirmation_required",
-                "This terminal action requires an explicit voice confirmation before execution.",
-            )
-
-        trusted_executable = _resolve_trusted_executable(argv[0], root)
+        if approved:
+            # The user's yes: whatever it names on PATH, never one in the project
+            # or in a directory others can write.
+            trusted_executable = _resolve_executable(argv[0], root, os.environ.get("PATH") or os.defpath)
+        else:
+            read_only = _is_read_only_action(argv, canonical_cwd, root)
+            trusted_executable = _resolve_trusted_executable(argv[0], root) if read_only else None
+            if trusted_executable is None:  # not read-only, or its tool is off the fixed system path
+                return self._deny(
+                    "confirmation_required",
+                    "This terminal action requires an explicit voice confirmation before execution.",
+                )
         if trusted_executable is None:
             return self._deny(
                 "command_blocked",
-                "Voice terminal executable is unavailable in the fixed trusted command path.",
+                "Voice terminal executable was not found, or is in the project or a directory others can write.",
             )
         normalized_argv = (str(trusted_executable), *argv[1:])
         plan_material = {
@@ -234,7 +273,7 @@ class VoiceToolExecutionGuard:
         plan = VoiceTerminalPlan(
             plan_id=f"voice-plan-{digest[:20]}",
             digest=digest,
-            classification="read_only",
+            classification="approved" if approved else "read_only",
             argv=normalized_argv,
             canonical_cwd=canonical_cwd,
         )
@@ -275,13 +314,23 @@ def _has_unsafe_ls_flags(argv: Sequence[str]) -> bool:
 
 
 def _resolve_trusted_executable(executable: str, repository_root: Path) -> Path | None:
-    if _is_path_qualified_executable(executable):
-        return None
     if executable not in _TRUSTED_TERMINAL_EXECUTABLES:
         return None
     # os.defpath is a fixed system search path, not the user/session PATH; it
     # cannot prefer a repository-local or /tmp executable placed earlier in PATH.
-    resolved = shutil.which(executable, path=os.defpath)
+    return _resolve_executable(executable, repository_root, os.defpath)
+
+
+# Group-writable is fine for root/wheel and macOS admin: Homebrew's Cellar is.
+_ADMIN_GROUPS = frozenset({0, 80})
+
+
+def _resolve_executable(executable: str, repository_root: Path, search_path: str) -> Path | None:
+    """The executable a shell would run, or None when it is one nobody should trust:
+    inside the project, or under a directory someone else can write."""
+    if _is_path_qualified_executable(executable):
+        return None
+    resolved = shutil.which(executable, path=search_path)
     if not resolved:
         return None
     try:
@@ -291,11 +340,44 @@ def _resolve_trusted_executable(executable: str, repository_root: Path) -> Path 
         if _is_relative_to(canonical, repository_root):
             return None
         for parent in (canonical, *canonical.parents):
-            if parent.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            info = parent.stat()
+            if info.st_uid not in (0, os.getuid()) or info.st_mode & stat.S_IWOTH:
+                return None
+            if info.st_mode & stat.S_IWGRP and info.st_gid not in _ADMIN_GROUPS:
                 return None
     except (OSError, RuntimeError):
         return None
     return canonical
+
+
+def _git_leaves_project(argv: Sequence[str], cwd: Path, root: Path) -> bool:
+    """git sent to a directory outside the project (-C, --git-dir, --work-tree)."""
+    if Path(argv[0]).name.lower() != "git":
+        return False
+    base, at = cwd, 1
+    while at < len(argv) and argv[at].startswith("-"):
+        option, has_value, value = argv[at].partition("=")
+        if option in _GIT_GLOBAL_OPTIONS_WITH_VALUE and not has_value:
+            at += 1
+            value = argv[at] if at < len(argv) else ""
+        if option in _GIT_PATH_OPTIONS:
+            if not _path_is_inside(value, base, root):
+                return True
+            if option == "-C" and value:  # later paths count from there
+                base = (base / Path(value).expanduser()).resolve(strict=False)
+        at += 1
+    return False
+
+
+def _git_subcommand(argv: Sequence[str]) -> int | None:
+    """Where git's subcommand is, past its global options; None when one sets config."""
+    at = 1
+    while at < len(argv) and argv[at].startswith("-"):
+        option, has_value = argv[at].split("=", 1)[0], "=" in argv[at]
+        if option in _GIT_CONFIG_OPTIONS:
+            return None
+        at += 2 if option in _GIT_GLOBAL_OPTIONS_WITH_VALUE and not has_value else 1
+    return at
 
 
 def _is_hard_blocked(argv: Sequence[str]) -> bool:
@@ -303,18 +385,34 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
     executable = Path(tokens[0]).name
     if executable in _HARD_BLOCKED_COMMANDS:
         return True
+    if executable in _INTERPRETERS_AND_WRAPPERS or _VERSIONED_INTERPRETER.fullmatch(executable):
+        return True
     if any(token in {"--restart", "--update", "--reset-config"} for token in tokens):
         return True
     if executable == "rm":
         for token in tokens[1:]:
-            if token == "--recursive" or (token.startswith("-") and ("r" in token[1:] or "f" in token[1:])):
+            if token in {"--recursive", "--force"} or (
+                token.startswith("-") and not token.startswith("--") and ("r" in token[1:] or "f" in token[1:])
+            ):
                 return True
-    if executable == "git" and len(tokens) > 1:
-        if tokens[1] in _HARD_BLOCKED_GIT_COMMANDS:
+    if executable == "find" and any(token in _FIND_RUNS_OR_DELETES for token in tokens[1:]):
+        return True
+    if executable == "git" and len(argv) > 1:
+        at = _git_subcommand(argv)
+        if at is None:
             return True
-        if any(token.split("=", 1)[0] in _HARD_BLOCKED_GIT_FLAGS for token in tokens[1:]):
+        if at >= len(argv):
+            return False  # bare `git` (or only global options): prints its help
+        subcommand, rest = tokens[at], tokens[at + 1 :]
+        if subcommand not in _VOICE_GIT_COMMANDS:
             return True
-        if tokens[1] == "branch" and any(token in {"-d", "-D", "--delete"} for token in tokens[2:]):
+        if any(token.split("=", 1)[0] in _HARD_BLOCKED_GIT_FLAGS for token in rest):
+            return True
+        if subcommand == "grep" and any(
+            "O" in token for token in argv[at + 1 :] if token.startswith("-") and not token.startswith("--")
+        ):
+            return True  # -O<pager>: opens the matches in that program
+        if subcommand == "branch" and any(token in {"-d", "--delete"} for token in rest):
             return True
     if executable == "gh" and tokens[1:3] == ("pr", "merge"):
         return True

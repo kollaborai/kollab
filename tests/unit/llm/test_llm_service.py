@@ -172,10 +172,28 @@ class TestLLMServiceIntegration(unittest.TestCase):
         ):
             mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
             approvals.ask(call)
+            approvals.on_reply_done()
             asyncio.run(self.service.process_user_input("yes", origin_context=greeting))
             self.assertFalse(approvals.take({**call, "id": "c2"}))
             asyncio.run(self.service.process_user_input("Yes."))
         self.assertTrue(approvals.take({**call, "id": "c2"}))
+
+    def test_a_yes_said_over_the_agent_answers_nothing(self):
+        """Words that started while the agent was still talking never count as the yes."""
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        over = {**make_voice_origin_context("t2"), "voice_talk_over": True}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call, make_voice_origin_context("t1"))
+            approvals.on_reply_done()
+            asyncio.run(self.service.process_user_input("yeah", origin_context=over))
+        self.assertFalse(approvals.take({**call, "id": "c2"}))
 
 
     def test_process_user_input_displays_before_lazy_alias_rebuild(self):

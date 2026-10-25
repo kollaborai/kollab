@@ -501,6 +501,7 @@ class Worker:
         self.last_reply = None  # the newest reply's SpeechHandle (cuts_sent)
         self.stt_ms = self.language = None  # last utterance, joins the next turn
         self.user_speaking, self.agent_state, self.shown = False, "idle", None
+        self.spoke_over = False  # the user started over the agent: the next turn is a talk-over
 
     # -- events: one ordered queue to the Engine ------------------------------------
 
@@ -676,6 +677,10 @@ class Worker:
 
     def _user_state(self, event) -> None:
         self.user_speaking = event.new_state == "speaking"
+        if self.user_speaking and self.agent_state in ("thinking", "speaking"):
+            # Also in the AEC warm-up, when LiveKit lets the reply play on: a yes
+            # in it never answers what the reply asks (it was not heard whole).
+            self.spoke_over = True
         self._show()
 
     def _agent_state(self, event) -> None:
@@ -759,6 +764,9 @@ class Worker:
         }
         if greeting:
             turn.body["kind"] = "greeting"
+        elif self.spoke_over:
+            turn.body["talk_over"] = True
+        self.spoke_over = False
         return turn
 
     async def shutdown(self) -> None:

@@ -86,6 +86,21 @@ async def test_nothing_played_or_no_turn_adds_nothing():
     }
 
 
+async def test_a_talk_over_leaves_the_cut_replys_ask_unanswerable():
+    from kollabor_agent.yes_approval import YesApprovals
+    from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+    llm, approvals = FakeLLM(), YesApprovals()
+    llm.tool_executor = SimpleNamespace(yes_approvals=approvals)
+    call = {"type": "terminal", "id": "c1", "command": "touch notes.txt"}
+    approvals.ask(call, make_voice_origin_context("turn-1"))
+    approvals.on_reply_done()
+
+    await service(llm).record_interrupted_voice_reply("turn-1", "I need your okay to")
+    approvals.on_human_input("yeah")  # said over the ask: it never counts as the yes
+    assert not approvals.take({**call, "id": "c2"})
+
+
 async def test_a_log_failure_still_keeps_the_message_in_the_history():
     llm = FakeLLM(FakeLogger(fail=True))
     assert await service(llm).record_interrupted_voice_reply("turn-1", "So the") == {

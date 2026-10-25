@@ -662,6 +662,20 @@ async def test_a_reply_after_a_round_of_hub_tags_alone_is_still_said(rig):
     await rig.control.shutdown()
 
 
+async def test_words_said_over_the_agent_ride_on_the_turn_context(rig):
+    rig.control.settings = None
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        rig.session.script = [{"type": "turn_complete"}]
+        url = f"/voice/sessions/{view['voice_session_id']}/turns"
+        await http.post(url, json={**transcript(view), "talk_over": True})
+        await http.post(url, json=transcript(view, text="and the tests"))
+        talked_over, clean = (sent[3] for sent in rig.session.sent)
+        assert talked_over["voice_talk_over"] is True  # its yes never counts
+        assert "voice_talk_over" not in clean
+    await rig.control.shutdown()
+
+
 async def test_voice_settings_ride_on_the_turn_context(rig):
     async with client(rig.app) as http:
         view = await ready_session(rig, http)

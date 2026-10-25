@@ -780,6 +780,7 @@ class TestQueueProcessor(unittest.TestCase):
         self.processor.tool_executor = MagicMock(yes_approvals=approvals)
         self.processor._execute_llm_turn = AsyncMock(return_value="parent")
         approvals.ask({"type": "terminal", "id": "c1", "command": "gh pr list"})
+        approvals.on_reply_done()
         approvals.on_human_input("yes")
 
         self.loop.run_until_complete(self.processor.process_message_batch(["yes"], "parent"))
@@ -789,6 +790,22 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.loop.run_until_complete(self.processor.process_message_batch(["thanks"], "parent"))
         self.assertNotIn("injected_context", self.add_message_fn.call_args.args[0].metadata)
+
+    def test_what_a_reply_asked_opens_when_its_chain_ends(self):
+        """A yes answers a reply only once it is finished: the chain's end is that point."""
+        from kollabor_agent.yes_approval import YesApprovals
+
+        approvals = YesApprovals()
+        self.processor.tool_executor = MagicMock(yes_approvals=approvals)
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        self.processor.is_processing = True
+        approvals.ask(call)
+        approvals.on_human_input("yes")  # while the reply is still written: answers nothing
+        self.assertFalse(approvals.take({**call, "id": "c0"}))
+        approvals.ask(call)
+        self.processor.is_processing = False
+        approvals.on_human_input("yes")
+        self.assertTrue(approvals.take({**call, "id": "c2"}))
 
     def test_livekit_origin_survives_tool_continuation(self):
         from kollabor_agent.queue_processor import QueuedInput

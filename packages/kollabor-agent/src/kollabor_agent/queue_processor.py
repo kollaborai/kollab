@@ -496,6 +496,9 @@ class QueueProcessor:
         was = self.is_processing
         self._is_processing = value
         if was and not value:
+            approvals = getattr(getattr(self, "tool_executor", None), "yes_approvals", None)
+            if isinstance(approvals, YesApprovals):
+                approvals.on_reply_done()  # its reply is finished: a yes answers what it asked
             self.note_chain_end()
 
     @property

@@ -208,9 +208,13 @@ still answers its prompts cancelled (`cancel_confirmations`).
 A call it may not run unasked (the voice guard's `confirmation_required`, or a
 prompt in a Confirm mode) comes back "Not run yet" and the agent asks for the OK
 in its reply; no card opens. The user's next message, spoken or typed, decides
-(`kollabor_agent/yes_approval.py`): a short yes lets each asked call run once
-(step 6 answers it "User approved (yes)"), a short no drops them, and anything
-else leaves them open.
+(`kollabor_agent/yes_approval.py`): a short yes lets each call the agent's last
+finished reply asked for run once (step 6 answers it "User approved (yes)"), a
+short no drops them, and anything else is a normal turn that drops them too. A
+yes said before that reply was finished, or over it by voice, answers nothing;
+a voice ask stops counting after 5 minutes. The manager marks its own asks
+(`PermissionDecision.needs_yes`), so a tool whose text reads like one plants
+nothing.
 
 ## Commands
 

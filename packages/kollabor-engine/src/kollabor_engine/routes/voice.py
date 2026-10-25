@@ -218,8 +218,9 @@ async def worker_turn(request: Request, voice_session_id: str, body: VoiceTurnRe
             )
         turn = await _control(request).open_turn(
             voice_session_id,
-            VoiceTranscriptSnapshot(**body.model_dump(exclude={"kind"})),
+            VoiceTranscriptSnapshot(**body.model_dump(exclude={"kind", "talk_over"})),
             kind=body.kind,
+            talk_over=body.talk_over,
         )
     except RuntimeHostError as exc:
         return error_response(exc)

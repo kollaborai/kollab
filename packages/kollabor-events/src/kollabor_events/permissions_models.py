@@ -167,6 +167,8 @@ class PermissionDecision:
     requires_user_confirmation: bool = False
     confirmation_details: Optional[Dict[str, Any]] = None
     timestamp: datetime = field(default_factory=datetime.now)
+    # Not run yet: the call waits for the user's own yes (kollabor_agent.yes_approval).
+    needs_yes: bool = False
 
 
 @dataclass

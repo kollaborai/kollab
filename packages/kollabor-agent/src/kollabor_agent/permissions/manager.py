@@ -287,7 +287,7 @@ class PermissionManager:
             except Exception:
                 logger.warning("could not park the approval prompt", exc_info=True)
         prompt.add_done_callback(lambda done: self._answered_late(done, tool_data))
-        return PermissionDecision(allowed=False, reason=NEEDS_YES, risk_level=risk_level)
+        return PermissionDecision(allowed=False, reason=NEEDS_YES, risk_level=risk_level, needs_yes=True)
 
     def _answered_late(
         self, prompt: "asyncio.Future[PermissionDecision]", tool_data: Dict[str, Any]
@@ -489,7 +489,7 @@ class PermissionManager:
             # A voice turn never waits on a prompt nobody can click: the model
             # asks for a yes in its reply instead (kollabor_agent.yes_approval).
             return PermissionDecision(
-                allowed=False, reason=NEEDS_YES, risk_level=risk_result.level
+                allowed=False, reason=NEEDS_YES, risk_level=risk_result.level, needs_yes=True
             )
 
         if self._confirmation_callback:

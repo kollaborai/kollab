@@ -592,6 +592,7 @@ class VoiceControl:
         snapshot: VoiceTranscriptSnapshot,
         *,
         kind: Literal["speech", "greeting"] = "speech",
+        talk_over: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """Admit a turn, then stream its reply as speech-ready sentences.
 
@@ -609,7 +610,7 @@ class VoiceControl:
         queue = session.subscribe()
         try:
             receipt = await self.router.admit_final(
-                binding, snapshot, extra_context=self._turn_context(binding, kind)
+                binding, snapshot, extra_context=self._turn_context(binding, kind, talk_over)
             )
         except BaseException:
             session.unsubscribe(queue)
@@ -635,7 +636,9 @@ class VoiceControl:
         )
         return self._stream_turn(binding, snapshot, session, queue)
 
-    def _turn_context(self, binding: VoiceSessionBinding, kind: str) -> dict[str, Any]:
+    def _turn_context(
+        self, binding: VoiceSessionBinding, kind: str, talk_over: bool = False
+    ) -> dict[str, Any]:
         """Voice-only turn settings the daemon applies for this turn and no other."""
         extra: dict[str, Any] = {}
         if self.settings is not None:
@@ -643,6 +646,8 @@ class VoiceControl:
             extra["voice_reasoning"] = self.settings.reasoning()
         if kind == "greeting":
             extra["voice_hidden"] = True
+        if talk_over:
+            extra["voice_talk_over"] = True  # a yes in it never answers the agent's ask
         return extra
 
     @staticmethod

@@ -93,22 +93,46 @@ runs it.
 - A voice turn never waits on an approval prompt. A call it may not run
   unasked comes back "Not run yet: this needs the user's OK", and the agent
   says in its reply what it wants to run and why and asks for a yes. That is
-  the voice guard's `confirmation_required` (anything that is not read-only,
-  `kollab --hub msg`, the `hub_msg` tool), in every permission mode, and in a
-  Confirm mode the permission prompt too (no card opens).
+  the voice guard's `confirmation_required` (anything that is not read-only, a
+  read-only command whose tool is not in `/bin` or `/usr/bin`, such as Homebrew's
+  `rg`, `kollab --hub msg`, the `hub_msg` tool), in every permission mode, and
+  in a Confirm mode the permission prompt too (no card opens).
 - The user's next message, spoken or typed, decides
   (`kollabor_agent/yes_approval.py`, fed by `LLMService.process_user_input`): a
-  short yes ("yes", "yeah, go ahead", "do it", "okay") lets each call the agent
-  last asked for run once, past both checks. A one-shot note on the yes, seen
-  only by the model, names them; the agent runs exactly those and answers with
-  what it found. A short no drops them. Anything else is a normal turn that
-  leaves them open; a later ask replaces them, and `/resume` or a new chat drops
-  them.
+  short yes ("yes", "yeah, go ahead", "do it", "okay"; "ok thanks" is not one)
+  lets each call the agent's last reply asked for run once, past both checks. A
+  one-shot note on the yes, seen only by the model, names them; the agent runs
+  exactly those and answers with what it found. A short no drops them.
+- A yes answers only the reply just before it, once that reply is finished. Its
+  asks open when its chain ends (`QueueProcessor.is_processing` falling,
+  `YesApprovals.on_reply_done`); a message sent before then answers none of
+  them, a reply that asks nothing leaves nothing to answer, and any other
+  message is a normal turn that drops them (a parked card stays open). A voice
+  ask stops counting after 5 minutes (`ASK_OPEN_SECONDS`), with nothing said. A
+  later ask replaces them, and `/resume` or a new chat drops them.
+- Words said over the agent never count. The worker marks a turn whose speech
+  started while the agent was thinking or speaking (`talk_over` on the turn,
+  `voice_talk_over` in its context), also in the AEC warm-up, when LiveKit lets
+  the reply play on; a talk-over's cut (`record_interrupted_voice_reply`,
+  `YesApprovals.reply_cut`) drops what the cut reply asked.
 - Only the user's own words count. `process_user_input` is the human entry
-  (terminal, web UI, voice); a hidden voice turn (the greeting), hub and relay
-  messages and the model's own text never answer.
-- Hard blocks (`sudo`, `rm -r`, `git push`, ...) and unsafe syntax stay refused;
-  a yes never runs them.
+  (terminal, web UI, voice); hub and relay messages and the model's own text
+  never answer. A hidden voice turn (the greeting) asks for nothing: a call that
+  needs the OK comes back refused, never "Not run yet", and its words never
+  answer. Asks come only from the voice guard's decision and the permission
+  manager's (`PermissionDecision.needs_yes`), never from a tool's text, and one
+  is keyed by the tool's own name and the exact command, quotes kept.
+- The yes runs the call as the guard plans it again, approved
+  (`VoiceToolExecutionGuard.evaluate(approved=True)`): argv with no shell, the
+  executable found on PATH but never in the project or under a directory others
+  can write. Hard blocks and unsafe syntax stay refused, and a yes never runs
+  them: `sudo`, `rm -r`/`-f`, interpreters and wrappers (`sh`, `bash`, `env`,
+  `xargs`, `timeout`, `nice`, `nohup`, `python*`, `node`, `perl`, `ruby`,
+  `osascript`, `awk`, `npx`, ...), `find -exec`/`-delete`, git's config
+  options (`-c`, `--config-env`, `--exec-path`), git sent outside the project
+  (`-C`, `--git-dir`, `--work-tree`; the cwd must stay inside it too), and any
+  git subcommand outside `_VOICE_GIT_COMMANDS` (so no push, reset, stash, pull
+  or config, and no alias or `git-*` helper).
 
 A typed turn keeps its card, and a Stop or a wait no longer refuses the tool:
 
