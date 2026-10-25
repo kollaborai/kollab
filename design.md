@@ -23,7 +23,13 @@ content, agent identity, and available actions easy to read.
 - Give What's New its own page and newspaper icon in the bottom action row.
 - Match the main pane's outer corners and inset spacing to the floating sidebar.
 - Keep the removed guide links out of the sidebar and Agents modal.
+- Use Overview, Access, and Knocks tabs inside Network. Keep Trust as a compact
+  single-choice control and device name in a short row with an explicit Save.
+  Show the owning connection's Knocks address as plain text with a copy icon
+  when available; show Unavailable when the owner has no address to report.
 - Reorder agents by dragging, with neighboring rows moving during the gesture.
+- Reorder remote devices within their network by dragging the device header.
+  Move the whole group together and save the order with the agent ordering preferences.
 - Hide an agent by dragging it outside the sidebar. On release, shrink it into
   the bottom Hidden Agents button. Allow restoration from that button.
 
@@ -53,7 +59,7 @@ ornaments need a clear purpose in the current task.
 
 Inherit the app's system sans-serif stack. Use the existing rem-based utilities:
 
-- Page, dialog, and lesson titles: `text-lg font-semibold`.
+- Page, dialog, and topic titles: `text-lg font-semibold`.
 - Body and controls: `text-sm`; section headings: `text-sm font-semibold`.
 - Secondary labels, metadata, and supporting details: `text-xs`.
 
@@ -128,7 +134,7 @@ reduced motion.
 The learning system remains under review. The first reference-browser and task-card
 mockups were rejected. Current prototypes explore a session walkthrough using the
 actual controls, and an interactive model of networks, devices, workspaces, and
-agents. Neither content direction has been selected for implementation.
+agents. Neither content direction has been selected for implementation. The [review prototypes](docs/design/learn-prototypes/README.md) preserve both concepts.
 
 - [LearnPage.tsx](packages/kollabor-webui/frontend/src/components/learn/LearnPage.tsx):
   compact headings, plain topic navigation, and borderless content groups.
