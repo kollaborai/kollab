@@ -186,13 +186,15 @@ class MessageHandler:
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
                 return {"status": "rejected", "reason": "Voice admission is unavailable"}
+            # The turn's grant comes only from the admission (VoicePlugin.admit),
+            # never from the event: the voice tool policy governs it either way.
             return await plugin.admit(
                 data,
-                lambda: self._coordinator.process_user_input(
+                lambda tool_context=None: self._coordinator.process_user_input(
                     message,
                     pre_displayed=pre_displayed,
                     voice=data["voice"],
-                    **origin_kwargs,
+                    **{**origin_kwargs, "origin_context": tool_context},
                 ),
             )
 

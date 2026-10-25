@@ -23,6 +23,8 @@ import time
 from contextvars import ContextVar
 from typing import Any, Callable, Mapping
 
+from .voice_admission import is_voice_origin
+
 logger = logging.getLogger(__name__)
 
 NEEDS_YES = (
@@ -111,7 +113,7 @@ class YesApprovals:
     def ask(self, tool_data: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> None:
         """Keep a call that needs the user's OK for the reply being written."""
         turn = None
-        if isinstance(context, Mapping) and context.get("source") == "livekit_voice":
+        if is_voice_origin(context):
             if context.get("voice_hidden") is True:
                 return  # the greeting: the user has not said anything yet
             turn = str(context.get("turn_id") or "")

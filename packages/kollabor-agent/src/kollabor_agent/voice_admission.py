@@ -1,4 +1,4 @@
-"""Process-local capabilities for admitted LiveKit voice turns.
+"""Process-local capabilities for admitted voice turns (LiveKit rooms and /voice).
 
 A `source` string is not authority. The engine issues a random capability only
 inside a binding-checked turn admission operation; consumers validate it against
@@ -218,7 +218,86 @@ def validate_voice_admission_context(context: Any) -> bool:
 
 
 def revoke_voice_admission_context(context: Any) -> None:
+    """End a turn's grant, a LiveKit room's or the /voice plugin's."""
     VOICE_ADMISSION_CAPABILITIES.revoke(context)
+    DEVICE_VOICE_ADMISSIONS.revoke(context)
+
+
+# The /voice plugin's turns (plugins/voice_plugin.py): the same voice tool policy
+# as a LiveKit room's, anchored on the device voice admission instead.
+DEVICE_VOICE_SOURCE = "voice"
+VOICE_ORIGIN_SOURCES = frozenset({"livekit_voice", DEVICE_VOICE_SOURCE})
+_DEVICE_FIELDS = ("voice_session_id", "generation", "turn_id", "voice_tool_policy")
+
+
+def is_voice_origin(context: Any) -> bool:
+    """A turn the voice tool policy governs: a LiveKit room's or the /voice plugin's."""
+    return isinstance(context, Mapping) and context.get("source") in VOICE_ORIGIN_SOURCES
+
+
+class DeviceVoiceAdmissions:
+    """Capabilities for the turns the /voice plugin admits.
+
+    ``VoicePlugin.admit`` issues one in the process that runs the turn, once the
+    turn's lease epoch checks out, and nothing else does: a context that only
+    says ``source: "voice"`` holds no authority, and the voice guard refuses its
+    tools. Never persisted; revoked when the turn ends.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = VOICE_ADMISSION_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._active: dict[str, _ActiveAdmission] = {}
+
+    def issue(self, fields: Mapping[str, Any]) -> dict[str, Any]:
+        identity = tuple(fields.get(name) for name in _DEVICE_FIELDS)
+        if any(value is None or value == "" for value in identity):
+            raise ValueError("device voice admission is incomplete")
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self._active[token] = _ActiveAdmission(identity, self._clock() + self._ttl_seconds)
+        return {**fields, "source": DEVICE_VOICE_SOURCE, "admission_capability": token}
+
+    def validate(self, context: Any) -> bool:
+        if not isinstance(context, Mapping) or context.get("source") != DEVICE_VOICE_SOURCE:
+            return False
+        token = context.get("admission_capability")
+        if not isinstance(token, str) or not token:
+            return False
+        with self._lock:
+            active = self._active.get(token)
+            if active is None:
+                return False
+            if active.expires_at <= self._clock():
+                self._active.pop(token, None)
+                return False
+            return active.identity == tuple(context.get(name) for name in _DEVICE_FIELDS)
+
+    def revoke(self, context: Any) -> None:
+        token = context.get("admission_capability") if isinstance(context, Mapping) else None
+        if isinstance(token, str):
+            with self._lock:
+                self._active.pop(token, None)
+
+
+DEVICE_VOICE_ADMISSIONS = DeviceVoiceAdmissions()
+
+
+def issue_device_voice_context(fields: Mapping[str, Any]) -> dict[str, Any]:
+    return DEVICE_VOICE_ADMISSIONS.issue(fields)
+
+
+def validate_voice_origin(context: Any) -> bool:
+    """A voice turn's grant holds: the engine's capability, or the /voice plugin's."""
+    if isinstance(context, Mapping) and context.get("source") == DEVICE_VOICE_SOURCE:
+        return DEVICE_VOICE_ADMISSIONS.validate(context)
+    return VOICE_ADMISSION_CAPABILITIES.validate(context)
 
 
 def revoke_voice_admissions_for_turn(

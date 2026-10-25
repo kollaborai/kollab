@@ -35,8 +35,11 @@ from .tool_output_budget import (
     pack_tool_history_and_results,
 )
 from .voice_admission import (
+    DEVICE_VOICE_SOURCE,
+    is_voice_origin,
     revoke_voice_admission_context,
     validate_voice_admission_context,
+    validate_voice_origin,
 )
 from .yes_approval import YesApprovals
 
@@ -97,6 +100,38 @@ def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
         if context.get("admission_capability") != selected_capability:
             revoke_voice_admission_context(context)
     return selected_context
+
+
+def merge_device_voice_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    """The /voice plugin's batch: its turn's grant, or fail closed (every tool refused).
+
+    Any /voice item makes the turn a voice turn, so the voice policy applies
+    whether or not its grant holds: one without a valid capability (never
+    admitted, mixed with typed input, or two turns at once) runs no tool.
+    """
+    items = [
+        m
+        for m in messages
+        if isinstance(m, QueuedInput)
+        and (m.voice or (m.origin_context or {}).get("source") == DEVICE_VOICE_SOURCE)
+    ]
+    if not items:
+        return None
+    contexts = [item.origin_context for item in items]
+    if (
+        len(items) == len(messages)
+        and all(validate_voice_origin(c) and c.get("source") == DEVICE_VOICE_SOURCE for c in contexts)
+        and len({c.get("turn_id") for c in contexts}) == 1
+    ):
+        return dict(contexts[-1])
+    for context in contexts:
+        revoke_voice_admission_context(context)
+    return _invalid_device_voice_context()
+
+
+def merge_voice_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    """The tool context of a batch: a LiveKit room's turn, a /voice turn, or none."""
+    return merge_livekit_origin_contexts(messages) or merge_device_voice_contexts(messages)
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -296,6 +331,11 @@ def _invalid_voice_context(turn_id: str | None) -> dict[str, Any]:
     if turn_id:
         context["turn_id"] = turn_id
     return context
+
+
+def _invalid_device_voice_context() -> dict[str, Any]:
+    """A /voice batch that failed closed: every tool refused."""
+    return {"source": DEVICE_VOICE_SOURCE, "voice_tool_policy": "invalid"}
 
 
 def _xml_display_metadata(
@@ -1045,11 +1085,10 @@ class QueueProcessor:
         """
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
-        merged_origin_context = merge_livekit_origin_contexts(messages)
+        merged_origin_context = merge_voice_origin_contexts(messages)
         previous_origin_context = self.active_origin_context
         if (
-            isinstance(previous_origin_context, dict)
-            and previous_origin_context.get("source") == "livekit_voice"
+            is_voice_origin(previous_origin_context)
             and (
                 not isinstance(merged_origin_context, dict)
                 or merged_origin_context.get("admission_capability")
@@ -1060,8 +1099,11 @@ class QueueProcessor:
             if isinstance(merged_origin_context, dict):
                 revoke_voice_admission_context(merged_origin_context)
             # Its reply goes to the voice turn in it, else to the one it cut off.
-            merged_origin_context = _invalid_voice_context(
-                _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+            turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+            merged_origin_context = (
+                _invalid_voice_context(turn_id)
+                if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
+                else _invalid_device_voice_context()
             )
         self.active_origin_context = merged_origin_context
         self._open_voice_turn = _voice_turn_id(merged_origin_context)

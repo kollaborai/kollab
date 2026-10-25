@@ -13,6 +13,8 @@ import uuid
 from collections import deque
 from datetime import datetime
 
+from kollabor_agent.voice_admission import issue_device_voice_context, revoke_voice_admission_context
+from kollabor_agent.voice_tool_policy import VOICE_TOOL_POLICY_ID
 from kollabor_events import EventType, Hook, HookPriority
 from kollabor_plugins.base import BasePlugin
 
@@ -776,8 +778,21 @@ class VoicePlugin(BasePlugin):
             previous = self._admissions.reserve(voice["admission_id"], data["message"])
             if previous:
                 return previous
+            # The turn's tool grant: the voice policy governs it under every
+            # approval mode, as a LiveKit room's turn. A lease is one voice
+            # session with one generation.
+            context = issue_device_voice_context(
+                {
+                    "voice_session_id": str(voice["epoch"]),
+                    "generation": 1,
+                    "turn_id": voice["admission_id"],
+                    "voice_tool_policy": VOICE_TOOL_POLICY_ID,
+                }
+            )
             # If submit/commit is interrupted, delivery_unknown survives on disk.
-            result = await submit()
+            result = await submit(context)
+            if result["status"] != "queued":
+                revoke_voice_admission_context(context)
             self._admissions.finish(voice["admission_id"], result["status"])
             if result["status"] == "queued":
                 self._watch_progress(voice)

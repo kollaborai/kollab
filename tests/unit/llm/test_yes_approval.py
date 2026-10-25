@@ -11,7 +11,7 @@ from kollabor_agent.shell_executor import ShellResult
 from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
 from kollabor_agent.yes_approval import NEEDS_YES, YesApprovals, human_answer
 from kollabor_events.bus import EventBus
-from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+from tests.unit.llm.voice_admission_helpers import make_device_voice_context, make_voice_origin_context
 
 
 @pytest.mark.parametrize(
@@ -38,6 +38,12 @@ def test_anything_else_is_a_normal_turn(text):
 
 
 CHECK_PRS = {"type": "terminal", "id": "call-1", "command": "gh pr list"}
+# The same voice policy under every approval mode, for a LiveKit room's turn and a
+# /voice turn: Trust All runs nothing a voice turn may not run unasked.
+EVERY_MODE = pytest.mark.parametrize("mode", ["confirm_all", "trust_all"])
+EVERY_VOICE = pytest.mark.parametrize(
+    "voice_origin", [make_voice_origin_context, make_device_voice_context], ids=["livekit", "device"]
+)
 
 
 def again(call, call_id="call-2"):
@@ -136,14 +142,14 @@ def test_a_reply_talked_over_leaves_nothing_for_a_yes():
     assert not approvals.take(again(CHECK_PRS))
 
 
-def test_a_voice_ask_stops_counting_after_five_minutes(monkeypatch):
+@EVERY_VOICE
+def test_a_voice_ask_stops_counting_after_five_minutes(monkeypatch, voice_origin):
     from kollabor_agent import yes_approval
-    from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
 
     clock = [1000.0]
     monkeypatch.setattr(yes_approval.time, "monotonic", lambda: clock[0])
     voice, typed = YesApprovals(), YesApprovals()
-    asked(voice, CHECK_PRS, context=make_voice_origin_context("t1"))
+    asked(voice, CHECK_PRS, context=voice_origin("t1"))
     asked(typed, CHECK_PRS)  # a parked card's ask: its card stays open, and so does the ask
     clock[0] += yes_approval.ASK_OPEN_SECONDS + 1
     voice.on_human_input("yes")
@@ -192,7 +198,7 @@ def test_a_new_conversation_drops_what_the_old_one_asked():
 # PermissionManager whose prompt must never open for a voice turn.
 
 
-def _confirm_all_manager():
+def _confirm_all_manager(mode="confirm_all"):
     from kollabor_agent.permissions.manager import PermissionManager
     from kollabor_agent.permissions.risk_assessor import RiskAssessor
     from kollabor_events.dict_utils import deep_merge
@@ -201,7 +207,7 @@ def _confirm_all_manager():
 
     config = deep_merge(
         PERMISSION_CONFIG_DEFAULTS,
-        {"kollabor": {"permissions": {"approval_mode": "confirm_all"}}},
+        {"kollabor": {"permissions": {"approval_mode": mode}}},
     )
     return PermissionManager(
         config=config,
@@ -210,9 +216,9 @@ def _confirm_all_manager():
     )
 
 
-async def _executor():
+async def _executor(mode="confirm_all"):
     bus = EventBus()
-    manager = _confirm_all_manager()
+    manager = _confirm_all_manager(mode)
     prompt = AsyncMock(side_effect=AssertionError("a voice turn never opens a prompt"))
     manager.set_confirmation_callback(prompt)
     await PermissionHook(permission_manager=manager).register(bus)
@@ -231,15 +237,17 @@ async def _executor():
 NOTES = {"type": "terminal", "id": "call-1", "command": "touch notes.txt"}
 
 
-def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes():
+@EVERY_MODE
+@EVERY_VOICE
+def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes(mode, voice_origin):
     async def scenario():
-        executor, prompt = await _executor()
-        first = await executor.execute_tool(dict(NOTES), execution_context=make_voice_origin_context("t1"))
+        executor, prompt = await _executor(mode)
+        first = await executor.execute_tool(dict(NOTES), execution_context=voice_origin("t1"))
         executor.yes_approvals.on_reply_done()
         executor.yes_approvals.on_human_input("Yeah, go ahead.")
         note = executor.yes_approvals.take_note()
-        second = await executor.execute_tool(again(NOTES), execution_context=make_voice_origin_context("t2"))
-        third = await executor.execute_tool(again(NOTES, "c3"), execution_context=make_voice_origin_context("t2"))
+        second = await executor.execute_tool(again(NOTES), execution_context=voice_origin("t2"))
+        third = await executor.execute_tool(again(NOTES, "c3"), execution_context=voice_origin("t2"))
         return executor, prompt, first, note, second, third
 
     executor, prompt, first, note, second, third = asyncio.run(scenario())
@@ -255,18 +263,20 @@ def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes():
     prompt.assert_not_awaited()
 
 
-def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_path):
+@EVERY_MODE
+@EVERY_VOICE
+def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_path, mode, voice_origin):
     # Real models reach for file_create first: it never runs, and its result names the
     # terminal path a yes can run, so the agent asks instead of saying it can't.
     async def scenario():
-        executor, prompt = await _executor()
+        executor, prompt = await _executor(mode)
         create = {"type": "file_create", "id": "f1", "file": str(tmp_path / "notes.md"), "content": "notes"}
-        refused = await executor.execute_tool(dict(create), execution_context=make_voice_origin_context("t1"))
+        refused = await executor.execute_tool(dict(create), execution_context=voice_origin("t1"))
         touch = {"type": "terminal", "id": "c1", "command": "touch notes.md"}
-        asked = await executor.execute_tool(dict(touch), execution_context=make_voice_origin_context("t1"))
+        asked = await executor.execute_tool(dict(touch), execution_context=voice_origin("t1"))
         executor.yes_approvals.on_reply_done()
         executor.yes_approvals.on_human_input("Yes.")
-        ran = await executor.execute_tool(again(touch), execution_context=make_voice_origin_context("t2"))
+        ran = await executor.execute_tool(again(touch), execution_context=voice_origin("t2"))
         return executor, prompt, refused, asked, ran
 
     executor, prompt, refused, asked, ran = asyncio.run(scenario())
@@ -277,16 +287,18 @@ def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_pa
     prompt.assert_not_awaited()
 
 
-def test_a_voice_yes_never_runs_a_shell_or_a_wrapper():
+@EVERY_MODE
+@EVERY_VOICE
+def test_a_voice_yes_never_runs_a_shell_or_a_wrapper(mode, voice_origin):
     async def scenario():
-        executor, _ = await _executor()
+        executor, _ = await _executor(mode)
         results = []
         for command in ("bash -c 'rm -rf ~'", "env rm -rf ~"):
             call = {"type": "terminal", "id": "w1", "command": command}
-            results.append(await executor.execute_tool(dict(call), execution_context=make_voice_origin_context("t1")))
+            results.append(await executor.execute_tool(dict(call), execution_context=voice_origin("t1")))
             executor.yes_approvals.on_reply_done()
             executor.yes_approvals.on_human_input("yes")
-            results.append(await executor.execute_tool(again(call), execution_context=make_voice_origin_context("t2")))
+            results.append(await executor.execute_tool(again(call), execution_context=voice_origin("t2")))
         return executor, results
 
     executor, results = asyncio.run(scenario())

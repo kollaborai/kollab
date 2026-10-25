@@ -21,7 +21,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .voice_admission import validate_voice_admission_context
+from .voice_admission import is_voice_origin, validate_voice_origin
 
 VOICE_TOOL_POLICY_ID = "voice_terminal_hub_v1"
 MAX_VOICE_COMMAND_BYTES = 8 * 1024
@@ -184,9 +184,9 @@ class VoiceToolExecutionGuard:
         approved: bool = False,
     ) -> VoiceToolDecision:
         """``approved``: the user's yes OK'd this call; it still passes every hard block."""
-        if not isinstance(execution_context, Mapping) or execution_context.get("source") != "livekit_voice":
+        if not is_voice_origin(execution_context):
             return VoiceToolDecision(allowed=True)
-        if not validate_voice_admission_context(execution_context):
+        if not validate_voice_origin(execution_context):
             return self._deny("command_blocked", "Voice origin lacks a valid server admission capability.")
         if not self._has_valid_binding_context(execution_context):
             return self._deny("command_blocked", "Voice tool context is incomplete or unsupported.")

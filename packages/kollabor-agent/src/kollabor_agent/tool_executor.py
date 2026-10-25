@@ -18,6 +18,7 @@ from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
+from .voice_admission import is_voice_origin
 from .voice_tool_policy import (
     MAX_VOICE_COMMAND_SECONDS,
     MAX_VOICE_OUTPUT_BYTES,
@@ -483,7 +484,7 @@ class ToolExecutor:
         tool_name = self._get_display_name(tool_data)
         approval = "yes" if self.yes_approvals.take(tool_data) else None
         voice_decision: VoiceToolDecision | None = None
-        if execution_context is not None and execution_context.get("source") == "livekit_voice":
+        if is_voice_origin(execution_context):
             voice_decision = self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,
@@ -634,7 +635,7 @@ class ToolExecutor:
             tool_type = "terminal"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
-        if execution_context is not None and execution_context.get("source") == "livekit_voice":
+        if is_voice_origin(execution_context):
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,
