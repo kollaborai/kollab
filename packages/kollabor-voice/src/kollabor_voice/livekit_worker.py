@@ -169,21 +169,24 @@ class TurnClient:
                     response.status >= 500,
                 )
             done = False
-            async for raw in response.content:
-                if not raw.strip():
-                    continue
-                try:
-                    line = json.loads(raw)
-                except ValueError as exc:
-                    raise TurnError("turn_invalid", "Unreadable turn stream") from exc
-                if line.get("done"):
-                    done = True
-                    break
-                if "error" in line:
-                    raise TurnError("turn_failed", str(line["error"]))
-                text = line.get("text")
-                if isinstance(text, str) and text.strip():
-                    yield text
+            try:
+                async for raw in response.content:
+                    if not raw.strip():
+                        continue
+                    try:
+                        line = json.loads(raw)
+                    except ValueError as exc:
+                        raise TurnError("turn_invalid", "Unreadable turn stream") from exc
+                    if line.get("done"):
+                        done = True
+                        break
+                    if "error" in line:
+                        raise TurnError("turn_failed", str(line["error"]))
+                    text = line.get("text")
+                    if isinstance(text, str) and text.strip():
+                        yield text
+            except (aiohttp.ClientError, OSError):
+                pass  # the connection broke mid-reply: an early end, said below
             if not done:
                 raise TurnError(
                     "turn_incomplete", "The Engine ended the turn early", True

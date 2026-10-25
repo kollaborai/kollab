@@ -4,7 +4,8 @@ The server takes signaling on 127.0.0.1 and ICE over TCP on free ports, with a
 per-run key and secret that live only in this process and the server's
 environment. One worker process joins each room and calls back into the engine
 (/turns, /events); the engine never pushes to it. Stop is SIGTERM to the
-worker's process group.
+worker's process group; a worker that exits by itself ends its session
+(EngineRuntimeHost waits on wait_exited).
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ from .voice_types import RuntimeStatus, StopReason, VoiceSessionBinding
 logger = logging.getLogger(__name__)
 
 WORKER_READY_PREFIX = "WORKER_READY"  # the worker prints "WORKER_READY -" once joined
-WORKER_READY_TIMEOUT_S = 300.0
+# The worker waits up to 1200 s for its models (a first-run download), then joins.
+WORKER_READY_TIMEOUT_S = 1260.0
 SERVER_READY_TIMEOUT_S = 15.0
 WORKER_TOKEN_TTL_S = 3600
 
@@ -311,6 +313,11 @@ class LiveKitRuntime:
         while await process.stdout.readline():
             pass
 
+    async def wait_exited(self, handle: object) -> None:
+        """Return once the worker has exited, stopped by the engine or by itself."""
+        assert isinstance(handle, WorkerHandle)
+        await handle.process.wait()  # at exit, not at pipe close (gh-119710)
+
     async def stop_session(
         self, binding: VoiceSessionBinding, handle: object, reason: StopReason
     ) -> None:
@@ -361,5 +368,9 @@ class LiveKitRuntime:
             await self._kill_group(handle.process)
         self._workers.clear()
         if self._server is not None:
-            await self._kill_group(self._server)
+            # SIGKILL at once: on SIGTERM the server drains, waiting for rooms
+            # that only this engine could end (see _SUPERVISE).
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self._server.pid, signal.SIGKILL)
+            await self._server.wait()
             self._server = None

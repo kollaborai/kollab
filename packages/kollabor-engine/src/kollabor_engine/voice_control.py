@@ -920,10 +920,11 @@ class VoiceControl:
                     completed = True
                     yield {"done": True, "turn_id": turn_id, "error": "provider_error"}
                     return
-                rid = event.get("request_id")
-                if rid and rid != turn_id:
-                    continue
                 kind = event.get("type")
+                # Only this turn's events: a hub wake's or a typed turn's (no id)
+                # stream to every subscriber, and would be said as this reply.
+                if kind != "daemon_closed" and event.get("request_id") != turn_id:
+                    continue
                 if kind == "token":
                     after_response = False
                     raw += str(event.get("text") or "")
@@ -1018,6 +1019,10 @@ class VoiceControl:
                         },
                     )
                 elif kind == "turn_complete":
+                    if raw:  # its shown reply had no turn id (an ACP agent's): say the rest now
+                        async for item in say(final=True):
+                            yield item
+                        await self._final_response(binding, generation, turn_id, raw, said)
                     completed = True
                     yield {"done": True, "turn_id": turn_id}
                     return
@@ -1037,6 +1042,13 @@ class VoiceControl:
         except (asyncio.CancelledError, GeneratorExit):
             if not completed:
                 self._barge_in(binding, generation, turn_id, session)
+            raise
+        except Exception:
+            # A fault here, not a talk-over: the daemon's turn still stops, so it
+            # never runs on with nobody listening. The worker sees the stream break.
+            if not completed:
+                revoke_voice_admissions_for_turn(vsid, generation, turn_id)
+                session.cancel_turn()
             raise
         finally:
             session.unsubscribe(queue)

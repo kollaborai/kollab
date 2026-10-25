@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -383,6 +385,39 @@ async def test_late_events_after_stop_never_publish(rig):
     await rig.control.shutdown()
 
 
+async def test_a_worker_that_exits_by_itself_ends_its_session(rig):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid = view["voice_session_id"]
+        published = []
+        orig = rig.control.hub.publish
+        rig.control.hub.publish = lambda v, e, p, **k: published.append(
+            (e, p)
+        ) or orig(v, e, p, **k)
+        (worker,) = rig.runtime._workers.values()
+        os.kill(worker.process.pid, signal.SIGKILL)  # a crash: the engine never stopped it
+        for _ in range(250):
+            got = (await http.get(f"/voice/sessions/{sid}")).json()
+            if got["state"] != "ready":
+                break
+            await asyncio.sleep(0.02)
+        gone = {"state": "error", "detail": "The voice worker stopped.", "retryable": True}
+        assert {k: got[k] for k in gone} == gone
+        await wait_for(lambda: ("voice.state", gone) in published)
+        assert not rig.runtime._workers
+        # the next create starts a new session, and a stop of ours is not a crash
+        fresh = await ready_session(rig, http)
+        nid = fresh["voice_session_id"]
+        assert nid != sid
+        await http.request(
+            "DELETE", f"/voice/sessions/{nid}", json={"generation": 1, "reason": "user"}
+        )
+        await wait_for(lambda: rig.control.host._sessions[nid].state == "stopped")
+        await asyncio.sleep(0.1)
+        assert rig.control.host._sessions[nid].state == "stopped"
+    await rig.control.shutdown()
+
+
 async def test_cursor_replay_and_generation_reset(rig):
     async with client(rig.app) as http:
         view = await ready_session(rig, http)
@@ -540,6 +575,55 @@ def test_server_dies_with_engine_even_when_engine_is_killed(tmp_path):
         sup.wait()
 
 
+# Like livekit-server, it outlives a SIGTERM: it drains its rooms first.
+DRAINING_SERVER = """\
+#!{py}
+import os, signal, socket, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open({pidfile!r}, "w").write(str(os.getpid()))
+port = int(sys.argv[sys.argv.index("--port") + 1])
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port)); s.listen(5)
+while True: time.sleep(1)
+"""
+
+
+async def test_a_clean_shutdown_kills_the_server_without_waiting_for_a_drain(tmp_path):
+    server = tmp_path / "livekit-server"
+    pidfile = tmp_path / "pid"
+    server.write_text(DRAINING_SERVER.format(py=sys.executable, pidfile=str(pidfile)))
+    server.chmod(0o755)
+    runtime = LiveKitRuntime(
+        engine_url=lambda: "http://127.0.0.1:1",
+        engine_token=lambda: "tok",
+        server_binary=str(server),
+    )
+    await runtime._ensure_server()
+    srv_pid = int(pidfile.read_text())
+    try:
+        await runtime.shutdown()
+        await wait_for(lambda: _gone(srv_pid), timeout=2.0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(srv_pid, signal.SIGKILL)
+
+
+def test_the_engine_waits_for_a_worker_longer_than_it_waits_for_its_models():
+    import ast
+
+    import kollabor_voice
+
+    source = (Path(kollabor_voice.__file__).parent / "livekit_worker.py").read_text()
+    (models_wait,) = [
+        node.value.value
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and getattr(node.targets[0], "id", None) == "READY_TIMEOUT_S"
+    ]
+    # a first-run download the worker still waits for must not be killed here
+    assert voice_livekit.WORKER_READY_TIMEOUT_S > models_wait
+
+
 # --- /turns: progressive speech, greeting, barge-in -------------------------------
 
 
@@ -667,6 +751,47 @@ async def test_a_turns_latency_outlives_its_reply_stream(rig):
     await rig.control.shutdown()
 
 
+async def test_another_turns_events_are_never_said_as_the_voice_turns(rig):
+    # The voice turn waits in the daemon's queue behind a hub wake or a typed turn,
+    # whose events (no request id) reach every subscriber first.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "what is on my calendar")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        queue = rig.session.queues[0]
+        for event in (
+            {"type": "token", "text": "Counting: one. Two. "},
+            {**SHOWN, "content": "Counting: one. Two."},
+            {"type": "turn_complete"},
+        ):
+            queue.put_nowait(event)
+        said = asyncio.ensure_future(anext(turn))
+        await asyncio.sleep(0.2)
+        assert not said.done()  # nothing said, and the stream is still open
+        for event in ({**SHOWN, "content": "You have two meetings."}, {"type": "turn_complete"}):
+            queue.put_nowait({**event, "request_id": snapshot.turn_id})
+        assert await asyncio.wait_for(said, 3) == {"text": "You have two meetings."}
+        assert (await anext(turn))["done"] is True
+    await rig.control.shutdown()
+
+
+async def test_a_reply_shown_without_its_turn_id_still_says_its_last_sentence(rig):
+    # An ACP agent: its tokens and turn_complete carry the turn id, its shown reply does not.
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        snapshot = voice_snapshot(view, "is it green")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
+        queue = rig.session.queues[0]
+        stamp = {"request_id": snapshot.turn_id}
+        queue.put_nowait({"type": "token", "text": "Checking now. It is green", **stamp})
+        queue.put_nowait({**SHOWN, "content": "Checking now. It is green"})
+        queue.put_nowait({"type": "turn_complete", **stamp})
+        lines = [line async for line in turn]
+    assert [line["text"] for line in lines if "text" in line] == ["Checking now.", "It is green"]
+    assert lines[-1]["done"] is True
+    await rig.control.shutdown()
+
+
 async def test_a_reply_with_xml_tool_tags_is_said_once(rig):
     # Its "response" (the clean text) comes before its display message.
     rig.session.script = [
@@ -779,6 +904,29 @@ async def test_disconnect_before_done_is_a_barge_in(rig, how):
         turn_queue.put_nowait({"type": "turn_complete", "request_id": view_turn})
         await asyncio.sleep(0.2)
         assert len(rig.control.hub._streams[sid].ring) == seen
+    await rig.control.shutdown()
+
+
+async def test_a_fault_in_the_reply_stream_stops_the_daemon_turn(rig):
+    from kollabor_agent.voice_admission import validate_voice_admission_context
+
+    rig.session.script = [{"type": "token", "text": "Sure thing. And then I"}]
+
+    def broken(sentence):
+        raise RuntimeError("speech policy fault")
+
+    rig.control.policy.sentence = broken
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        turn = await rig.control.open_turn(
+            view["voice_session_id"], voice_snapshot(view, "hi")
+        )
+        with pytest.raises(RuntimeError, match="speech policy fault"):
+            await anext(turn)
+        assert rig.session.cancels == 1  # it does not run on with nobody listening
+        assert validate_voice_admission_context(rig.session.sent[0][3]) is False
+        ring = rig.control.hub._streams[view["voice_session_id"]].ring
+        assert not any(e["payload"].get("barge_in") for e in ring)  # nobody talked over it
     await rig.control.shutdown()
 
 

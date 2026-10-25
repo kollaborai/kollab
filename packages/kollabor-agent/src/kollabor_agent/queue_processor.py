@@ -68,7 +68,9 @@ def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
     def fail_closed() -> dict[str, Any]:
         for context in contexts:
             revoke_voice_admission_context(context)
-        return {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+        # No grant, but the newest voice turn's id: its reply stream takes only
+        # events stamped with it, and would never end.
+        return _invalid_voice_context(_voice_turn_id(contexts[-1]))
 
     # Any plain or untrusted item mixed into the batch invalidates voice
     # authority for the combined LLM turn.
@@ -286,6 +288,14 @@ def _voice_turn_id(origin: Any) -> str | None:
         if isinstance(turn_id, str) and turn_id:
             return turn_id
     return None
+
+
+def _invalid_voice_context(turn_id: str | None) -> dict[str, Any]:
+    """A voice batch that failed closed: every tool refused, its events still stamped."""
+    context: dict[str, Any] = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+    if turn_id:
+        context["turn_id"] = turn_id
+    return context
 
 
 def _xml_display_metadata(
@@ -1044,10 +1054,10 @@ class QueueProcessor:
             revoke_voice_admission_context(previous_origin_context)
             if isinstance(merged_origin_context, dict):
                 revoke_voice_admission_context(merged_origin_context)
-            merged_origin_context = {
-                "source": "livekit_voice",
-                "voice_tool_policy": "invalid",
-            }
+            # Its reply goes to the voice turn in it, else to the one it cut off.
+            merged_origin_context = _invalid_voice_context(
+                _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+            )
         self.active_origin_context = merged_origin_context
         self._open_voice_turn = _voice_turn_id(merged_origin_context)
         combined_message = combine_message_contents(

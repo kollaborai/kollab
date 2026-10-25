@@ -195,6 +195,33 @@ class TestLLMServiceIntegration(unittest.TestCase):
             asyncio.run(self.service.process_user_input("yeah", origin_context=over))
         self.assertFalse(approvals.take({**call, "id": "c2"}))
 
+    def test_only_a_person_answering_live_says_the_yes(self):
+        """The TUI, an attached window, the web composer and voice answer an ask; no other source does."""
+        from types import SimpleNamespace
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        handler = self.service._message_handler
+        sources = [
+            ("cli_initial", False),
+            ("pipe", False),
+            ("bridge:email", False),  # a source nobody listed never answers
+            ("user", True),
+            ("hub_attachment", True),
+            ("state_rpc", True),
+            ("voice", True),
+        ]
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            for source, answers in sources:
+                approvals.ask(call)
+                approvals.on_reply_done()
+                asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source=source)))
+                self.assertEqual(approvals.take({**call, "id": "c2"}), answers, source)
+
     def test_a_hub_peers_yes_answers_nothing(self):
         """Another agent's "Yes." is a turn like any, never the user's answer to the ask."""
         from types import SimpleNamespace
@@ -763,7 +790,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         """Test user input hook callback processing."""
         # Test data
         event_data = {"message": "Test user message"}
-        event = MagicMock()
+        event = MagicMock(source="user")  # typed in the TUI
 
         # Patch on the coordinator (MessageHandler accesses coordinator.process_user_input)
         mock_process = AsyncMock(return_value={"status": "processed"})

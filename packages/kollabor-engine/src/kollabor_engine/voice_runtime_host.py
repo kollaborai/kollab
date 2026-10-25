@@ -8,6 +8,7 @@ an adapter behind this boundary.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import platform
 import sys
 import time
@@ -172,6 +173,8 @@ class EngineRuntimeHost:
         self._sessions: dict[VoiceSessionId, _SessionRecord] = {}
         self._active_by_key: dict[tuple[str, str, str, str | None, str], VoiceSessionId] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # One per running worker; not background tasks, since they last as long as it does.
+        self._exit_watches: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
     async def prepare(self) -> RuntimeStatus:
@@ -451,6 +454,8 @@ class EngineRuntimeHost:
                     self._fence_record_locked(current, reason="shutdown")
 
         await self.wait_for_background_tasks()
+        for task in tuple(self._exit_watches):
+            task.cancel()  # only a worker whose stop failed is still running
         async with self._lock:
             failed_stops = tuple(
                 record
@@ -674,6 +679,11 @@ class EngineRuntimeHost:
                 record.state = "ready"
                 record.detail = None
                 record.retryable = False
+                wait_exited = getattr(self._runtime, "wait_exited", None)
+                if wait_exited is not None:
+                    task = asyncio.create_task(self._end_on_exit(binding, handle, wait_exited))
+                    self._exit_watches.add(task)
+                    task.add_done_callback(self._exit_watches.discard)
                 return
             expected_generation = record.generation if record is not None else binding.generation + 1
             reason = record.stop_reason if record is not None else "shutdown"
@@ -686,6 +696,36 @@ class EngineRuntimeHost:
             expected_generation=expected_generation,
             reason=reason or "session_switch",
         )
+
+    async def _end_on_exit(
+        self,
+        binding: VoiceSessionBinding,
+        handle: object,
+        wait_exited: Callable[[object], Awaitable[None]],
+    ) -> None:
+        """A worker that exits while its session still holds it ends that session.
+
+        Without this the session stays ready with no worker in the room: the
+        browser keeps its mic on and hears nothing, and create keeps handing
+        the same dead session back.
+        """
+        await wait_exited(handle)
+        record = self._sessions.get(binding.voice_session_id)
+        if record is None:
+            return
+        async with record.operation_lock:
+            async with self._lock:
+                if record.handle is not handle:
+                    return  # a stop or switch took it first: that exit was ours
+                revoke_voice_admissions_for_generation(binding.voice_session_id, record.generation)
+                record.state = "error"
+                record.detail = "The voice worker stopped."
+                record.retryable = True
+                record.handle = None
+                if self._active_by_key.get(record.idempotency_key) == binding.voice_session_id:
+                    self._active_by_key.pop(record.idempotency_key, None)
+        with contextlib.suppress(Exception):
+            await self._runtime.stop_session(binding, handle, "error")  # the backend lets go of it
 
     async def _stop_handle(
         self,

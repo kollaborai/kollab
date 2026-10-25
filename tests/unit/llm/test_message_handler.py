@@ -104,7 +104,7 @@ class TestMessageHandler(unittest.TestCase):
     def test_handle_user_input(self):
         """Test user input handler."""
         data = {"message": "hello"}
-        event = MagicMock()
+        event = MagicMock(source="user")  # typed in the TUI
 
         result = self.loop.run_until_complete(
             self.handler.handle_user_input(data, event)
@@ -123,7 +123,7 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.run_until_complete(
             self.handler.handle_user_input(
                 {"message": "show status", "origin_context": origin_context},
-                event=None,
+                event=MagicMock(source="state_rpc"),  # how a room turn arrives
             )
         )
 
@@ -153,7 +153,7 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.create_task(release_startup())
 
         result = self.loop.run_until_complete(
-            self.handler.handle_user_input({"message": "hello"}, MagicMock())
+            self.handler.handle_user_input({"message": "hello"}, MagicMock(source="user"))
         )
 
         self.coordinator.message_display_service.display_user_message.assert_called_once_with(

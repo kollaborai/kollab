@@ -32,6 +32,22 @@ them, and no voice screen shows classifier controls, status or decisions.
   `kind: "greeting"` is a hidden instruction turn that opens the room.
 - The worker reports `listening`, `hearing`, `thinking` and `speaking` from
   LiveKit's own state changes; the Engine never guesses them.
+- The room ends with its worker. A worker that exits by itself (a crash) turns
+  its session to error, "The voice worker stopped." (retryable): the Engine
+  waits on its exit (`LiveKitRuntime.wait_exited`), and only an exit it did not
+  stop counts. The browser leaves the room and frees the mic on that state, and
+  the next start makes a fresh session. The Engine waits up to 1260 s for a
+  worker to join, past the worker's own 1200 s wait for its models.
+- A reply stream that breaks mid-turn ends the turn on both sides: the worker
+  reports `turn_incomplete` (retryable), and a fault in the Engine's stream
+  still cancels the session turn and revokes its admission.
+- A voice turn's reply stream takes only events stamped with its id
+  (`request_id`). A hub wake or a typed turn that runs while the voice turn
+  waits in the queue streams to every subscriber with no id, and was said as
+  the voice reply. A voice batch that fails closed (merged with typed input, or
+  cutting off an unfinished voice turn) keeps the id of the voice turn its
+  reply belongs to: no tool runs, but the reply is said and the stream ends. A
+  reply shown without the id (an ACP agent's) is said at `turn_complete`.
 - Turn ids are canonical UUIDs. Thinking runs at the lowest level the model
   takes (`kollabor/llm/voice_turn.py`); the user's provider, key and model stay.
 - Voice turns run through the same guarded turn path as typed ones, so the
@@ -44,6 +60,9 @@ them, and no voice screen shows classifier controls, status or decisions.
   downloads, latency (Hear, Think, Speak, Total) and a stop button.
 - The browser joins only once the runtime is ready, so a cold start that is
   still loading or downloading models waits instead of failing.
+- A stop before the session exists (create still in flight) ends the session
+  create makes, and the mic does not start again until it has; a stop while
+  the room is being built never connects it.
 - `livekit-server` takes signaling on loopback only, so only a page served from
   this computer gets the room. Its ICE ports listen on every interface, but
   answer only peers that joined through signaling. Elsewhere the mic is the
@@ -124,9 +143,14 @@ runs it.
   own text never answer. A native hub message wakes the agent through
   `TRIGGER_LLM_CONTINUE`; one that goes through `submit_human_input` as another
   agent (its "agent" source: a network-attached agent, a hub message whose
-  profile could not be read) reaches `process_user_input` marked `from_agent`
-  and leaves the asks alone. The goal driver's steering is a HUD context item,
-  and ACP steering goes to the ACP agent. A hidden voice turn (the greeting) asks for nothing: a call that
+  profile could not be read) reaches `process_user_input` with
+  `may_answer=False` and leaves the asks alone, as every source outside
+  `YES_SOURCES` does (`kollabor/user_input_source.py`: the terminal, an
+  attached window, state RPC for the web composer and the room, the `/voice`
+  plugin). `kollab --hub msg` and the Telegram and email bridges are hub
+  messages, so their "yes" never answers either. The goal driver's steering
+  is a HUD context item, and ACP steering goes to the ACP agent. A hidden
+  voice turn (the greeting) asks for nothing: a call that
   needs the OK comes back refused, never "Not run yet", and its words never
   answer. Asks come only from the voice guard's decision and the permission
   manager's (`PermissionDecision.needs_yes`), never from a tool's text, and one
@@ -220,6 +244,7 @@ is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
       after the Engine dies without stopping them (crash, SIGKILL): the
       watchdog SIGKILLs livekit-server (on SIGTERM it drains, waiting for rooms
       only the Engine could end) and the worker stops when it is reparented
-      (`Worker._stop_when_orphaned`). Live: none left 8 s after a SIGKILL.
+      (`Worker._stop_when_orphaned`). Live: none left 8 s after a SIGKILL. A
+      clean Engine shutdown SIGKILLs the server too, for the same reason.
 - [ ] PhoneLink voice.
 - [x] Before/after latency (#301, "Measurement").

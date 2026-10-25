@@ -577,6 +577,85 @@ async def test_shutdown_surfaces_failed_backend_stop_and_allows_retry():
     assert len(backend.stop_calls) == 2
 
 
+class ExitingBackend(FakeRuntimeBackend):
+    """A backend whose worker can exit by itself, as a crashed process does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exits: dict[str, asyncio.Event] = {}
+
+    def exit(self, handle) -> asyncio.Event:
+        return self.exits.setdefault(handle["room"], asyncio.Event())
+
+    async def wait_exited(self, handle) -> None:
+        await self.exit(handle).wait()
+
+    async def stop_session(self, binding, handle, reason) -> None:
+        await super().stop_session(binding, handle, reason)
+        self.exit(handle).set()
+
+
+async def _until(host, voice_session_id, state):
+    for _ in range(100):
+        view = await host.get_status("owner-1", voice_session_id)
+        if view.state == state:
+            return view
+        await asyncio.sleep(0.01)
+    raise AssertionError(view)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_exit_errors_its_session_and_the_next_create_starts_fresh():
+    from kollabor_agent.voice_admission import (
+        issue_voice_admission_context,
+        validate_voice_admission_context,
+    )
+
+    backend = ExitingBackend()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    context = issue_voice_admission_context(backend.start_calls[0], str(uuid4()))
+
+    backend.exit({"room": f"room-{first.voice_session_id}-1"}).set()  # it crashed
+    gone = await _until(host, first.voice_session_id, "error")
+    assert (gone.detail, gone.retryable) == ("The voice worker stopped.", True)
+    assert validate_voice_admission_context(context) is False
+    assert [reason for *_, reason in backend.stop_calls] == ["error"]  # the backend lets go
+
+    second = await host.create_session("owner-1", "session-1", _request())
+    assert second.voice_session_id != first.voice_session_id
+    await host.wait_for_background_tasks()
+    await host.stop_session(
+        "owner-1",
+        second.voice_session_id,
+        StopVoiceSessionRequest(generation=1, reason="user"),
+    )
+    await host.wait_for_background_tasks()
+    await asyncio.sleep(0.05)  # its exit is our own stop: no error
+    assert (await host.get_status("owner-1", second.voice_session_id)).state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_is_not_reused_by_the_next_create():
+    class FailingStart(FakeRuntimeBackend):
+        async def start_session(self, binding):
+            self.start_calls.append(binding)
+            raise RuntimeError("worker exited before joining")
+
+    backend = FailingStart()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    failed = await host.get_status("owner-1", first.voice_session_id)
+    assert (failed.state, failed.retryable) == ("error", True)
+
+    second = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    assert second.voice_session_id != first.voice_session_id
+    assert len(backend.start_calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_host_generation_fence_revokes_voice_admission_capability():
     from kollabor_agent.voice_admission import (

@@ -56,7 +56,8 @@ class FakeEngine:
     """The Engine's /turns route: chunked NDJSON, one script per request.
 
     A script step is a sentence, "wait" (hold until `gate`, or the client leaves),
-    "done", or an int to answer with that HTTP status.
+    "done", "cut" (drop the connection mid-reply), or an int to answer with that
+    HTTP status.
     """
 
     def __init__(self, scripts=()):
@@ -93,6 +94,8 @@ class FakeEngine:
                     if gone.done():
                         return
                     continue
+                if step == "cut":
+                    return writer.transport.abort()
                 line = (
                     {"done": True, "turn_id": request["turn_id"]}
                     if step == "done"
@@ -435,6 +438,7 @@ def test_turn_stream_reports_a_refused_or_cut_off_turn():
 
     assert run(outcome([409])) == "turn_rejected"
     assert run(outcome([S1])) == "turn_incomplete"  # closed before `done`
+    assert run(outcome([S1, "cut"])) == "turn_incomplete"  # the connection broke
     assert run(outcome([S1, "done"])) == [S1]
 
 

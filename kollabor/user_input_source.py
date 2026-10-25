@@ -14,3 +14,11 @@ class UserInputSource(StrEnum):
 
 
 HUMAN_USER_INPUT_SOURCES = frozenset(source.value for source in UserInputSource)
+
+# A person answering live: typed in the TUI or an attached window, sent from the web
+# composer, or said by voice (state RPC carries the LiveKit room, "voice" the /voice
+# plugin). Only their short yes runs what the agent asked to run; a hub peer
+# ("agent"), the CLI's first message, a pipe or a source not listed here never does.
+YES_SOURCES = frozenset(
+    {UserInputSource.TUI.value, UserInputSource.HUB_ATTACHMENT.value, UserInputSource.STATE_RPC.value, "voice"}
+)

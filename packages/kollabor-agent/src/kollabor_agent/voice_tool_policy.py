@@ -101,6 +101,10 @@ _VOICE_GIT_COMMANDS = frozenset(
         "log", "ls-files", "mv", "rev-parse", "rm", "shortlog", "show", "status",
     }
 )
+# Where git takes a remote, `<helper>::<address>` runs the git-remote-<helper> program
+# (`ext::` runs any command). Only there: a commit message may say `Parser::parse`.
+_GIT_REMOTE_COMMANDS = frozenset({"fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule", "archive"})
+_GIT_REMOTE_HELPER = re.compile(r"(?:^|=)[a-z][a-z0-9+.-]*::")
 _HARD_BLOCKED_GIT_FLAGS = frozenset(
     {
         "--output",
@@ -453,6 +457,8 @@ def _is_hard_blocked(argv: Sequence[str]) -> bool:
         if subcommand not in _VOICE_GIT_COMMANDS:
             return True
         if any(token.split("=", 1)[0] in _HARD_BLOCKED_GIT_FLAGS for token in rest):
+            return True
+        if subcommand in _GIT_REMOTE_COMMANDS and any(_GIT_REMOTE_HELPER.search(token) for token in rest):
             return True
         if subcommand == "grep" and any(
             "O" in token for token in argv[at + 1 :] if token.startswith("-") and not token.startswith("--")

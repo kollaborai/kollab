@@ -265,6 +265,9 @@ def test_voice_policy_blocks_recursive_or_symlink_following_ls(tmp_path: Path, c
         "git config core.pager rm",
         "git ship",
         "git fetch --upload-pack=rm origin",
+        "git fetch 'ext::sh -c touch% x'",  # a remote helper: ext:: runs any command
+        "git fetch EXT::sh",
+        "git fetch --all fd::3",
         "git grep -Orm x",
     ],
 )
@@ -316,7 +319,13 @@ def test_a_yes_never_points_git_outside_the_project(tmp_path: Path, where: str, 
 
 
 @pytest.mark.parametrize(
-    "command", ["git commit -m 'notes'", "git -C . log --oneline", "git --git-dir=.git status"]
+    "command",
+    [
+        "git commit -m 'notes'",
+        "git -C . log --oneline",
+        "git --git-dir=.git status",
+        "git commit -m 'Parser::parse handles nil'",  # only a remote is a helper
+    ],
 )
 def test_a_yes_runs_a_git_commit_past_globals(tmp_path: Path, monkeypatch, command: str):
     monkeypatch.setenv("PATH", os.defpath)

@@ -93,9 +93,13 @@ test("barge_in and latency events land in state", () => {
 
 type Script = Array<Record<string, unknown>>;
 
-function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script } = {}) {
+function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script; hold?: "create" | "room" } = {}) {
   const calls: string[] = [];
   let speaking: (b: boolean) => void = () => undefined;
+  // `hold` keeps that step waiting until release(), as a slow network would
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => (release = r));
+  const wait = (step: string) => (opts.hold === step ? held : Promise.resolve());
   const room = {
     connect: async () => void calls.push("connect"),
     setMicrophoneEnabled: async (on: boolean) => void calls.push(`mic:${on}`),
@@ -104,7 +108,7 @@ function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script
     onDisconnected: () => undefined,
   };
   const api = {
-    create: async () => (calls.push("create"), view({ state: opts.startsAs ?? "ready" })),
+    create: async () => (calls.push("create"), await wait("create"), view({ state: opts.startsAs ?? "ready" })),
     join: async () => {
       calls.push("join");
       if (opts.joinFails) throw new Error("409: models not ready");
@@ -120,8 +124,17 @@ function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script
         );
       }),
   };
-  return { calls, api, room, speaking: (b: boolean) => speaking(b), controller: new VoiceRoomController(api, async () => room) };
+  return {
+    calls,
+    api,
+    room,
+    release: () => release(),
+    speaking: (b: boolean) => speaking(b),
+    controller: new VoiceRoomController(api, async () => (await wait("room"), room)),
+  };
 }
+
+const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 test("the mic opens only inside start, after join and connect; stop releases it", async () => {
   const h = harness();
@@ -167,6 +180,42 @@ test("a runtime that fails before ready never joins or asks for the mic", async 
   assert.equal(h.controller.getState().state, "error");
   assert.ok(!h.calls.includes("join") && !h.calls.includes("mic:true"));
   assert.ok(h.calls.includes("stop:error"));
+});
+
+test("a session the engine ends while live leaves the room, and the mic starts again", async () => {
+  const h = harness({ events: [{ state: "error", detail: "The voice worker stopped.", retryable: true }] });
+  await h.controller.start("s1", null);
+  assert.deepEqual(h.calls, ["create", "join", "connect", "mic:true"]);
+  await tick(30);
+  assert.deepEqual(h.calls.slice(4), ["event:error", "mic:false", "disconnect", "stop:error"]);
+  const s = h.controller.getState();
+  assert.equal(s.state, "error");
+  assert.equal(s.error, "The voice worker stopped.");
+  await h.controller.start("s1", null);
+  assert.equal(h.calls.filter((c) => c === "create").length, 2);
+  await h.controller.stop();
+});
+
+test("a stop while the session is being created ends that session and opens no room", async () => {
+  const h = harness({ hold: "create" });
+  const starting = h.controller.start("s1", null);
+  const stopping = h.controller.stop("session_switch");
+  const again = h.controller.start("s1", null); // a click while it stops is not a second start
+  h.release();
+  await Promise.all([starting, stopping, again]);
+  assert.deepEqual(h.calls, ["create", "stop:session_switch"]);
+  assert.equal(h.controller.getState().state, "stopped");
+});
+
+test("a stop while the room is being built never connects it", async () => {
+  const h = harness({ hold: "room" });
+  const starting = h.controller.start("s1", null);
+  await tick(); // create and join are done
+  await h.controller.stop();
+  h.release();
+  await starting;
+  assert.deepEqual(h.calls, ["create", "join", "stop:user"]);
+  assert.equal(h.controller.getState().state, "stopped");
 });
 
 test("a late ready from the runtime does not undo the browser's connecting", () => {

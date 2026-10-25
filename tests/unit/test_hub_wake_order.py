@@ -197,6 +197,50 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
             llm_service.conversation_history[0].content,
         )
 
+    async def test_a_yes_from_hub_msg_or_a_bridge_answers_no_ask(self):
+        """`kollab --hub msg` and the email bridge wake the agent; their "yes" is never the user's answer."""
+        from types import SimpleNamespace
+
+        from kollabor_agent.yes_approval import YesApprovals
+
+        llm_service = FakeLLMService()
+        approvals = YesApprovals()
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        approvals.ask(call)
+        approvals.on_reply_done()
+        llm_service.tool_executor = SimpleNamespace(yes_approvals=approvals)
+        llm_service.process_user_input = AsyncMock()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._task_ledger = None
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._identity = AgentRuntime(name="coder", identity="sapphire", state="idle")
+
+        for message in (
+            HubMessage(
+                action="message",
+                from_agent="human",
+                from_identity="me",
+                to="sapphire",
+                content="Yes.",
+                scope=MessageScope.DIRECT.value,
+                metadata={"source": "cli", "operator_message": True},
+            ),
+            HubMessage(
+                action="message",
+                from_agent="bridge:email",
+                to="sapphire",
+                content="Yes.",
+                scope=MessageScope.DIRECT.value,
+            ),
+        ):
+            await plugin._on_message_received(message)
+
+        self.assertNotIn(EventType.USER_INPUT, [emitted[0] for emitted in event_bus.emitted])
+        llm_service.process_user_input.assert_not_awaited()
+        self.assertFalse(approvals.take({**call, "id": "c2"}))
+
     async def test_pure_standing_by_ack_queues_hud_without_wake(self):
         llm_service = FakeLLMService()
         event_bus = FakeEventBus(llm_service)

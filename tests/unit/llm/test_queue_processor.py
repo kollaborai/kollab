@@ -457,13 +457,21 @@ class TestQueueProcessor(unittest.TestCase):
     def test_a_stopped_voice_turn_leaves_the_next_turn_its_own_grant(self):
         """A Stop, a talk-over or an error while a voice turn's tool runs ends that
         turn. The next turn, spoken or typed, never runs on the ended turn's grant:
-        an invalid one refused all its tools and left its reply no voice turn id."""
+        an invalid one refuses all its tools. Its events keep the id of the voice
+        turn whose reply stream waits for them (the newest voice turn in it, else
+        the one it cut off), or that stream would never end."""
         from kollabor_agent.queue_processor import QueuedInput
 
         seen = []
         invalid = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
         # Input that cuts in while the turn still has a round to run fails closed.
-        cases = (("stop", True, "own"), ("stop", False, None), ("error", True, "own"), ("new input", True, invalid))
+        cases = (
+            ("stop", True, "own"),
+            ("stop", False, None),
+            ("error", True, "own"),
+            ("new input", True, {**invalid, "turn_id": "turn-2"}),
+            ("new input", False, {**invalid, "turn_id": "turn-1"}),
+        )
         for ended_by, said, expected in cases:
             with self.subTest(ended_by=ended_by, said=said):
                 seen.clear()
@@ -855,7 +863,9 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.assertEqual(merged["source"], "livekit_voice")
         self.assertEqual(merged["voice_tool_policy"], "invalid")
+        self.assertEqual(merged["turn_id"], "turn-1")  # its reply stream still waits
         self.assertFalse(validate_voice_admission_context(voice_context))
+        self.assertFalse(validate_voice_admission_context(merged))
 
 
     def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
