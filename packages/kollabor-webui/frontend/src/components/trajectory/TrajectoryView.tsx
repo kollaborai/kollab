@@ -141,8 +141,9 @@ export function TrajectoryView({
           continue;
         }
         if (!mountedRef.current || controller.signal.aborted) break;
-        // GET /events intentionally ends at turn_complete. Reconnect so a
-        // trajectory tab left open can observe the next turn as well.
+        // GET /events follows the session across turns and ends only after
+        // the engine's idle timeout or a daemon exit. Reconnect so a
+        // trajectory tab left open keeps observing.
         await waitForRetry(controller.signal, 50, retryTimerRef);
       }
     };

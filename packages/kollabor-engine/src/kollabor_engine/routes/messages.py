@@ -157,7 +157,12 @@ async def stream_events(session_id: str):
     A client that reloads mid-turn loses the POST /message stream, but the
     daemon keeps working - and if it is blocked on a permission prompt, the
     answer never produces visible output. This lets a reconnecting client pick
-    the turn back up. Ends at turn_complete so it does not leak subscriptions.
+    the turn back up. It does not end at turn_complete: the daemon starts a
+    queued turn right after the last one, and a stream that closed there would
+    drop that turn's first events (already queued behind turn_complete) and
+    miss the rest until the client reconnected. It ends when the client leaves,
+    after EVENT_IDLE_TIMEOUT_SECONDS of silence or when the daemon closes; the
+    finally below releases the subscription.
     """
     registry = get_session_registry()
     session = registry.get(session_id)
@@ -188,9 +193,6 @@ async def stream_events(session_id: str):
                     return
 
                 yield {"data": sse.serialize(event)}
-
-                if event.get("type") == "turn_complete":
-                    return
         finally:
             session.unsubscribe(queue)
 

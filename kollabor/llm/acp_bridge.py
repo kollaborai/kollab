@@ -389,6 +389,8 @@ class ACPRunner:
         self._closing = False
         self._cancel_lock = asyncio.Lock()
         self._cancel_hold = False
+        # The turn a cancel was accepted for: its reply prose stops here.
+        self._cancelled_turn_id = 0
         self._cancel_target: tuple[str | None, int | None] | None = None
         self._cancel_active_task: asyncio.Task[Any] | None = None
         self._permission_cancel_tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
@@ -975,6 +977,12 @@ class ACPRunner:
             return
         payload = update.model_dump(by_alias=True) if hasattr(update, "model_dump") else {}
         kind = payload.get("sessionUpdate", payload.get("session_update", payload.get("type", "unknown")))
+        if (kind in {"agent_message_chunk", "agent_thought_chunk"}
+                and self._active_turn_id and self._active_turn_id == self._cancelled_turn_id):
+            # Prose flushed after the cancel was accepted was never shown
+            # and is not part of the reply that stays. Tool and plan
+            # updates still land: they are the state the turn stopped in.
+            return
         if kind == "config_option_update":
             self.config_options = self._wire_config_options(payload)
         if kind == "agent_message_chunk":
@@ -1178,6 +1186,10 @@ class ACPRunner:
         task.add_done_callback(settled)
 
 
+    def _mark_cancelled(self) -> None:
+        """Remember which turn a cancel was accepted for (see ``_session_update``)."""
+        self._cancelled_turn_id = getattr(getattr(self, "_active_context", None), "turn_id", 0)
+
     def prepare_cancel(
         self,
         *,
@@ -1195,6 +1207,7 @@ class ACPRunner:
         self._cancel_target = (expected_session_id, expected_generation)
         self._cancel_active_task = active
         self._cancel_hold = True
+        self._mark_cancelled()
         self._queue_release.clear()
         return True
 
@@ -1221,6 +1234,8 @@ class ACPRunner:
             # Hold the worker at the queue boundary before sending cancel so a
             # completion cannot release B between our snapshot and the RPC.
             self._cancel_hold = True
+            if active is not None:
+                self._mark_cancelled()
             self._queue_release.clear()
             if self._active_future and not self._active_future.done():
                 self._active_future.set_exception(ACPError("ACP turn cancelled"))

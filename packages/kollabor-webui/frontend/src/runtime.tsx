@@ -32,10 +32,21 @@ import type {
   HistoryMessage,
   PermissionPrompt,
   Session,
+  SessionEvent,
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
 import { shownMessagesChanged } from "./history-merge";
+import {
+  apartFromLive,
+  applyLiveEvent,
+  emptyLiveTurn,
+  historyReplacesLiveTurn,
+  isLiveMessage,
+  liveMessage,
+  replacedLiveTurn,
+  type LiveTurn,
+} from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
@@ -314,6 +325,10 @@ function historyToMessages(
 
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
+  // The ACP request that produced a reply: a passive window swaps its live
+  // copy of that reply for this row (see historyReplacesLiveTurn).
+  const replyMetadata = (metadata: Record<string, unknown> | null) =>
+    asString(metadata?.request_id) ? { metadata: { custom: { requestId: asString(metadata?.request_id) } } } : {};
   const restoredStatus = (metadata: Record<string, unknown> | null): ThreadMessageLike["status"] => {
     const reason = asString(metadata?.stop_reason);
     if (metadata?.provider === "acp" && reason && reason !== "end_turn") {
@@ -458,6 +473,7 @@ function historyToMessages(
           role: "assistant",
           content,
           status: restoredStatus(metadata),
+          ...replyMetadata(metadata),
         }, voiceTurn);
         finalReplyAt = message.timestamp;
         return;
@@ -491,6 +507,7 @@ function historyToMessages(
         role: "assistant",
         content,
         status: restoredStatus(metadata),
+        ...replyMetadata(metadata),
       }, voiceTurn);
       return;
     }
@@ -574,7 +591,7 @@ const converter = (
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = state.messages.map((message) => {
+  const stored = apartFromLive(state.messages).map((message) => {
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)
@@ -668,6 +685,7 @@ export function EngineRuntimeProvider({
   sessionId,
   initialState,
   onStale,
+  liveEvents,
   children,
 }: {
   api: EngineApi;
@@ -675,6 +693,8 @@ export function EngineRuntimeProvider({
   initialState: EngineState;
   /** Reload the thread whole: the prompt it waits on closed in another window. */
   onStale?: () => void;
+  /** Session-stream events, fed by App's followEvents loop. */
+  liveEvents?: { current: ((event: SessionEvent) => void) | null };
   children: ReactNode;
 }) {
   const turnRef = useRef<TurnClock>(newTurnClock());
@@ -783,6 +803,59 @@ export function EngineRuntimeProvider({
     }
   }, [api, sessionId, onStale, runtime]);
 
+  // A turn this page did not start (another window, the agent's terminal, a
+  // peer's message) streams through App's event subscription. Its events fold
+  // into one ephemeral assistant message so a passive window watches the
+  // reply arrive; nothing is persisted — the history reload at turn_complete
+  // replaces it, and a page that runs the turn itself ignores these.
+  const liveTurn = useRef<LiveTurn>(emptyLiveTurn());
+  const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    if (!liveEvents) return;
+    const importLiveState = (messages: ThreadMessageLike[]) => {
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      if (!shown) return;
+      runtime.thread.importExternalState({
+        ...shown,
+        messages,
+        synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
+      });
+    };
+    liveEvents.current = (event: SessionEvent) => {
+      const thread = runtime.thread.getState();
+      if (thread.isRunning) return;
+      const previous = liveTurn.current;
+      const next = applyLiveEvent(previous, event);
+      if (next === previous) return;
+      liveTurn.current = next;
+      if (next.held && next.parts === previous.parts) return;  // held back: nothing new to show
+      const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+      if (!shown) return;
+      // A turn that ended is dropped now: the reload its event triggers appends
+      // the finished (or stopped) reply from history, and keeping both would
+      // show it twice (assistant-ui keeps every message by id). A stopped turn
+      // stays, no longer running, until its own turn_complete brings that reply.
+      const kept = shown.messages.filter((message) => !isLiveMessage(message));
+      const live = liveMessage(next);
+      if (!live && kept.length === shown.messages.length) return;
+      importLiveState(live ? [...kept, live] : kept);
+      // Bounded: if the history never carries the reply, the text goes anyway.
+      clearTimeout(settleTimer.current);
+      if (next.settled && live) {
+        settleTimer.current = setTimeout(() => {
+          if (liveTurn.current.parts !== next.parts || !liveTurn.current.settled) return;
+          liveTurn.current = replacedLiveTurn(liveTurn.current);  // a held turn starts now
+          const state = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+          if (!state) return;
+          const held = liveMessage(liveTurn.current);
+          const kept = state.messages.filter((m) => !isLiveMessage(m));
+          importLiveState(held ? [...kept, held] : kept);
+        }, 5000);
+      }
+    };
+    return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
+  }, [runtime, liveEvents]);
+
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
   // after them. Only the history past what the thread shows is appended:
@@ -836,7 +909,14 @@ export function EngineRuntimeProvider({
       return index !== null && index >= from.history && !currentIds.has(String(message.id ?? ""));
     });
     if (!older.length && !tail.length && nextStart >= currentStart) return;
-    const messages = [...older, ...shown.messages, ...tail];
+    // A live turn this page is only watching rides at the end, outside the
+    // synced bookkeeping, until the history carries its reply (replaced above).
+    const replaced = historyReplacesLiveTurn(liveTurn.current, tail);
+    if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
+    const held = replaced ? liveMessage(liveTurn.current) : null;  // the queued turn it held back
+    const liveShown = replaced ? (held ? [held] : []) : shown.messages.filter(isLiveMessage);
+    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const messages = [...older, ...kept, ...tail, ...liveShown];
     runtime.thread.importExternalState({
       ...shown,
       messages,
