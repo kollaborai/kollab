@@ -149,7 +149,8 @@ class TestCannotShrinkStop(unittest.TestCase):
 class TestBoundedCoordinationDeferral(unittest.TestCase):
     def test_pending_coordination_defers_at_most_a_few_turns_in_a_row(self) -> None:
         history = _history()
-        plugin = _make_plugin(history, reported=100_649)
+        # Over the 96K auto trigger, under the 100K hard cap: deferral applies.
+        plugin = _make_plugin(history, reported=99_000)
         plugin._llm_service._pending_agent_hud = [object()]  # never drains
         runs: List[int] = []
 
@@ -172,7 +173,7 @@ class TestBoundedCoordinationDeferral(unittest.TestCase):
 
     def test_model_first_asks_the_model_after_the_deferral_cap(self) -> None:
         history = _history()
-        plugin = _make_plugin(history, reported=100_649, ask_model_first=True)
+        plugin = _make_plugin(history, reported=99_000, ask_model_first=True)
         plugin._llm_service._pending_agent_hud = [object()]  # never drains
         plugin._request_model_curation = AsyncMock()
 
@@ -189,7 +190,7 @@ class TestBoundedCoordinationDeferral(unittest.TestCase):
 
     def test_a_cleared_trigger_resets_the_deferral_count(self) -> None:
         history = _history()
-        plugin = _make_plugin(history, reported=100_649)
+        plugin = _make_plugin(history, reported=99_000)
         plugin._llm_service._pending_agent_hud = [object()]
 
         asyncio.run(plugin._on_llm_turn_complete({}, None))
