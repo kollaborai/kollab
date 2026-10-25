@@ -1,5 +1,5 @@
 /**
- * Sidebar agent order saved by the engine (engine: sidebar_order.py). Local
+ * Sidebar order saved by the engine (engine: sidebar_order.py). Local
  * persona keys use workspace + identity; duplicate live rows add stable session
  * IDs while retaining the persona key as an offline/restart fallback. Remote
  * keys add network + device scope to keep identically named agents independent.
@@ -21,6 +21,32 @@ export function orderKey(
 ): string {
   const parts = ["pos", ...(scope?.length ? scope : []), folder || "", (name || "").trim().toLowerCase()];
   return JSON.stringify(parts);
+}
+
+/** The network API exposes device names, not immutable device IDs; a rename is a new key. */
+export function deviceOrderKey(networkId: string, device: string): string {
+  return JSON.stringify(["device", networkId, device]);
+}
+
+function deviceOrderRows<Device extends { device: string }>(networkId: string, devices: Device[]) {
+  const folder = JSON.stringify(["devices", networkId]);
+  return devices.map((device) => ({ key: deviceOrderKey(networkId, device.device), folder, device }));
+}
+
+/** Rank whole device groups without changing their workspaces or agent rows. */
+export function orderedDevices<Device extends { device: string }>(networkId: string, devices: Device[], saved: string[]): Device[] {
+  return groupByFolder(deviceOrderRows(networkId, devices), saved).flatMap((group) => group.rows.map((row) => row.device));
+}
+
+/** Device moves share the agent preference file and retain all unrelated or absent keys. */
+export function reorderDevicesWithinNetwork<Device extends { device: string }>(
+  networkId: string,
+  devices: Device[],
+  key: string,
+  to: number,
+  saved: string[],
+): string[] | null {
+  return reorderWithinFolder(groupByFolder(deviceOrderRows(networkId, devices), saved), key, to, saved);
 }
 
 /** Scope duplicate rows by API session ID; persona keys remain durable fallbacks. */

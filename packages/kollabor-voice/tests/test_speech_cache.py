@@ -10,9 +10,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from kollabor_voice.classifiers import save_preferences
 from kollabor_voice.output import SpeechQueue
 from kollabor_voice.speech_cache import KEEP_S, SpeechCache
+from kollabor_voice.speech_settings import save_speech_preferences as save_preferences
 
 LINE = "Sorry, was that for me?"
 
@@ -51,7 +51,7 @@ def engine(calls):
     return stream
 
 
-async def say(root, stream, producer="voice-classifier"):
+async def say(root, stream, producer="voice-progress"):
     """Speak LINE through a fresh queue, as a restarted service would."""
     speaker = Speaker()
     q = SpeechQueue(root, stream, speaker)
@@ -149,7 +149,7 @@ async def test_a_cancelled_sentence_is_never_kept(root):
         yield np.full(4, -0.5, np.float32), 24000
 
     q = SpeechQueue(root, stream, Speaker())
-    q.admit(LINE, "line", "epoch", "voice-classifier")
+    q.admit(LINE, "line", "epoch", "voice-progress")
     worker = asyncio.create_task(q.run())
     deadline = time.monotonic() + 3
     while not started.is_set():

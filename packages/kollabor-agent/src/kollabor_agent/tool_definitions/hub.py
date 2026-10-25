@@ -258,7 +258,7 @@ hub_spawn = ToolDefinition(
             name="llm",
             type="string",
             required=False,
-            description="LLM profile or loadout; ACP profiles include claude-code, codex-cli and gemini-cli.",
+            description="LLM profile or loadout; ACP profiles include claude-code and codex-cli.",
         ),
         ToolParameter(
             name="name",

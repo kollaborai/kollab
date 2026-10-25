@@ -11,6 +11,9 @@ may run. The answer to a native tool result is "pong: the tool answered".
 "slowreply" holds the answer for SLOW_SECONDS, so a spec can act mid-turn.
 "slowtool" gets a <terminal> call that runs SLOW_SECONDS, so a check can watch
 a tool mid-call (the gem's tool animation).
+"parkone" and "parktwo" get <terminal> calls whose output (park-one-ran,
+park-two-ran) shows only if they ran. A message that carries the note a yes or
+an Allow on a parked card adds gets the approved call again.
 
 usage: fake_llm.py <port file>
 Binds a free port on 127.0.0.1 and writes it to <port file> once listening.
@@ -46,6 +49,16 @@ def _answers_a_tool(body):
     return bool(messages) and messages[-1].get("role") == "tool"
 
 
+def _approved_command(text):
+    """The command the user's yes (or Allow on a parked card) approved, from its note."""
+    for line in text.splitlines():
+        if "approved on the card: " in line:
+            return line.split("approved on the card: ", 1)[1].strip()
+    if "said yes to what you asked to run" in text:
+        return next((line[2:].strip() for line in text.splitlines() if line.startswith("- ")), None)
+    return None
+
+
 def _native_calls(body):
     if _answers_a_tool(body) or "echocall" not in _last_line(body):
         return []
@@ -56,6 +69,9 @@ def _native_calls(body):
 def _reply(body):
     if _answers_a_tool(body):
         return "pong: the tool answered"
+    approved = _approved_command(_last_user_text(body))
+    if approved:
+        return f"Running it.\n<terminal>{approved}</terminal>"
     last = _last_line(body)
     if "echocall" in last:
         # Text copies beside the native call: echo-*-ran shows only if one runs.
@@ -64,6 +80,10 @@ def _reply(body):
         return f"Running it.\n<tool_call>{nameless}</tool_call>\n<tool_call>{named}</tool_call>"
     if "runtool" in last:
         return "Running it.\n<terminal>echo fake-tool-ran</terminal>"
+    if "parkone" in last:
+        return "Running it.\n<terminal>printf 'park-%s-ran' one</terminal>"
+    if "parktwo" in last:
+        return "Running it.\n<terminal>printf 'park-%s-ran' two</terminal>"
     # The whole message, since a hub message ends in its </agent_hud> line.
     if "slowtool" in _last_user_text(body):
         return f"Running it.\n<terminal>sleep {SLOW_SECONDS}; echo slow-tool-ran</terminal>"

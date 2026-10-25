@@ -42,7 +42,7 @@ import { gemMood, gemSpec, type GemCut, type GemMood, type GemSpec } from "./gem
 import {
   BLINK,
   DANCE,
-  TOOL_HOLD,
+  stageActivity,
   blinkOpen,
   breathCurve,
   dance,
@@ -299,8 +299,6 @@ const BUSY: ReadonlySet<Activity> = new Set([
 ]);
 /** Activities a tool call shows; each holds the stage for at least TOOL_HOLD. */
 const TOOLS: ReadonlySet<Activity> = new Set(["typing", "reading", "searching", "messaging", "tasking"]);
-/** Seconds a thinking blip between two tool calls waits before it shows. */
-const TOOL_GAP = 0.35;
 /** Seconds the working moves take to blend from one activity's into the next. */
 const MOVE_BLEND = 0.3;
 type Moves = { slide: number; roll: number; pitch: number; lift: number; squash: number; spin: number };
@@ -768,19 +766,13 @@ class GemEngine {
     const now = performance.now() / 1000;
     const mood = gemMood(props.state, props.live !== false);
     const activity = activityFor(props, mood);
-    if (activity === avatar.activity) {
-      // Back to the tool still on show: the blip in between never happened.
-      avatar.queued = null;
-    } else if (activity !== avatar.queued) {
-      // A tool's look holds the stage a moment, and a breath of thinking
-      // between two calls waits to see whether the next call follows.
-      const until = TOOLS.has(avatar.activity) && !URGENT.has(activity)
-        ? Math.max(avatar.activitySince + TOOL_HOLD, activity === "thinking" ? now + TOOL_GAP : 0)
-        : 0;
-      avatar.queued = now < until ? activity : null;
-      avatar.queuedAt = until;
-      if (!avatar.queued) this.changeActivity(avatar, activity, now);
-    }
+    const staged = stageActivity(
+      { activity: avatar.activity, since: avatar.activitySince, queued: avatar.queued, queuedAt: avatar.queuedAt },
+      activity, now, TOOLS.has(avatar.activity), URGENT.has(activity),
+    );
+    avatar.queued = staged.stage.queued;
+    avatar.queuedAt = staged.stage.queuedAt;
+    if (staged.switched) this.changeActivity(avatar, activity, now);
     avatar.mood = mood;
     this.identify(avatar, props);
     avatar.dirty = true;

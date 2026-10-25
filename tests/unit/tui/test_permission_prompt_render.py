@@ -53,3 +53,21 @@ def test_permission_prompt_requests_render_before_waiting():
         assert layout.has_active_permission_prompt() is False
 
     asyncio.run(run_prompt())
+
+
+def test_a_prompt_the_hook_timeout_ends_closes():
+    """Nobody answered for 5 min: the stale prompt stayed up and caught keys."""
+
+    async def run_prompt():
+        layout = LayoutManager(terminal_width=120, terminal_height=30)
+        layout.set_render_loop(RenderLoopSpy())
+        details = {"tool_id": "tool-1", "tool_type": "terminal", "tool_name": "terminal", "command": "git push"}
+        try:  # the hook executor's timeout, made short
+            await asyncio.wait_for(layout.show_permission_prompt(details), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+        assert layout.has_active_permission_prompt() is False
+        assert layout.handle_permission_keypress("a") is False
+        assert layout.get_area("thinking").content == []
+
+    asyncio.run(run_prompt())

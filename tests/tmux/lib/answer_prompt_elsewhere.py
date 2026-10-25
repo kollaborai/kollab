@@ -5,7 +5,10 @@ DaemonPool.adopt): this attaches, finds the prompt in the replayed events,
 answers it over RPC, and detaches. The agent's own terminal must then close its
 copy of the prompt (specs/attach_prompt_answered_elsewhere.json).
 
-usage: HOME=<spec home> answer_prompt_elsewhere.py [response]
+STOP sends a Stop instead (what the web UI's Stop does): the turn ends and its
+prompt stays open, parked (specs/attach_prompt_parked.json).
+
+usage: HOME=<spec home> answer_prompt_elsewhere.py [response | STOP]
 """
 
 import asyncio
@@ -28,6 +31,10 @@ async def main(response: str) -> None:
             if event.get("type") == "permission_request":
                 tool_id = event["tool_id"]
                 break
+        if response == "STOP":
+            await handle.state.cancel_current_request()
+            print(f"stopped the turn waiting on {tool_id}")
+            return
         reply = await handle.rpc.call("permission.respond", {"tool_id": tool_id, "response": response})
         print(f"answered {tool_id}: {reply}")
     finally:

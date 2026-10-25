@@ -157,7 +157,7 @@ def test_a_voice_reply_keeps_code_that_shows_the_field_tags():
 
 
 def test_a_voice_turn_shows_what_the_user_said():
-    from kollabor_voice.observer import voice_preamble
+    from kollabor_voice.voice_context import voice_preamble
 
     first = {"event_ids": ["a"], "transcript_context": [{"text": "earlier ] line"}]}
     later = {"event_ids": ["b"], "spoken_ack": "One moment."}
@@ -193,3 +193,14 @@ def test_a_silent_reply_to_speech_shows_nothing():
 
     assert [m["content"] for m in shaped] == ["Hmm.", "", "typed", ".", "Run it.", "", "ok", ""]
     assert len(shaped) == len(history)  # rows stay, so the web's message ids line up
+
+
+def test_hidden_message_is_not_in_the_web_history():
+    from kollabor_engine.history_xml_tools import web_history
+
+    history = [
+        {"role": "user", "content": "Greet the user.", "metadata": {"hidden": True}},
+        {"role": "assistant", "content": "Hey, what's up?", "metadata": {}},
+        {"role": "user", "content": "hi", "metadata": {}},
+    ]
+    assert [m["content"] for m in web_history(history)] == ["Hey, what's up?", "hi"]

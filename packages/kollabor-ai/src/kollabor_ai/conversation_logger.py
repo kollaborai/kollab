@@ -5,11 +5,13 @@ including message threading, session management, and intelligence features
 that learn from user patterns and project context.
 """
 
+import asyncio
 import json
 import logging
 import os
 import stat
 import subprocess
+import tempfile
 import time
 import tomllib
 from copy import deepcopy
@@ -92,6 +94,10 @@ class KollaborConversationLogger:
         self.conversation_start_time = datetime.now()
         self.message_count = 0
         self.current_thread_uuid = None
+        # A talk-over's cut rewrites the log off the event loop (rewrite_voice_turn):
+        # appends wait for it and thread past the records it dropped.
+        self._write_lock = asyncio.Lock()
+        self._reparent: Dict[str, Any] = {}  # a dropped record's uuid: its parent's
 
         # Memory directory (used by _load/_save_conversation_memory)
         self.memory_dir = self.conversations_dir / "memory"
@@ -289,17 +295,23 @@ class KollaborConversationLogger:
 
     async def _append_to_jsonl(self, message: Dict[str, Any]):
         """Append message to JSONL file."""
-        try:
-            fd = os.open(
-                self.session_file,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            with os.fdopen(fd, "a") as f:
-                f.write(json.dumps(message) + "\n")
-            self.message_count += 1
-        except Exception as e:
-            logger.error(f"Failed to write to JSONL: {e}")
+        async with self._write_lock:  # never mid-rewrite (rewrite_voice_turn)
+            parent = message.get("parentUuid")
+            while parent in self._reparent:  # a cut dropped it after the caller read it
+                parent = self._reparent[parent]
+            if "parentUuid" in message:
+                message["parentUuid"] = parent
+            try:
+                fd = os.open(
+                    self.session_file,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o600,
+                )
+                with os.fdopen(fd, "a") as f:
+                    f.write(json.dumps(message) + "\n")
+                self.message_count += 1
+            except Exception as e:
+                logger.error(f"Failed to write to JSONL: {e}")
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -580,6 +592,7 @@ class KollaborConversationLogger:
         tool_calls: Optional[List[Dict]] = None,
         provider_reasoning: Optional[Dict[str, Any]] = None,
         display_metadata: Optional[Dict[str, Any]] = None,
+        voice_turn_id: Optional[str] = None,
     ) -> str:
         """Log assistant response with usage statistics.
 
@@ -594,6 +607,8 @@ class KollaborConversationLogger:
                 verbatim so a resumed session can hand them back to the model
             display_metadata: ACP cards, updates and stop reason for replay;
                 excluded from native provider tool-call reconstruction
+            voice_turn_id: The voice turn a reply belongs to, so a talk-over
+                can cut it here too (rewrite_voice_turn)
         """
         message_uuid = str(uuid4())
 
@@ -661,6 +676,8 @@ class KollaborConversationLogger:
             message["provider_reasoning"] = provider_reasoning
         if replay_metadata := _acp_display_metadata(display_metadata):
             message["display_metadata"] = replay_metadata
+        if voice_turn_id:
+            message["voice_turn_id"] = voice_turn_id
 
         await self._append_to_jsonl(message)
 
@@ -671,6 +688,105 @@ class KollaborConversationLogger:
         self._save_conversation_memory()
 
         return message_uuid
+
+    async def rewrite_voice_turn(
+        self, turn_id: str, count: int, edits: Dict[int, Optional[str]]
+    ) -> Optional[Dict[str, Any]]:
+        """Apply a talk-over's cut to a voice turn's logged replies, in place.
+
+        The turn's replies are its assistant records with this voice_turn_id, in
+        order: `count` of them, or nothing changes. `edits` maps a reply's
+        position to its new text, or None to drop it (its children then thread
+        under its parent). Off the event loop (a 67 MB log takes ~0.7 s) and
+        under the append lock: an append waits for it, and one whose parent it
+        dropped threads under that record's parent. What a writer outside the
+        logger appends meanwhile (compaction's records) is carried over at the
+        swap. Returns each dropped record's uuid with its parent's, None when
+        the log was not cut.
+        """
+        async with self._write_lock:
+            path = Path(self.session_file)
+            cut = await asyncio.to_thread(self._rewrite_voice_turn, path, turn_id, count, edits)
+            if cut is None:
+                return None
+            dropped, temp, end = cut
+            try:  # on the loop, so nothing lands between the copy and the swap
+                with open(path, "rb") as log, open(temp, "ab") as new:
+                    log.seek(end)
+                    new.write(log.read())  # appended since the cut read the log
+                os.replace(temp, path)
+            except BaseException:
+                Path(temp).unlink(missing_ok=True)
+                raise
+            self._reparent.update(dropped)
+            return dropped
+
+    def _rewrite_voice_turn(
+        self, path: Path, turn_id: str, count: int, edits: Dict[int, Optional[str]]
+    ) -> Optional[tuple[Dict[str, Any], str, int]]:
+        """The cut log in a temp file: (dropped, the temp path, the bytes it covers)."""
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        end = data.rfind(b"\n") + 1  # a line still being written goes with the tail
+        lines = data[:end].decode().splitlines()
+        records: List[Any] = []
+        for line in lines:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                records.append(line)  # kept as written
+        replies = [
+            record
+            for record in records
+            if isinstance(record, dict)
+            and record.get("type") == "assistant"
+            and record.get("voice_turn_id") == turn_id
+        ]
+        if len(replies) != count:
+            logger.warning(
+                "voice turn %s: %d logged replies, %d in history; log not cut",
+                turn_id, len(replies), count,
+            )
+            return None
+        dropped: Dict[str, Any] = {}  # uuid: its parent
+        skip = set()
+        for position, text in edits.items():
+            record = replies[position]
+            message = record.get("message") or {}
+            calls = [
+                item
+                for item in message.get("content") or []
+                if isinstance(item, dict) and item.get("type") == "tool_use"
+            ]
+            # No empty text block: providers refuse one.
+            content = [{"type": "text", "text": text}] if text else []
+            if text is None or not (content or calls):
+                skip.add(id(record))
+                if record.get("uuid"):
+                    dropped[record["uuid"]] = record.get("parentUuid")
+                continue
+            message["content"] = [*content, *calls]
+        kept = []
+        for record in records:
+            if isinstance(record, dict):
+                if id(record) in skip:
+                    continue
+                parent = record.get("parentUuid")
+                while parent in dropped:
+                    parent = dropped[parent]
+                if "parentUuid" in record:
+                    record["parentUuid"] = parent
+            kept.append(record if isinstance(record, str) else json.dumps(record))
+        fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("".join(line + "\n" for line in kept))
+        except BaseException:
+            Path(temp).unlink(missing_ok=True)
+            raise
+        return dropped, temp, end
 
     async def log_system_message(
         self,

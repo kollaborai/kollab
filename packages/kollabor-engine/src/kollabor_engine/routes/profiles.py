@@ -123,7 +123,6 @@ def _safe_acp_adapter(command: Any) -> Optional[str]:
     known_packages = {
         "@agentclientprotocol/claude-agent-acp": "claude-agent-acp",
         "@agentclientprotocol/codex-acp": "codex-acp",
-        "@google/gemini-cli": "gemini-cli",
     }
     for part in command:
         if not isinstance(part, str):

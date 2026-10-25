@@ -1345,8 +1345,7 @@ opens **Settings > PhoneLink**, chooses **Link a Phone**, scans an expiring QR
 with the phone camera, compares the pairing codes and approves on the computer.
 The phone can bookmark the opened app in the same browser. The computer stays awake and
 online. No WireGuard app, personal server, key entry or router changes belong
-to the normal flow. Manual WireGuard access is optional and collapsed under
-**Advanced Settings**.
+to the flow, and there is no manual WireGuard option.
 
 A phone is an app controller, not a joined agent-network device. It gets an
 isolated private room and its own identity, local approval, and revocation.

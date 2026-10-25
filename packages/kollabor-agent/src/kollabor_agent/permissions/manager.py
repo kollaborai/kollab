@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from kollabor_agent.file_operations_executor import PathAccessMode
+from kollabor_agent.yes_approval import NEEDS_YES, YesApprovals, call_approval
 from kollabor_events.dict_utils import safe_get
 from kollabor_events.models import EventType
 from kollabor_events.permissions_models import (
     ApprovalMode,
     ApprovalRecord,
+    ConfirmationResponse,
     PermissionDecision,
     ToolRiskLevel,
 )
@@ -24,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Project approvals file name
 PROJECT_APPROVALS_FILE = "permission_approvals.json"
+
+# A prompt unanswered this long parks: its turn goes on (the model asks for the
+# OK in its reply) and its card stays open. Under the permission hook's 5 min.
+PARK_AFTER_SECONDS = 290.0
 
 
 class PermissionManager:
@@ -80,6 +86,14 @@ class PermissionManager:
         self._confirmation_callback: Optional[
             Callable[[Dict[str, Any]], Awaitable[PermissionDecision]]
         ] = None
+        # Answers every prompt the callback has open cancelled (cancel_confirmations)
+        self._cancel_confirmations: Optional[Callable[[], None]] = None
+        # A parked prompt: terminals close it (tool id); its card stays open.
+        self._park_prompt: Optional[Callable[[str], None]] = None
+        # Answers one open prompt (tool id, ConfirmationResponse).
+        self._settle_prompt: Optional[Callable[[str, Any], Any]] = None
+        self._parking: Set[asyncio.Event] = set()  # prompts waiting now (park_confirmations)
+        self._late_answers: Set[asyncio.Task] = set()
 
         # Statistics
         self._stats = {
@@ -121,6 +135,9 @@ class PermissionManager:
     def set_tool_executor(self, tool_executor) -> None:
         """Set the tool executor for file access mode sync."""
         self._tool_executor = tool_executor
+        approvals = getattr(tool_executor, "yes_approvals", None)
+        if isinstance(approvals, YesApprovals):
+            approvals.close_card = self._close_card
 
     def _sync_file_access_mode(self, tool_executor=None) -> None:
         """Sync file path access mode with current approval mode."""
@@ -200,15 +217,117 @@ class PermissionManager:
     def set_confirmation_callback(
         self,
         callback: Callable[[Dict[str, Any]], Awaitable[PermissionDecision]],
+        cancel: Optional[Callable[[], None]] = None,
+        park: Optional[Callable[[str], None]] = None,
+        settle: Optional[Callable[[str, Any], Any]] = None,
     ) -> None:
         """
         Set callback for showing confirmation UI.
 
         Args:
             callback: Async function that shows confirmation and returns decision
+            cancel: Answers every prompt the callback has open cancelled
+            park: Its turn went on without an answer: terminals close this
+                prompt (tool id), its card stays open
+            settle: Answers one open prompt (tool id, ConfirmationResponse)
         """
         self._confirmation_callback = callback
+        self._cancel_confirmations = cancel
+        self._park_prompt = park
+        self._settle_prompt = settle
         logger.debug("Confirmation callback set")
+
+    def cancel_confirmations(self) -> None:
+        """An ACP Stop ends the turn: its open prompts are answered cancelled."""
+        if self._cancel_confirmations is not None:
+            self._cancel_confirmations()
+
+    def park_confirmations(self) -> None:
+        """A Stop leaves its turn's open prompts open: the card or a yes answers them.
+
+        A prompt asked after it, while the turn is still stopping, shows and
+        parks at once (check_permission).
+        """
+        for waiting in list(self._parking):
+            waiting.set()
+
+    def _close_card(self, tool_id: str, allowed: Optional[bool]) -> None:
+        """The user's typed yes or no answered a parked prompt: close its card."""
+        if self._settle_prompt is None:
+            return
+        if allowed is None:
+            response = ConfirmationResponse.CANCEL
+        else:
+            response = ConfirmationResponse.APPROVE_ONCE if allowed else ConfirmationResponse.DENY
+        try:
+            self._settle_prompt(tool_id, response)
+        except Exception:
+            logger.warning("could not close the approval card", exc_info=True)
+
+    def _park(
+        self,
+        prompt: "asyncio.Future[PermissionDecision]",
+        tool_data: Dict[str, Any],
+        details: Dict[str, Any],
+        risk_level: ToolRiskLevel,
+    ) -> PermissionDecision:
+        """Its turn goes on unanswered: the prompt stays open as an ask.
+
+        Terminals close it (a key typed there would answer it mid-message); its
+        card stays open. The card, or the user's typed yes, answers it later
+        (_answered_late, YesApprovals).
+        """
+        details["parked"] = True
+        approvals = getattr(getattr(self, "_tool_executor", None), "yes_approvals", None)
+        if isinstance(approvals, YesApprovals):
+            approvals.park(tool_data)
+        if self._park_prompt is not None:
+            try:
+                self._park_prompt(str(details.get("tool_id")))
+            except Exception:
+                logger.warning("could not park the approval prompt", exc_info=True)
+        prompt.add_done_callback(lambda done: self._answered_late(done, tool_data))
+        return PermissionDecision(allowed=False, reason=NEEDS_YES, risk_level=risk_level, needs_yes=True)
+
+    def _answered_late(
+        self, prompt: "asyncio.Future[PermissionDecision]", tool_data: Dict[str, Any]
+    ) -> None:
+        """A parked prompt was answered: Allow runs its call, Deny drops it quietly."""
+        if prompt.cancelled():
+            return
+        try:
+            decision = prompt.result()
+        except Exception:
+            logger.warning("a parked approval prompt failed", exc_info=True)
+            return
+        approvals = getattr(getattr(self, "_tool_executor", None), "yes_approvals", None)
+        if not isinstance(approvals, YesApprovals):
+            return
+        allowed = None
+        if decision is not None and decision.reason != "User cancelled operation":
+            allowed = bool(decision.allowed)
+        what = approvals.answered_on_card(tool_data, allowed)
+        if what:
+            task = asyncio.ensure_future(self._go_on(what))
+            self._late_answers.add(task)
+            task.add_done_callback(self._late_answers.discard)
+
+    async def _go_on(self, what: str) -> None:
+        """The agent goes on with the call the user approved on its card."""
+        llm = self._event_bus.get_service("llm_service")
+        queue_hud = getattr(llm, "queue_agent_hud", None)
+        if callable(queue_hud):
+            queue_hud(
+                "permission",
+                "approved",
+                f"The user approved on the card: {what}\n"
+                "Run exactly that now, then tell them what you found.",
+            )
+        await self._event_bus.emit_with_hooks(
+            EventType.TRIGGER_LLM_CONTINUE,
+            {"source": "permission"},
+            source="permission_manager",
+        )
 
     async def check_permission(
         self,
@@ -353,6 +472,26 @@ class PermissionManager:
             return decision
 
         # Step 6: Request user confirmation
+        approval = call_approval.get()
+        if approval == "yes":
+            # The user's own yes, typed or spoken, already approved this call.
+            self._stats["user_approved"] += 1
+            decision = PermissionDecision(
+                allowed=True,
+                reason="User approved (yes)",
+                risk_level=risk_result.level,
+            )
+            await self._emit_permission_granted(
+                tool_id, tool_type, tool_name, risk_result.level, decision.reason
+            )
+            return decision
+        if approval == "ask":
+            # A voice turn never waits on a prompt nobody can click: the model
+            # asks for a yes in its reply instead (kollabor_agent.yes_approval).
+            return PermissionDecision(
+                allowed=False, reason=NEEDS_YES, risk_level=risk_result.level, needs_yes=True
+            )
+
         if self._confirmation_callback:
             confirmation_details = self._build_confirmation_details(
                 tool_data, risk_result
@@ -372,7 +511,36 @@ class PermissionManager:
                 source="permission_manager",
             )
 
-            decision = await self._confirmation_callback(confirmation_details)
+            # A Stop parks the prompt (park_confirmations), and so does a prompt
+            # asked while its turn stops: it shows as a card, and terminals,
+            # told before it opens, never show it.
+            stop = asyncio.Event()
+            executor = getattr(self, "_tool_executor", None)
+            if executor is not None and executor.is_cancelled():
+                stop.set()
+                confirmation_details["parked"] = True
+            prompt = asyncio.ensure_future(
+                self._confirmation_callback(confirmation_details)
+            )
+            stopped = asyncio.ensure_future(stop.wait())
+            self._parking.add(stop)
+            try:
+                await asyncio.wait(
+                    {prompt, stopped},
+                    timeout=PARK_AFTER_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.CancelledError:
+                prompt.cancel()  # the hook's own timeout, a shutdown
+                raise
+            finally:
+                self._parking.discard(stop)
+                stopped.cancel()
+            if not prompt.done():
+                return self._park(
+                    prompt, tool_data, confirmation_details, risk_result.level
+                )
+            decision = prompt.result()
 
             if decision.allowed:
                 self._stats["user_approved"] += 1

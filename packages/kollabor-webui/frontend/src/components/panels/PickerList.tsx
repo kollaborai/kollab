@@ -1,11 +1,13 @@
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, Search } from "lucide-react";
 import type { PanelAction, PanelField, PanelPicker, PanelRow } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { FieldRenderer } from "./FieldRenderer";
-import { summaryRows, titleCase } from "./panel-model";
+import { cn } from "@/lib/utils";
+import { FieldRenderer, type Draft } from "./FieldRenderer";
+import { PanelSummary } from "./PanelSummary";
+import { pickerControlNeedsApply, titleCase } from "./panel-model";
 
 const SEARCH_FROM_ROWS = 8;
 
@@ -16,7 +18,7 @@ function actionLabel(action: PanelAction): string {
 /**
  * A grouped, searchable list with row and toolbar actions. It also draws the
  * generic extras a picker may carry: `summary` rows, a read-only `notice`,
- * `controls` (fields that act on change) and `empty_groups`.
+ * `controls` (immediate except Knocks route text) and `empty_groups`.
  */
 export function PickerList({
   panel,
@@ -24,19 +26,28 @@ export function PickerList({
   onRowAction,
   onToolbarAction,
   onControlChange,
+  draft,
+  onDraftChange,
+  errors,
+  compactControls = false,
+  emptyText,
 }: {
   panel: PanelPicker;
   busy: boolean;
   onRowAction: (action: PanelAction, row: PanelRow) => void;
   onToolbarAction: (action: PanelAction) => void;
   onControlChange: (field: PanelField, value: unknown) => void;
+  draft: Draft;
+  onDraftChange: (draft: Draft) => void;
+  errors?: Record<string, string>;
+  compactControls?: boolean;
+  emptyText?: string;
 }) {
   const [query, setQuery] = useState("");
   // The row action waiting for a second click (confirm: true).
   const [armed, setArmed] = useState<string | null>(null);
   const q = query.trim().toLowerCase();
   const rows = panel.rows ?? [];
-  const summary = summaryRows(panel.summary);
 
   const groups = useMemo(() => {
     const byGroup = new Map<string, PanelRow[]>();
@@ -75,32 +86,48 @@ export function PickerList({
         </p>
       ) : null}
 
-      {summary.length ? (
-        <dl className="bg-muted/30 grid grid-cols-[minmax(0,8.5rem)_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg p-3 text-sm">
-          {summary.map((row, index) => (
-            <Fragment key={`${row.label}-${index}`}>
-              <dt className="text-muted-foreground break-words">{row.label}</dt>
-              <dd className="font-medium break-words">{row.value || "—"}</dd>
-            </Fragment>
-          ))}
-        </dl>
-      ) : null}
+      <PanelSummary summary={panel.summary} />
 
       {panel.controls?.length ? (
         <div className="rounded-lg bg-muted/30 px-3">
-          {panel.controls.map((control) => (
-            <FieldRenderer
-              key={control.path}
-              field={control}
-              draft={{}}
-              disabled={busy}
-              onChange={(next) => {
-                if (control.path in next) {
-                  onControlChange(control, next[control.path]);
-                }
-              }}
-            />
-          ))}
+          {panel.controls.map((control) => {
+            const deferred = pickerControlNeedsApply(panel.panel, control);
+            const field = (
+              <FieldRenderer
+                field={control}
+                draft={deferred ? draft : {}}
+                error={errors?.[control.path]}
+                disabled={busy}
+                onChange={(next) => {
+                  if (deferred) {
+                    onDraftChange(next);
+                  } else if (control.path in next) {
+                    onControlChange(control, next[control.path]);
+                  }
+                }}
+              />
+            );
+            return (
+              <div key={control.path} className={cn(compactControls && "max-w-sm")}>
+                {deferred ? (
+                  <form
+                    className="pb-2.5"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!busy && control.editable && control.path in draft) {
+                        onControlChange(control, draft[control.path]);
+                      }
+                    }}
+                  >
+                    {field}
+                    <Button type="submit" variant="outline" size="sm" aria-label={`Apply ${control.label}`} disabled={busy || !control.editable || !(control.path in draft)}>
+                      Apply
+                    </Button>
+                  </form>
+                ) : field}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
@@ -210,7 +237,7 @@ export function PickerList({
 
       {!groups.length && !emptyGroups.length ? (
         <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
-          {q ? "Nothing matches your search." : "Nothing to show here yet."}
+          {q ? "Nothing matches your search." : emptyText || "Nothing to show here yet."}
         </p>
       ) : null}
     </div>

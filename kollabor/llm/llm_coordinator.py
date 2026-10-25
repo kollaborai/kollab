@@ -19,10 +19,14 @@ from kollabor_agent.queue_processor import (
     CancellationOrigin,
     QueuedInput,
     QueueProcessor,
-    merge_livekit_origin_contexts,
+    merge_voice_origin_contexts,
 )
 from kollabor_agent.tool_executor import ToolExecutor
-from kollabor_agent.voice_admission import validate_voice_admission_context
+from kollabor_agent.voice_admission import (
+    is_voice_origin,
+    validate_voice_admission_context,
+    validate_voice_origin,
+)
 from kollabor_ai import (
     ConversationManager,
     KollaborConversationLogger,
@@ -98,6 +102,17 @@ class LLMService:
     conversation logging with memory features.
     """
 
+    def _is_hidden_voice_message(self, message) -> bool:
+        """The user message that carries a hidden voice turn's instruction."""
+        if (message.metadata or {}).get("tool_output_batch"):
+            return False
+        origin = getattr(getattr(self, "_queue_processor", None), "active_origin_context", None)
+        return (
+            isinstance(origin, dict)
+            and origin.get("voice_hidden") is True
+            and validate_voice_admission_context(origin)
+        )
+
     def _add_conversation_message(
         self, message_or_role, content=None, parent_uuid=None, metadata=None
     ) -> str:
@@ -128,6 +143,9 @@ class LLMService:
             message = ConversationMessage(
                 role=role, content=content, metadata=dict(metadata or {})
             )
+        hidden = role == "user" and self._is_hidden_voice_message(message)
+        if hidden:
+            message.metadata["hidden"] = True
 
         # Add to conversation manager if available
         if hasattr(self, "conversation_manager") and self.conversation_manager:
@@ -149,7 +167,7 @@ class LLMService:
         # conversation_manager: adds persistence, UUID tracking, metadata
         # both systems stay synchronized
         self.conversation_history.append(message)
-        if role == "user":
+        if role == "user" and not hidden:
             # What mirrors this conversation (the engine) follows it by these,
             # so a window opened mid-turn shows the message being answered.
             publish_semantic(
@@ -864,6 +882,12 @@ class LLMService:
             api_service=self.api_service,
             message_display_service=self.message_display_service,
             renderer=self.renderer,
+            # A voice turn's settings reach its model calls through the running
+            # turn's origin context; every other turn has none.
+            origin_context=lambda: getattr(
+                getattr(self, "_queue_processor", None), "active_origin_context", None
+            ),
+            profile_manager=lambda: getattr(self, "profile_manager", None),
         )
 
         # Background task manager (owns task tracking, circuit breaker, monitoring)
@@ -1686,7 +1710,7 @@ class LLMService:
         """Process a batch of messages. Delegates to QueueProcessor."""
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
-            merged_origin_context = merge_livekit_origin_contexts(messages)
+            merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, QueuedInput) else m for m in messages]
             )
@@ -1884,6 +1908,7 @@ class LLMService:
         pre_displayed: bool = False,
         voice: dict | None = None,
         origin_context: dict | None = None,
+        may_answer: bool = False,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1895,6 +1920,9 @@ class LLMService:
                 before startup gating released.
             origin_context: Trusted internal provenance for a voice-originated
                 turn. Public messages cannot set the reserved source.
+            may_answer: True only when a person answering live said the words
+                (MessageHandler sets it for YES_SOURCES). Closed by default: a
+                generation prompt, a hub peer, a pipe is never the user's yes.
 
         Returns:
             Status information about processing
@@ -1926,11 +1954,9 @@ class LLMService:
                 "reason": f"model '{self.api_service.model}' does not accept image input",
             }
 
-        claims_voice_origin = (
-            isinstance(origin_context, dict)
-            and origin_context.get("source") == "livekit_voice"
-        )
-        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+        # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
+        claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
+        if claims_voice_origin and not validate_voice_origin(origin_context):
             return {"status": "rejected", "reason": "Invalid or expired voice admission"}
         trusted_origin_context = (
             dict(origin_context) if claims_voice_origin else None
@@ -1938,8 +1964,25 @@ class LLMService:
         if (voice or trusted_origin_context) and self._queue_processor.processing_queue.full():
             return {"status": "rejected", "reason": "Agent input queue is full"}
 
+        # A hidden voice turn (the greeting) is an instruction, not something the
+        # user said: it is never shown as a user message.
+        hidden_voice_turn = bool(
+            trusted_origin_context and trusted_origin_context.get("voice_hidden") is True
+        )
+        if not hidden_voice_turn and may_answer:
+            # The user's own words: a short yes runs what the agent asked to run,
+            # unless they said it over the agent (they never heard the whole ask).
+            self.tool_executor.yes_approvals.on_human_input(
+                display_text,
+                self.conversation_manager.current_session_id,
+                talk_over=bool(
+                    trusted_origin_context
+                    and trusted_origin_context.get("voice_talk_over") is True
+                ),
+            )
+
         # Display user message using MessageDisplayService (DRY refactoring)
-        if not pre_displayed:
+        if not pre_displayed and not hidden_voice_turn:
             logger.debug(
                 f"DISPLAY DEBUG: About to display user message: '{display_text[:100]}...' ({len(display_text)} chars)"
             )
@@ -2100,7 +2143,7 @@ class LLMService:
             if voice:
                 # A mic turn carries the voice rules, as on the native path, and
                 # its reply is spoken when the turn ends (acp.voice_turns).
-                from kollabor_voice.observer import voice_preamble
+                from kollabor_voice.voice_context import voice_preamble
 
                 epoch = voice.get("epoch")
                 message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
@@ -2206,6 +2249,7 @@ class LLMService:
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
             generation = queue_processor.request_cancellation(origin=origin)
+            self._cancel_open_prompts(park=False)
             async def cancel_acp() -> None:
                 try:
                     await asyncio.wait_for(acp.cancel(), timeout=35.0)
@@ -2245,6 +2289,7 @@ class LLMService:
                 return queue_processor.cancel_generation
 
         generation = queue_processor.request_cancellation(origin=origin)
+        self._cancel_open_prompts(park=True)
         cancellation_task_id = self._safe_operation_task_id(task_id)
         if cancellation_task_id is None:
             cancellation_task_id = self._operation_context_task_id()
@@ -2284,6 +2329,23 @@ class LLMService:
                 logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
         return generation
+
+    def _cancel_open_prompts(self, *, park: bool) -> None:
+        """A prompt left waiting would hold the stopped turn until answered.
+
+        A native Stop parks it: the turn ends, the card stays open, and the card
+        or the user's yes runs it. ACP's are answered cancelled.
+        """
+        bus = getattr(self, "event_bus", None)
+        permissions = bus.get_service("permission_manager") if bus is not None else None
+        name = "park_confirmations" if park else "cancel_confirmations"
+        release = getattr(permissions, name, None)
+        if release is None:
+            return
+        try:
+            release()
+        except Exception:  # the Stop still ends the stream and the running tool
+            logger.warning("could not release the open approval prompts", exc_info=True)
 
     def clear_remote_task_cancellation(
         self, generation: int, *, task_id: str | None = None

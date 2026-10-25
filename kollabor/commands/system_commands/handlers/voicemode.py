@@ -39,10 +39,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                         ("config", "Configure voice in the terminal or web UI"),
                         ("context", "Set previous transcript lines to use; default 10"),
                         (
-                            "classifier",
-                            "See each decision; add laya, qwen or provider to switch",
-                        ),
-                        (
                             "enroll",
                             "Save your voiceprint from 30 seconds of speech; forget deletes it",
                         ),
@@ -78,17 +74,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 return CommandResult(
                     success=False, message=str(exc), display_type="error"
                 )
-        if action == "classifier":
-            return await self._open_classifier_log(plugin)
-        if action.startswith("classifier "):
-            name = action.removeprefix("classifier ").strip()
-            try:
-                message = await plugin.set_classifier(name)
-                return CommandResult(success=True, message=message)
-            except (ValueError, OSError, RuntimeError) as exc:
-                return CommandResult(
-                    success=False, message=str(exc), display_type="error"
-                )
         if action in {"enroll", "enroll forget"}:
             try:
                 message = await (
@@ -106,7 +91,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 success=False,
                 message=(
                     "Usage: /voice [on|off|status|retry|config"
-                    "|classifier [laya|qwen|provider]|context [1–50]|enroll [forget]]"
+                    "|context [1–50]|enroll [forget]]"
                 ),
                 display_type="error",
             )
@@ -131,44 +116,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         await stack.push(VoiceConfigAltView(plugin), "voice-config", reuse=False)
         return CommandResult(success=True, message="")
 
-    async def _open_classifier_log(self, plugin):
-        """Fullscreen: each classifier decision, what it saw and what it said."""
-        from kollabor_voice.classifiers import CLASSIFIERS, available_classifiers
-
-        from kollabor_tui.altview.stack_manager import (
-            AltViewStackManager,
-            AltViewUnavailable,
-        )
-        from plugins.altview.voice_classifier_altview import VoiceClassifierAltView
-
-        stack_mgr = self.event_bus.get_service("altview_stack_manager")
-        if stack_mgr is None:
-            stack_mgr = AltViewStackManager(
-                self.event_bus, self.event_bus.get_service("renderer")
-            )
-            self.event_bus.register_service("altview_stack_manager", stack_mgr)
-        view = VoiceClassifierAltView()
-        view.set_plugin(plugin)
-        try:
-            await stack_mgr.push(view, "voice-classifier", reuse=False)
-        except AltViewUnavailable:
-            # No terminal (pipe mode, a detached daemon): name the classifier.
-            return CommandResult(
-                success=True,
-                message=(
-                    f"Voice classifier: {CLASSIFIERS[plugin.classifier_name]}\n"
-                    "/voice classifier laya — local, shared persistent worker (default)\n"
-                    + (
-                        "/voice classifier qwen — local fine-tuned Qwen3 0.6B, "
-                        'also answers "was that for me?"\n'
-                        if "qwen" in available_classifiers()
-                        else ""
-                    )
-                    + "/voice classifier provider — active AI provider"
-                ),
-            )
-        return CommandResult(success=True, message="")
-
     async def _status(self, plugin):
         from kollabor_voice.client import VoiceClient
 
@@ -180,28 +127,23 @@ class VoiceModeCommandHandler(BaseCommandHandler):
                 **live,
                 "observer_error": state.get("observer_error"),
                 "pending": state.get("pending", 0),
-                "classifier_name": state.get("classifier_name", "laya"),
             }
         except OSError, TimeoutError, ValueError, RuntimeError:
             pass  # not running, an older service, or a socket path too long
         last = state.get("last_transcript") or {}
         output = state.get("output") or {}
-        from kollabor_voice.classifiers import (
-            CLASSIFIERS,
-            LOCAL_CLASSIFIERS,
-            load_preferences,
+        from kollabor_voice.speech_settings import (
+            STT_ENGINES,
+            TTS_ENGINES,
+            load_speech_preferences,
         )
-        from kollabor_voice.speech_settings import STT_ENGINES, TTS_ENGINES
 
-        from kollabor.panels.voice import classifier_worker, voiceprint_text
+        from kollabor.panels.voice import voiceprint_text
 
-        name = state.get("classifier_name", "laya")
-        # The service reports the local classifier it has loaded, maybe the other one.
-        classifier = classifier_worker(name, state)
         transcription = state.get("transcription") or {}
         speech_engine = state.get("speech", {}).get("engine")
         # No service running: the saved settings are what will apply.
-        saved = load_preferences()
+        saved = load_speech_preferences()
         echo = state.get("echo_cancellation") or {"enabled": saved["echo_cancellation"]}
         speaker = state.get("speaker") or {
             "enabled": saved["speaker_gate"],
@@ -216,12 +158,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             f"{state.get('speech', {}).get('voice') or 'no voice'} · "
             f"{state.get('speech', {}).get('state', 'off')}",
             f"Context: previous {state.get('context_lines', 10)} transcript lines",
-            f"Classifier: {CLASSIFIERS.get(name, name)}"
-            + (
-                f" · {classifier.get('state', 'off')} · worker {classifier.get('pid') or 'not running'}"
-                if name in LOCAL_CLASSIFIERS
-                else ""
-            ),
             "Echo cancellation: "
             + ("on" if echo.get("enabled") else "off")
             + (" · removing voice's speech" if echo.get("active") else ""),
@@ -232,16 +168,8 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             f"Transcript: {state.get('transcript_path') or 'not open'}",
             f"Last heard: {last.get('ended_at', 'none')} {last.get('text', '')[:160]}",
             f"Queues: {state.get('input_depth', 0)} transcription · "
-            f"{output.get('depth', 0)} speech · {state.get('pending', 0)} pending decisions",
+            f"{output.get('depth', 0)} speech · {state.get('pending', 0)} pending",
         ]
-        decision = state.get("last_decision") or {}
-        if decision:
-            confidence = decision.get("confidence")
-            lines.append(
-                f"Last decision: {decision.get('decision', 'unknown')}"
-                + (f" · {confidence:.0%}" if confidence is not None else "")
-                + (f" · {decision['detail']}" if decision.get("detail") else "")
-            )
         speech = state.get("last_speech_decision") or {}
         if speech:
             lines.append(
@@ -256,7 +184,6 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             transcription.get("detail"),
             echo.get("detail"),
             speaker.get("detail"),
-            classifier.get("detail") if name in LOCAL_CLASSIFIERS else None,
         ):
             if value:
                 lines.append(str(value))

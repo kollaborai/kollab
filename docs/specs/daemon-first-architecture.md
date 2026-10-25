@@ -40,7 +40,12 @@ works in attach mode. if your terminal dies, your agent dies.
     -> conversation logger
 
   --detached: forks before async_main(), child redirects stdio
-  to /dev/null, runs the full app headless. attach clients connect
+  to /dev/null, then execs a fresh kollab (marker env
+  KOLLAB_DETACHED_CHILD, so the exec'd cli_main does not fork again) and
+  runs the full app headless. The exec is required on macOS: a forked
+  child of a multithreaded parent aborts (SIGABRT) the first time it
+  touches an Objective-C class such as a Keychain read
+  (kollabor/daemon.py exec_detached_child). attach clients connect
   via hub socket and read DisplayTap events.
 
   --attach: boots full TUI app, but overrides USER_INPUT hook to
@@ -220,7 +225,7 @@ box drawing, colors, themes. the daemon just sends semantic data.
         # child: setsid, redirect stdio, run daemon
         os.setsid()
         redirect_to_devnull()
-        asyncio.run(run_daemon())
+        exec_detached_child()  # ready pipe fd stays inheritable
         sys.exit(0)
 
 ### phase 3: daemon ready signaling

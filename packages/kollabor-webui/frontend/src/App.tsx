@@ -1,9 +1,13 @@
+import { refreshesOnEvent } from "./live-follow";
+import type { SessionEvent } from "./api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
+import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
@@ -62,6 +66,7 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
+import { VoiceRoomProvider } from "./voice/voice-room";
 
 import {
   historyPageCache,
@@ -146,6 +151,7 @@ function RuntimeShell({
   eventActivity,
   onOpenProperties,
   refreshSignal,
+  supervisorEvents,
   view,
   onViewChange: setView,
   locked,
@@ -172,6 +178,7 @@ function RuntimeShell({
   /** This session's Properties (its gem, double-clicked). */
   onOpenProperties: () => void;
   refreshSignal: number;
+  supervisorEvents: StreamEvent[];
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
@@ -288,6 +295,7 @@ function RuntimeShell({
               </ol>
             </details>
           )}
+          <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
             {view === "chat" ? (
               <Thread
@@ -458,8 +466,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
   const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  // Live-turn events flow from followEvents into the open thread's runtime;
+  // the runtime registers its handler through this ref on mount.
+  const liveEventsRef = useRef<((event: SessionEvent) => void) | null>(null);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   // Folded from the open session's events, so a hub-driven turn still animates.
@@ -590,8 +602,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [workspacePath]);
 
   const loadState = useCallback(
-    async (sessionId: string, nextSessions: Session[]) => {
-      setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+    async (sessionId: string, nextSessions: Session[], quiet = false) => {
+      // A refresh of an open chat shows no banner: the thread is already there.
+      if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
       try {
         const [loaded, permissions] = await Promise.all([
           loadLatestHistoryPage(sessionId, api, historyPageCache),
@@ -746,7 +759,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
-        const nextState = await loadState(sessionId, nextSessions);
+        const nextState = await loadState(sessionId, nextSessions, true);
         if (controller.signal.aborted || activeId !== sessionId) return;
         // Still the seed: the daemon's answer comes as history_updated.
         if (seeded && staleHistoryRef.current.has(sessionId)) return;
@@ -763,42 +776,37 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setEventActivity(null);
     };
     const followEvents = async () => {
-      // A turn is streaming; its history is still growing.
-      let midTurn = false;
       resetEventActivity();
+      setSupervisorEvents([]);
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);
             if (compactionStatus !== undefined) {
               setContextCompactionStatus(compactionStatus);
             }
-            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
             setEventActivity(liveActivity(eventActivityRef.current));
-            // hub_message: another agent's message just landed in the
-            // history, ahead of the reply it wakes. One that lands mid-turn
-            // waits for turn_complete, which reloads the whole turn.
+            // hub_message / history_updated: another agent's or window's
+            // message just landed in the history, mid-turn or not.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (
-              type === "hub_message" || type === "history_updated"
-                ? !midTurn
-                : ["turn_complete", "error", "permission_request"].includes(type)
-            ) {
-              void refreshActiveState(activeId);
-            }
-            if (type === "turn_complete") midTurn = false;
+            if (refreshesOnEvent(type)) void refreshActiveState(activeId);
+            // A turn this page did not start still streams here: fold the
+            // events into the ephemeral live message (a no-op while this
+            // page runs the turn itself through the transport).
+            liveEventsRef.current?.(event);
           }, () => {
             // A reconnect may have missed the last turn's end.
             resetEventActivity();
-            // Open, so nothing slips past from here. The history_updated that
-            // replaces a seed can have fired before this stream existed: ask
-            // again now.
-            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
+            // Open, so nothing slips past from here. An event fired while the
+            // stream was down (or before it existed, like the history_updated
+            // that replaces a seed) left no trace: reconcile from history.
+            void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -1360,38 +1368,44 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             </div>
           ) : null}
           {activeSession && initialState ? (
-            <EngineRuntimeProvider
-              key={`${activeId}:${runtimeEpoch}`}
-              api={api}
-              sessionId={activeSession.session_id}
-              initialState={initialState}
-              onStale={() => void resetThread(activeSession.session_id)}
-            >
-              <RuntimeShell
-                session={activeSession}
-                profiles={profiles}
-                agents={agents}
-                liveAgents={liveAgents}
-                remoteAgents={network.remote}
-                refreshSignal={refreshSignal}
-                onSessionUpdated={handleSessionUpdated}
-                onOpenSettings={openSettings}
-                onHistoryCleared={() => resetThread(activeSession.session_id)}
-                onActivity={setActiveActivity}
-                eventActivity={eventActivity}
-                onOpenProperties={() => openProperties(activeSession.session_id)}
-                view={sessionView}
-                onViewChange={setSessionView}
-                locked={busy ? busyMessage || "Loading…" : ""}
+            // Outside the epoch key: a thread reload (resetThread) must not
+            // stop the voice room, as a talk-over that cuts a reply reloads it.
+            <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>
+              <EngineRuntimeProvider
+                key={`${activeId}:${runtimeEpoch}`}
+                api={api}
+                sessionId={activeSession.session_id}
+                initialState={initialState}
+                onStale={() => void resetThread(activeSession.session_id)}
+                liveEvents={liveEventsRef}
+              >
+                <RuntimeShell
+                  session={activeSession}
+                  profiles={profiles}
+                  agents={agents}
+                  liveAgents={liveAgents}
+                  remoteAgents={network.remote}
+                  refreshSignal={refreshSignal}
+                  supervisorEvents={supervisorEvents}
+                  onSessionUpdated={handleSessionUpdated}
+                  onOpenSettings={openSettings}
+                  onHistoryCleared={() => resetThread(activeSession.session_id)}
+                  onActivity={setActiveActivity}
+                  eventActivity={eventActivity}
+                  onOpenProperties={() => openProperties(activeSession.session_id)}
+                  view={sessionView}
+                  onViewChange={setSessionView}
+                  locked={busy ? busyMessage || "Loading…" : ""}
 
-                historyStatus={historyStatus?.sessionId === activeSession.session_id
-                  ? { kind: historyStatus.kind, message: historyStatus.message }
-                  : undefined}
-                onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
-                onRetryHistory={retryHistory}
-                historyStartIndex={initialState.synced?.start ?? 0}
-              />
-            </EngineRuntimeProvider>
+                  historyStatus={historyStatus?.sessionId === activeSession.session_id
+                    ? { kind: historyStatus.kind, message: historyStatus.message }
+                    : undefined}
+                  onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
+                  onRetryHistory={retryHistory}
+                  historyStartIndex={initialState.synced?.start ?? 0}
+                />
+              </EngineRuntimeProvider>
+            </VoiceRoomProvider>
           ) : (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">

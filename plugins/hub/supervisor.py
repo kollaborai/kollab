@@ -47,6 +47,16 @@ turn, the supervisor says so instead of looping in silence.
 DEFAULT_ALERT_COOLDOWN = 900.0
 """Minimum seconds between stalled-coordinator alerts."""
 
+DEFAULT_HANDOFF_ACK_TIMEOUT = 120.0
+"""Seconds a handed-off task may go unacknowledged before a resend, and
+again before the unacknowledged handoff is surfaced (issue #283)."""
+
+HANDOFF_MAX_RETRIES = 1
+
+DEFAULT_HANDOFF_RESEND = False
+"""Resend an unacknowledged handoff once before alerting. Off by default: a
+resend wakes the assignee again, which changes how agents take messages."""
+
 # Presence states from which a direct coordinator-originated message can
 # re-invoke an agent. "waiting" agents accept coordinator delivery, which
 # is exactly what the supervisor is.
@@ -61,7 +71,8 @@ DEAD_STATES = frozenset({"dead", "disconnecting", "disconnected"})
 class SupervisorDecision:
     """One action the hub plugin should take for the supervisor."""
 
-    kind: str  # wake_coordinator | nudge_worker | requeue_stalled
+    kind: str  # wake_coordinator | nudge_worker | requeue_stalled |
+    # retry_handoff | alert_handoff_unacked | alert_coordinator_stalled
     card_id: str = ""
     worker: str = ""  # coordinator identity for wakes, assignee for nudges
     text: str = ""
@@ -84,6 +95,77 @@ class SupervisorState:
     wakes_since_turn: int = 0
     last_error: str = ""
     last_alert: float = 0.0
+
+
+# -- handoff tracking (issue #283) -----------------------------------------
+# A handoff is a ledger card plus structured checkpoints (data.handoff =
+# sent | retry | alert | ack). The card is the durable record, so a handed
+# off task stays visible on the ledger until the assignee proves receipt:
+# any checkpoint after the last sent/retry marker (a claim, a progress note
+# or an explicit ack) counts. No new storage layer.
+
+
+def handoff_status(card) -> Tuple[float, bool, int, bool]:
+    """(sent_at, acked, retries, alerted) for a card's current handoff."""
+    sent_at, acked, retries, alerted = 0.0, False, 0, False
+    for cp in card.checkpoints or []:
+        mark = (cp.get("data") or {}).get("handoff")
+        if mark == "sent":
+            sent_at, acked, retries, alerted = cp.get("ts", 0.0), False, 0, False
+        elif mark == "retry":
+            sent_at, acked, retries = cp.get("ts", 0.0), False, retries + 1
+        elif mark == "alert":
+            alerted = True
+        elif sent_at:
+            acked = True
+    return sent_at, acked, retries, alerted
+
+
+def begin_handoff(ledger, task_id: str, assigner: str, assignee: str, directive: str):
+    """Track a directive just sent to ``assignee``; returns the card or None.
+
+    Reuses the card ``task_id`` names (claiming it for the assignee when
+    still open), else creates one under that id. None when the card is held
+    by someone else or is terminal.
+    """
+    card = ledger.get(task_id) if task_id else None
+    if card is None:
+        card = ledger.create(
+            assigner=assigner,
+            assignee=assignee,
+            directive=directive[:500],
+            report_to=assigner,
+            card_id=task_id,
+        )
+    elif card.status == "open" and not card.assignee:
+        card = ledger.claim(card.id, assignee)
+    if card is None or card.status != "active" or card.assignee != assignee:
+        return None
+    ledger.checkpoint(card.id, f"handed off to {assignee}", {"handoff": "sent"})
+    return card
+
+
+def ack_handoff(ledger, task_id: str, by: str) -> bool:
+    """The assignee received the task; clears its unacknowledged handoff."""
+    card = ledger.get(task_id) if task_id else None
+    if card is None or card.status != "active":
+        return False
+    sent_at, acked, _, _ = handoff_status(card)
+    if not sent_at or acked:
+        return False
+    return ledger.checkpoint(
+        card.id, f"handoff acknowledged by {by}", {"handoff": "ack"}
+    )
+
+
+def unacked_handoffs(ledger) -> List[Any]:
+    """Active cards with a handoff nobody has acknowledged, oldest first."""
+    out = []
+    for card in ledger.get_all(status="active"):
+        sent_at, acked, _, _ = handoff_status(card)
+        if sent_at and not acked:
+            out.append((sent_at, card))
+    return [c for _, c in sorted(out, key=lambda p: p[0])]
 
 
 def _online(roster: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -133,11 +215,21 @@ def evaluate(
     max_reassignments: int = DEFAULT_MAX_REASSIGNMENTS,
     wake_inefficacy: int = DEFAULT_WAKE_INEFFICACY,
     alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
+    handoff_ack_timeout: float = DEFAULT_HANDOFF_ACK_TIMEOUT,
+    handoff_resend: bool = DEFAULT_HANDOFF_RESEND,
     state: Optional[SupervisorState] = None,
 ) -> Tuple[List[SupervisorDecision], SupervisorState]:
     """Decide what the supervisor should do this pass.
 
     Decisions in order:
+      retry_handoff            — a handed-off task is still unacknowledged
+                                 after ``handoff_ack_timeout``: resend once
+                                 (``text`` is the directive). Only when
+                                 ``handoff_resend`` is on.
+      alert_handoff_unacked    — still unacknowledged (after the resend, if
+                                 any): say
+                                 so (issue #283). Both are recorded on the
+                                 card here, so each fires once per handoff.
       nudge_worker             — first stall of an active card whose worker
                                  is online; one nudge per stall window.
       requeue_stalled          — card still stalled after its nudge grace (or
@@ -158,6 +250,44 @@ def evaluate(
     """
     state = state if state is not None else SupervisorState()
     decisions: List[SupervisorDecision] = []
+
+    for card in unacked_handoffs(ledger):
+        sent_at, _, retries, alerted = handoff_status(card)
+        if now - sent_at < handoff_ack_timeout:
+            continue
+        who = card.assignee
+        if handoff_resend and retries < HANDOFF_MAX_RETRIES:
+            ledger.checkpoint(
+                card.id,
+                "handoff resent: no acknowledgement",
+                {"handoff": "retry"},
+            )
+            decisions.append(
+                SupervisorDecision(
+                    kind="retry_handoff",
+                    card_id=card.id,
+                    worker=who,
+                    text=str(card.directive or ""),
+                )
+            )
+        elif not alerted:
+            ledger.checkpoint(
+                card.id, "handoff unacknowledged: alerted", {"handoff": "alert"}
+            )
+            decisions.append(
+                SupervisorDecision(
+                    kind="alert_handoff_unacked",
+                    card_id=card.id,
+                    worker=who,
+                    text=(
+                        f"task {card.id} was handed to {who}"
+                        f"{' and resent' if retries else ''} but"
+                        f" never acknowledged ({int(now - sent_at)}s)."
+                        f" {who} may be offline, wedged or not reading its"
+                        " inbox."
+                    ),
+                )
+            )
 
     open_cards = ledger.get_open()
     stalled_cards = ledger.get_stalled(stall_threshold, now=now)
