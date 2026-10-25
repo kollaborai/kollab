@@ -878,16 +878,31 @@ class EngineSession:
             await self.refresh_history(notify=True)  # open windows hear the new row
         return result
 
-    def cancel_turn(self) -> None:
-        """Ask the daemon to cancel the in-flight turn (fire and forget)."""
+    def cancel_turn(self, voice_turn_id: str | None = None) -> None:
+        """Ask the daemon to cancel the in-flight turn (fire and forget).
+
+        With `voice_turn_id`, only while that voice turn is the one running: a
+        typed turn that started after it runs on.
+        """
         if self.daemon is None:
             return
+        if voice_turn_id is None:
+            self._active_turn_task = asyncio.create_task(
+                self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            )
+            # A cancelled tool call may never report a result or a turn end: tell
+            # the open windows so a gem does not keep acting out the dead call.
+            self._emit_event({"type": "turn_cancelled"})
+            return
+
+        async def cancel_voice_turn() -> None:
+            result = await self.state.cancel_current_request(voice_turn_id=voice_turn_id)
+            if result.get("cancelled") and not result.get("queued"):
+                self._emit_event({"type": "turn_cancelled"})
+
         self._active_turn_task = asyncio.create_task(
-            self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            cancel_voice_turn(), name=f"cancel-{self.session_id}"
         )
-        # A cancelled tool call may never report a result or a turn end: tell
-        # the open windows so a gem does not keep acting out the dead call.
-        self._emit_event({"type": "turn_cancelled"})
 
     async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
         """Cancel only this admitted owner, without a current-turn fallback."""

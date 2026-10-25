@@ -27,7 +27,9 @@ them, and no voice screen shows classifier controls, status or decisions.
 - Talking over the agent works like the demo (LiveKit's defaults, `mode: vad`):
   half a second of speech pauses the voice. Words in it commit a user turn,
   which interrupts the reply: the worker closes the `/turns` stream, and the
-  Engine revokes the turn's admission and cancels the session turn. No words
+  Engine revokes the turn's admission and cancels the session turn while it
+  is still the one running (`cancel_current_request(voice_turn_id)`: a typed
+  turn that started after it runs on). No words
   within 2 s (a cough) and the voice resumes where it paused.
   `kind: "greeting"` is a hidden instruction turn that opens the room.
 - The worker reports `listening`, `hearing`, `thinking` and `speaking` from
@@ -40,7 +42,8 @@ them, and no voice screen shows classifier controls, status or decisions.
   worker to join, past the worker's own 1200 s wait for its models.
 - A reply stream that breaks mid-turn ends the turn on both sides: the worker
   reports `turn_incomplete` (retryable), and a fault in the Engine's stream
-  still cancels the session turn and revokes its admission.
+  still cancels the session turn (only that turn, as a talk-over does) and
+  revokes its admission.
 - A voice turn's reply stream takes only events stamped with its id
   (`request_id`). A hub wake or a typed turn that runs while the voice turn
   waits in the queue streams to every subscriber with no id, and was said as
@@ -143,16 +146,18 @@ runs it.
   own text never answer. A native hub message wakes the agent through
   `TRIGGER_LLM_CONTINUE`; one that goes through `submit_human_input` as another
   agent (its "agent" source: a network-attached agent, a hub message whose
-  profile could not be read) reaches `process_user_input` with
-  `may_answer=False` and leaves the asks alone, as every source outside
+  profile could not be read) leaves the asks alone, as every source outside
   `YES_SOURCES` does (`kollabor/user_input_source.py`: the terminal, an
   attached window, state RPC for the web composer and the room, the `/voice`
-  plugin). `kollab --hub msg` and the Telegram and email bridges are hub
-  messages, so their "yes" never answers either. The goal driver's steering
-  is a HUD context item, and ACP steering goes to the ACP agent. A hidden
-  voice turn (the greeting) asks for nothing: a call that
-  needs the OK comes back refused, never "Not run yet", and its words never
-  answer. Asks come only from the voice guard's decision and the permission
+  plugin): `process_user_input`'s `may_answer` is closed by default, so a
+  `/agent` or `/skill` generation prompt never answers, and `MessageHandler`
+  opens it only for those sources. `kollab --hub msg` and the Telegram and
+  email bridges are hub messages, so their "yes" never answers either; to an
+  ACP agent `kollab --hub msg` goes in as `hub_message`, outside
+  `YES_SOURCES`. The goal driver's steering is a HUD context item, and ACP
+  steering goes to the ACP agent. A hidden voice turn (the greeting) asks for
+  nothing: a call that needs the OK comes back refused, never "Not run yet",
+  and its words never answer. Asks come only from the voice guard's decision and the permission
   manager's (`PermissionDecision.needs_yes`), never from a tool's text, and one
   is keyed by the tool's own name and the exact command, quotes kept.
 - The yes runs the call as the guard plans it again, approved

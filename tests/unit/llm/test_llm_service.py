@@ -173,9 +173,9 @@ class TestLLMServiceIntegration(unittest.TestCase):
             mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
             approvals.ask(call)
             approvals.on_reply_done()
-            asyncio.run(self.service.process_user_input("yes", origin_context=greeting))
+            asyncio.run(self.service.process_user_input("yes", origin_context=greeting, may_answer=True))
             self.assertFalse(approvals.take({**call, "id": "c2"}))
-            asyncio.run(self.service.process_user_input("Yes."))
+            asyncio.run(self.service.process_user_input("Yes.", may_answer=True))
         self.assertTrue(approvals.take({**call, "id": "c2"}))
 
     def test_a_yes_said_over_the_agent_answers_nothing(self):
@@ -192,7 +192,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
             mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
             approvals.ask(call, make_voice_origin_context("t1"))
             approvals.on_reply_done()
-            asyncio.run(self.service.process_user_input("yeah", origin_context=over))
+            asyncio.run(self.service.process_user_input("yeah", origin_context=over, may_answer=True))
         self.assertFalse(approvals.take({**call, "id": "c2"}))
 
     def test_only_a_person_answering_live_says_the_yes(self):
@@ -205,6 +205,7 @@ class TestLLMServiceIntegration(unittest.TestCase):
         sources = [
             ("cli_initial", False),
             ("pipe", False),
+            ("hub_message", False),  # a person's hub message handed to an ACP agent
             ("bridge:email", False),  # a source nobody listed never answers
             ("user", True),
             ("hub_attachment", True),
@@ -221,6 +222,31 @@ class TestLLMServiceIntegration(unittest.TestCase):
                 approvals.on_reply_done()
                 asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source=source)))
                 self.assertEqual(approvals.take({**call, "id": "c2"}), answers, source)
+
+    def test_a_prompt_sent_straight_to_the_model_answers_no_ask(self):
+        """/agent and /skill generation call process_user_input themselves: closed by default."""
+        from types import SimpleNamespace
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call)
+            approvals.on_reply_done()
+            asyncio.run(self.service.process_user_input("Yes."))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            handler = self.service._message_handler
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="user")))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))  # the ask was still open for the user
+
+    def test_a_hub_message_is_a_persons_input_but_never_a_yes(self):
+        from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES, UserInputSource
+
+        self.assertIn(UserInputSource.HUB_MESSAGE.value, HUMAN_USER_INPUT_SOURCES)
+        self.assertNotIn(UserInputSource.HUB_MESSAGE.value, YES_SOURCES)
 
     def test_a_hub_peers_yes_answers_nothing(self):
         """Another agent's "Yes." is a turn like any, never the user's answer to the ask."""
@@ -799,7 +825,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         result = asyncio.run(self.service._handle_user_input(event_data, event))
 
         mock_process.assert_called_once_with(
-            "Test user message", pre_displayed=False
+            "Test user message", pre_displayed=False, may_answer=True
         )
         self.assertEqual(result["status"], "processed")
 

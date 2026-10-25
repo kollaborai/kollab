@@ -216,7 +216,8 @@ a voice ask stops counting after 5 minutes. The manager marks its own asks
 (`PermissionDecision.needs_yes`), so a tool whose text reads like one plants
 nothing, and only a person answering live answers (`YES_SOURCES`: the
 terminal, an attached window, the web composer, voice): another agent's
-message, the CLI's first message or a pipe never does. By voice a
+message, a person's `kollab --hub msg`, the CLI's first message, a pipe or a
+`/agent` or `/skill` generation prompt never does. By voice a
 yes runs only the guard's voice list (read-only commands, git, file changes
 inside the project, the project's own `make` and `npm` scripts, read-only `gh`
 and `kollab --hub`); anything else comes

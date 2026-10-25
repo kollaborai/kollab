@@ -268,6 +268,7 @@ def test_voice_policy_blocks_recursive_or_symlink_following_ls(tmp_path: Path, c
         "git fetch 'ext::sh -c touch% x'",  # a remote helper: ext:: runs any command
         "git fetch EXT::sh",
         "git fetch --all fd::3",
+        "git fetch 9p::x",  # a helper name may start with a digit
         "git grep -Orm x",
     ],
 )

@@ -1904,7 +1904,7 @@ class LLMService:
         pre_displayed: bool = False,
         voice: dict | None = None,
         origin_context: dict | None = None,
-        may_answer: bool = True,
+        may_answer: bool = False,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1916,8 +1916,9 @@ class LLMService:
                 before startup gating released.
             origin_context: Trusted internal provenance for a voice-originated
                 turn. Public messages cannot set the reserved source.
-            may_answer: False when the words are not a person answering live
-                (a hub peer, the CLI's first message, a pipe): never the user's yes.
+            may_answer: True only when a person answering live said the words
+                (MessageHandler sets it for YES_SOURCES). Closed by default: a
+                generation prompt, a hub peer, a pipe is never the user's yes.
 
         Returns:
             Status information about processing

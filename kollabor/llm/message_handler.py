@@ -179,8 +179,8 @@ class MessageHandler:
         # Only a person answering live (YES_SOURCES) answers what the agent asked
         # them. A hub peer's message (the "agent" source) is a turn like the user's,
         # but its words never do.
-        if getattr(event, "source", None) not in YES_SOURCES:
-            origin_kwargs["may_answer"] = False
+        if getattr(event, "source", None) in YES_SOURCES:
+            origin_kwargs["may_answer"] = True
 
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")

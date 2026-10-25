@@ -111,7 +111,7 @@ class TestMessageHandler(unittest.TestCase):
         )
 
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=False
+            "hello", pre_displayed=False, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
 
@@ -131,6 +131,7 @@ class TestMessageHandler(unittest.TestCase):
             "show status",
             pre_displayed=False,
             origin_context=origin_context,
+            may_answer=True,
         )
 
 
@@ -160,7 +161,7 @@ class TestMessageHandler(unittest.TestCase):
             "hello"
         )
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=True
+            "hello", pre_displayed=True, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
 

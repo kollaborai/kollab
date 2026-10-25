@@ -73,7 +73,7 @@ class FakeSession:
         self.queues = []
         self.sent = []
         self.script = []
-        self.cancels = 0
+        self.cancels = []  # the voice turn each cancel was for
         self.revokes = []
         self.interrupted = []
 
@@ -102,8 +102,8 @@ class FakeSession:
     async def cancel_owned_turn(self, request_id):
         return {"cancelled": True}
 
-    def cancel_turn(self):
-        self.cancels += 1
+    def cancel_turn(self, voice_turn_id=None):
+        self.cancels.append(voice_turn_id)
 
     async def voice_admission(self, action, **params):
         self.revokes.append((action, params))
@@ -891,7 +891,7 @@ async def test_disconnect_before_done_is_a_barge_in(rig, how):
         )
         barge = [e for e in ring if e["payload"].get("barge_in")]
         assert len(barge) == 1 and barge[0]["payload"]["state"] == "listening"
-        assert rig.session.cancels == 1  # the in-flight turn, once
+        assert rig.session.cancels == [view_turn]  # the in-flight turn, once, by its id
         assert not rig.session.queues  # nobody listens to the daemon any more
         # the capability is gone here and in the daemon
         assert validate_voice_admission_context(rig.session.sent[0][3]) is False
@@ -907,6 +907,25 @@ async def test_disconnect_before_done_is_a_barge_in(rig, how):
     await rig.control.shutdown()
 
 
+async def test_a_turn_the_daemon_refuses_answers_at_once(rig):
+    """A refused submission sends no turn_complete: no stream is left to wait one out."""
+    from kollabor_engine.voice_runtime_host import RuntimeHostError
+
+    async def refuse(message, *, request_id, thread_id, origin_context):
+        return {"accepted": False, "reason": "invalid voice admission capability"}
+
+    rig.session.send_message = refuse
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        with pytest.raises(RuntimeHostError) as refused:
+            await asyncio.wait_for(
+                rig.control.open_turn(view["voice_session_id"], voice_snapshot(view, "hi")), 1
+            )
+        assert refused.value.code == "session_busy"
+        assert not rig.session.queues  # nothing still subscribed to the daemon
+    await rig.control.shutdown()
+
+
 async def test_a_fault_in_the_reply_stream_stops_the_daemon_turn(rig):
     from kollabor_agent.voice_admission import validate_voice_admission_context
 
@@ -918,12 +937,12 @@ async def test_a_fault_in_the_reply_stream_stops_the_daemon_turn(rig):
     rig.control.policy.sentence = broken
     async with client(rig.app) as http:
         view = await ready_session(rig, http)
-        turn = await rig.control.open_turn(
-            view["voice_session_id"], voice_snapshot(view, "hi")
-        )
+        snapshot = voice_snapshot(view, "hi")
+        turn = await rig.control.open_turn(view["voice_session_id"], snapshot)
         with pytest.raises(RuntimeError, match="speech policy fault"):
             await anext(turn)
-        assert rig.session.cancels == 1  # it does not run on with nobody listening
+        # it does not run on with nobody listening; a later typed turn is not its to stop
+        assert rig.session.cancels == [snapshot.turn_id]
         assert validate_voice_admission_context(rig.session.sent[0][3]) is False
         ring = rig.control.hub._streams[view["voice_session_id"]].ring
         assert not any(e["payload"].get("barge_in") for e in ring)  # nobody talked over it
@@ -938,7 +957,7 @@ async def test_disconnect_after_done_is_not_a_barge_in(rig):
         seen = [line async for line in turn]
         await turn.aclose()
         assert seen[-1]["done"] is True
-        assert rig.session.cancels == 0
+        assert rig.session.cancels == []
         ring = rig.control.hub._streams[view["voice_session_id"]].ring
         assert not any(e["payload"].get("barge_in") for e in ring)
     await rig.control.shutdown()

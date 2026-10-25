@@ -828,7 +828,7 @@ class VoiceControl:
         so the fence is that: the daemon's late events reach nobody.
         """
         revoke_voice_admissions_for_turn(binding.voice_session_id, generation, turn_id)
-        session.cancel_turn()  # only reached while our turn was still in flight
+        session.cancel_turn(turn_id)  # only if it still runs: a later typed turn is not ours
         self._spawn(self._publish_barge_in(binding.voice_session_id, generation, turn_id))
 
     async def _publish_barge_in(
@@ -1048,7 +1048,7 @@ class VoiceControl:
             # never runs on with nobody listening. The worker sees the stream break.
             if not completed:
                 revoke_voice_admissions_for_turn(vsid, generation, turn_id)
-                session.cancel_turn()
+                session.cancel_turn(turn_id)  # only if it still runs
             raise
         finally:
             session.unsubscribe(queue)

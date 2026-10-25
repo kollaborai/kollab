@@ -626,7 +626,8 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
 
     async def _cancel_current_request(params: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await state_service.cancel_current_request()
+            turn = params.get("voice_turn_id")
+            return await state_service.cancel_current_request(voice_turn_id=str(turn) if turn else None)
         except Exception as e:
             return {"error": str(e)}
 

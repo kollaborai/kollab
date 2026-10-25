@@ -1,7 +1,7 @@
 // Run: node --test tests/voice-room.test.ts (Node 24 strips the types).
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 registerHooks({
   resolve: (specifier, context, next) => {
@@ -93,8 +93,10 @@ test("barge_in and latency events land in state", () => {
 
 type Script = Array<Record<string, unknown>>;
 
-function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script; hold?: "create" | "room" } = {}) {
+// `closes`: the engine ends the event stream after its last event
+function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script; hold?: "create" | "room"; closes?: boolean } = {}) {
   const calls: string[] = [];
+  let follows = 0;
   let speaking: (b: boolean) => void = () => undefined;
   // `hold` keeps that step waiting until release(), as a slow network would
   let release: () => void = () => undefined;
@@ -116,12 +118,14 @@ function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script
     },
     stop: async (_id: string, _g: number, reason: string) => (calls.push(`stop:${reason}`), view()),
     events: (_id: string, _c: string | null, signal: AbortSignal, onEvent: (e: never) => void) =>
-      new Promise<void>((_, reject) => {
+      new Promise<void>((resolve, reject) => {
+        follows++;
         signal.addEventListener("abort", () => reject(new Error("abort")));
         // the engine's later states, one per tick, as the SSE stream delivers them
         (opts.events ?? []).forEach((payload, i) =>
           setTimeout(() => (calls.push(`event:${payload.state}`), onEvent(ev("voice.state", payload))), 5 * (i + 1)),
         );
+        if (opts.closes) setTimeout(resolve, 5 * ((opts.events ?? []).length + 1));
       }),
   };
   return {
@@ -130,6 +134,7 @@ function harness(opts: { joinFails?: boolean; startsAs?: string; events?: Script
     room,
     release: () => release(),
     speaking: (b: boolean) => speaking(b),
+    follows: () => follows,
     controller: new VoiceRoomController(api, async () => (await wait("room"), room)),
   };
 }
@@ -194,6 +199,24 @@ test("a session the engine ends while live leaves the room, and the mic starts a
   await h.controller.start("s1", null);
   assert.equal(h.calls.filter((c) => c === "create").length, 2);
   await h.controller.stop();
+});
+
+test("the reason a session ended stays once the engine closes its event stream", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const h = harness({ events: [{ state: "error", detail: "The voice worker stopped.", retryable: true }], closes: true });
+    await h.controller.start("s1", null);
+    for (let ms = 0; ms < 10_000; ms += 250) {  // past every retry's backoff
+      mock.timers.tick(250);
+      await new Promise((r) => setImmediate(r));
+    }
+    const s = h.controller.getState();
+    assert.equal(s.error, "The voice worker stopped."); // never "Lost the voice event stream."
+    assert.equal(s.state, "error");
+    assert.equal(h.follows(), 1); // an ended session is not followed again
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("a stop while the session is being created ends that session and opens no room", async () => {

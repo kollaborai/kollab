@@ -104,7 +104,7 @@ _VOICE_GIT_COMMANDS = frozenset(
 # Where git takes a remote, `<helper>::<address>` runs the git-remote-<helper> program
 # (`ext::` runs any command). Only there: a commit message may say `Parser::parse`.
 _GIT_REMOTE_COMMANDS = frozenset({"fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule", "archive"})
-_GIT_REMOTE_HELPER = re.compile(r"(?:^|=)[a-z][a-z0-9+.-]*::")
+_GIT_REMOTE_HELPER = re.compile(r"(?:^|=)[a-z0-9][a-z0-9+.-]*::")
 _HARD_BLOCKED_GIT_FLAGS = frozenset(
     {
         "--output",

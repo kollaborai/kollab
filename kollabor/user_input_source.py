@@ -11,6 +11,9 @@ class UserInputSource(StrEnum):
     CLI_INITIAL = "cli_initial"
     PIPE = "pipe"
     HUB_ATTACHMENT = "hub_attachment"
+    # A hub message from a person (`kollab --hub msg`, a human sender) handed to an
+    # ACP agent: theirs, but not an answer typed or said live.
+    HUB_MESSAGE = "hub_message"
 
 
 HUMAN_USER_INPUT_SOURCES = frozenset(source.value for source in UserInputSource)

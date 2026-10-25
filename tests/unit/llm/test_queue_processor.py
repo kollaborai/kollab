@@ -316,7 +316,10 @@ class TestQueueProcessor(unittest.TestCase):
         self.renderer.get_service = MagicMock(return_value=tap)
         self._reply_with("Sure.")
 
+        running = []  # which voice turn the daemon says runs (a talk-over cancels only it)
+
         async def call_llm(*_args, **_kwargs):
+            running.append(self.processor.open_voice_turn)
             publish_semantic(self.renderer, "token", text="Sure.")
             return "Sure."
 
@@ -331,6 +334,7 @@ class TestQueueProcessor(unittest.TestCase):
             return current_turn.get()
 
         after = self.loop.run_until_complete(turn())
+        self.assertEqual(running, ["turn-9"])
         ids = [
             (e["type"], e.get("request_id"))
             for e in tap.get_snapshot()
@@ -341,6 +345,24 @@ class TestQueueProcessor(unittest.TestCase):
             [("token", "turn-9"), ("turn_complete", "turn-9"), ("token", None)],
         )
         self.assertNotIn("request_id", after)
+
+    def test_a_voice_turn_that_fails_says_so_on_its_own_stream(self):
+        """Its error and turn_complete carry its id: the Engine says the error and
+        ends the stream, never waits out the idle timeout."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self.streaming_handler.call_llm = AsyncMock(side_effect=RuntimeError("provider down"))
+        voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+        self.loop.run_until_complete(self.processor.process_message_batch([voice], "parent"))
+        ids = [
+            (e["type"], e.get("request_id"))
+            for e in tap.get_snapshot()
+            if e["type"] in ("error", "turn_complete")
+        ]
+        self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
 
     def test_a_turn_that_ends_while_a_voice_turn_waits_leaves_its_stamp_alone(self):
         """A hub turn still running when a voice turn queues ends by clearing its

@@ -3169,15 +3169,28 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
-    async def cancel_current_request(self) -> dict[str, Any]:
+    async def cancel_current_request(self, voice_turn_id: str | None = None) -> dict[str, Any]:
         """Cancel the currently processing LLM request.
 
         Delegates to LLMCoordinator.cancel_current_request(). Safe to
         call when nothing is processing -- it's a no-op in that case.
+        With `voice_turn_id`, only that voice turn: a typed turn or a hub
+        wake that started after it is not the voice turn's to stop.
         """
         llm = self._llm_service
         if llm is None:
             return {"cancelled": False, "reason": "no llm service"}
+        if voice_turn_id is not None:
+            bus = self._event_bus
+            acp = bus.get_service("acp_orchestrator") if bus is not None else None
+            if acp is not None and acp.active:
+                if acp.runner.cancel_queued(voice_turn_id):  # it never started: nothing runs for it
+                    return {"cancelled": True, "queued": True}
+                running = getattr(getattr(acp.runner, "_active_context", None), "request_id", None)
+            else:
+                running = getattr(getattr(llm, "_queue_processor", None), "open_voice_turn", None)
+            if running != voice_turn_id:
+                return {"cancelled": False}
         was_processing = getattr(llm, "is_processing", False)
         if hasattr(llm, "cancel_current_request"):
             llm.cancel_current_request()

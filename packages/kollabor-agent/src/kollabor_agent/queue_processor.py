@@ -532,6 +532,11 @@ class QueueProcessor:
         return self._cancel_generation
 
     @property
+    def open_voice_turn(self) -> str | None:
+        """The voice turn with rounds still to run, if any."""
+        return self._open_voice_turn
+
+    @property
     def cancel_origin(self) -> CancellationOrigin | None:
         return self._cancel_origin
 
