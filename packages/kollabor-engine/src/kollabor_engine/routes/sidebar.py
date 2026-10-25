@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sidebar", tags=["sidebar"])
 
+# What clients show when a write fails. The OS error and its path stay in the log only.
+SAVE_FAILED_HIDDEN = "Could not save hidden agents. Check that the Kollab data folder is writable."
+SAVE_FAILED_ORDER = "The sidebar order file could not be written. Check that the Kollab data folder is writable."
+
 
 def _answer() -> Dict[str, Any]:
     """The entries clients show: those of daemons running now, plus the ones with no process."""
@@ -28,7 +32,7 @@ def _changed(change: Any) -> Dict[str, Any]:
         change()
     except OSError as exc:
         logger.warning("Could not save hidden agents: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Could not save hidden agents: {exc}") from exc
+        raise HTTPException(status_code=500, detail=SAVE_FAILED_HIDDEN) from exc
     return _answer()
 
 
@@ -87,4 +91,4 @@ async def set_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         ) from exc
     except OSError as exc:
         logger.warning("Could not save sidebar order: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Could not save sidebar order: {exc}") from exc
+        raise HTTPException(status_code=500, detail=SAVE_FAILED_ORDER) from exc

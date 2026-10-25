@@ -113,7 +113,8 @@ class TestNoRetriggerAfterCompaction(unittest.TestCase):
 
     def test_deferred_trigger_is_evaluated_and_logged_once(self) -> None:
         history = _incident_history()
-        plugin = _make_plugin(history, reported=100_649)
+        # Over the 96K auto trigger, under the 100K hard cap: deferral applies.
+        plugin = _make_plugin(history, reported=99_000)
         plugin._llm_service._pending_agent_hud = [object()]  # coordination in flight
 
         with self.assertLogs(level="INFO") as logs:

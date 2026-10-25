@@ -363,6 +363,7 @@ class AgentSocketServer:
         on_shutdown: Optional[Callable] = None,
         on_input_inject: Optional[Callable] = None,
         on_network_status: Optional[Callable] = None,
+        on_health_status: Optional[Callable] = None,
         on_network_send: Optional[Callable] = None,
         on_network_attach: Optional[Callable] = None,
         on_connect_proxy: Optional[Callable] = None,
@@ -381,6 +382,7 @@ class AgentSocketServer:
         # Agent network CLI (docs/specs/agent-network-simple-flow.md): local
         # operator only, same gate as get_output/get_status below.
         self._on_network_status = on_network_status
+        self._on_health_status = on_health_status
         self._on_network_send = on_network_send
         self._on_network_attach = on_network_attach
         # /connect from a window that does not own the relay: the owner runs it.
@@ -1648,6 +1650,41 @@ class AgentSocketServer:
                     writer.write(resp.encode())
                     await writer.drain()
 
+                elif action == "health_status":
+                    # `kollab --hub status` asks for the handoff health
+                    # sections (issue #283): the same lines `/hub status`
+                    # renders here. Local operator only, like network_status.
+                    sections: Dict[str, List[str]] = {
+                        "supervisor": [],
+                        "dispatch": [],
+                    }
+                    if self._on_health_status:
+                        try:
+                            result = self._on_health_status()
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            if isinstance(result, dict):
+                                sections = {
+                                    "supervisor": [
+                                        str(line)
+                                        for line in result.get("supervisor", [])
+                                    ],
+                                    "dispatch": [
+                                        str(line)
+                                        for line in result.get("dispatch", [])
+                                    ],
+                                }
+                        except Exception as exc:
+                            logger.debug(f"health_status callback error: {exc}")
+                    resp = (
+                        json.dumps(
+                            {"type": "health_status", **sections}, default=str
+                        )
+                        + "\n"
+                    )
+                    writer.write(resp.encode())
+                    await writer.drain()
+
                 elif action == "connect_proxy":
                     # A daemon that lost the workspace lock asks the relay owner
                     # to run one /connect operation. Local operator only (the
@@ -2792,6 +2829,48 @@ class AgentMessenger:
             return None
         except Exception as exc:
             logger.debug("network_status request failed for %s: %s", socket_path, exc)
+            return None
+        finally:
+            if writer:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def request_health_status(
+        socket_path: str,
+        timeout: float = 3.0,
+        *,
+        auth: Optional[Dict[str, Any]] = None,
+        ssl_ctx: Any = None,
+    ) -> Optional[dict]:
+        """Ask a local agent for its supervisor and dispatch-failure lines.
+
+        Issue #283: `kollab --hub status` prints the same handoff health
+        sections `/hub status` shows in that agent. Returns None on any
+        transport failure or malformed response -- the caller prints nothing
+        extra in that case.
+        """
+        writer = None
+        try:
+            reader, writer = await AgentMessenger._open(
+                socket_path, timeout=timeout, auth=auth, ssl_ctx=ssl_ctx
+            )
+            req = json.dumps({"action": "health_status"}) + "\n"
+            writer.write(req.encode())
+            await writer.drain()
+
+            resp_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+
+            if resp_line:
+                resp = json.loads(resp_line.decode().strip())
+                if isinstance(resp, dict) and resp.get("type") == "health_status":
+                    return resp
+            return None
+        except Exception as exc:
+            logger.debug("health_status request failed for %s: %s", socket_path, exc)
             return None
         finally:
             if writer:

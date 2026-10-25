@@ -5192,6 +5192,7 @@ class HubPlugin(BasePlugin):
                 on_shutdown=self._on_remote_shutdown,
                 on_input_inject=self._inject_attacher_input,
                 on_network_status=self._handle_network_status_request,
+                on_health_status=self._handle_health_status_request,
                 on_network_send=self._handle_network_send_request,
                 on_network_attach=self._handle_network_attach_request,
                 on_connect_proxy=self._handle_connect_proxy,
@@ -15040,6 +15041,17 @@ class HubPlugin(BasePlugin):
                 current_turn.reset(token)
                 if relay_token is not None:
                     relay._turn.reset(relay_token)
+
+    async def _handle_health_status_request(self) -> Dict[str, Any]:
+        """Answer the CLI's `health_status` socket request (issue #283).
+
+        The supervisor and dispatch sections `/hub status` renders here,
+        as line lists. Empty lists when this agent has nothing to show.
+        """
+        return {
+            "supervisor": self._supervisor_status_lines(),
+            "dispatch": self._dispatch_failure_lines(),
+        }
 
     async def _handle_network_status_request(self) -> Dict[str, Any]:
         """Answer the CLI's `network_status` socket request.
