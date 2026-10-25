@@ -1,4 +1,5 @@
 import { refreshesOnEvent } from "./live-follow";
+import type { SessionEvent } from "./api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
@@ -467,6 +468,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  // Live-turn events flow from followEvents into the open thread's runtime;
+  // the runtime registers its handler through this ref on mount.
+  const liveEventsRef = useRef<((event: SessionEvent) => void) | null>(null);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   // Folded from the open session's events, so a hub-driven turn still animates.
@@ -791,6 +795,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
             if (refreshesOnEvent(type)) void refreshActiveState(activeId);
+            // A turn this page did not start still streams here: fold the
+            // events into the ephemeral live message (a no-op while this
+            // page runs the turn itself through the transport).
+            liveEventsRef.current?.(event);
           }, () => {
             // A reconnect may have missed the last turn's end.
             resetEventActivity();
@@ -1365,6 +1373,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               sessionId={activeSession.session_id}
               initialState={initialState}
               onStale={() => void resetThread(activeSession.session_id)}
+              liveEvents={liveEventsRef}
             >
               <RuntimeShell
                 session={activeSession}

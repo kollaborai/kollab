@@ -148,6 +148,23 @@ async def _drain(packet, identifier):
             assert event["type"] == "waiting"
 
 
+async def _read_until(packet, identifier, needle):
+    """Read a stream that does not end by itself until `needle` has arrived."""
+    chunks = []
+    first = _COALESCED_FIRST_READS.pop(identifier, None)
+    if first and "data" in first:
+        chunks.append(base64.b64decode(first["data"]))
+    while needle not in b"".join(chunks):
+        event = await packet(op="read", id=identifier)
+        if event["type"] == "end":
+            break
+        if event["type"] == "data":
+            chunks.append(base64.b64decode(event["data"]))
+        else:
+            assert event["type"] == "waiting"
+    return b"".join(chunks)
+
+
 def test_phone_frame_codec_roundtrips_and_bounds_decompression():
     original = json.dumps({"history": "synthetic " * 20_000}).encode()
     compressed = encode_phone_frame(original)
@@ -335,7 +352,9 @@ async def test_explicit_stop_finishes_assistant_and_event_stream(engine_stream):
     stop = await _start(probe.packet, f"/sessions/{probe.session.session_id}/cancel", {})
     assert json.loads(await _drain(probe.packet, stop))["ok"] is True
     assert b"fixture-stream-token" in await _drain(probe.packet, assistant)
-    assert b"turn_complete" in await _drain(probe.packet, observer)
+    # /events follows the session across turns: read up to turn_complete, then leave.
+    assert b"turn_complete" in await _read_until(probe.packet, observer, b"turn_complete")
+    await probe.packet(op="cancel", id=observer)
     await until(lambda: not probe.session.queues)
     assert probe.session.stops == 1
     assert not probe.manager.exchanges
