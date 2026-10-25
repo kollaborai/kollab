@@ -57,6 +57,7 @@ STT_BATCH = 1600  # 100 ms, the KVA1 frame ceiling
 PLAY_RATE = 24000
 READINESS_POLL_S = 1.0
 READY_TIMEOUT_S = 1200
+PARENT_POLL_S = 1.0
 GREETING = "Greet the user briefly and ask what they want to talk about."
 
 
@@ -607,11 +608,20 @@ class Worker:
         signals = (signal.SIGTERM, signal.SIGINT)
         for sig in signals:
             loop.add_signal_handler(sig, self.stopping.set)  # SIGTERM is the stop path
+        orphaned = asyncio.create_task(self._stop_when_orphaned(os.getppid()))
         try:
             await self._run()
         finally:
+            orphaned.cancel()
             for sig in signals:
                 loop.remove_signal_handler(sig)
+
+    async def _stop_when_orphaned(self, engine_pid: int) -> None:
+        # An Engine that dies without stopping us (crash, SIGKILL) never sends the
+        # SIGTERM: we are handed to launchd or init instead, and stop the same way.
+        while os.getppid() == engine_pid:
+            await asyncio.sleep(PARENT_POLL_S)
+        self.stopping.set()
 
     async def _run(self) -> None:
         cfg = self.config

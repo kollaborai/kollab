@@ -175,6 +175,10 @@ class MessageHandler:
         if not claims_voice_origin:
             origin_context = None
         origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        # A hub peer's message (submit_human_input's "agent" source) is a turn
+        # like the user's, but its words never answer what the agent asked them.
+        if getattr(event, "source", None) == "agent":
+            origin_kwargs["from_agent"] = True
 
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")

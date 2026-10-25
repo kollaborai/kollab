@@ -505,6 +505,7 @@ class ToolExecutor:
                 error = f"{reason_code}: {message}"
                 if reason_code == "confirmation_required":
                     error = self._ask_for_yes(tool_data, execution_context)
+                logger.info(f"Voice tool {tool_id} not run: {reason_code}")
                 result = ToolExecutionResult(
                     tool_id=tool_id,
                     tool_type=tool_data.get("type", "unknown"),

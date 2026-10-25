@@ -1,9 +1,10 @@
 """Engine-owned LiveKit server and speech-worker processes for voice rooms.
 
-The server binds 127.0.0.1 on a free port with a per-run key and secret that
-live only in this process and the server's environment. One worker process
-joins each room and calls back into the engine (/turns, /events); the engine
-never pushes to it. Stop is SIGTERM to the worker's process group.
+The server takes signaling on 127.0.0.1 and ICE over TCP on free ports, with a
+per-run key and secret that live only in this process and the server's
+environment. One worker process joins each room and calls back into the engine
+(/turns, /events); the engine never pushes to it. Stop is SIGTERM to the
+worker's process group.
 """
 
 from __future__ import annotations
@@ -37,11 +38,12 @@ WORKER_TOKEN_TTL_S = 3600
 
 # Runs the server and a watchdog in one process group: if the engine dies
 # without cleanup (crash, SIGKILL) the watchdog sees its pid vanish and kills
-# the server, so no livekit-server is left running.
+# the server, so no livekit-server is left running. SIGKILL: on SIGTERM the
+# server drains, waiting for rooms that only the dead engine could end.
 _SUPERVISE = (
     'ppid="$1"; shift; "$@" & srv=$!; '
     '( while kill -0 "$ppid" 2>/dev/null && kill -0 "$srv" 2>/dev/null; do sleep 1; done; '
-    'kill "$srv" 2>/dev/null ) & wait "$srv"'
+    'kill -9 "$srv" 2>/dev/null ) & wait "$srv"'
 )
 
 
@@ -113,6 +115,12 @@ class LiveKitRuntime:
         self._worker_argv = list(worker_argv) if worker_argv else None
         self._worker_env = worker_env or {}
         self.port = _free_port()
+        # ICE over TCP. livekit-server's default, 7881, is one port for every server
+        # on the machine, so a second one (another Engine, LiveKit's own demo) could
+        # not start.
+        self.rtc_tcp_port = _free_port()
+        while self.rtc_tcp_port == self.port:
+            self.rtc_tcp_port = _free_port()
         self.livekit_url = f"ws://127.0.0.1:{self.port}"
         self._api_key = "kv" + secrets.token_hex(8)
         self._api_secret = secrets.token_urlsafe(32)
@@ -178,6 +186,8 @@ class LiveKitRuntime:
                     "127.0.0.1",
                     "--port",
                     str(self.port),
+                    "--rtc.tcp_port",
+                    str(self.rtc_tcp_port),
                     env=env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=log,

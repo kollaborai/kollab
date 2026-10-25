@@ -859,6 +859,22 @@ def test_ready_line_then_sigterm_stops_and_fences(capsys):
     assert rig.adapter.heard == [] and len(rig.engine.requests) == 0
 
 
+def test_a_worker_whose_engine_dies_stops_and_fences(monkeypatch):
+    parent = [os.getppid()]
+    monkeypatch.setattr(lw.os, "getppid", lambda: parent[0])
+    monkeypatch.setattr(lw, "PARENT_POLL_S", 0.01)
+
+    async def scenario():
+        async with Rig() as rig:
+            parent[0] = 1  # a SIGKILLed Engine sends no SIGTERM: launchd adopts the worker
+            await asyncio.wait_for(rig.task, 10)
+            return rig
+
+    rig = run(scenario())
+    assert rig.worker.stopping.is_set() and rig.room.is_closed
+    assert rig.adapter.fenced == CONFIG.generation + 1 and rig.adapter.released
+
+
 def test_the_stt_node_hands_one_utterance_to_the_single_parakeet_owner():
     async def scenario():
         rig = Rig(["hello there"])

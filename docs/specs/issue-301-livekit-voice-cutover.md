@@ -12,7 +12,10 @@ them, and no voice screen shows classifier controls, status or decisions.
 ## Pipeline
 
 - The Engine owns one local `livekit-server` (loopback, per-run key) and one
-  agent worker per voice session (`kollabor_engine/voice_livekit.py`).
+  agent worker per voice session (`kollabor_engine/voice_livekit.py`). The
+  server gets free ports for signaling and for ICE over TCP (`--rtc.tcp_port`):
+  its ICE/TCP default, 7881, is one port per machine, so a second server
+  (another Engine, LiveKit's own demo) exited at startup.
 - The worker (`kollabor_voice/livekit_worker.py`) runs an `AgentSession`:
   Silero VAD, the v1-mini turn detector, VAD interruption. Parakeet does
   speech-to-text and VibeVoice Carter text-to-speech, both through the one voice
@@ -41,9 +44,10 @@ them, and no voice screen shows classifier controls, status or decisions.
   downloads, latency (Hear, Think, Speak, Total) and a stop button.
 - The browser joins only once the runtime is ready, so a cold start that is
   still loading or downloading models waits instead of failing.
-- `livekit-server` listens on loopback, so only a page served from this computer
-  gets the room. Elsewhere the mic is the `/voice` toggle (the computer running
-  the agent listens), as before.
+- `livekit-server` takes signaling on loopback only, so only a page served from
+  this computer gets the room. Its ICE ports listen on every interface, but
+  answer only peers that joined through signaling. Elsewhere the mic is the
+  `/voice` toggle (the computer running the agent listens), as before.
 
 ## Talk-over
 
@@ -93,10 +97,10 @@ runs it.
 - A voice turn never waits on an approval prompt. A call it may not run
   unasked comes back "Not run yet: this needs the user's OK", and the agent
   says in its reply what it wants to run and why and asks for a yes. That is
-  the voice guard's `confirmation_required` (anything that is not read-only, a
-  read-only command whose tool is not in `/bin` or `/usr/bin`, such as Homebrew's
-  `rg`, `kollab --hub msg`, the `hub_msg` tool), in every permission mode, and
-  in a Confirm mode the permission prompt too (no card opens).
+  the voice guard's `confirmation_required` (a command on the voice list that is
+  not read-only, a read-only command whose tool is not in `/bin` or `/usr/bin`,
+  such as Homebrew's `rg`, and the `hub_msg` tool), in every permission mode,
+  and in a Confirm mode the permission prompt too (no card opens).
 - The user's next message, spoken or typed, decides
   (`kollabor_agent/yes_approval.py`, fed by `LLMService.process_user_input`): a
   short yes ("yes", "yeah, go ahead", "do it", "okay"; "ok thanks" is not one)
@@ -116,8 +120,13 @@ runs it.
   the reply play on; a talk-over's cut (`record_interrupted_voice_reply`,
   `YesApprovals.reply_cut`) drops what the cut reply asked.
 - Only the user's own words count. `process_user_input` is the human entry
-  (terminal, web UI, voice); hub and relay messages and the model's own text
-  never answer. A hidden voice turn (the greeting) asks for nothing: a call that
+  (terminal, web UI, voice); hub and relay messages, steering and the model's
+  own text never answer. A native hub message wakes the agent through
+  `TRIGGER_LLM_CONTINUE`; one that goes through `submit_human_input` as another
+  agent (its "agent" source: a network-attached agent, a hub message whose
+  profile could not be read) reaches `process_user_input` marked `from_agent`
+  and leaves the asks alone. The goal driver's steering is a HUD context item,
+  and ACP steering goes to the ACP agent. A hidden voice turn (the greeting) asks for nothing: a call that
   needs the OK comes back refused, never "Not run yet", and its words never
   answer. Asks come only from the voice guard's decision and the permission
   manager's (`PermissionDecision.needs_yes`), never from a tool's text, and one
@@ -133,6 +142,22 @@ runs it.
   (`-C`, `--git-dir`, `--work-tree`; the cwd must stay inside it too), and any
   git subcommand outside `_VOICE_GIT_COMMANDS` (so no push, reset, stash, pull
   or config, and no alias or `git-*` helper).
+- A yes runs only what is on the voice list (`_voice_may_run`), since the user
+  heard only the agent's words for the call: read-only commands, git, file
+  changes inside the project and outside `.git` (`mkdir` `-p`/`-v`, `touch`,
+  `cp` `-R`/`-r`/`-p`/`-n`/`-v`, `mv` `-n`/`-v`, `rm` `-d`/`-v`, no other
+  option), the project's own scripts (`make` with targets only, `-C` and `-f`
+  inside the project, never `VAR=value` or another option; `npm run <script>`,
+  `test`, `start`, `install` and `ci` with no other argument, so never a package
+  or `npm exec`), read-only `gh` (`--version`, `status`, `pr list/view/status/checks/diff`,
+  `issue list/view/status`, `repo view`, `run list/view`) and `kollab --hub`
+  `status`/`capture`/`where`/`help`. Anything else comes back `not_by_voice`
+  before it is asked for: the agent says it cannot run that by voice and offers
+  to run it from a typed message, where the user sees the exact command. So no
+  tool that runs code from its arguments (`pip`, `ex`/`vi`, `sqlite3`, `sed`,
+  `tar`, `find`, `curl`, `ssh`, `gh api`, `kollab --hub msg`...); the `hub_msg`
+  tool still asks. Marco chose `make` and `npm` (2026-10-24): they run any code
+  the project's own scripts contain.
 
 A typed turn keeps its card, and a Stop or a wait no longer refuses the tool:
 
@@ -187,6 +212,10 @@ is `KOLLAB_VOICE_ROOT`, default `~/.kollab/voice`). Each starts over past 5 MB.
       permissions; provider, key and model settings kept; thinking low.
 - [x] Classifier modules, models, workers and manifest entries still present;
       the voice path never imports or calls them (tests).
-- [x] No orphaned worker or server after stop (process-group kill, tests).
+- [x] No orphaned worker or server after stop (process-group kill, tests), or
+      after the Engine dies without stopping them (crash, SIGKILL): the
+      watchdog SIGKILLs livekit-server (on SIGTERM it drains, waiting for rooms
+      only the Engine could end) and the worker stops when it is reparented
+      (`Worker._stop_when_orphaned`). Live: none left 8 s after a SIGKILL.
 - [ ] PhoneLink voice.
 - [x] Before/after latency (#301, "Measurement").

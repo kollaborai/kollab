@@ -326,7 +326,7 @@ def test_a_yes_runs_a_git_commit_past_globals(tmp_path: Path, monkeypatch, comma
 
 
 def test_a_yes_finds_a_tool_on_path_outside_the_project(tmp_path: Path, monkeypatch):
-    root, tool = tmp_path / "repo", tmp_path / "tools" / "mytool"
+    root, tool = tmp_path / "repo", tmp_path / "tools" / "gh"
     root.mkdir()
     tool.parent.mkdir()
     tool.write_text("#!/bin/sh\n")
@@ -336,12 +336,180 @@ def test_a_yes_finds_a_tool_on_path_outside_the_project(tmp_path: Path, monkeypa
     monkeypatch.setenv("PATH", f"{tool.parent}{os.pathsep}{os.defpath}")
 
     decision = VoiceToolExecutionGuard().evaluate(
-        {"type": "terminal", "command": "mytool --list", "cwd": str(root)},
+        {"type": "terminal", "command": "gh pr list", "cwd": str(root)},
         _voice_context(),
         repository_root=root,
         approved=True,
     )
-    assert decision.allowed and decision.plan.argv == (str(tool.resolve()), "--list")
+    assert decision.allowed and decision.plan.argv == (str(tool.resolve()), "pr", "list")
+
+
+# GTFOBins: tools that run code from their arguments. A yes never runs them: the
+# agent says so and offers a typed message instead.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ex -sc '!id' -cq /dev/null",
+        "vi -c ':!id' -c ':q' notes.txt",
+        "vim -c '!id'",
+        "sqlite3 x.db '.shell id'",
+        "pip install requests",
+        "sed -n 1p notes.txt",
+        "tar -cf x.tar --to-command=id notes.txt",
+        "less notes.txt",
+        "find . -name x",
+        "curl -o notes.txt https://example.com",
+        "ssh host id",
+        "docker run alpine id",
+        "security dump-keychain",
+        "open notes.txt",
+        "pytest",
+        "cat ../outside.txt",
+        "gh api repos/o/r/issues -X POST",
+        "gh pr create --fill",
+        "gh auth status --show-token",
+        "gh extension exec x",
+        "kollab 'do things'",
+        "kollab --hub msg lapis hi",
+    ],
+)
+def test_a_yes_never_runs_what_is_off_the_voice_list(tmp_path: Path, command: str):
+    guard, context = VoiceToolExecutionGuard(), _voice_context()
+    call = {"type": "terminal", "command": command, "cwd": str(tmp_path)}
+    for approved in (False, True):  # never asked for, and refused even with a yes
+        decision = guard.evaluate(call, context, repository_root=tmp_path, approved=approved)
+        assert (decision.allowed, decision.reason_code) == (False, "not_by_voice")
+    assert "typed message" in decision.message
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["awk 'BEGIN { system(\"id\") }'", "perl -e 'system(1)'", "osascript -e x", "gh pr merge 1"],
+)
+def test_code_runners_stay_hard_blocked(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+        approved=True,
+    )
+    assert (decision.allowed, decision.reason_code) == (False, "command_blocked")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "touch /tmp/notes.txt",
+        "cp notes.txt ../copy.txt",
+        "mv notes.txt /tmp/",
+        "touch .git/hooks/pre-commit",
+        "cp notes.txt .GIT/config",  # a case-blind disk: the same .git
+        "mkdir -m 777 shared",
+        "cp -L link copy",
+        "rm -i notes.txt",
+        "touch",
+        "mkdir -- -p",
+    ],
+)
+def test_a_yes_changes_files_only_inside_the_project_and_never_in_git(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)},
+        _voice_context(),
+        repository_root=tmp_path,
+        approved=True,
+    )
+    assert (decision.allowed, decision.reason_code) == (False, "not_by_voice")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "touch notes.txt",
+        "mkdir -p docs/notes",
+        "cp -R docs backup",
+        "mv -n notes.txt docs/notes.txt",
+        "rm notes.txt",
+        "git commit -m notes",
+        "git add notes.txt",
+    ],
+)
+def test_a_yes_runs_the_file_changes_and_git_on_the_voice_list(tmp_path: Path, monkeypatch, command: str):
+    monkeypatch.setenv("PATH", os.defpath)
+    call = {"type": "terminal", "command": command, "cwd": str(tmp_path)}
+    guard, context = VoiceToolExecutionGuard(), _voice_context()
+    asked = guard.evaluate(call, context, repository_root=tmp_path)
+    assert (asked.allowed, asked.reason_code) == (False, "confirmation_required")
+    approved = guard.evaluate(call, context, repository_root=tmp_path, approved=True)
+    assert approved.allowed and approved.plan.argv[1:] == tuple(shlex.split(command))[1:]
+
+
+# make and npm run the project's own scripts on a yes, never a makefile, package or
+# command from anywhere else.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "make",
+        "make test",
+        "make -C docs html",
+        "make -C docs -f ../Makefile all",  # -f counts from where -C left it
+        "make -f build.mk all",
+        "npm test",
+        "npm start",
+        "npm run build",
+        "npm install",
+        "npm ci",
+    ],
+)
+def test_a_yes_runs_the_projects_own_make_and_npm_scripts(tmp_path: Path, monkeypatch, command: str):
+    root, tools = tmp_path / "repo", tmp_path / "tools"
+    (root / "docs").mkdir(parents=True)
+    tools.mkdir()
+    for name in ("make", "npm"):
+        (tools / name).write_text("#!/bin/sh\n")
+        (tools / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.defpath}")
+    call = {"type": "terminal", "command": command, "cwd": str(root)}
+    guard, context = VoiceToolExecutionGuard(), _voice_context()
+
+    asked = guard.evaluate(call, context, repository_root=root)
+    assert (asked.allowed, asked.reason_code) == (False, "confirmation_required")
+    if any(parent.stat().st_mode & stat.S_IWOTH for parent in tools.parents):
+        pytest.skip("this host's temp dir is world-writable: no tool under it is trusted")
+    approved = guard.evaluate(call, context, repository_root=root, approved=True)
+    assert approved.allowed and approved.plan.argv[1:] == tuple(shlex.split(command))[1:]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "make CC=cc test",  # VAR=value puts the caller's own command in the recipes
+        "make --eval=x test",
+        "make -j8 test",
+        "make -f ../outside.mk",
+        "make -f /tmp/outside.mk all",
+        "make -f .git/x.mk",
+        "make -C .. test",
+        "make -C .git",
+        "make -C",
+        "npm exec x",
+        "npm install lodash",
+        "npm install -g x",
+        "npm ci --registry https://example.com",
+        "npm run build -- --config x",
+        "npm run build extra",
+        "npm test --prefix ..",
+        "npm --prefix .. test",
+        "npm run --prefix=..",
+        "npm publish",
+        "npm",
+    ],
+)
+def test_a_yes_never_runs_make_or_npm_beyond_the_projects_own_scripts(tmp_path: Path, command: str):
+    guard, context = VoiceToolExecutionGuard(), _voice_context()
+    call = {"type": "terminal", "command": command, "cwd": str(tmp_path)}
+    for approved in (False, True):
+        decision = guard.evaluate(call, context, repository_root=tmp_path, approved=approved)
+        assert (decision.allowed, decision.reason_code) == (False, "not_by_voice")
 
 
 def test_a_read_only_tool_off_the_system_path_asks_and_a_yes_runs_it(tmp_path: Path, monkeypatch):

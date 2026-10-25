@@ -214,7 +214,11 @@ short no drops them, and anything else is a normal turn that drops them too. A
 yes said before that reply was finished, or over it by voice, answers nothing;
 a voice ask stops counting after 5 minutes. The manager marks its own asks
 (`PermissionDecision.needs_yes`), so a tool whose text reads like one plants
-nothing.
+nothing, and another agent's message (`from_agent`) never answers. By voice a
+yes runs only the guard's voice list (read-only commands, git, file changes
+inside the project, the project's own `make` and `npm` scripts, read-only `gh`
+and `kollab --hub`); anything else comes
+back `not_by_voice` and the agent offers to run it from a typed message.
 
 ## Commands
 

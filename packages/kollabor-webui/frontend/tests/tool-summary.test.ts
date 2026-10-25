@@ -27,6 +27,9 @@ test("shell commands say what ran", () => {
   assert.equal(run("ls -la"), "List Files");
   assert.equal(run("ls -la src/components"), "List Files · components");
   assert.equal(run("make build"), "Run · make build");
+  // A spoken yes runs npm: its row is where the user sees the exact command.
+  assert.equal(run("npm test"), "Run · npm test");
+  assert.equal(run("npm install lodash"), "Run · npm install lodash");
   assert.equal(run("git status"), "Git Status");
 });
 

@@ -119,15 +119,6 @@ function summarizeTerminalCommand(command: string): string {
     );
   }
 
-  if (/^(?:npm|pnpm|yarn)\s+/.test(normalized)) {
-    const packageManager = normalized.split(/\s+/, 1)[0] ?? "package manager";
-    const script = normalized.match(/\b(?:run|exec)\s+([^\s]+)/)?.[1];
-    return withStepCount(
-      script ? `Run ${packageManager} · ${script}` : `Run ${packageManager}`,
-      count,
-    );
-  }
-
   if (/^ls\b/.test(normalized)) {
     const target = pathArgument(normalized);
     return withStepCount(

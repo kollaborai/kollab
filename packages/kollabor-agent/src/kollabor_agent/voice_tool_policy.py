@@ -3,7 +3,8 @@
 This is the low-level executor boundary. A mutating or externally communicative
 action comes back ``confirmation_required``: the agent asks for the user's OK in
 its reply, and their yes runs that exact call (``yes_approval``), planned again
-as approved: argv with no shell, past the same hard blocks.
+as approved: argv with no shell, past the same hard blocks. A yes runs only what
+``_voice_may_run`` lists; anything else comes back ``not_by_voice``.
 """
 
 from __future__ import annotations
@@ -112,6 +113,30 @@ _HARD_BLOCKED_GIT_FLAGS = frozenset(
         "--open-files-in-pager",
     }
 )
+# What a spoken yes may run besides the read-only commands. The user heard only the
+# agent's words for the call, so never a tool that runs code from its arguments (ex,
+# sqlite3, sed...): git (its subcommands are checked in _is_hard_blocked), file changes
+# inside the project with only these options, the project's own make and npm scripts,
+# and read-only gh and kollab.
+_VOICE_FILE_OPTIONS = {
+    "mkdir": frozenset({"-p", "-v"}),
+    "touch": frozenset(),
+    "cp": frozenset({"-R", "-r", "-p", "-n", "-v"}),
+    "mv": frozenset({"-n", "-v"}),
+    "rm": frozenset({"-d", "-v"}),
+}
+_VOICE_GH_COMMANDS = frozenset(
+    {
+        ("--version",), ("version",), ("status",),
+        ("pr", "list"), ("pr", "view"), ("pr", "status"), ("pr", "checks"), ("pr", "diff"),
+        ("issue", "list"), ("issue", "view"), ("issue", "status"),
+        ("repo", "view"), ("run", "list"), ("run", "view"),
+    }
+)
+_VOICE_KOLLAB_HUB_COMMANDS = frozenset({"status", "capture", "where", "help"})
+# package.json's scripts and the dependencies it lists, never npm exec (npx), which
+# fetches and runs any package.
+_VOICE_NPM_COMMANDS = frozenset({"run", "test", "start", "install", "ci"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,13 +266,20 @@ class VoiceToolExecutionGuard:
             )
         if _git_leaves_project(argv, canonical_cwd, root):
             return self._deny("command_blocked", "Voice git commands must stay inside the project.")
+        read_only = _is_read_only_action(argv, canonical_cwd, root)
+        if not read_only and not _voice_may_run(argv, canonical_cwd, root):
+            return self._deny(
+                "not_by_voice",
+                "A spoken yes runs only read-only commands, git and file changes inside the "
+                "project. Tell the user it was not run, and offer to run it if they ask in a "
+                "typed message, where they see the exact command.",
+            )
 
         if approved:
             # The user's yes: whatever it names on PATH, never one in the project
             # or in a directory others can write.
             trusted_executable = _resolve_executable(argv[0], root, os.environ.get("PATH") or os.defpath)
         else:
-            read_only = _is_read_only_action(argv, canonical_cwd, root)
             trusted_executable = _resolve_trusted_executable(argv[0], root) if read_only else None
             if trusted_executable is None:  # not read-only, or its tool is off the fixed system path
                 return self._deny(
@@ -457,6 +489,68 @@ def _is_read_only_action(argv: Sequence[str], cwd: Path, root: Path) -> bool:
     if executable == "kollab" and tokens[1:3] in {("--hub", "status"), ("--hub", "capture")}:
         return True
     return False
+
+
+def _voice_may_run(argv: Sequence[str], cwd: Path, root: Path) -> bool:
+    """A command a spoken yes may run, past the hard blocks: see _VOICE_FILE_OPTIONS."""
+    executable = Path(argv[0]).name.lower()
+    if executable == "git":
+        return True
+    if executable in _VOICE_FILE_OPTIONS:
+        paths = [token for token in argv[1:] if token not in _VOICE_FILE_OPTIONS[executable]]
+        return bool(paths) and all(
+            not token.startswith("-") and _is_project_file(token, cwd, root) for token in paths
+        )
+    if executable == "gh":
+        return tuple(argv[1:2]) in _VOICE_GH_COMMANDS or tuple(argv[1:3]) in _VOICE_GH_COMMANDS
+    if executable == "kollab":
+        return len(argv) > 2 and argv[1] == "--hub" and argv[2] in _VOICE_KOLLAB_HUB_COMMANDS
+    if executable == "make":
+        return _make_runs_project_rules(argv[1:], cwd, root)
+    if executable == "npm":
+        args = argv[1:]
+        if not args or args[0] not in _VOICE_NPM_COMMANDS or any(token.startswith("-") for token in args):
+            return False
+        return len(args) <= 2 if args[0] == "run" else len(args) == 1  # no package, no extra argument
+    return False
+
+
+def _make_runs_project_rules(args: Sequence[str], cwd: Path, root: Path) -> bool:
+    """Targets of the project's own makefile, with -C and -f only inside the project.
+
+    Never VAR=value or another option (--eval...): they put the caller's own commands
+    in the recipes. make applies every -C before it reads a makefile, so -f counts
+    from the last one.
+    """
+    directory, makefiles, at = cwd, [], 0
+    while at < len(args):
+        token = args[at]
+        if token in {"-C", "-f"} and at + 1 < len(args):
+            value = args[at + 1]
+            if token == "-f":
+                makefiles.append(value)
+            elif not _is_project_file(value, directory, root):
+                return False
+            else:
+                directory = (directory / Path(value).expanduser()).resolve(strict=False)
+            at += 2
+        elif token.startswith("-") or "=" in token:
+            return False
+        else:
+            at += 1
+    return all(_is_project_file(name, directory, root) for name in makefiles)
+
+
+def _is_project_file(value: str, cwd: Path, root: Path) -> bool:
+    """Inside the project and outside .git, where a hook or config runs code."""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    try:
+        relative = candidate.resolve(strict=False).relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return ".git" not in (part.lower() for part in relative.parts)  # .GIT on a case-blind disk
 
 
 def _path_is_inside(value: str, cwd: Path, root: Path) -> bool:

@@ -195,6 +195,36 @@ class TestLLMServiceIntegration(unittest.TestCase):
             asyncio.run(self.service.process_user_input("yeah", origin_context=over))
         self.assertFalse(approvals.take({**call, "id": "c2"}))
 
+    def test_a_hub_peers_yes_answers_nothing(self):
+        """Another agent's "Yes." is a turn like any, never the user's answer to the ask."""
+        from types import SimpleNamespace
+
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        handler = self.service._message_handler
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+            patch.object(self.service, "_continue_conversation", AsyncMock()),
+            patch.object(handler, "_hub_continue_blocked", return_value=False),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            mock_logger.log_system_message = AsyncMock()
+            approvals.ask(call, make_voice_origin_context("t1"))
+            approvals.on_reply_done()
+            # submit_human_input's "agent" source: a network-attached agent, or a
+            # hub message whose profile could not be read
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="agent")))
+            # a native hub message: injected, then TRIGGER_LLM_CONTINUE
+            asyncio.run(handler.handle_llm_continue({"source": "hub:lapis", "content": "Yes."}, None))
+            # steering (the goal driver's context item): an agent HUD message
+            asyncio.run(self.service.inject_system_message("Yes.", subtype="goal_context"))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="state_rpc")))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))  # the ask was still open for the user
+
 
     def test_process_user_input_displays_before_lazy_alias_rebuild(self):
         """First submit must echo immediately before alias/prompt rebuild work."""

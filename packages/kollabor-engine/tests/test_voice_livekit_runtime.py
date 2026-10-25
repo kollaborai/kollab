@@ -33,6 +33,18 @@ s.bind(("127.0.0.1", port)); s.listen(5)
 while True: time.sleep(1)
 """
 
+# Binds both of livekit-server's TCP ports, with its defaults when a flag is missing.
+TWO_PORT_SERVER = """\
+#!{py}
+import socket, sys, time
+def bind(flag, default):
+    port = int(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
+    s = socket.socket(); s.bind(("127.0.0.1", port)); s.listen(5)
+    return s
+http, ice = bind("--port", 7880), bind("--rtc.tcp_port", 7881)
+while True: time.sleep(1)
+"""
+
 FAKE_WORKER = """\
 import json, os, signal, sys, time
 cfg = json.loads(os.environ["KOLLAB_VOICE_WORKER_CONFIG"])
@@ -413,6 +425,29 @@ async def test_missing_server_binary_is_runtime_unavailable(rig):
     await rig.control.shutdown()
 
 
+async def test_two_servers_on_one_machine_each_get_their_own_ice_port(tmp_path):
+    # livekit-server's ICE/TCP default is one port for every server on the machine:
+    # a second Engine, or LiveKit's own demo, made the next one exit at startup.
+    server = tmp_path / "livekit-server"
+    server.write_text(TWO_PORT_SERVER.format(py=sys.executable))
+    server.chmod(0o755)
+    runtimes = [
+        LiveKitRuntime(
+            engine_url=lambda: "http://127.0.0.1:1",
+            engine_token=lambda: "tok",
+            server_binary=str(server),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for runtime in runtimes:
+            await runtime._ensure_server()
+        assert len({runtimes[0].rtc_tcp_port, runtimes[1].rtc_tcp_port, 7881}) == 3
+    finally:
+        for runtime in runtimes:
+            await runtime.shutdown()
+
+
 async def test_unknown_session_and_other_session_are_404(rig):
     async with client(rig.app) as http:
         assert (await http.post("/sessions/nope/voice", json={})).status_code == 404
@@ -464,8 +499,11 @@ def test_server_dies_with_engine_even_when_engine_is_killed(tmp_path):
     """The supervisor watchdog kills livekit-server when its parent pid vanishes."""
     parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     pidfile = tmp_path / "pid"
+    # Like livekit-server, it outlives a SIGTERM: it drains rooms that only the
+    # dead engine could end.
     child = textwrap.dedent(f"""\
-        import os
+        import os, signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         open({str(pidfile)!r}, "w").write(str(os.getpid()))
         import time; time.sleep(60)""")
     script = tmp_path / "srv.py"

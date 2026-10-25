@@ -17,10 +17,13 @@ no closes that card.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from contextvars import ContextVar
 from typing import Any, Callable, Mapping
+
+logger = logging.getLogger(__name__)
 
 NEEDS_YES = (
     "Not run yet: this needs the user's OK. In your reply, say in a few plain words "
@@ -190,6 +193,7 @@ class YesApprovals:
                 "Run exactly those now, then tell them what you found."
             )
         if answer:
+            logger.info(f"The user's {answer} answered {len(self._asked)} asked call(s)")
             self._close_cards(set(self._asked), answer == "yes")
         self._asked.clear()  # a yes answers only the reply just before it; its card stays open
 

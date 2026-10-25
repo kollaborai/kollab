@@ -1904,6 +1904,7 @@ class LLMService:
         pre_displayed: bool = False,
         voice: dict | None = None,
         origin_context: dict | None = None,
+        from_agent: bool = False,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1915,6 +1916,7 @@ class LLMService:
                 before startup gating released.
             origin_context: Trusted internal provenance for a voice-originated
                 turn. Public messages cannot set the reserved source.
+            from_agent: Another agent's message (a hub peer): never the user's yes.
 
         Returns:
             Status information about processing
@@ -1963,7 +1965,7 @@ class LLMService:
         hidden_voice_turn = bool(
             trusted_origin_context and trusted_origin_context.get("voice_hidden") is True
         )
-        if not hidden_voice_turn:
+        if not hidden_voice_turn and not from_agent:
             # The user's own words: a short yes runs what the agent asked to run,
             # unless they said it over the agent (they never heard the whole ask).
             self.tool_executor.yes_approvals.on_human_input(
