@@ -34,7 +34,7 @@ import {
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
-import { VoiceRoomBar } from "@/voice/voice-room";
+import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -75,9 +75,9 @@ import {
 import {
   createContext,
   useContext,
+  useEffect,
   useMemo,
   useLayoutEffect,
-
   useRef,
   type ComponentType,
   type FC,
@@ -207,6 +207,15 @@ const ThreadRoot: FC<{
 
   const userScrollRef = useRef(false);
 
+  // A voice room's turns arrive from the room, not from this composer's runs,
+  // so the top anchor never moves for them: while the room is live the chat
+  // follows the bottom, from the latest turn when the room starts.
+  const voiceLive = useVoiceRoomLive();
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (voiceLive && viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
+  }, [voiceLive]);
+
   useLayoutEffect(() => {
     const anchor = scrollAnchorRef.current;
     if (!anchor) return;
@@ -275,6 +284,7 @@ const ThreadRoot: FC<{
             });
         }}
         turnAnchor="top"
+        autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
@@ -429,7 +439,10 @@ const Composer: FC<{
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
-  const voice = useVoiceMode();
+  // The mic starts the LiveKit room in this browser; /voice (the computer
+  // running the agent listens) stays a typed command, and its status line shows.
+  const terminalVoice = useVoiceMode();
+  const voice = useRoomVoiceMode() ?? terminalVoice;
   const placeholder = useContext(ComposerPlaceholderContext);
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
@@ -797,8 +810,8 @@ const Composer: FC<{
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
-            {voiceAvailable && voice.on ? (
-              <VoiceStatus activity={voice.activity} />
+            {voiceAvailable && terminalVoice.on ? (
+              <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
             {voiceAvailable ? <VoiceRoomBar /> : null}
             <div className="aui-composer-row flex items-end gap-1.5">
@@ -849,14 +862,14 @@ function prettyCommandName(name: string): string {
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
 // One trailing button slot that morphs: stop while a run is going, send once
-// there is something to send, otherwise the /voice toggle (a mic, or the
-// pulsing listening button while voice is on) where the session offers it.
+// there is something to send, otherwise the voice mic (a mic, or the
+// pulsing listening button while the voice room is up) where the session offers it.
 const composerSlotMode = (
   s: AssistantState,
   voice: VoiceMode | null,
   awaitingPermission = false,
 ): ComposerSlotMode => {
-  // A /voice command is itself a chat run; hold the mic still through it
+  // A room starting or stopping (or a /voice command run); hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
   if (!s.composer.isEmpty || !voice) return "send";
@@ -882,11 +895,7 @@ const VOICE_METER = [0.1, 0.3, 0.55, 0.8];
 /** Voice mode at a glance: the mic level, what voice is doing, the last line. */
 const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
   const level = activity?.level ?? 0;
-  const line = activity?.said
-    ? `Said “${activity.said}”`
-    : activity?.heard
-      ? `Heard “${activity.heard}”`
-      : "";
+  const line = activity?.heard ? `Heard “${activity.heard}”` : "";
   return (
     <div
       data-slot="aui_voice-status"

@@ -8687,7 +8687,7 @@ class HubPlugin(BasePlugin):
                 if is_operator_direct or message.from_agent == "human":
                     if wake_decision.should_trigger:
                         await llm_service.submit_human_input(
-                            message.content, source=UserInputSource.HUB_ATTACHMENT,
+                            message.content, source=UserInputSource.HUB_MESSAGE,
                             request_id=message.id, thread_id=message.thread_id,
                             origin_context={"operator": True},
                         )

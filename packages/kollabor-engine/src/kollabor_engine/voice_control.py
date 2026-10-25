@@ -1,9 +1,10 @@
 """Voice session control: events, routing glue and speech output for LiveKit rooms.
 
-Wires EngineRuntimeHost and EngineSessionRouter into the live engine. Final
-transcripts enter the selected session through the router (ordinary admission
-and PermissionManager); the session's own events become voice events, and the
-assistant's final reply goes through SpeechOutputPolicy to the room's worker.
+Wires EngineRuntimeHost and EngineSessionRouter into the live engine. A final
+transcript enters the selected session through the router (ordinary admission
+and PermissionManager) as a /turns call; the reply streams back to the worker
+as one speech-ready sentence per line, and the session's own events become
+voice events. A /turns client that disconnects before "done" is a barge-in.
 """
 
 from __future__ import annotations
@@ -23,11 +24,15 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from kollabor_agent.voice_admission import (
+    add_voice_admission_revoke_listener,
+    revoke_voice_admissions_for_turn,
+)
+
 from .voice_livekit import LiveKitRuntime
 from .voice_runtime_host import EngineRuntimeHost, ResolvedVoiceTarget, RuntimeHostError
 from .voice_session_router import EngineSessionRouter
 from .voice_types import (
-    AdmissionReceipt,
     CreateVoiceSessionRequest,
     JoinVoiceSessionRequest,
     StopVoiceSessionRequest,
@@ -48,6 +53,7 @@ TURN_IDLE_TIMEOUT_S = 600.0
 PARTIAL_INTERVAL_S = 0.25
 MAX_SPOKEN_CHARS = 600
 TERMINAL_STATES = {"stopped", "error"}
+GREETING_INSTRUCTION = "Greet the user briefly and ask what they want to talk about."
 _LOCAL_PROVIDERS = {"ollama", "lmstudio", "local", "mlx", "llamacpp"}
 
 
@@ -75,6 +81,55 @@ def format_for_speech(text: str) -> str:
     return out
 
 
+_SPOKEN_OPEN = re.compile(r"<spoken_text\s*>", re.I)
+_SPOKEN_CLOSE = re.compile(r"</spoken_text\s*>", re.I)
+# A sentence ends at . ! ? (plus closing quotes) before whitespace, or at a blank line.
+# ponytail: "Dr. Smith" cuts too; a pause there is harmless, a abbreviation list is not worth it.
+_BOUNDARY = re.compile(r"(?<=[.!?])[\"')\]]*(?=\s)|\n\s*\n")
+
+
+def spoken_so_far(raw: str) -> str | None:
+    """The speakable text of a reply that is still streaming; None until it is known.
+
+    split_response_channels(partial=True) reads an unclosed <spoken_text> as
+    malformed and answers "", so a stream reads the channel itself: what follows
+    the opening tag up to its closing tag, minus a closing tag still arriving.
+    A reply with no channel tags is all speech; one with only <display_text>
+    cannot say what is spoken until the reply ends.
+    """
+    match = _SPOKEN_OPEN.search(raw)
+    if match:
+        body = raw[match.end() :]
+        close = _SPOKEN_CLOSE.search(body)
+        if close:
+            return body[: close.start()]
+        cut = body.rfind("<")
+        if cut >= 0 and "</spoken_text>".startswith(body[cut:].lower()):
+            body = body[:cut]
+        return body
+    if "<display_text" in raw.lower():
+        return None
+    from kollabor_ai.response_channels import display_response_text
+
+    return display_response_text(raw, partial=True)
+
+
+def cut_sentences(buffer: str, *, final: bool) -> tuple[list[str], str]:
+    """The complete sentences in `buffer` and the unfinished rest (flushed when final)."""
+    sentences: list[str] = []
+    start = 0
+    for match in _BOUNDARY.finditer(buffer):
+        piece = buffer[start : match.end()].strip()
+        if piece:
+            sentences.append(piece)
+        start = match.end()
+    rest = buffer[start:]
+    if final and rest.strip():
+        sentences.append(rest.strip())
+        rest = ""
+    return sentences, rest
+
+
 class SpeechOutputDecision(_FrozenModel):
     speak: bool
     transcript: VoiceTranscriptSnapshot
@@ -82,6 +137,13 @@ class SpeechOutputDecision(_FrozenModel):
 
 
 class SpeechOutputPolicy:
+    @staticmethod
+    def sentence(text: str) -> str:
+        """One sentence in speakable form; "" when nothing is left to say."""
+        spoken = format_for_speech(text)
+        # A lone period is the voice rule for a silent reply.
+        return spoken if any(ch.isalnum() for ch in spoken) else ""
+
     def prepare(
         self, response: VoiceTranscriptSnapshot, binding: VoiceSessionBinding
     ) -> SpeechOutputDecision:
@@ -448,6 +510,9 @@ class VoiceControl:
         self._tasks: set[asyncio.Task[None]] = set()
         self._watching: set[str] = set()
         self._latency: dict[str, dict[str, int]] = {}
+        # The engine issues voice capabilities; the daemon runs the turn. A revoke
+        # here (stop, session switch, barge-in) is mirrored into the daemon.
+        self._unlisten = add_voice_admission_revoke_listener(self._mirror_revoke)
 
     # --- control API ---
 
@@ -521,40 +586,85 @@ class VoiceControl:
 
     # --- worker routes ---
 
-    async def ingest_transcript(
-        self, voice_session_id: str, snapshot: VoiceTranscriptSnapshot
-    ) -> AdmissionReceipt:
+    async def open_turn(
+        self,
+        voice_session_id: str,
+        snapshot: VoiceTranscriptSnapshot,
+        *,
+        kind: Literal["speech", "greeting"] = "speech",
+        talk_over: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Admit a turn, then stream its reply as speech-ready sentences.
+
+        Admission runs eagerly so a refusal answers with a plain HTTP error; the
+        returned iterator yields {"text": sentence} lines and ends with
+        {"done": true, "turn_id": ...}. Closing it before "done" is a barge-in.
+        A greeting is a hidden instruction turn: no user bubble, no user transcript.
+        """
         binding = await self.host.get_binding(OWNER_ID, voice_session_id)
         session = await self.router._get_session(
             binding
         )  # noqa: SLF001 - same lookup the router validates with
+        if kind == "greeting":
+            snapshot = snapshot.model_copy(update={"display_text": GREETING_INSTRUCTION})
         queue = session.subscribe()
         try:
-            receipt = await self.router.admit_final(binding, snapshot)
+            receipt = await self.router.admit_final(
+                binding, snapshot, extra_context=self._turn_context(binding, kind, talk_over)
+            )
         except BaseException:
             session.unsubscribe(queue)
             raise
         if receipt.duplicate or not receipt.accepted:
             session.unsubscribe(queue)
-            return receipt
-        generation = snapshot.generation
+            return self._finished(snapshot.turn_id, duplicate=receipt.duplicate)
+        if kind != "greeting":
+            await self._emit(
+                voice_session_id,
+                snapshot.generation,
+                "voice.transcript",
+                None,
+                turn_id=snapshot.turn_id,
+                chunks=transcript_chunks(snapshot),
+            )
         await self._emit(
             voice_session_id,
-            generation,
-            "voice.transcript",
-            None,
-            turn_id=snapshot.turn_id,
-            chunks=transcript_chunks(snapshot),
-        )
-        await self._emit(
-            voice_session_id,
-            generation,
+            snapshot.generation,
             "voice.state",
             {"state": "thinking"},
             turn_id=snapshot.turn_id,
         )
-        self._spawn(self._pump(binding, generation, snapshot.turn_id, session, queue))
-        return receipt
+        return self._stream_turn(binding, snapshot, session, queue)
+
+    def _turn_context(
+        self, binding: VoiceSessionBinding, kind: str, talk_over: bool = False
+    ) -> dict[str, Any]:
+        """Voice-only turn settings the daemon applies for this turn and no other."""
+        extra: dict[str, Any] = {}
+        if self.settings is not None:
+            extra["voice_prompt_overlay"] = self.settings.overlay(binding.agent_id)
+            extra["voice_reasoning"] = self.settings.reasoning()
+        if kind == "greeting":
+            extra["voice_hidden"] = True
+        if talk_over:
+            extra["voice_talk_over"] = True  # a yes in it never answers the agent's ask
+        return extra
+
+    @staticmethod
+    async def _finished(turn_id: str, *, duplicate: bool) -> AsyncIterator[dict[str, Any]]:
+        yield {"done": True, "turn_id": turn_id, "duplicate": duplicate}
+
+    async def record_interrupted_reply(
+        self, voice_session_id: str, turn_id: str, text: str
+    ) -> dict[str, Any]:
+        """A talk-over cut a reply short: keep the part the worker says was played.
+
+        An empty text is a talk-over before any of it was played: the reply goes.
+        """
+        binding = await self.host.get_binding(OWNER_ID, voice_session_id)
+        text = text.strip()
+        session = await self.router._get_session(binding)  # noqa: SLF001
+        return await session.record_interrupted_reply(turn_id, text)
 
     async def ingest_event(self, voice_session_id: str, body: WorkerEvent) -> None:
         view = await self.status(voice_session_id)
@@ -603,10 +713,20 @@ class VoiceControl:
     def _merge_latency(
         self, turn_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        """The worker's stages for a turn: its own measures, the only writer.
+
+        A turn's last audio is reported after its reply stream ended, so the
+        stages outlive that stream; the newest turns are kept.
+        """
         stages = self._latency.setdefault(turn_id or "", {})
-        key = {"stt": "stt_ms", "first_audio": "first_audio_ms"}.get(
-            str(payload.get("stage"))
-        )
+        while len(self._latency) > 16:
+            self._latency.pop(next(iter(self._latency)))
+        key = {
+            "stt": "stt_ms",
+            "llm_first_token": "llm_first_token_ms",
+            "first_audio": "first_audio_ms",
+            "total_turn": "total_turn_ms",
+        }.get(str(payload.get("stage")))
         if key and isinstance(payload.get("ms"), (int, float)) and payload["ms"] >= 0:
             stages[key] = int(payload["ms"])
         return self._metrics(stages)
@@ -673,25 +793,115 @@ class VoiceControl:
         finally:
             self._watching.discard(voice_session_id)
 
-    async def _pump(
+    def _mirror_revoke(
+        self, voice_session_id: str, generation: int, turn_id: str | None
+    ) -> None:
+        """Registry listener: tell the daemon running the turn that it was revoked."""
+        try:
+            self._spawn(self._revoke_in_daemon(voice_session_id, generation, turn_id))
+        except RuntimeError:  # no running loop: nothing is in flight to stop
+            pass
+
+    async def _revoke_in_daemon(
+        self, voice_session_id: str, generation: int, turn_id: str | None
+    ) -> None:
+        try:
+            binding = await self.host.get_binding(OWNER_ID, voice_session_id)
+            session = await self.router._get_session(binding)  # noqa: SLF001
+            revoke = getattr(session, "voice_admission", None)
+            if revoke is None:
+                return
+            params = {"voice_session_id": voice_session_id, "generation": generation}
+            if turn_id is None:
+                await revoke("revoke_generation", **params)
+            else:
+                await revoke("revoke_turn", turn_id=turn_id, **params)
+        except Exception:
+            logger.warning("voice admission revoke did not reach the daemon", exc_info=True)
+
+    def _barge_in(
+        self, binding: VoiceSessionBinding, generation: int, turn_id: str, session: Any
+    ) -> None:
+        """The listener talked over the reply: stop the turn, let nothing late through.
+
+        The /turns generator is the only publisher for its turn and it is gone,
+        so the fence is that: the daemon's late events reach nobody.
+        """
+        revoke_voice_admissions_for_turn(binding.voice_session_id, generation, turn_id)
+        session.cancel_turn(turn_id)  # only if it still runs: a later typed turn is not ours
+        self._spawn(self._publish_barge_in(binding.voice_session_id, generation, turn_id))
+
+    async def _publish_barge_in(
+        self, voice_session_id: str, generation: int, turn_id: str
+    ) -> None:
+        await self._emit(
+            voice_session_id,
+            generation,
+            "voice.state",
+            {"state": "listening", "barge_in": True},
+            turn_id=turn_id,
+        )
+
+    async def _stream_turn(
         self,
         binding: VoiceSessionBinding,
-        generation: int,
-        turn_id: str,
+        snapshot: VoiceTranscriptSnapshot,
         session: Any,
         queue: asyncio.Queue,
-    ) -> None:
-        vsid = binding.voice_session_id
-        started = time.monotonic()
-        first_token_ms: int | None = None
-        text = ""
+    ) -> AsyncIterator[dict[str, Any]]:
+        vsid, generation, turn_id = (
+            binding.voice_session_id,
+            snapshot.generation,
+            snapshot.turn_id,
+        )
+        raw = ""  # the reply being streamed (one per model call in the turn)
+        consumed = 0  # chars of its speakable text already cut into sentences
+        said: list[str] = []  # sentences handed to the worker, across the turn
         revision = 0
-        last_partial = 0.0
         partial_id = str(uuid4())
-        stages = self._latency.setdefault(turn_id, {})
+        last_partial = 0.0
+        completed = False
+        after_response = False  # its display message repeats what "response" said
 
         async def emit(event: str, payload: dict[str, Any]) -> None:
             await self._emit(vsid, generation, event, payload, turn_id=turn_id)
+
+        async def say(*, final: bool) -> AsyncIterator[dict[str, Any]]:
+            """Sentences of the reply so far; the speakable text may still grow."""
+            nonlocal consumed, revision
+            speakable = spoken_so_far(raw)
+            start = consumed
+            if speakable is None:
+                if not final:
+                    return
+                from kollabor_ai.response_channels import split_response_channels
+
+                # Display-only reply: the visible text is what gets said.
+                speakable, start = split_response_channels(raw)[0], 0
+            pending = speakable[start:]
+            sentences, rest = cut_sentences(pending, final=final)
+            consumed += len(pending) - len(rest)
+            for sentence in sentences:
+                line = self.policy.sentence(sentence)
+                if not line:
+                    continue
+                said.append(line)
+                # voice states (thinking, speaking, listening) come from the worker,
+                # which follows LiveKit's own; a sentence handed over here has not
+                # been heard yet
+                revision += 1
+                await self._publish_assistant(
+                    binding,
+                    generation,
+                    turn_id,
+                    partial_id,
+                    revision,
+                    False,
+                    raw,
+                    " ".join(said),
+                    partial=True,
+                )
+                yield {"text": line}
 
         try:
             while True:
@@ -707,16 +917,19 @@ class VoiceControl:
                             "next_action": None,
                         },
                     )
+                    completed = True
+                    yield {"done": True, "turn_id": turn_id, "error": "provider_error"}
                     return
-                rid = event.get("request_id")
-                if rid and rid != turn_id:
-                    continue
                 kind = event.get("type")
+                # Only this turn's events: a hub wake's or a typed turn's (no id)
+                # stream to every subscriber, and would be said as this reply.
+                if kind != "daemon_closed" and event.get("request_id") != turn_id:
+                    continue
                 if kind == "token":
-                    if first_token_ms is None:
-                        first_token_ms = int((time.monotonic() - started) * 1000)
-                        stages["llm_first_token_ms"] = first_token_ms
-                    text += str(event.get("text") or "")
+                    after_response = False
+                    raw += str(event.get("text") or "")
+                    async for item in say(final=False):
+                        yield item
                     now = time.monotonic()
                     if now - last_partial >= PARTIAL_INTERVAL_S:
                         last_partial = now
@@ -728,23 +941,31 @@ class VoiceControl:
                             partial_id,
                             revision,
                             False,
-                            text,
-                            None,
+                            raw,
+                            " ".join(said) or None,
                             partial=True,
                         )
-                elif kind == "response":
-                    await self._final_response(
-                        binding,
-                        generation,
-                        turn_id,
-                        str(event.get("text") or ""),
-                        stages,
-                        started,
-                    )
-                    text, revision, partial_id = "", 0, str(uuid4())
-                elif kind == "thinking":
-                    await emit("voice.state", {"state": "thinking"})
+                elif kind == "response" or (
+                    kind == "message" and event.get("message_type") == "assistant"
+                ):
+                    # A model call's reply is shown (its display message), so its
+                    # last sentence, with no space after it yet, is said now. Only
+                    # a reply with XML tool tags sends "response" (its clean text)
+                    # before that display message.
+                    if kind == "message" and after_response:
+                        after_response = False
+                        continue
+                    after_response = kind == "response"
+                    reply = str(event.get("text") or event.get("content") or "")
+                    raw = raw or reply  # no token events: the whole reply arrives here
+                    async for item in say(final=True):
+                        yield item
+                    await self._final_response(binding, generation, turn_id, reply, said)
+                    raw, consumed, revision, partial_id = "", 0, 0, str(uuid4())
                 elif kind == "tool_start":
+                    # A reply's display message comes before its tools: none is
+                    # left to skip (a round of hub tags alone shows nothing).
+                    after_response = False
                     await emit(
                         "voice.tool",
                         {
@@ -754,6 +975,7 @@ class VoiceControl:
                         },
                     )
                 elif kind == "tool_result":
+                    after_response = False  # as at tool_start: a denied call has only this
                     await emit(
                         "voice.tool",
                         {
@@ -797,9 +1019,12 @@ class VoiceControl:
                         },
                     )
                 elif kind == "turn_complete":
-                    stages["total_turn_ms"] = int((time.monotonic() - started) * 1000)
-                    await emit("voice.metrics", self._metrics(stages))
-                    await emit("voice.state", {"state": "listening"})
+                    if raw:  # its shown reply had no turn id (an ACP agent's): say the rest now
+                        async for item in say(final=True):
+                            yield item
+                        await self._final_response(binding, generation, turn_id, raw, said)
+                    completed = True
+                    yield {"done": True, "turn_id": turn_id}
                     return
                 elif kind == "daemon_closed":
                     await emit(
@@ -811,10 +1036,22 @@ class VoiceControl:
                             "next_action": None,
                         },
                     )
+                    completed = True
+                    yield {"done": True, "turn_id": turn_id, "error": "runtime_unavailable"}
                     return
+        except (asyncio.CancelledError, GeneratorExit):
+            if not completed:
+                self._barge_in(binding, generation, turn_id, session)
+            raise
+        except Exception:
+            # A fault here, not a talk-over: the daemon's turn still stops, so it
+            # never runs on with nobody listening. The worker sees the stream break.
+            if not completed:
+                revoke_voice_admissions_for_turn(vsid, generation, turn_id)
+                session.cancel_turn(turn_id)  # only if it still runs
+            raise
         finally:
             session.unsubscribe(queue)
-            self._latency.pop(turn_id, None)
 
     async def _publish_assistant(
         self,
@@ -875,9 +1112,9 @@ class VoiceControl:
         generation: int,
         turn_id: str,
         raw: str,
-        stages: dict[str, int],
-        started: float,
+        said: list[str],
     ) -> None:
+        """Publish the immutable final reply; its audio already went out as sentences."""
         from kollabor_ai.response_channels import split_response_channels
 
         display, spoken = split_response_channels(raw)
@@ -897,52 +1134,19 @@ class VoiceControl:
             observed_at_utc_ms=_now_ms(),
         )
         decision = self.policy.prepare(snap, binding)
-        # The final revision publishes before audio starts and never changes.
-        if (
-            not await self._publish_assistant(
-                binding,
-                generation,
-                turn_id,
-                snap.transcript_id,
-                1,
-                True,
-                display,
-                decision.transcript.spoken_text,
-            )
-            or not decision.speak
-        ):
-            return
-        await self._emit(
-            binding.voice_session_id,
+        await self._publish_assistant(
+            binding,
             generation,
-            "voice.state",
-            {"state": "speaking"},
-            turn_id=turn_id,
+            turn_id,
+            snap.transcript_id,
+            1,
+            True,
+            display,
+            decision.transcript.spoken_text,
         )
-        spoke = await self.runtime.speak(
-            binding.voice_session_id,
-            generation,
-            {
-                "turn_id": turn_id,
-                "generation": generation,
-                "spoken_text": decision.transcript.spoken_text,
-            },
-        )
-        if not spoke:
-            await self._emit(
-                binding.voice_session_id,
-                generation,
-                "voice.error",
-                {
-                    "code": "runtime_unavailable",
-                    "message": "Speech output is unavailable.",
-                    "retryable": True,
-                    "next_action": None,
-                },
-                turn_id=turn_id,
-            )
 
     async def shutdown(self) -> None:
+        self._unlisten()
         try:
             await self.host.shutdown()
         except RuntimeHostError:

@@ -460,6 +460,30 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
         state["messages"] = messages
 
 
+def _assistant_close_shown_prompt(
+    messages: List[Dict[str, Any]], call_id: str, result: Dict[str, Any]
+) -> None:
+    """Put the answer on a prompt card an earlier message shows.
+
+    The message is replaced, not edited in place, so the next progress publish
+    sees it changed and sends it.
+    """
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(content, list):
+            continue
+        for at, part in enumerate(content):
+            if isinstance(part, dict) and part.get("toolCallId") == call_id:
+                parts = list(content)
+                parts[at] = {
+                    **part,
+                    "result": result,
+                    "isError": result["decision"] == "deny",
+                }
+                messages[index] = {**message, "content": parts}
+                return
+
+
 async def _assistant_set_synced(
     controller: Any, session: Any, message_count: int
 ) -> None:
@@ -772,12 +796,13 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         )
         submitted_contents: List[MessageContent] = []
         request_ids: set[str] = set()
+        answered_prompts: set[str] = set()  # daemon tool ids this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
         # What the client holds; progress publishes only send what differs.
-        sent_messages = state_messages
+        sent_messages = list(state_messages)
         last_publish = float("-inf")
         # Streamed text the throttle has not published yet.
         stream_held = False
@@ -895,6 +920,7 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             f"No pending permission for tool_id '{source_tool_id}'"
                         )
                         return
+                    answered_prompts.add(source_tool_id)
                 else:
                     controller.add_error(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
@@ -1085,6 +1111,14 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "isError": permission_result["decision"] == "deny",
                             }
                         )
+                    else:
+                        # A card an earlier run showed, answered by this run's
+                        # message (a typed yes or no answers a parked card).
+                        _assistant_close_shown_prompt(
+                            state_messages,
+                            f"permission_{source_tool_id}",
+                            permission_result,
+                        )
                     permission_controller = permission_controllers.pop(
                         source_tool_id, None
                     )
@@ -1094,6 +1128,24 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             permission_result,
                         )
                     publish_progress()
+                    if (
+                        event.get("parked")
+                        and event_type != "permission_granted"
+                        and source_tool_id in answered_prompts
+                        and not submitted_contents
+                    ):
+                        # A prompt its turn left open, answered no: no turn
+                        # follows it (an Allow goes on with one).
+                        _assistant_update_message_state(
+                            state_messages,
+                            session_id,
+                            submitted_contents,
+                            assistant_parts,
+                            {"type": "complete", "reason": "stop"},
+                        )
+                        if persist_message_state:
+                            _assistant_set_messages(controller, state_messages)
+                        return
                 elif event_type == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
                     if not persist_message_state:

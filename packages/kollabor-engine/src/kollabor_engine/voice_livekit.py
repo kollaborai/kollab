@@ -1,14 +1,18 @@
 """Engine-owned LiveKit server and speech-worker processes for voice rooms.
 
-The server binds 127.0.0.1 on a free port with a per-run key and secret that
-live only in this process and the server's environment. One worker process
-joins each room; the engine talks to it over its private control URL.
+The server takes signaling on 127.0.0.1 and ICE over TCP on free ports, with a
+per-run key and secret that live only in this process and the server's
+environment. One worker process joins each room and calls back into the engine
+(/turns, /events); the engine never pushes to it. Stop is SIGTERM to the
+worker's process group; a worker that exits by itself ends its session
+(EngineRuntimeHost waits on wait_exited).
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -19,7 +23,6 @@ import shutil
 import signal
 import socket
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -29,19 +32,20 @@ from .voice_types import RuntimeStatus, StopReason, VoiceSessionBinding
 
 logger = logging.getLogger(__name__)
 
-WORKER_READY_PREFIX = "WORKER_READY "
-WORKER_READY_TIMEOUT_S = 300.0
+WORKER_READY_PREFIX = "WORKER_READY"  # the worker prints "WORKER_READY -" once joined
+# The worker waits up to 1200 s for its models (a first-run download), then joins.
+WORKER_READY_TIMEOUT_S = 1260.0
 SERVER_READY_TIMEOUT_S = 15.0
-WORKER_STOP_GRACE_S = 3.0
 WORKER_TOKEN_TTL_S = 3600
 
 # Runs the server and a watchdog in one process group: if the engine dies
 # without cleanup (crash, SIGKILL) the watchdog sees its pid vanish and kills
-# the server, so no livekit-server is left running.
+# the server, so no livekit-server is left running. SIGKILL: on SIGTERM the
+# server drains, waiting for rooms that only the dead engine could end.
 _SUPERVISE = (
     'ppid="$1"; shift; "$@" & srv=$!; '
     '( while kill -0 "$ppid" 2>/dev/null && kill -0 "$srv" 2>/dev/null; do sleep 1; done; '
-    'kill "$srv" 2>/dev/null ) & wait "$srv"'
+    'kill -9 "$srv" 2>/dev/null ) & wait "$srv"'
 )
 
 
@@ -82,29 +86,6 @@ def room_name_for(binding: VoiceSessionBinding) -> str:
     return f"kollab-{binding.voice_session_id}-g{binding.generation}"
 
 
-def _post_json_sync(
-    url: str, body: dict[str, Any] | None, timeout: float, token: str = ""
-) -> int:
-    data = json.dumps(body or {}).encode()
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(
-        request, timeout=timeout
-    ) as response:  # noqa: S310 - private loopback worker URL
-        return response.status
-
-
-async def post_json(
-    url: str, body: dict[str, Any] | None = None, timeout: float = 5.0, token: str = ""
-) -> bool:
-    try:
-        return await asyncio.to_thread(_post_json_sync, url, body, timeout, token) < 300
-    except OSError:
-        return False
-
-
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -114,7 +95,6 @@ def _free_port() -> int:
 @dataclass
 class WorkerHandle:
     process: asyncio.subprocess.Process
-    control_url: str
 
 
 class LiveKitRuntime:
@@ -128,19 +108,39 @@ class LiveKitRuntime:
         server_binary: str | None = None,
         worker_argv: Sequence[str] | None = None,
         worker_env: dict[str, str] | None = None,
+        log_dir: Path | None = None,
     ) -> None:
         self._engine_url = engine_url
+        self._log_dir = log_dir
         self._engine_token = engine_token
         self._server_binary = server_binary
         self._worker_argv = list(worker_argv) if worker_argv else None
         self._worker_env = worker_env or {}
         self.port = _free_port()
+        # ICE over TCP. livekit-server's default, 7881, is one port for every server
+        # on the machine, so a second one (another Engine, LiveKit's own demo) could
+        # not start.
+        self.rtc_tcp_port = _free_port()
+        while self.rtc_tcp_port == self.port:
+            self.rtc_tcp_port = _free_port()
         self.livekit_url = f"ws://127.0.0.1:{self.port}"
         self._api_key = "kv" + secrets.token_hex(8)
         self._api_secret = secrets.token_urlsafe(32)
         self._server: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
         self._workers: dict[tuple[str, int], WorkerHandle] = {}
+
+    def _log(self, name: str):
+        """Where a child's output goes: a log under log_dir, or nowhere without one.
+
+        A file past 5 MB starts over, so a crash reason stays and the log stays small.
+        """
+        if self._log_dir is None:
+            return contextlib.nullcontext(asyncio.subprocess.DEVNULL)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        path = self._log_dir / name
+        small = path.exists() and path.stat().st_size < 5_000_000
+        return open(path, "ab" if small else "wb")
 
     # --- RuntimeBackend -------------------------------------------------
 
@@ -176,23 +176,26 @@ class LiveKitRuntime:
                 )
             env = dict(os.environ)
             env["LIVEKIT_KEYS"] = f"{self._api_key}: {self._api_secret}"
-            self._server = await asyncio.create_subprocess_exec(
-                "/bin/sh",
-                "-c",
-                _SUPERVISE,
-                "sh",
-                str(os.getpid()),
-                binary,
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                str(self.port),
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            with self._log("livekit-server.log") as log:
+                self._server = await asyncio.create_subprocess_exec(
+                    "/bin/sh",
+                    "-c",
+                    _SUPERVISE,
+                    "sh",
+                    str(os.getpid()),
+                    binary,
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    str(self.port),
+                    "--rtc.tcp_port",
+                    str(self.rtc_tcp_port),
+                    env=env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
             deadline = time.monotonic() + SERVER_READY_TIMEOUT_S
             while time.monotonic() < deadline:
                 if self._server.returncode is not None:
@@ -269,28 +272,27 @@ class LiveKitRuntime:
         env.update(cmd_env)
         env.update(self._worker_env)
         env["KOLLAB_VOICE_WORKER_CONFIG"] = json.dumps(config)
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=env,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            control_url = await asyncio.wait_for(
-                self._read_ready(process), WORKER_READY_TIMEOUT_S
+        with self._log("livekit-worker.log") as log:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log,
+                start_new_session=True,
             )
+        try:
+            await asyncio.wait_for(self._read_ready(process), WORKER_READY_TIMEOUT_S)
         except BaseException:
             await self._kill_group(process)
             raise
-        handle = WorkerHandle(process, control_url)
+        handle = WorkerHandle(process)
         self._workers[(binding.voice_session_id, binding.generation)] = handle
         asyncio.create_task(self._drain(process))
         return handle
 
     @staticmethod
-    async def _read_ready(process: asyncio.subprocess.Process) -> str:
+    async def _read_ready(process: asyncio.subprocess.Process) -> None:
         assert process.stdout is not None
         while True:
             line = await process.stdout.readline()
@@ -303,7 +305,7 @@ class LiveKitRuntime:
                 )
             text = line.decode(errors="replace").strip()
             if text.startswith(WORKER_READY_PREFIX):
-                return text[len(WORKER_READY_PREFIX) :].strip().rstrip("/")
+                return
 
     @staticmethod
     async def _drain(process: asyncio.subprocess.Process) -> None:
@@ -311,29 +313,18 @@ class LiveKitRuntime:
         while await process.stdout.readline():
             pass
 
+    async def wait_exited(self, handle: object) -> None:
+        """Return once the worker has exited, stopped by the engine or by itself."""
+        assert isinstance(handle, WorkerHandle)
+        await handle.process.wait()  # at exit, not at pipe close (gh-119710)
+
     async def stop_session(
         self, binding: VoiceSessionBinding, handle: object, reason: StopReason
     ) -> None:
         assert isinstance(handle, WorkerHandle)
         self._workers.pop((binding.voice_session_id, binding.generation), None)
-        await post_json(
-            f"{handle.control_url}/stop", timeout=1.0, token=self._engine_token()
-        )
-        try:
-            await asyncio.wait_for(handle.process.wait(), WORKER_STOP_GRACE_S)
-        except asyncio.TimeoutError:
-            await self._kill_group(handle.process)
-
-    async def speak(
-        self, voice_session_id: str, generation: int, payload: dict[str, Any]
-    ) -> bool:
-        """Push an immutable assistant final to the worker; False when it is gone."""
-        handle = self._workers.get((voice_session_id, generation))
-        if handle is None:
-            return False
-        return await post_json(
-            f"{handle.control_url}/speak", payload, token=self._engine_token()
-        )
+        # SIGTERM first (the worker leaves its room), SIGKILL after the grace.
+        await self._kill_group(handle.process)
 
     # --- JoinTicketSigner -----------------------------------------------
 
@@ -377,5 +368,9 @@ class LiveKitRuntime:
             await self._kill_group(handle.process)
         self._workers.clear()
         if self._server is not None:
-            await self._kill_group(self._server)
+            # SIGKILL at once: on SIGTERM the server drains, waiting for rooms
+            # that only this engine could end (see _SUPERVISE).
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self._server.pid, signal.SIGKILL)
+            await self._server.wait()
             self._server = None

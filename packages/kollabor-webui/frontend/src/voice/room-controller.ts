@@ -15,6 +15,8 @@ export type RoomLike = {
 };
 
 const MAX_STREAM_RETRIES = 3;
+/** States that mean the runtime is up; the worker can report one before "ready" is seen. */
+const LIVE = new Set(["ready", "listening", "hearing", "thinking", "speaking"]);
 
 const errorText = (reason: unknown) =>
   (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");
@@ -32,6 +34,8 @@ export class VoiceRoomController {
   private view: VoiceSessionView | null = null;
   /** Bumps on every start/stop so a late callback from an old room is ignored. */
   private epoch = 0;
+  /** The create in flight: a stop before it answers ends the session it makes. */
+  private creating: Promise<VoiceSessionView> | null = null;
 
   private api: VoiceApi;
   private createRoom: () => Promise<RoomLike>;
@@ -56,19 +60,26 @@ export class VoiceRoomController {
   }
 
   async start(sessionId: string, threadId: string | null) {
-    if (this.view || this.state.state === "starting") return;
+    if (this.view || this.state.state === "starting" || this.state.state === "stopping") return;
     const epoch = ++this.epoch;
     this.set({ ...initialRoomState, state: "starting" });
     try {
-      const view = await this.api.create(sessionId, threadId);
-      if (epoch !== this.epoch) return;
+      const creating = this.api.create(sessionId, threadId);
+      this.creating = creating;
+      const view = await creating.finally(() => (this.creating = null));
+      if (epoch !== this.epoch) return; // stop() ends the session it made
       this.view = view;
       this.set({ view, state: view.state, detail: view.detail });
       this.follow(view, epoch);
+      // The engine refuses a join until its runtime is ready (models may still be
+      // loading or downloading); the event stream says when it is.
+      await this.untilReady(epoch);
+      if (epoch !== this.epoch) return;
       const ticket = await this.api.join(view.voice_session_id, view.generation);
       if (epoch !== this.epoch) return;
       this.set({ state: "requesting_permission" });
       const room = await this.createRoom();
+      if (epoch !== this.epoch) return; // stopped while it was built: never connect it
       this.room = room;
       room.onLocalSpeaking((userSpeaking) => epoch === this.epoch && this.set({ userSpeaking }));
       room.onDisconnected(() => epoch === this.epoch && void this.stop("disconnect"));
@@ -83,7 +94,37 @@ export class VoiceRoomController {
     }
   }
 
+  /** Resolve once the runtime is ready (or the start was superseded); reject if it fails first. */
+  private untilReady(epoch: number) {
+    return new Promise<void>((resolve, reject) => {
+      const check = () => {
+        const { state, error, detail } = this.state;
+        if (epoch !== this.epoch || LIVE.has(state)) {
+          unsubscribe();
+          resolve();
+        } else if (state === "error" || state === "stopped" || state === "disconnected") {
+          unsubscribe();
+          reject(new Error(error || detail || "Voice could not start."));
+        }
+      };
+      const unsubscribe = this.subscribe(check);
+      check();
+    });
+  }
+
   async stop(reason: VoiceStopReason = "user") {
+    const creating = this.view ? null : this.creating;
+    if (creating) {
+      // Still creating: end that session once create answers. Until then a
+      // start waits, or it would get the same session back and lose it.
+      this.creating = null;
+      this.epoch++;
+      this.set({ state: "stopping" });
+      const view = await creating.catch(() => null);
+      if (view) await this.api.stop(view.voice_session_id, view.generation, reason).catch(() => undefined);
+      if (this.state.state === "stopping") this.set({ state: "stopped" });
+      return;
+    }
     if (!this.view) return;
     this.set({ state: "stopping" });
     await this.teardown(reason);
@@ -127,7 +168,10 @@ export class VoiceRoomController {
             c ? encodeCursor(view.voice_session_id, c.generation, c.sequence) : null,
             abort.signal,
             (e) => {
-              if (epoch === this.epoch) this.set(reduceVoiceEvent(this.state, e));
+              if (epoch !== this.epoch) return;
+              this.set(reduceVoiceEvent(this.state, e));
+              // The engine ended the session (its worker stopped): leave the room and free the mic.
+              if (this.state.state === "error" || this.state.state === "stopped") void this.teardown("error");
             },
           );
         } catch {

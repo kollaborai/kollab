@@ -147,6 +147,16 @@ class VoiceTranscriptSnapshot(_FrozenModel):
 FinalTranscript = VoiceTranscriptSnapshot
 
 
+class VoiceTurnRequest(VoiceTranscriptSnapshot):
+    """A /turns body: the final transcript, or kind "greeting" (a hidden instruction turn).
+
+    ``talk_over``: the user started it while the agent was still talking.
+    """
+
+    kind: Literal["speech", "greeting"] = "speech"
+    talk_over: bool = False
+
+
 class VoiceTurnContext(_FrozenModel):
     source: Literal["livekit_voice"]
     voice_session_id: VoiceSessionId

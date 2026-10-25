@@ -1061,12 +1061,13 @@ class RemoteStateService(StateService):
             raise ValueError(str(result["error"]))
         return result
 
-    async def cancel_current_request(self) -> dict[str, Any]:
-        """Ask the daemon to cancel the currently processing LLM request."""
+    async def cancel_current_request(self, voice_turn_id: str | None = None) -> dict[str, Any]:
+        """Ask the daemon to cancel the currently processing LLM request (with
+        `voice_turn_id`, only while that voice turn is the one running)."""
         logger.debug("state rpc: cancel_current_request")
         result = await self._rpc.call(
             "state.cancel_current_request",
-            {},
+            {"voice_turn_id": voice_turn_id} if voice_turn_id else {},
             timeout=self._timeout,
         )
         if not isinstance(result, dict):

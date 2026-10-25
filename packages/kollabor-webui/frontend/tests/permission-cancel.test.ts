@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EngineApi } from "../src/api.ts";
-import { cancelPendingPermission, pendingPermissions, permissionOwner } from "../src/utils/permission-cancel.ts";
+import { cancelPendingPermission, pendingPermissions, permissionOwner, promptParkedSinceShown } from "../src/utils/permission-cancel.ts";
 
 const owner = (toolId: string, requestId = toolId) => ({ toolId, requestId, source: "acp" });
 const permission = (id: string, result?: unknown, status = "requires-action") => ({
@@ -137,4 +137,23 @@ test("an older engine's unsupported owner endpoint never becomes an unscoped can
     cancel: (requestId) => api.cancelOwned("existing-session", requestId!),
   }), /404/);
   assert.deepEqual(requests, ["http://127.0.0.1:9000/sessions/existing-session/cancel-owned"]);
+});
+
+test("a prompt its turn left open reloads a thread whose run showed it, once", () => {
+  const card = (parked: boolean, result?: unknown) => ({
+    type: "tool-call", toolName: "request_permission", result,
+    args: { tool_id: "t1", details: parked ? { parked: true } : {} },
+  });
+  const waitingOn = (id: string, part: object) => ({ id, status: { type: "requires-action" }, content: [part] });
+  const shownByRun = [{ id: "u", content: "go" }, waitingOn("assistant-s-1", card(false))];
+  const reloadedParked = [{ id: "history-0", content: "go" }, waitingOn("permission-t1-0", card(true))];
+
+  assert.equal(promptParkedSinceShown(shownByRun, reloadedParked), true);
+  // After the whole reload the thread shows the loaded prompt: no second reload.
+  assert.equal(promptParkedSinceShown(reloadedParked, reloadedParked), false);
+  // A card that still waits on its turn, or one answered, is not parked.
+  assert.equal(promptParkedSinceShown(shownByRun, [waitingOn("permission-t1-0", card(false))]), false);
+  assert.equal(promptParkedSinceShown(shownByRun, [waitingOn("permission-t1-0", card(true, { decision: "deny" }))]), false);
+  // A thread that waits on nothing is the waiting-mismatch rule's case.
+  assert.equal(promptParkedSinceShown([{ id: "a", status: { type: "complete" }, content: [] }], reloadedParked), false);
 });

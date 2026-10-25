@@ -13,12 +13,10 @@ import type { EngineApi } from "./api";
 
 /** VoicePlugin._activity, polled while voice is on. */
 export type VoiceActivity = {
-  /** listening, hearing, transcribing, deciding, asking, speaking, or the service state. */
+  /** listening, hearing, transcribing, speaking, or the service state. */
   stage?: string;
   /** Microphone loudness, 0..1. */
   level?: number;
-  /** A line the classifier just said itself ("One moment."). */
-  said?: string | null;
   /** The last line the microphone heard. */
   heard?: string;
 };

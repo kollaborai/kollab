@@ -60,6 +60,16 @@ jobs:
           --with pytest --with pytest-asyncio
           python -m pytest packages/kollabor-voice/tests -q
 
+      # The web UI's own tests never ran in CI: four vitest files and the
+      # node:test files (Node 24 strips the types).
+      - name: Run web UI tests
+        working-directory: packages/kollabor-webui/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
+          npx vitest run
+          node --test $(grep -L 'from "vitest"' tests/*.test.ts)
+
       - name: Validate bundled Agent Skills layout
         run: uv run python scripts/validate_bundled_agent_skills.py
 

@@ -1960,35 +1960,30 @@ class AgentSocketServer:
                     # because rpc frames use "action", not "type".
                     if msg.get("action") == "rpc_request":
                         if self._rpc_server is not None:
+                            # Requests answer in the order they came (a Stop
+                            # sent after a Send runs after it), so no handler
+                            # may wait on a turn: a talk-over's cut is queued
+                            # on its turn instead (record_interrupted_voice_reply).
                             try:
                                 reply = await self._rpc_server.handle_wire(msg)
-                                line = json.dumps(reply, default=str) + "\n"
-                                async with write_lock:
-                                    writer.write(line.encode("utf-8"))
-                                    await writer.drain()
                             except Exception as exc:
                                 logger.warning(
                                     "rpc request failed on attached connection: %s",
                                     exc,
                                     exc_info=True,
                                 )
-                                error_reply = {
+                                reply = {
                                     "action": "rpc_reply",
                                     "request_id": msg.get("request_id", ""),
                                     "error": repr(exc),
                                     "error_kind": "handler",
                                 }
-                                try:
-                                    async with write_lock:
-                                        writer.write(
-                                            (
-                                                json.dumps(error_reply, default=str)
-                                                + "\n"
-                                            ).encode("utf-8")
-                                        )
-                                        await writer.drain()
-                                except Exception:
-                                    pass
+                            # A failed write is a closed connection: the
+                            # read loop's handler below ends it.
+                            line = json.dumps(reply, default=str) + "\n"
+                            async with write_lock:
+                                writer.write(line.encode("utf-8"))
+                                await writer.drain()
                         else:
                             # No RpcServer wired; return handler error so the
                             # client doesn't hang forever waiting for a reply.

@@ -65,6 +65,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stale assignments, preserves direct-to-agent requests without TaskLedger
   IDs, and caps the wrapped recovery message at 8,000 characters.
 - Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Voice: a spoken reply no longer pauses about a second between sentences; each
+  sentence's silent lead-in is cut to a short breath.
+- Chat: a reply you stop keeps the text shown so far, also when you stop it
+  while its tools run.
+- Voice: talking over a reply keeps only the part that was played, marked
+  interrupted, and the voice room stays up while the chat reloads to show it.
+  A reply that ran tools is cut where you stopped it and the unheard rest is
+  dropped, a reply you talked over before it was heard goes, the saved
+  conversation keeps the cut, and a typed reply is never touched.
+- Voice: talking over a reply while its tool waits on your approval or runs a
+  long command no longer stalls the agent's connection: the stop, the approval
+  answer and the next turn all still get through.
+- Chat: a resumed conversation sends a saved reply that only ran tools as
+  nothing, not as an empty message, which the Anthropic API rejects.
+- Voice: a reply after a round of hub messages alone is spoken again; with a
+  provider that does not stream it stayed silent.
+- Voice: every reply speaks its last sentence, which was dropped, so a short
+  reply such as the answer after a talk-over is heard. The latency line keeps
+  Hear, Think and Speak when the reply's Total arrives.
+- Voice: while the voice room is on, the chat follows the conversation to the
+  latest turn. The greeting shows as a message of its own instead of running
+  into the reply before it, and the latency line wraps rather than being cut
+  off on a phone or a narrow window.
 
 ### Removed
 - Web: WireGuard phone access is removed; PhoneLink is the way to connect a

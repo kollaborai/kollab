@@ -56,6 +56,25 @@ export async function cancelPendingPermission({
   return (await cancel(owner.requestId)).cancelled !== false;
 }
 
+type ShownMessage = { id?: unknown; status?: { type?: string }; content: unknown };
+type PromptPart = { type?: string; toolName?: string; result?: unknown; args?: { details?: { parked?: unknown } } };
+
+/**
+ * The thread shows a prompt its own run exposed, and the reloaded history has
+ * one its turn left open (a Stop, or 5 min unanswered). That run ended at the
+ * prompt with no sync point, so only a whole reload shows what the turn did
+ * after it: the call's "Not run yet" and the agent's ask for the OK.
+ */
+export function promptParkedSinceShown(shown: readonly ShownMessage[], reloaded: readonly ShownMessage[]): boolean {
+  const last = shown.at(-1);
+  // A loaded prompt is its own message (`permission-<tool id>-<n>`) and came
+  // with the history: nothing is missing above it.
+  if (!last || last.status?.type !== "requires-action" || String(last.id ?? "").startsWith("permission-")) return false;
+  return reloaded.some((message) => message.status?.type === "requires-action" && Array.isArray(message.content) &&
+    (message.content as PromptPart[]).some((part) => part?.type === "tool-call" &&
+      part.toolName === "request_permission" && part.result === undefined && part.args?.details?.parked === true));
+}
+
 export function samePendingPermission(a: readonly PendingPermission[], b: readonly PendingPermission[]): boolean {
   return a.some((left) => b.some((right) => left.toolId === right.toolId &&
     left.requestId === right.requestId && left.source === right.source));

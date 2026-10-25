@@ -46,6 +46,13 @@ export const initialRoomState: VoiceRoomState = {
 export const isActive = (s: VoiceRoomState) =>
   !["idle", "stopped", "error", "disconnected"].includes(s.state);
 
+/**
+ * livekit-server listens on this computer's loopback only (voice_livekit.py), so
+ * only a page served from this computer can join a room. Elsewhere (PhoneLink,
+ * a phone on the LAN) the mic stays the /voice toggle.
+ */
+export const roomReachable = (hostname: string) => ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+
 /** Talking while the assistant speaks: the "interrupt by talking" indicator. */
 export const isInterrupting = (s: VoiceRoomState) => s.userSpeaking && s.state === "speaking";
 
@@ -88,7 +95,10 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
   const p = e.payload ?? {};
   switch (e.event) {
     case "voice.state": {
-      const next = (str(p.state) as VoiceSessionState | null) ?? s.state;
+      const said = (str(p.state) as VoiceSessionState | null) ?? s.state;
+      // The browser's own join steps outrank a late "ready" from the runtime.
+      const joining = s.state === "requesting_permission" || s.state === "connecting";
+      const next = said === "ready" && joining ? s.state : said;
       const dl = p.download as Record<string, unknown> | undefined;
       const download =
         next === "downloading_models" && dl

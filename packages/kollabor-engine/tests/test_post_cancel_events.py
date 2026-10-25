@@ -109,3 +109,31 @@ async def test_owned_cancel_marks_only_a_successful_cancel(cancelled):
     assert await _marks(session.daemon, [{"type": "tool_result", "tool_id": "a"}]) == [
         True if cancelled else None
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        # The talk-over stopped its voice turn: the tool it left running reports marked.
+        ({"cancelled": True}, [("tool_start", None), ("turn_cancelled", None), ("tool_result", True)]),
+        # Refused (a typed turn runs) or dropped while queued: the typed turn's tool is not marked.
+        ({"cancelled": False}, [("tool_start", None), ("tool_result", None)]),
+        ({"cancelled": True, "queued": True}, [("tool_start", None), ("tool_result", None)]),
+    ],
+)
+async def test_a_voice_cancel_marks_only_a_stop_that_happened(result, expected):
+    session = EngineSession(
+        session_id="s", profile=SimpleNamespace(name="p", model=None, provider="openai")
+    )
+    handle = _handle()
+    handle.state = SimpleNamespace(cancel_current_request=AsyncMock(return_value=result))
+    session.daemon = handle
+    queue = handle.subscribe()
+    handle._fan_out({"type": "tool_start", "tool_id": "a"})
+    session.cancel_turn("voice-1")
+    await session._active_turn_task
+    handle._fan_out({"type": "tool_result", "tool_id": "a"})  # it ignored the stop
+    handle.state.cancel_current_request.assert_awaited_once_with(voice_turn_id="voice-1")
+    events = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert [(event["type"], event.get("cancelled")) for event in events] == expected

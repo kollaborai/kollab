@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.snapshots import ProfileSnapshot
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
 from kollabor_config.config_utils import get_conversations_dir
@@ -820,28 +821,94 @@ class EngineSession:
         origin_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        result = await self.state.send_message(
-            content,
-            request_id=request_id,
-            thread_id=thread_id,
-            origin_context=origin_context,
+        voice_turn = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
         )
+        if voice_turn:
+            # The capability was issued in this process; the daemon checks its own,
+            # so mirror it there, but only while this process still holds it.
+            if not validate_voice_admission_context(origin_context):
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+            admitted = await self.voice_admission("admit", context=origin_context)
+            if admitted.get("admitted") is not True:
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+        try:
+            result = await self.state.send_message(
+                content,
+                request_id=request_id,
+                thread_id=thread_id,
+                origin_context=origin_context,
+            )
+        except BaseException:
+            if voice_turn:
+                await self.voice_admission("revoke", context=origin_context)
+            raise
+        if voice_turn and not (isinstance(result, dict) and result.get("accepted")):
+            await self.voice_admission("revoke", context=origin_context)
         if thread_id and isinstance(result, dict) and result.get("accepted"):
             self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
         return result
 
-    def cancel_turn(self) -> None:
-        """Ask the daemon to cancel the in-flight turn (fire and forget)."""
+    async def voice_admission(self, action: str, **params: Any) -> Dict[str, Any]:
+        """Admit or revoke a voice capability in this session's daemon."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_admission", {"action": action, **params}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_admission expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        return result
+
+    async def record_interrupted_reply(self, turn_id: str, text: str) -> Dict[str, Any]:
+        """Keep the part of a voice reply the listener heard before talking over it."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_interrupted_reply", {"turn_id": turn_id, "text": text}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_interrupted_reply expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if result.get("recorded"):
+            await self.refresh_history(notify=True)  # open windows hear the new row
+        return result
+
+    def cancel_turn(self, voice_turn_id: str | None = None) -> None:
+        """Ask the daemon to cancel the in-flight turn (fire and forget).
+
+        With `voice_turn_id`, only while that voice turn is the one running: a
+        typed turn that started after it runs on.
+        """
         if self.daemon is None:
             return
+        if voice_turn_id is None:
+            self._active_turn_task = asyncio.create_task(
+                self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            )
+            # A cancelled tool call may never report a result or a turn end: tell
+            # the open windows so a gem does not keep acting out the dead call.
+            # Its late tool result arrives marked, so it restarts nothing.
+            self.daemon.mark_cancelled()
+            self._emit_event({"type": "turn_cancelled"})
+            return
+
+        async def cancel_voice_turn() -> None:
+            result = await self.state.cancel_current_request(voice_turn_id=voice_turn_id)
+            # Marked only for a stop that happened: a refused or queued cancel
+            # leaves the running typed turn's tools unmarked.
+            if result.get("cancelled") and not result.get("queued"):
+                if self.daemon is not None:
+                    self.daemon.mark_cancelled()
+                self._emit_event({"type": "turn_cancelled"})
+
         self._active_turn_task = asyncio.create_task(
-            self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            cancel_voice_turn(), name=f"cancel-{self.session_id}"
         )
-        # A cancelled tool call may never report a result or a turn end: tell
-        # the open windows so a gem does not keep acting out the dead call.
-        # Its late tool result arrives marked, so it restarts nothing.
-        self.daemon.mark_cancelled()
-        self._emit_event({"type": "turn_cancelled"})
 
     async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
         """Cancel only this admitted owner, without a current-turn fallback."""
@@ -938,6 +1005,11 @@ class EngineSession:
                     # any burst. turn_complete does its own awaited refresh.
                     self._schedule_refresh()
 
+                elif etype == "voice_reply_cut":
+                    # A talk-over's cut queued while its turn unwound landed
+                    # after the RPC answered: open windows reload the cut reply.
+                    self._schedule_refresh(notify=True)
+
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw
                     # details: a client that reloads mid-prompt needs to
@@ -945,6 +1017,14 @@ class EngineSession:
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
                         self._pending_permissions[tool_id] = event
+                elif etype == "permission_parked":
+                    # Its turn ended and left the prompt open (a Stop, or 5 min
+                    # unanswered): a window that loads it now must know.
+                    tool_id = str(event.get("tool_id") or "")
+                    stored = self._pending_permissions.get(tool_id)
+                    if stored is not None:
+                        details = {**(stored.get("details") or {}), "parked": True}
+                        self._pending_permissions[tool_id] = {**stored, "details": details}
                 elif etype == "acp_waiting":
                     self.acp_waiting = bool(event.get("waiting"))
                 elif etype == "plan":

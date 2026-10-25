@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from kollabor_engine.routes import messages, permissions
+from kollabor_engine.session import EngineSession
 
 from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
 from kollabor.llm.client_turns import ClientTurnBroker
 from kollabor.state.local import LocalStateService
 from kollabor_tui.display_tap import DisplayTap
-from kollabor_engine.routes import messages, permissions
-from kollabor_engine.session import EngineSession
 
 
 @pytest.fixture
@@ -33,7 +33,8 @@ def owner_bridge(tmp_path, monkeypatch):
     services["acp_orchestrator"] = orchestrator
     llm = SimpleNamespace(is_processing=True, cancel_current_request=Mock())
     state = LocalStateService(llm, None, event_bus=bus)
-    session = EngineSession(session_id="owned-engine", profile=SimpleNamespace(name="owned", model=None, provider="acp"))
+    profile = SimpleNamespace(name="owned", model=None, provider="acp")
+    session = EngineSession(session_id="owned-engine", profile=profile)
     flow = SimpleNamespace(advance_at_rpc=False)
 
     async def scoped_rpc(method, params):
@@ -123,7 +124,9 @@ async def test_unsupported_generic_native_owner_is_noop_without_session_fallback
     flow = owner_bridge
     flow.services.pop("acp_orchestrator")
     async with AsyncClient(transport=ASGITransport(app=flow.app), base_url="http://owned") as client:
-        response = await client.post("/sessions/owned-engine/cancel-owned", json={"request_id": "generic-native-web-owner"})
+        response = await client.post(
+            "/sessions/owned-engine/cancel-owned", json={"request_id": "generic-native-web-owner"}
+        )
     assert response.json()["cancelled"] is False
     flow.llm.cancel_current_request.assert_not_called()
 
@@ -155,7 +158,8 @@ async def test_bad_scoped_rpc_result_never_uses_generic_fallback(owner_bridge, r
     flow = owner_bridge
     flow.rpc.call.side_effect = None
     flow.rpc.call.return_value = result
-    async with AsyncClient(transport=ASGITransport(app=flow.app, raise_app_exceptions=False), base_url="http://owned") as client:
+    transport = ASGITransport(app=flow.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://owned") as client:
         response = await client.post("/sessions/owned-engine/cancel-owned", json={"request_id": "first-owner"})
     assert response.status_code == 500
     flow.rpc.call.assert_awaited_once_with("state.acp_cancel", {"request_id": "first-owner"})
@@ -201,3 +205,53 @@ async def test_held_cancel_lock_rechecks_generation_before_touching_replacement(
     runner.permission_bridge.cancel.assert_not_called()
     runner._connection.cancel.assert_not_awaited()
     flow.llm.cancel_current_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running,expected", [("voice-1", True), ("voice-2", False), (None, False)])
+async def test_a_voice_turns_cancel_stops_only_that_voice_turn(owner_bridge, running, expected):
+    """A talk-over or a stream fault: a typed turn or a later voice turn runs on."""
+    flow = owner_bridge
+    flow.services.pop("acp_orchestrator")
+    flow.llm._queue_processor = SimpleNamespace(open_voice_turn=running)
+    flow.session.cancel_turn("voice-1")
+    await flow.session._active_turn_task
+    assert flow.llm.cancel_current_request.call_count == int(expected)
+    told = [call.args[0] for call in flow.session.daemon.fan_out.call_args_list]
+    assert ({"type": "turn_cancelled"} in told) is expected  # the windows hear only a real stop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("voice_turn,expected", [("first-owner", True), ("later-owner", False)])
+async def test_an_acp_voice_turns_cancel_stops_only_its_own_request(owner_bridge, voice_turn, expected):
+    """Its own request gets the full Stop (prompts answered cancelled); another runs on."""
+    flow = owner_bridge
+    result = await flow.state.cancel_current_request(voice_turn_id=voice_turn)
+    assert result["cancelled"] is expected
+    assert flow.llm.cancel_current_request.call_count == int(expected)
+
+
+@pytest.mark.asyncio
+async def test_an_acp_voice_turn_still_queued_is_dropped_and_nothing_running_stops(owner_bridge):
+    flow = owner_bridge
+    queued = {"voice-1"}
+    flow.runner.cancel_queued = lambda request: request in queued and not queued.discard(request)
+    assert await flow.state.cancel_current_request(voice_turn_id="voice-1") == {"cancelled": True, "queued": True}
+    flow.llm.cancel_current_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_voice_turn_id_crosses_the_state_rpc(owner_bridge):
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor.state.remote import RemoteStateService
+
+    flow = owner_bridge
+    flow.services.pop("acp_orchestrator")
+    flow.llm._queue_processor = SimpleNamespace(open_voice_turn=None)  # a typed turn runs
+    handlers = {}
+    register_state_handlers(SimpleNamespace(register=handlers.__setitem__), flow.state)
+    remote = RemoteStateService(SimpleNamespace(call=lambda method, params, timeout: handlers[method](params)))
+    assert (await remote.cancel_current_request(voice_turn_id="voice-1"))["cancelled"] is False
+    flow.llm.cancel_current_request.assert_not_called()
+    assert (await remote.cancel_current_request())["cancelled"] is True  # Stop: whatever runs
+    flow.llm.cancel_current_request.assert_called_once_with()
