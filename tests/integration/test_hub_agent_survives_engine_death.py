@@ -16,9 +16,11 @@ the agent outlives it.
 """
 
 import asyncio
+import contextlib
 import os
 import secrets
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -61,6 +63,37 @@ async def _wait_until_gone(pid: int, timeout: float) -> bool:
     return False
 
 
+def _agents_under(home: Path) -> list[int]:
+    """Kollab processes running with this test's HOME (the detached agent and its fork)."""
+    out = subprocess.run(
+        ["/bin/ps", "-E", "-axww", "-o", "pid=,command="], capture_output=True, text=True
+    ).stdout
+    return [
+        int(line.split(None, 1)[0])
+        for line in out.splitlines()
+        if f"HOME={home}" in line.split() and "kollabor_cli_main" in line
+    ]
+
+
+async def _stop_agents(home: Path) -> None:
+    """Stop every agent this run started, with its MCP servers.
+
+    The agent is detached on purpose (it must outlive its spawner), so a failed
+    assert or an interrupted run would otherwise leave it running for good. It
+    leads its own session, so its process group takes the MCP servers with it.
+    """
+    pids = _agents_under(home)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, sig)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, sig)
+        gone = [await _wait_until_gone(pid, 10) for pid in pids]
+        if all(gone):
+            return
+
+
 @pytest.mark.asyncio
 async def test_agent_survives_spawner_death(monkeypatch):
     """Spawn a detached agent, kill its parent, assert the agent survives."""
@@ -99,6 +132,15 @@ asyncio.run(main())
         env=dict(os.environ),
     )
 
+    try:
+        await _check_survival(parent, home)
+    finally:
+        if parent.returncode is None:
+            parent.kill()
+        await _stop_agents(home)
+
+
+async def _check_survival(parent, home: Path) -> None:
     # Parent must report a successful spawn before we proceed.
     try:
         line = await asyncio.wait_for(parent.stdout.readline(), 90)
@@ -147,15 +189,3 @@ asyncio.run(main())
             "agent died after its spawner was killed -- parent-watchdog "
             "coupling is back (KOLLAB_PARENT_PID must not be set for hub agents)"
         )
-
-    # Still alive after the danger window. Clean up: terminate the agent.
-    try:
-        os.kill(agent_pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    gone = await _wait_until_gone(agent_pid, 15)
-    if not gone:
-        try:
-            os.kill(agent_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
