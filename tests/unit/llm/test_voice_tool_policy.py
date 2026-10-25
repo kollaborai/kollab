@@ -44,13 +44,17 @@ def test_untrusted_origin_does_not_activate_voice_policy(tmp_path: Path):
     assert decision.allowed is True
 
 
-@pytest.mark.parametrize("tool_type", ["file_delete", "mcp_tool", "terminal_kill", "hub_stop"])
+@pytest.mark.parametrize(
+    "tool_type", ["file_create", "file_edit", "file_delete", "mcp_tool", "terminal_kill", "hub_stop"]
+)
 def test_voice_policy_blocks_tools_outside_fixed_allowlist(tmp_path: Path, tool_type: str):
     decision = VoiceToolExecutionGuard().evaluate(
         {"type": tool_type}, _voice_context(), repository_root=tmp_path
     )
     assert decision.allowed is False
     assert decision.reason_code == "command_blocked"
+    # never a dead end: a file change by voice is the terminal's touch, mkdir... on a yes
+    assert "call the terminal tool" in decision.message and "touch" in decision.message
 
 
 @pytest.mark.parametrize(
@@ -379,7 +383,7 @@ def test_a_yes_never_runs_what_is_off_the_voice_list(tmp_path: Path, command: st
     for approved in (False, True):  # never asked for, and refused even with a yes
         decision = guard.evaluate(call, context, repository_root=tmp_path, approved=approved)
         assert (decision.allowed, decision.reason_code) == (False, "not_by_voice")
-    assert "typed message" in decision.message
+    assert "typed message" in decision.message and "make and npm" in decision.message
 
 
 @pytest.mark.parametrize(

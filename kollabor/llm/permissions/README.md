@@ -218,7 +218,9 @@ nothing, and another agent's message (`from_agent`) never answers. By voice a
 yes runs only the guard's voice list (read-only commands, git, file changes
 inside the project, the project's own `make` and `npm` scripts, read-only `gh`
 and `kollab --hub`); anything else comes
-back `not_by_voice` and the agent offers to run it from a typed message.
+back `not_by_voice` and the agent offers to run it from a typed message. A
+voice `file_create` or `file_edit` comes back `command_blocked` with the same
+list, so the agent makes a file with the terminal's `touch` and asks.
 
 ## Commands
 

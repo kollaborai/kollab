@@ -255,6 +255,28 @@ def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes():
     prompt.assert_not_awaited()
 
 
+def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_path):
+    # Real models reach for file_create first: it never runs, and its result names the
+    # terminal path a yes can run, so the agent asks instead of saying it can't.
+    async def scenario():
+        executor, prompt = await _executor()
+        create = {"type": "file_create", "id": "f1", "file": str(tmp_path / "notes.md"), "content": "notes"}
+        refused = await executor.execute_tool(dict(create), execution_context=make_voice_origin_context("t1"))
+        touch = {"type": "terminal", "id": "c1", "command": "touch notes.md"}
+        asked = await executor.execute_tool(dict(touch), execution_context=make_voice_origin_context("t1"))
+        executor.yes_approvals.on_reply_done()
+        executor.yes_approvals.on_human_input("Yes.")
+        ran = await executor.execute_tool(again(touch), execution_context=make_voice_origin_context("t2"))
+        return executor, prompt, refused, asked, ran
+
+    executor, prompt, refused, asked, ran = asyncio.run(scenario())
+    assert not refused.success and not (tmp_path / "notes.md").exists()
+    assert refused.error.startswith("command_blocked") and "call the terminal tool" in refused.error
+    assert asked.error == NEEDS_YES and ran.success
+    assert executor.shell_executor.run_argv.await_args.args[0][1:] == ("notes.md",)
+    prompt.assert_not_awaited()
+
+
 def test_a_voice_yes_never_runs_a_shell_or_a_wrapper():
     async def scenario():
         executor, _ = await _executor()

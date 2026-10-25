@@ -137,6 +137,14 @@ _VOICE_KOLLAB_HUB_COMMANDS = frozenset({"status", "capture", "where", "help"})
 # package.json's scripts and the dependencies it lists, never npm exec (npx), which
 # fetches and runs any package.
 _VOICE_NPM_COMMANDS = frozenset({"run", "test", "start", "install", "ci"})
+# The voice list in words, for the model to offer in place of what was refused.
+# Keep it in step with _voice_may_run.
+_VOICE_CAN = (
+    "By voice, the terminal tool runs read-only commands, and with the user's spoken yes also git, "
+    "the project's own make and npm scripts, read-only gh and kollab --hub commands, and file changes "
+    "inside the project (touch for a new empty file, mkdir, cp, mv, rm). Writing text into a file "
+    "needs a typed message."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +192,14 @@ class VoiceToolExecutionGuard:
         if tool_type == "git":
             tool_type = "terminal"
         if tool_type not in _ALLOWED_VOICE_TOOL_TYPES:
-            return self._deny("command_blocked", "This tool is not allowed for voice-originated turns.")
+            # Models reach for file_create and the like first: without the voice list
+            # the agent says it can't do what the terminal does on a yes.
+            return self._deny(
+                "command_blocked",
+                f"This tool does not run by voice. {_VOICE_CAN} If one of those does what the user "
+                "asked, call the terminal tool with it. Otherwise tell the user it was not run, and "
+                "offer to do it from a typed message.",
+            )
         if tool_type in {"hub_status", "hub_capture"}:
             return VoiceToolDecision(allowed=True)
         if tool_type == "hub_msg":
@@ -270,9 +285,8 @@ class VoiceToolExecutionGuard:
         if not read_only and not _voice_may_run(argv, canonical_cwd, root):
             return self._deny(
                 "not_by_voice",
-                "A spoken yes runs only read-only commands, git and file changes inside the "
-                "project. Tell the user it was not run, and offer to run it if they ask in a "
-                "typed message, where they see the exact command.",
+                f"This command does not run by voice. {_VOICE_CAN} Tell the user it was not run, "
+                "and offer to run it if they ask in a typed message, where they see the exact command.",
             )
 
         if approved:

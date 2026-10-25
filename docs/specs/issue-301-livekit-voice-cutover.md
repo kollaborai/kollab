@@ -157,7 +157,11 @@ runs it.
   tool that runs code from its arguments (`pip`, `ex`/`vi`, `sqlite3`, `sed`,
   `tar`, `find`, `curl`, `ssh`, `gh api`, `kollab --hub msg`...); the `hub_msg`
   tool still asks. Marco chose `make` and `npm` (2026-10-24): they run any code
-  the project's own scripts contain.
+  the project's own scripts contain. A tool other than the terminal and the hub
+  tools (`file_create`, `file_edit`, MCP...) comes back `command_blocked` with
+  the same list: real models reach for `file_create` first, and without it the
+  agent said it could not make files by voice, when the terminal's `touch` does
+  on a yes.
 
 A typed turn keeps its card, and a Stop or a wait no longer refuses the tool:
 
