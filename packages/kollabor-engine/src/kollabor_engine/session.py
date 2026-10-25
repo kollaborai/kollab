@@ -892,12 +892,18 @@ class EngineSession:
             )
             # A cancelled tool call may never report a result or a turn end: tell
             # the open windows so a gem does not keep acting out the dead call.
+            # Its late tool result arrives marked, so it restarts nothing.
+            self.daemon.mark_cancelled()
             self._emit_event({"type": "turn_cancelled"})
             return
 
         async def cancel_voice_turn() -> None:
             result = await self.state.cancel_current_request(voice_turn_id=voice_turn_id)
+            # Marked only for a stop that happened: a refused or queued cancel
+            # leaves the running typed turn's tools unmarked.
             if result.get("cancelled") and not result.get("queued"):
+                if self.daemon is not None:
+                    self.daemon.mark_cancelled()
                 self._emit_event({"type": "turn_cancelled"})
 
         self._active_turn_task = asyncio.create_task(
@@ -917,6 +923,8 @@ class EngineSession:
             raise ValueError(str(result["error"]))
         if not isinstance(result.get("cancelled"), bool):
             raise TypeError("state.acp_cancel expected a cancelled boolean")
+        if result["cancelled"]:
+            self.daemon.mark_cancelled()
         return {**result, "request_id": request_id}
 
     # === permissions ===

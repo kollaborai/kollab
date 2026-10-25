@@ -45,7 +45,7 @@ def owner_bridge(tmp_path, monkeypatch):
         return await state.cancel_client_turn(params["request_id"])
 
     rpc = SimpleNamespace(call=AsyncMock(side_effect=scoped_rpc))
-    session.daemon = SimpleNamespace(alive=True, rpc=rpc, state=state, fan_out=Mock())
+    session.daemon = SimpleNamespace(alive=True, rpc=rpc, state=state, fan_out=Mock(), mark_cancelled=Mock())
     session._pending_permissions["first-tool"] = {
         "tool_id": "first-tool", "details": {"request_id": "first-owner"},
     }

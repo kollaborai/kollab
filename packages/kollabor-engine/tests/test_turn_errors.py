@@ -46,6 +46,7 @@ def session():
         subscribe=lambda: events,
         unsubscribe=lambda queue: None,
         fan_out=lambda event: None,
+        mark_cancelled=lambda: None,
         state=SimpleNamespace(
             get_conversation=AsyncMock(
                 return_value=SimpleNamespace(messages=conversation)

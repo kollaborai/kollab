@@ -171,6 +171,13 @@ class DaemonHandle:
         self._subscribers: Set[asyncio.Queue] = set()
         self._closed = False
         self.startup_error: str = ""
+        # A cancelled turn's tool may ignore the stop signal and report
+        # afterwards. Its late result still flows (the transcript mirror
+        # follows it) but carries `cancelled: true`, so no gem reads it as a
+        # live turn. Only tools running at the cancel are marked: the next
+        # turn, whatever starts it (a client, a hub message, a goal), never is.
+        self._running_tools: Set[str] = set()
+        self._cancelled_tools: Set[str] = set()
 
         self.rpc: Any = None
         self.state: Any = None
@@ -287,6 +294,15 @@ class DaemonHandle:
 
     def _fan_out(self, event: Dict[str, Any]) -> None:
         event.setdefault("session_id", self.session_id)
+        tool_id = event.get("tool_id")
+        if tool_id and event.get("type") == "tool_start":
+            self._running_tools.add(tool_id)
+            self._cancelled_tools.discard(tool_id)  # a new call reusing the id
+        elif tool_id and event.get("type") == "tool_result":
+            self._running_tools.discard(tool_id)
+            if tool_id in self._cancelled_tools:
+                self._cancelled_tools.discard(tool_id)
+                event = {**event, "cancelled": True}
         for queue in list(self._subscribers):
             try:
                 queue.put_nowait(event)
@@ -294,6 +310,11 @@ class DaemonHandle:
                 logger.warning(
                     "dropping event for slow subscriber on session %s", self.session_id
                 )
+
+    def mark_cancelled(self) -> None:
+        """The turn was cancelled: a result from a tool still running arrives marked."""
+        self._cancelled_tools |= self._running_tools
+        self._running_tools.clear()
 
     def fan_out(self, event: Dict[str, Any]) -> None:
         """Engine-generated event to every SSE subscriber of this session."""
