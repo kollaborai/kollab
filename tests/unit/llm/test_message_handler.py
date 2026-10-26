@@ -706,3 +706,40 @@ class TestMessageHandler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_add_message_trigger_llm_rejects_acp_before_mutating_or_enqueuing(self):
+        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+        data = {
+            "messages": [{"role": "user", "content": "do not queue natively"}],
+            "options": {"trigger_llm": True},
+        }
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_add_message(data, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"success": False, "error": "acp_requires_submit_human_input"},
+        )
+        self.coordinator._add_conversation_message.assert_not_called()
+        self.coordinator.conversation_logger.log_user_message.assert_not_awaited()
+        self.coordinator._enqueue_with_overflow_strategy.assert_not_awaited()
+        self.coordinator.create_background_task.assert_not_called()
+        self.coordinator.message_display_service.show_loading.assert_not_called()
+
+    def test_llm_continue_rejects_acp_without_launching_native_continuation(self):
+        self.coordinator._uses_acp_input = MagicMock(return_value=True)
+
+        result = self.loop.run_until_complete(
+            self.handler.handle_llm_continue({"source": "agent-orchestrator"}, MagicMock())
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "rejected", "reason": "acp_requires_submit_human_input"},
+        )
+        self.coordinator.create_background_task.assert_not_called()
+        self.coordinator._continue_conversation.assert_not_awaited()
+        self.coordinator.message_display_service.display_error_message.assert_called_once()
