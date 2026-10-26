@@ -28,7 +28,8 @@ support (once, a few minutes), starts the voice service, then loads or downloads
 the models. Stop works at any point. A voice service left running by an older
 Kollab is replaced, unless a chat is using it. Web voice also needs
 `livekit-server` (`brew install livekit`) and, to install voice support, `uv`
-(`brew install uv`); a missing one is named at once.
+(`brew install uv`); a missing one is named at once. Kollab.app opened from the
+Dock finds them on your login shell's PATH, as a terminal does.
 
 This works on a page served from the computer running the agent (Kollab.app,
 or the web UI at `127.0.0.1` or `localhost`). On a phone, PhoneLink included,
