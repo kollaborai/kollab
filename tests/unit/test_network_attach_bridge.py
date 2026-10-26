@@ -214,7 +214,7 @@ async def test_a_refusal_reaches_a_window_that_does_not_own_the_network(tmp_path
         assert owner.commands is not None and window.commands is None
 
         class Refusing:
-            async def open(self, peer, agent_id, name):
+            async def open(self, peer, agent_id, name, *, quiet=False):
                 raise AttachRefused(refusal)
 
             async def close(self):

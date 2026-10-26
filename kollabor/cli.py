@@ -1813,7 +1813,9 @@ async def _handle_cli_hub(hub_args: list) -> None:
             if not asker:
                 print("no local agent online to reach the network")
                 sys.exit(1)
-            reply = await AgentMessenger.request_network_attach(asker["socket_path"], target)
+            reply = await AgentMessenger.request_network_attach(
+                asker["socket_path"], target, quiet=True
+            )
             if reply.get("type") != "network_attach" or not reply.get("socket_path"):
                 print(f"capture of {target} refused: {reply.get('msg') or 'no answer from the network'}")
                 sys.exit(1)

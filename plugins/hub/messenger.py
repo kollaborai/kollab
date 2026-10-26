@@ -1729,7 +1729,9 @@ class AgentSocketServer:
                     # (plugins/hub/network_attach.py): answers a one-shot
                     # socket the caller attaches on like any agent socket.
                     # Local operator only, same as network_send.
-                    reply = await self._network_attach_reply(str(msg_data.get("to", "") or ""))
+                    reply = await self._network_attach_reply(
+                        str(msg_data.get("to", "") or ""), quiet=msg_data.get("quiet") is True
+                    )
                     writer.write((json.dumps(reply) + "\n").encode())
                     await writer.drain()
 
@@ -1773,11 +1775,11 @@ class AgentSocketServer:
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
 
-    async def _network_attach_reply(self, to: str) -> dict:
+    async def _network_attach_reply(self, to: str, *, quiet: bool = False) -> dict:
         if not self._on_network_attach:
             return {"type": "error", "msg": "this agent cannot open agents from the network"}
         try:
-            path = await self._on_network_attach(to)
+            path = await (self._on_network_attach(to, quiet=True) if quiet else self._on_network_attach(to))
         except Exception as exc:
             return {"type": "error", "msg": str(exc) or type(exc).__name__}
         return {"type": "network_attach", "socket_path": path}
@@ -2984,9 +2986,11 @@ class AgentMessenger:
 
     @staticmethod
     async def request_network_attach(
-        socket_path: str, handle: str, *, timeout: float = 60.0
+        socket_path: str, handle: str, *, timeout: float = 60.0, quiet: bool = False
     ) -> dict:
         """Ask a local agent's daemon to open agent@device through the network.
+
+        ``quiet`` is a capture: the far device posts no open/close line.
 
         Answers ``{"type": "network_attach", "socket_path": ...}``, a one-shot
         socket to attach on like any agent socket, ``{"type": "error",
@@ -2998,7 +3002,10 @@ class AgentMessenger:
         writer = None
         try:
             reader, writer = await AgentMessenger._open(socket_path, timeout=5.0)
-            writer.write((json.dumps({"action": "network_attach", "to": handle}) + "\n").encode())
+            request = {"action": "network_attach", "to": handle}
+            if quiet:
+                request["quiet"] = True
+            writer.write((json.dumps(request) + "\n").encode())
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
             reply = json.loads(line.decode().strip()) if line else None

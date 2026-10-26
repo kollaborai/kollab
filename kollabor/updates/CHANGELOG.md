@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allows. A contact's agents (a knock) are never capturable.
   `plugins.hub.disallow_cross_device_capture` (off by default) turns
   cross-device capture off on this device (#340).
+- A capture is a read: the device running the captured agent no longer posts
+  "opened ... from the network" and "closed ..." lines for it (it logs the
+  capture instead). Opening an agent as a chat still posts them (#340).
 
 ### Fixed
 - With an ACP profile, input from agent and skill generation and other
