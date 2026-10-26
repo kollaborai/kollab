@@ -133,17 +133,20 @@ class PermissionManager:
         return self._approval_mode
 
     def set_tool_executor(self, tool_executor) -> None:
-        """Set the tool executor for file access mode sync."""
+        """Set the tool executor, kept in step with the approval mode."""
         self._tool_executor = tool_executor
         approvals = getattr(tool_executor, "yes_approvals", None)
         if isinstance(approvals, YesApprovals):
             approvals.close_card = self._close_card
+        self._sync_file_access_mode()
 
     def _sync_file_access_mode(self, tool_executor=None) -> None:
-        """Sync file path access mode with current approval mode."""
+        """Sync the tool executor with the approval mode: file path access, and Trust All for voice turns."""
         try:
             if tool_executor is None:
                 tool_executor = getattr(self, "_tool_executor", None)
+            if tool_executor is not None:
+                tool_executor.trust_all = self._approval_mode == ApprovalMode.TRUST_ALL
             file_ops = getattr(tool_executor, "file_ops_executor", None)
             if not file_ops:
                 return

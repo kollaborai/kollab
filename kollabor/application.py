@@ -909,7 +909,6 @@ class TerminalLLMChat:
 
         # Wire tool executor and permission sync (requires llm_service)
         self.permission_manager.set_tool_executor(self.llm_service.tool_executor)
-        self.permission_manager._sync_file_access_mode()
 
         # Wire bundle scope sync callback into agent_manager
         # so scope is set on startup, resume, and agent changes.

@@ -205,7 +205,9 @@ and closes the card. Terminals close a parked prompt without answering
 still answers its prompts cancelled (`cancel_confirmations`).
 
 **Voice turns ask instead of waiting:** a voice turn never waits on a prompt.
-A call it may not run unasked (the voice guard's `confirmation_required`, or a
+Under Trust All it asks for nothing: it runs its tools as a typed turn does,
+with no voice list (`ToolExecutor.trust_all`, which the PermissionManager keeps
+in step with the approval mode). In the other modes, a call it may not run unasked (the voice guard's `confirmation_required`, or a
 prompt in a Confirm mode) comes back "Not run yet" and the agent asks for the OK
 in its reply; no card opens. The user's next message, spoken or typed, decides
 (`kollabor_agent/yes_approval.py`): a short yes lets each call the agent's last
