@@ -1269,6 +1269,25 @@ async def async_main() -> None:
                 # print("Warning: Some resources may not have been cleaned up properly")
 
 
+def _hub_config_flag(key: str) -> bool:
+    """plugins.hub.<key> from the global then the local config (local wins), for
+    CLI paths that skip plugin boot."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from kollabor_config.config_utils import get_existing_global_config_path
+
+    value = False
+    for path in (get_existing_global_config_path(), _Path.cwd() / ".kollab" / "config.json"):
+        try:
+            hub = _json.loads(path.read_text()).get("plugins", {}).get("hub", {})
+        except Exception:
+            continue
+        if key in hub:
+            value = bool(hub[key])
+    return value
+
+
 def _apply_hub_project_scope_from_config() -> None:
     """Read plugins.hub.project_scoped from config and set the env var.
 
@@ -1770,29 +1789,48 @@ async def _handle_cli_hub(hub_args: list) -> None:
         raw = "--raw" in rest
         capture_args = [arg for arg in rest if arg != "--raw"]
         if not capture_args:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(1)
         target = capture_args[0]
         if len(capture_args) > 2:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(2)
         try:
             num_lines = int(capture_args[1]) if len(capture_args) > 1 else 50
         except ValueError:
-            print("usage: kollab --hub capture <identity> [lines] [--raw]")
+            print("usage: kollab --hub capture <identity|agent@device> [lines] [--raw]")
             sys.exit(2)
-        agent = _find_agent(target)
-        if not agent:
-            agents = _get_live_agents()
-            available = [a.get("identity", "?") for a in agents]
-            print(f"agent '{target}' not found")
-            if available:
-                print(f"online: {', '.join(sorted(available))}")
-            sys.exit(1)
-        socket_path = agent.get("socket_path", "")
-        if not socket_path:
-            print(f"agent '{target}' has no socket")
-            sys.exit(1)
+        from plugins.hub.device_names import parse_handle
+
+        if parse_handle(target) is not None:
+            # Another device of this network: a local daemon opens it through
+            # the network attach, which that device's trust decides (a contact
+            # never may). plugins.hub.disallow_cross_device_capture turns it off.
+            if _hub_config_flag("disallow_cross_device_capture"):
+                print("cross-device capture is off here (plugins.hub.disallow_cross_device_capture)")
+                sys.exit(1)
+            asker = _pick_relay_agent()
+            if not asker:
+                print("no local agent online to reach the network")
+                sys.exit(1)
+            reply = await AgentMessenger.request_network_attach(asker["socket_path"], target)
+            if reply.get("type") != "network_attach" or not reply.get("socket_path"):
+                print(f"capture of {target} refused: {reply.get('msg') or 'no answer from the network'}")
+                sys.exit(1)
+            socket_path = reply["socket_path"]
+        else:
+            agent = _find_agent(target)
+            if not agent:
+                agents = _get_live_agents()
+                available = [a.get("identity", "?") for a in agents]
+                print(f"agent '{target}' not found")
+                if available:
+                    print(f"online: {', '.join(sorted(available))}")
+                sys.exit(1)
+            socket_path = agent.get("socket_path", "")
+            if not socket_path:
+                print(f"agent '{target}' has no socket")
+                sys.exit(1)
         if raw:
             # Keep the original terminal request/response path byte-for-byte.
             lines, capture_error = await AgentMessenger.request_output_diagnostic(

@@ -770,6 +770,7 @@ class HubPlugin(BasePlugin):
                     "bridge_user_id": "",
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
+                    "disallow_cross_device_capture": False,
                     "email_enabled": False,
                     "email_imap_host": "imap.gmail.com",
                     "email_address": "",
@@ -836,6 +837,16 @@ class HubPlugin(BasePlugin):
                         "Keep hub state per project (presence, vaults, "
                         "sockets). Agents in other projects stay invisible. "
                         "Requires restart."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Disallow Cross-Device Capture",
+                    "config_path": "plugins.hub.disallow_cross_device_capture",
+                    "help": (
+                        "Refuse capturing agent@device from here. Off: your "
+                        "network's devices capture as their trust allows; "
+                        "contacts never can"
                     ),
                 },
                 {
@@ -1873,18 +1884,14 @@ class HubPlugin(BasePlugin):
             "hub_cron_delete", self._handle_hub_cron_delete_tool
         )
 
-        # hub_capture (self-closing, optional lines/format/raw/allow_cross_device attributes)
+        # hub_capture (self-closing, optional lines/format/raw attributes)
         def _extract_hub_capture(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "cap_name": attrs.get("name", "").strip(),
                 "cap_lines": attrs.get("lines") or "50",
                 "cap_format": (attrs.get("format") or "").strip().lower(),
-                **{
-                    flag: attrs[flag].lower() == "true"
-                    for flag in ("raw", "allow_cross_device")
-                    if flag in attrs
-                },
+                **({"raw": attrs["raw"].lower() == "true"} if "raw" in attrs else {}),
             }
 
         cap_pat = tag_pattern(
@@ -1894,7 +1901,6 @@ class HubPlugin(BasePlugin):
                 "lines": r"\d+",
                 "format": r"(?:terminal|plain|json)",
                 "raw": r"(?:true|false)",
-                "allow_cross_device": r"(?:true|false)",
             },
             end="/>",
         )
@@ -4774,11 +4780,6 @@ class HubPlugin(BasePlugin):
         raw_flag = request.get("raw", tool_data.get("raw", False))
         if not isinstance(raw_flag, bool):
             return failure("hub_capture raw must be a boolean")
-        allow_cross_device = request.get(
-            "allow_cross_device", tool_data.get("allow_cross_device", False)
-        )
-        if not isinstance(allow_cross_device, bool):
-            return failure("hub_capture allow_cross_device must be a boolean")
         if raw_flag or cap_format == "terminal":
             capture_format = "terminal"
         elif cap_format == "plain":
@@ -4790,7 +4791,6 @@ class HubPlugin(BasePlugin):
             cap_name,
             cap_lines,
             capture_format=capture_format,
-            allow_cross_device=allow_cross_device,
         )
         output = outcome.text
         if len(output) > 10_000:
@@ -12663,17 +12663,15 @@ class HubPlugin(BasePlugin):
         lines: int,
         *,
         capture_format: str = "json",
-        allow_cross_device: bool = False,
     ) -> _CaptureOutcome:
         """Capture one validated target/line request without textual argument parsing.
 
-        An agent@device target is captured only with ``allow_cross_device``,
-        through the network attach, which the other device's trust decides.
+        An agent@device target goes through the network attach: only a device
+        of this network whose trust lets it open that agent answers; a contact
+        (a knock) never does.
         """
         if parse_handle(target) is not None:
-            return await self._capture_remote(
-                target, lines, capture_format, allow_cross_device
-            )
+            return await self._capture_remote(target, lines, capture_format)
         target_for_orchestrator = target
         if target.lower() != "all":
             own_identity = self._identity.identity if self._identity else ""
@@ -12730,13 +12728,16 @@ class HubPlugin(BasePlugin):
         return _CaptureOutcome(message)
 
     async def _capture_remote(
-        self, target: str, lines: int, capture_format: str, allow_cross_device: bool
+        self, target: str, lines: int, capture_format: str
     ) -> _CaptureOutcome:
         """Capture agent@device over a network attach the other device allows."""
-        if not allow_cross_device:
+        config = getattr(self, "config", None)
+        if config is not None and config.get(
+            "plugins.hub.disallow_cross_device_capture", False
+        ):
             message = (
-                f"capturing {target} reads another device's transcript: "
-                "pass --allow-cross-device (tool: allow_cross_device=true)"
+                "cross-device capture is off here "
+                "(plugins.hub.disallow_cross_device_capture)"
             )
             return _CaptureOutcome(message, error=message)
         relay = getattr(self, "_relay_agent", None)
@@ -12760,7 +12761,7 @@ class HubPlugin(BasePlugin):
     async def _handle_capture_command(
         self, rest: str, *, capture_format: str = "json"
     ) -> str:
-        """Handle /hub capture <identity|name|all> [lines] [--raw] [--allow-cross-device].
+        """Handle /hub capture <identity|name|agent@device|all> [lines] [--raw].
 
         Hub identities use the shared transcript renderer by default; --raw
         preserves the terminal capture path. Tool callers use `_capture_target`
@@ -12768,9 +12769,7 @@ class HubPlugin(BasePlugin):
         """
         args = rest.split() if rest.strip() else []
         if not args:
-            return "usage: /hub capture <identity|name|all> [lines] [--raw] [--allow-cross-device]"
-        allow_cross_device = "--allow-cross-device" in args
-        args = [arg for arg in args if arg != "--allow-cross-device"]
+            return "usage: /hub capture <identity|name|agent@device|all> [lines] [--raw]"
         if "--raw" in args:
             capture_format = "terminal"
             args = [arg for arg in args if arg != "--raw"]
@@ -12786,7 +12785,6 @@ class HubPlugin(BasePlugin):
                 target,
                 lines,
                 capture_format=capture_format,
-                allow_cross_device=allow_cross_device,
             )
         ).text
 

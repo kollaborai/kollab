@@ -96,21 +96,7 @@ async def test_explicit_terminal_raw_capture_preserves_synthetic_canary():
 
 
 @pytest.mark.asyncio
-async def test_cross_device_capture_is_denied_without_explicit_opt_in():
-    plugin = _minimal_plugin()
-    plugin._relay_agent = SimpleNamespace(attach=AsyncMock())
-
-    outcome = await plugin._capture_target(
-        REMOTE_HANDLE, 10, capture_format="json"
-    )
-
-    assert not outcome.success
-    assert "allow-cross-device" in outcome.text
-    plugin._relay_agent.attach.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cross_device_capture_uses_trust_checked_network_attach():
+async def test_cross_device_capture_uses_trust_checked_network_attach_by_default():
     plugin = _minimal_plugin()
     plugin._relay_agent = SimpleNamespace(
         attach=AsyncMock(return_value=ATTACHED_SOCKET)
@@ -119,12 +105,7 @@ async def test_cross_device_capture_uses_trust_checked_network_attach():
         return_value=SimpleNamespace(text="safe transcript", error=None, success=True)
     )
 
-    outcome = await plugin._capture_target(
-        REMOTE_HANDLE,
-        10,
-        capture_format="json",
-        allow_cross_device=True,
-    )
+    outcome = await plugin._capture_target(REMOTE_HANDLE, 10, capture_format="json")
 
     assert outcome.text == "safe transcript"
     plugin._relay_agent.attach.assert_awaited_once_with(REMOTE_HANDLE)
@@ -134,47 +115,62 @@ async def test_cross_device_capture_uses_trust_checked_network_attach():
 
 
 @pytest.mark.asyncio
-async def test_network_trust_refusal_stops_cross_device_capture():
+async def test_disallow_setting_refuses_cross_device_capture_before_attach():
+    plugin = _minimal_plugin()
+    plugin.config = SimpleNamespace(
+        get=lambda key, default=None: key == "plugins.hub.disallow_cross_device_capture"
+    )
+    plugin._relay_agent = SimpleNamespace(attach=AsyncMock())
+
+    outcome = await plugin._capture_target(REMOTE_HANDLE, 10, capture_format="json")
+
+    assert not outcome.success
+    assert "disallow_cross_device_capture" in outcome.text
+    plugin._relay_agent.attach.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        "network trust denied attach",
+        "her-mac is a contact, not on this network: message its agents, "
+        "opening them needs a join code",
+    ],
+)
+@pytest.mark.asyncio
+async def test_network_or_contact_refusal_stops_cross_device_capture(refusal):
     plugin = _minimal_plugin()
     plugin._relay_agent = SimpleNamespace(
-        attach=AsyncMock(side_effect=PermissionError("network trust denied attach"))
+        attach=AsyncMock(side_effect=PermissionError(refusal))
     )
     plugin._capture_peer_output = AsyncMock()
 
-    outcome = await plugin._capture_target(
-        REMOTE_HANDLE,
-        10,
-        capture_format="json",
-        allow_cross_device=True,
-    )
+    outcome = await plugin._capture_target(REMOTE_HANDLE, 10, capture_format="json")
 
     assert not outcome.success
-    assert "network trust denied attach" in outcome.text
+    assert refusal in outcome.text
     plugin._capture_peer_output.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_slash_capture_passes_explicit_cross_device_and_raw_flags():
+async def test_slash_capture_passes_raw_flag_for_a_remote_target():
     plugin = _minimal_plugin()
     plugin._capture_target = AsyncMock(
         return_value=SimpleNamespace(text="captured", error=None, success=True)
     )
 
-    result = await plugin._handle_capture_command(
-        f"{REMOTE_HANDLE} 7 --raw --allow-cross-device"
-    )
+    result = await plugin._handle_capture_command(f"{REMOTE_HANDLE} 7 --raw")
 
     assert result == "captured"
-    kwargs = plugin._capture_target.await_args.kwargs
-    assert kwargs["capture_format"] == "terminal"
-    assert kwargs["allow_cross_device"] is True
+    assert plugin._capture_target.await_args.args == (REMOTE_HANDLE, 7)
+    assert plugin._capture_target.await_args.kwargs == {"capture_format": "terminal"}
 
 
-def test_hub_capture_tool_requires_permission_and_exposes_explicit_options():
+def test_hub_capture_tool_requires_permission_and_has_no_cross_device_option():
     assert hub_capture.requires_permission is True
     assert hub_capture.risk_level == "high"
     parameters = {parameter.name: parameter for parameter in hub_capture.parameters}
-    assert parameters["allow_cross_device"].type == "boolean"
+    assert "allow_cross_device" not in parameters
     assert parameters["raw"].type == "boolean"
 
     assessment = RiskAssessor(
@@ -185,24 +181,38 @@ def test_hub_capture_tool_requires_permission_and_exposes_explicit_options():
 
 
 @pytest.mark.asyncio
-async def test_hub_capture_tool_forwards_remote_permission_flag():
+async def test_hub_capture_tool_captures_a_remote_target():
     plugin = _minimal_plugin()
     plugin._capture_target = AsyncMock(
         return_value=SimpleNamespace(text="captured", error=None, success=True)
     )
     tool_data = {
         "id": "privacy-tool-1",
-        "input": {
-            "name": REMOTE_HANDLE,
-            "lines": 7,
-            "raw": False,
-            "allow_cross_device": True,
-        },
+        "input": {"name": REMOTE_HANDLE, "lines": 7, "raw": False},
     }
 
     result = await plugin._handle_hub_capture_tool(tool_data)
 
     assert result.success is True
-    kwargs = plugin._capture_target.await_args.kwargs
-    assert kwargs["capture_format"] == "json"
-    assert kwargs["allow_cross_device"] is True
+    assert plugin._capture_target.await_args.args == (REMOTE_HANDLE, 7)
+    assert plugin._capture_target.await_args.kwargs == {"capture_format": "json"}
+
+
+def test_cli_disallow_flag_reads_global_then_local_config(tmp_path, monkeypatch):
+    from kollabor import cli
+
+    global_cfg = tmp_path / "global.json"
+    global_cfg.write_text(json.dumps({"plugins": {"hub": {"disallow_cross_device_capture": True}}}))
+    project = tmp_path / "project"
+    (project / ".kollab").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_existing_global_config_path", lambda: global_cfg
+    )
+
+    assert cli._hub_config_flag("disallow_cross_device_capture") is True
+    (project / ".kollab" / "config.json").write_text(
+        json.dumps({"plugins": {"hub": {"disallow_cross_device_capture": False}}})
+    )
+    assert cli._hub_config_flag("disallow_cross_device_capture") is False
+    assert cli._hub_config_flag("missing_key") is False
