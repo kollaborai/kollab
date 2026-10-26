@@ -46,6 +46,7 @@ STALE_SERVICE_EXIT_S = 10.0  # an older Kollab's voice service gets this long af
 # to come back (a reload that starts voice again rejoins it), then ends.
 USER_GONE_GRACE_S = 60.0
 PRESENCE_POLL_S = 5.0
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 USER_PREFIX = "user-"  # the browser's identity in a room (sign); the worker's is "worker-"
 LIVEKIT_MISSING = "livekit-server is not installed. Install it with brew install livekit."
 
@@ -445,7 +446,8 @@ class LiveKitRuntime:
 
         def ask() -> bool | None:
             try:
-                with urllib.request.urlopen(request, timeout=3) as response:
+                # No proxy: HTTP_PROXY or the system proxy would answer for 127.0.0.1.
+                with _NO_PROXY.open(request, timeout=3) as response:
                     participants = json.loads(response.read()).get("participants") or []
             except urllib.error.HTTPError as exc:
                 return False if exc.code == 404 else None  # no such room: nobody in it

@@ -652,12 +652,15 @@ class LeavingBackend(ExitingBackend):
 
 
 @pytest.mark.asyncio
-async def test_a_room_its_user_left_ends_as_a_stop_and_the_next_create_starts_fresh():
+async def test_a_room_its_user_left_ends_as_a_stop_and_the_next_create_starts_fresh(monkeypatch):
+    from kollabor_engine import voice_runtime_host
+
     from kollabor_agent.voice_admission import (
         issue_voice_admission_context,
         validate_voice_admission_context,
     )
 
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.0)
     backend = LeavingBackend()
     host = _host(backend)
     first = await host.create_session("owner-1", "session-1", _request())
@@ -675,6 +678,39 @@ async def test_a_room_its_user_left_ends_as_a_stop_and_the_next_create_starts_fr
 
     second = await host.create_session("owner-1", "session-1", _request())
     assert second.voice_session_id != first.voice_session_id
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_room_seen_empty_just_after_a_page_got_it_back_waits_a_full_grace_again(monkeypatch):
+    from kollabor_engine import voice_runtime_host
+
+    class EmptyOnCue(ExitingBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.empty: asyncio.Queue[None] = asyncio.Queue()
+            self.waits = 0
+
+        async def wait_abandoned(self, binding, handle) -> bool:
+            self.waits += 1
+            await self.empty.get()
+            return True
+
+    backend = EmptyOnCue()
+    host = _host(backend)
+    first = await host.create_session("owner-1", "session-1", _request())
+    await host.wait_for_background_tasks()
+    await host.create_session("owner-1", "session-1", _request())  # a reload gets it back
+
+    backend.empty.put_nowait(None)  # the grace ran out while that page was still joining
+    await asyncio.sleep(0.05)
+    assert (await host.get_status("owner-1", first.voice_session_id)).state == "ready"
+    assert (backend.waits, backend.stop_calls) == (2, [])
+
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.0)  # long since handed out
+    backend.empty.put_nowait(None)
+    await _until(host, first.voice_session_id, "stopped")
+    assert [reason for *_, reason in backend.stop_calls] == ["disconnect"]
     await host.shutdown()
 
 

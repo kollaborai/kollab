@@ -44,6 +44,9 @@ from .voice_types import (
 
 _T = TypeVar("_T")
 JOIN_TICKET_TTL_MS = 300_000
+# A page handed a session this recently is still joining: a room seen empty
+# then gets a full grace again instead of ending under it.
+HANDOUT_GRACE_S = 30.0
 
 
 class RuntimeHost(Protocol):
@@ -142,6 +145,7 @@ class _SessionRecord:
     handle: object | None = None
     start_task: asyncio.Task[None] | None = None
     stop_reason: StopReason | None = None
+    handed_out_at: float = 0.0  # monotonic: create returned it or a join ticket was issued
 
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -218,6 +222,7 @@ class EngineRuntimeHost:
                     if existing.state in active_states:
                         # A slower resolver response must never regress an
                         # already-published service lease.
+                        existing.handed_out_at = time.monotonic()
                         return _to_view(existing)
                     raise RuntimeHostError(
                         "target_mismatch",
@@ -230,6 +235,7 @@ class EngineRuntimeHost:
                         self._active_by_key.pop(key, None)
                     return self._create_session_locked(owner_id, control_session_id, target, key)
                 if existing.binding.service_lease_epoch == target.service_lease_epoch:
+                    existing.handed_out_at = time.monotonic()
                     return _to_view(existing)
                 operation_lock = existing.operation_lock
 
@@ -308,6 +314,7 @@ class EngineRuntimeHost:
                         "LiveKit join ticket signing is not configured.",
                     )
                 binding = current.binding.model_copy(update={"generation": current.generation})
+                current.handed_out_at = time.monotonic()
                 room_name = f"kollab-{voice_session_id}-g{current.generation}"
                 expires_at_utc_ms = self._utc_now_ms() + JOIN_TICKET_TTL_MS
 
@@ -754,11 +761,16 @@ class EngineRuntimeHost:
         and keep the voice service's lease. Until then create hands this session
         back, so a reload that starts voice again rejoins the room.
         """
-        if not await wait_abandoned(binding, handle):
-            return  # the worker exited first: _end_on_exit has it
-        record = self._sessions.get(binding.voice_session_id)
-        if record is None:
-            return
+        while True:
+            if not await wait_abandoned(binding, handle):
+                return  # the worker exited first: _end_on_exit has it
+            record = self._sessions.get(binding.voice_session_id)
+            if record is None:
+                return
+            if time.monotonic() - record.handed_out_at >= HANDOUT_GRACE_S:
+                break
+            # A page was just given this session (a reload near the end of the
+            # grace): it is still joining, so wait a full grace again.
         async with record.operation_lock:
             async with self._lock:
                 if record.handle is handle:  # else a stop, switch or exit took it first
