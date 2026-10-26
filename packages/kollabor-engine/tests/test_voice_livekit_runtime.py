@@ -21,7 +21,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from kollabor_engine import voice_livekit
+from kollabor_engine import voice_livekit, voice_runtime_host
 from kollabor_engine.routes import voice as voice_routes
 from kollabor_engine.voice_control import VoiceControl, decode_cursor
 from kollabor_engine.voice_livekit import LiveKitRuntime, mint_livekit_jwt
@@ -457,6 +457,7 @@ def rooms(rig, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_ROOM_LOG", str(calls))
     monkeypatch.setattr(voice_livekit, "PRESENCE_POLL_S", 0.05)
     monkeypatch.setattr(voice_livekit, "USER_GONE_GRACE_S", 0.4)
+    monkeypatch.setattr(voice_runtime_host, "HANDOUT_GRACE_S", 0.3)
 
     def here(room, *identities):
         staged = tmp_path / "people.next"
@@ -474,8 +475,12 @@ async def _state(http, sid):
     return (await http.get(f"/voice/sessions/{sid}")).json()
 
 
-async def test_a_room_its_user_left_ends_once_they_stay_gone(rig, rooms):
+async def test_a_room_its_user_left_ends_once_they_stay_gone(rig, rooms, monkeypatch):
     """A closed or reloaded page sends no stop: the Engine ends the room after the grace."""
+    for name in ("http_proxy", "HTTP_PROXY"):  # the server is asked directly, never through a proxy
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
     async with client(rig.app) as http:
         view = await ready_session(rig, http)
         sid = view["voice_session_id"]
