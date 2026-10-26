@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
 import sys
 from types import SimpleNamespace
 
@@ -12,9 +14,11 @@ from fastapi import FastAPI
 from kollabor_engine.routes import voice as voice_routes
 from kollabor_engine.voice_control import VoiceControl
 from kollabor_engine.voice_livekit import LiveKitRuntime
+from kollabor_engine.voice_runtime_host import RuntimeHostError
 from kollabor_engine.voice_settings import DEFAULT_PROMPT, VoiceSettingsService
 from kollabor_engine.voice_types import SpeechReadiness
-from kollabor_voice.control import manifest
+from kollabor_voice.client import VoiceClient
+from kollabor_voice.control import VoiceError, manifest
 from test_voice_livekit_runtime import FakeSession
 
 from kollabor_ai.prompt_overrides import PromptOverrideStore
@@ -116,15 +120,94 @@ def test_worker_env_override_wins(tmp_path, monkeypatch):
     assert cmd[0] == "/opt/custom/python"
 
 
-async def test_unprepared_runtime_is_actionable_error(rig, tmp_path, monkeypatch):
-    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path / "empty"))
-    monkeypatch.delenv("KOLLAB_VOICE_PYTHON", raising=False)
+async def _start_voice(rig, monkeypatch, *, ensure):
+    """Create a voice session; return the first start_session call's worker command."""
+    monkeypatch.setattr(rig.runtime, "_binary", lambda: "/usr/local/bin/livekit-server")
+    monkeypatch.setattr(VoiceClient, "ensure", ensure)
+    started: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    async def start_session(binding):
+        started.set_result(rig.runtime._worker_command()[0])
+        raise RuntimeHostError("runtime_unavailable", 503, "no room in tests")
+
+    monkeypatch.setattr(rig.runtime, "start_session", start_session)
     res = await rig.http.post("/sessions/s1/voice", json={})
-    assert res.status_code == 503
-    body = res.json()
-    assert body["code"] == "voice_runtime_not_ready"
-    assert "set up" in body["message"]
-    assert rig.runtime._server is None  # no livekit-server started for nothing
+    assert res.status_code == 202 and res.json()["state"] == "starting"
+    return await asyncio.wait_for(started, 5)
+
+
+async def test_first_voice_start_installs_voice_and_shows_each_step(rig, tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.delenv("KOLLAB_VOICE_PYTHON", raising=False)
+    seen, installed = [], []
+
+    async def ensure(client, progress):
+        progress({"state": "installing", "detail": "Installing voice support"})
+        seen.append(next(iter(rig.control.host._sessions.values())).detail)
+        installed.append(_prepare_runtime(tmp_path))  # what the service's setup leaves
+        return {"state": "off"}
+
+    cmd = await _start_voice(rig, monkeypatch, ensure=ensure)
+    assert seen == ["Installing voice support"]
+    assert cmd == [str(installed[0]), "-m", "kollabor_voice.livekit_worker"]
+
+
+async def test_failed_voice_setup_says_why(rig, tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.delenv("KOLLAB_VOICE_PYTHON", raising=False)
+    monkeypatch.setattr(rig.runtime, "_binary", lambda: "/usr/local/bin/livekit-server")
+
+    async def ensure(client, progress):
+        raise VoiceError("setup_failed", "Voice setup failed: uv is not installed.")
+
+    monkeypatch.setattr(VoiceClient, "ensure", ensure)
+    res = await rig.http.post("/sessions/s1/voice", json={})
+    vid = res.json()["voice_session_id"]
+    for _ in range(100):
+        view = await rig.control.status(vid)
+        if view.state == "error":
+            break
+        await asyncio.sleep(0.02)
+    assert (view.state, view.detail) == ("error", "Voice setup failed: uv is not installed.")
+
+
+async def test_missing_livekit_server_fails_before_any_setup(rig, tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.delenv("KOLLAB_VOICE_PYTHON", raising=False)
+    monkeypatch.setattr(rig.runtime, "_binary", lambda: None)
+    called = []
+    monkeypatch.setattr(VoiceClient, "ensure", lambda *a: called.append(a))
+    with pytest.raises(RuntimeHostError) as err:
+        await rig.runtime.ensure_runtime(lambda detail: None)
+    assert "brew install livekit" in err.value.detail and not called
+
+
+class _Service:
+    def __init__(self, status):
+        self.status = status
+
+    async def call(self, op):
+        assert op == "status"
+        return self.status
+
+
+async def test_an_older_kollab_voice_service_is_replaced():
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    await LiveKitRuntime._retire_stale_service(_Service({"owner": None, "pid": service.pid}))
+    assert await asyncio.wait_for(service.wait(), 5) == -signal.SIGTERM
+
+
+async def test_an_older_kollab_voice_service_in_use_keeps_running():
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    try:
+        with pytest.raises(RuntimeHostError) as err:
+            await LiveKitRuntime._retire_stale_service(
+                _Service({"owner": "cli:abc", "pid": service.pid})
+            )
+        assert err.value.code == "voice_service_busy" and service.returncode is None
+    finally:
+        service.kill()
+        await service.wait()
 
 
 # --- thread validation ---
@@ -252,3 +335,16 @@ async def test_prompt_validation_and_scope_errors(rig):
     ok = await rig.http.get("/voice/settings/prompt?session_id=s1&thread_id=t1")
     assert ok.status_code == 200
 
+
+
+async def test_a_worker_that_cannot_start_gives_its_reason():
+    worker = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "print('WORKER_ERROR Choose Parakeet v3 in Settings > Voice.', flush=True)",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    with pytest.raises(RuntimeHostError) as err:
+        await LiveKitRuntime._read_ready(worker)
+    await worker.wait()
+    assert err.value.detail == "Choose Parakeet v3 in Settings > Voice."

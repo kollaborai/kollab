@@ -1,8 +1,8 @@
 # Voice mode
 
 Run `/voice on` in the chat that should respond to you. Kollab prepares local
-voice support in the background, downloads Whisper base, and prepares the selected
-speech engine (Kokoro by default), warms them, then starts the microphone. Engine setup is automatic. The input box stays usable during setup.
+voice support in the background, downloads Whisper base (and Parakeet v3 on Apple
+silicon), and prepares the selected speech engine (Kokoro by default), warms them, then starts the microphone. Engine setup is automatic. The input box stays usable during setup.
 
 What you say goes straight to the agent: every final transcript becomes a turn in
 the responding chat, with no intent or style gate in front of it. Your
@@ -17,12 +17,18 @@ controls, status or decisions.
 
 The mic in the message box starts voice in the browser, with the browser's
 microphone. The agent greets you, hears you through Parakeet, and speaks its
-answer sentence by sentence with VibeVoice while the rest is still being
-written. Talk over it to stop it: the voice pauses as you start, and once your words come through its turn is cancelled and your words become the next turn. A cough or a short noise only pauses it; after 2 s it carries on.
+answer sentence by sentence with the selected speech engine (Kokoro or VibeVoice)
+while the rest is still being written. Talk over it to stop it: the voice pauses as you start, and once your words come through its turn is cancelled and your words become the next turn. A cough or a short noise only pauses it; after 2 s it carries on.
 The strip above the message box shows what voice is doing (Listening, Hearing,
 Thinking, Speaking, Interrupted), model downloads and how long each step took
-(Hear, Think, Speak, Total). The pulsing mic or the stop button ends it. On
-first use the button waits while the models load or download.
+(Hear, Think, Speak, Total). The pulsing mic or the stop button ends it.
+
+The first start sets voice up, and the strip shows each step: it installs voice
+support (once, a few minutes), starts the voice service, then loads or downloads
+the models. Stop works at any point. A voice service left running by an older
+Kollab is replaced, unless a chat is using it. Web voice also needs
+`livekit-server` (`brew install livekit`) and, to install voice support, `uv`
+(`brew install uv`); a missing one is named at once.
 
 This works on a page served from the computer running the agent (Kollab.app,
 or the web UI at `127.0.0.1` or `localhost`). On a phone, PhoneLink included,
@@ -52,8 +58,8 @@ latest transcript. The web UI shows the same line above the message box while
   Change the transcript context there, then save for this device.
   Select Whisper Base or Parakeet v3 under Transcription Engine (see
   [Select a transcription engine](#select-a-transcription-engine)), and Kokoro or
-  VibeVoice and their voices under Speech Engine. The panel also shows microphone,
-  operating state, transcription readiness and speech readiness. Saving does not enable the microphone.
+  VibeVoice and their voices under Speech Engine. The panel also shows whether voice is
+  installed (Voice Setup), microphone, operating state, transcription readiness and speech readiness. Saving does not enable the microphone.
   Preferences are shared across chats on the device running Kollab; an attached
   remote host's web settings apply to that host.
   `/voicemode`, `/vm`, `/voicemodels` and `/vmodels` are no longer registered.
@@ -243,8 +249,10 @@ Implementation and measured platform/acceptance coverage are recorded in
 ## Select a transcription engine
 
 Open `/voice config` (terminal) or Settings → Voice (web), choose Transcription
-Engine and save for this device. **Whisper Base** is the default. **Parakeet v3**
-is NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, the `mlx-community` MLX conversion)
+Engine and save for this device. **Parakeet v3** is the default on Apple silicon,
+since voice in the web UI transcribes only with it; **Whisper Base** is the default
+elsewhere. Parakeet v3 is NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, the
+`mlx-community` MLX conversion)
 running on the GPU through `parakeet-mlx`; it needs an Apple silicon Mac and is
 not offered elsewhere. The choice applies without restarting voice.
 

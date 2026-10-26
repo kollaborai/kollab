@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kollabor_voice.bootstrap import prepared_runtime_python
 from kollabor_voice.control import service_root
 from kollabor_voice.speech_settings import (
     KOKORO_VOICES,
@@ -33,6 +34,16 @@ def voice_plugin(ctx):
     return plugin
 
 
+def setup_status() -> str:
+    from kollabor_voice.client import VoiceClient
+
+    if prepared_runtime_python():
+        return "Installed"
+    if VoiceClient().setup_status().get("state") == "installing":
+        return "Installing now"
+    return "Not installed yet"
+
+
 def voice_sections(plugin, live=None) -> list[dict]:
     """One field definition for both interfaces and both speech engines."""
     preferences = load_preferences()
@@ -43,6 +54,24 @@ def voice_sections(plugin, live=None) -> list[dict]:
     transcription = state.get("transcription", {})
     engines = available_stt_engines()
     return [
+        {
+            "id": "setup",
+            "title": "Voice Setup",
+            "open": True,  # what a new user looks for first
+            "fields": [
+                make_field(
+                    "voice_setup",
+                    "label",
+                    "Status",
+                    value=setup_status(),
+                    help=(
+                        "Voice sets itself up the first time you turn it on: the microphone "
+                        "button in a chat, or /voice on. That first start installs voice "
+                        "support and downloads the selected models, which takes a few minutes."
+                    ),
+                ),
+            ],
+        },
         {
             "id": "preferences",
             "title": "Voice Preferences",
@@ -188,7 +217,10 @@ def voice_sections(plugin, live=None) -> list[dict]:
                     "label",
                     "Voice State",
                     value=state.get("state", "off").replace("_", " ").title(),
-                    help="Use /voice on, /voice off, /voice status or /voice retry in this chat.",
+                    help=(
+                        "Turn voice on with the microphone button in a chat, or /voice on; "
+                        "/voice off, /voice status and /voice retry work in the terminal."
+                    ),
                 ),
                 make_field(
                     "preferences_path",

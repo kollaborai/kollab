@@ -122,6 +122,8 @@ class VoiceClient:
             try:
                 os.kill(int(data["pid"]), 0)
             except ProcessLookupError:
+                if data.get("state") == "error":
+                    return data  # it exited after writing why
                 return {
                     **data,
                     "state": "error",
@@ -150,14 +152,14 @@ class VoiceClient:
                 return await self.call("status")
             except (OSError, asyncio.TimeoutError, ValueError):
                 state = self.setup_status()
+                if state.get("state") == "error":
+                    if state.get("updated_at", 0) >= launched:
+                        raise VoiceError(
+                            "setup_failed", state.get("detail", "Voice setup failed")
+                        )
+                    # An earlier run's failure: this one has not written yet.
+                    state = {"state": "starting", "detail": "Starting the voice service"}
                 progress(state)
-                if (
-                    state.get("state") == "error"
-                    and state.get("updated_at", 0) >= launched
-                ):
-                    raise VoiceError(
-                        "setup_failed", state.get("detail", "Voice setup failed")
-                    )
                 await asyncio.sleep(0.3)
         raise VoiceError("setup_timeout", "Voice setup timed out")
 

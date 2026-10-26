@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-25
+
+### Changed
+- Voice: Parakeet v3 is the default transcription engine on Apple silicon Macs,
+  since voice in the Web UI transcribes only with it. Whisper Base stays the
+  default elsewhere and transcribes while Parakeet downloads (2.5 GB, once). A
+  saved choice is kept.
+
+### Fixed
+- Voice: turning voice on in the Web UI now sets voice up when it is not installed
+  yet, as `/voice on` does in the terminal. The first start installs voice support
+  and starts the voice service, and the voice bar shows each step. It used to stop
+  with "Voice support is not set up yet", pointing to a Settings control that did
+  not exist. A voice service left running by an older Kollab is replaced unless a
+  chat is using it, Stop works while voice starts, and Settings > Voice opens on
+  whether voice is installed.
+- Voice: when voice cannot start in the Web UI, the voice bar gives the reason,
+  such as Whisper being the chosen transcription engine, instead of "Voice worker
+  exited before joining."
+
 ## [0.18.0] - 2026-10-25
 
 ### Added

@@ -94,9 +94,12 @@ def map_readiness(status: dict) -> SpeechReadiness:
         )
     if stt.get("engine") != "parakeet":
         # Never claim Parakeet when Whisper would run.
+        if stt.get("state") == "loading":
+            return SpeechReadiness("starting", str(stt.get("detail", "")))
         return SpeechReadiness(
-            "starting" if stt.get("state") == "loading" else "error",
-            str(stt.get("detail", "Parakeet is not selected")),
+            "error",
+            "Voice in the web UI transcribes with Parakeet v3. Choose it as the "
+            "Transcription Engine in Settings > Voice, then turn voice on again.",
             retryable=True,
         )
     if stt.get("state") == "error" or tts.get("state") == "error":

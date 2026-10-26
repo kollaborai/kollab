@@ -1154,3 +1154,52 @@ async def test_client_timeout_carries_a_real_reason(root):
         release.set()
         holder.cancel()
         await server.close()
+
+
+def _exited_pid():
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
+def test_setup_status_keeps_the_reason_a_failed_setup_wrote(root):
+    (root / "setup.json").write_text(
+        json.dumps(
+            {
+                "state": "error",
+                "detail": "Voice setup failed: uv is not installed.",
+                "pid": _exited_pid(),
+                "updated_at": time.time(),
+            }
+        )
+    )
+    assert VoiceClient(root).setup_status()["detail"] == (
+        "Voice setup failed: uv is not installed."
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_never_shows_an_earlier_setup_failure(root, monkeypatch):
+    (root / "setup.json").write_text(
+        json.dumps(
+            {
+                "state": "error",
+                "detail": "Voice setup failed: old reason",
+                "pid": _exited_pid(),
+                "updated_at": time.time() - 60,
+            }
+        )
+    )
+    answers = iter([OSError("down"), OSError("down"), {"state": "off"}])
+
+    async def call(self, op, **params):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+    monkeypatch.setattr(VoiceClient, "launch", lambda self: None)
+    seen = []
+    assert await VoiceClient(root).ensure(seen.append) == {"state": "off"}
+    assert [s["detail"] for s in seen] == ["Starting the voice service"]

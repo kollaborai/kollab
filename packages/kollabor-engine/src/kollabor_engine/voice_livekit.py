@@ -33,10 +33,13 @@ from .voice_types import RuntimeStatus, StopReason, VoiceSessionBinding
 logger = logging.getLogger(__name__)
 
 WORKER_READY_PREFIX = "WORKER_READY"  # the worker prints "WORKER_READY -" once joined
+WORKER_ERROR_PREFIX = "WORKER_ERROR"  # or "WORKER_ERROR <reason>" when it cannot start
 # The worker waits up to 1200 s for its models (a first-run download), then joins.
 WORKER_READY_TIMEOUT_S = 1260.0
 SERVER_READY_TIMEOUT_S = 15.0
 WORKER_TOKEN_TTL_S = 3600
+STALE_SERVICE_EXIT_S = 10.0  # an older Kollab's voice service gets this long after SIGTERM
+LIVEKIT_MISSING = "livekit-server is not installed. Install it with brew install livekit."
 
 # Runs the server and a watchdog in one process group: if the engine dies
 # without cleanup (crash, SIGKILL) the watchdog sees its pid vanish and kills
@@ -152,7 +155,7 @@ class LiveKitRuntime:
             return RuntimeStatus(
                 state="error",
                 component="livekit_server",
-                detail="livekit-server is not installed. Install it with brew install livekit.",
+                detail=LIVEKIT_MISSING,
                 retryable=False,
             )
         running = self._server is not None and self._server.returncode is None
@@ -171,9 +174,7 @@ class LiveKitRuntime:
                 return
             binary = self._binary()
             if binary is None:
-                raise RuntimeHostError(
-                    "runtime_unavailable", 503, "livekit-server is not installed."
-                )
+                raise RuntimeHostError("runtime_unavailable", 503, LIVEKIT_MISSING)
             env = dict(os.environ)
             env["LIVEKIT_KEYS"] = f"{self._api_key}: {self._api_secret}"
             with self._log("livekit-server.log") as log:
@@ -217,8 +218,64 @@ class LiveKitRuntime:
                 retryable=True,
             )
 
-    def preflight(self) -> None:
-        self._worker_command()
+    async def ensure_runtime(self, progress: Callable[[str], None]) -> None:
+        """Start the shared voice service the worker speaks through.
+
+        The first start installs its runtime, as /voice on does in the terminal;
+        progress gets each setup step. A service an older Kollab left running has
+        an older runtime than this worker needs, so it is replaced. An injected
+        worker or KOLLAB_VOICE_PYTHON means voice is run by hand.
+        """
+        if self._binary() is None:
+            # Say so before minutes of setup, not after.
+            raise RuntimeHostError("runtime_unavailable", 503, LIVEKIT_MISSING)
+        if self._worker_argv or os.environ.get("KOLLAB_VOICE_PYTHON"):
+            return
+        from kollabor_voice.bootstrap import prepared_runtime_python
+        from kollabor_voice.client import VoiceClient
+
+        client = VoiceClient()
+        if prepared_runtime_python() is None:
+            await self._retire_stale_service(client)
+        try:
+            await client.ensure(lambda state: progress(state.get("detail") or "Starting voice"))
+        except RuntimeError as exc:  # VoiceError, or a voice root too long for its socket
+            raise RuntimeHostError("voice_setup_failed", 503, str(exc), retryable=True) from exc
+        except OSError as exc:
+            raise RuntimeHostError(
+                "voice_setup_failed", 503, f"Voice setup failed: {exc}", retryable=True
+            ) from exc
+
+    @staticmethod
+    async def _retire_stale_service(client: Any) -> None:
+        """Stop a voice service an older Kollab left running, unless a chat is using it."""
+        try:
+            status = await client.call("status")
+        except (RuntimeError, OSError, ValueError):
+            return  # none answering (VoiceError is a RuntimeError): ensure() starts this version's
+        if status.get("owner"):
+            raise RuntimeHostError(
+                "voice_service_busy",
+                409,
+                "Voice is on in another chat, on a voice service from an older Kollab. "
+                "Turn voice off there, then try again.",
+                retryable=True,
+            )
+        pid = status.get("pid")
+        if not isinstance(pid, int):
+            return
+        for sig, wait_s in ((signal.SIGTERM, STALE_SERVICE_EXIT_S), (signal.SIGKILL, 2.0)):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+            deadline = time.monotonic() + wait_s
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return  # gone, and its lock with it: a new service can start
+                await asyncio.sleep(0.1)
 
     def _worker_command(self) -> tuple[list[str], dict[str, str]]:
         if self._worker_argv:
@@ -234,8 +291,7 @@ class LiveKitRuntime:
                 raise RuntimeHostError(
                     "voice_runtime_not_ready",
                     503,
-                    "Voice support is not set up yet. Turn on voice in Settings "
-                    "and wait for model setup to finish, then try again.",
+                    "Voice support is not installed. Turn voice on again to install it.",
                     retryable=True,
                 )
             python = str(prepared)
@@ -306,6 +362,13 @@ class LiveKitRuntime:
             text = line.decode(errors="replace").strip()
             if text.startswith(WORKER_READY_PREFIX):
                 return
+            if text.startswith(WORKER_ERROR_PREFIX):
+                raise RuntimeHostError(
+                    "runtime_unavailable",
+                    503,
+                    text[len(WORKER_ERROR_PREFIX) :].strip() or "Voice worker exited before joining.",
+                    retryable=True,
+                )
 
     @staticmethod
     async def _drain(process: asyncio.subprocess.Process) -> None:

@@ -196,10 +196,6 @@ class EngineRuntimeHost:
                 "Voice mode requires an Apple Silicon macOS host.",
             )
 
-        preflight = getattr(self._runtime, "preflight", None)
-        if preflight is not None:
-            preflight()  # missing worker runtime: answer now, not after a dead start
-
         target = await self._session_resolver.resolve(owner_id, control_session_id, request.selected_thread_id)
         if request.selected_thread_id is not None and target.thread_id != request.selected_thread_id:
             raise RuntimeHostError("target_mismatch", 409, "The selected thread is not active in this session.")
@@ -648,8 +644,25 @@ class EngineRuntimeHost:
                 )
             return await operation()
 
+    def _starting(self, binding: VoiceSessionBinding) -> _SessionRecord | None:
+        record = self._sessions.get(binding.voice_session_id)
+        if record is not None and record.generation == binding.generation and record.state == "starting":
+            return record
+        return None
+
+    def _setup_detail(self, binding: VoiceSessionBinding, detail: str) -> None:
+        record = self._starting(binding)
+        if record is not None:
+            record.detail = detail
+
     async def _start_session(self, binding: VoiceSessionBinding) -> None:
         try:
+            ensure_runtime = getattr(self._runtime, "ensure_runtime", None)
+            if ensure_runtime is not None:
+                # The first start installs voice support (minutes): show each step.
+                await ensure_runtime(lambda detail: self._setup_detail(binding, detail))
+                if self._starting(binding) is None:
+                    raise RuntimeHostError("stopped", 409, "Voice stopped during setup.")
             handle = await self._runtime.start_session(binding)
         except Exception as exc:
             async with self._lock:

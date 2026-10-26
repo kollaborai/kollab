@@ -112,7 +112,8 @@ async def test_web_rpc_save_tui_read_and_fresh_chat(voice):
     assert load_preferences()["context_lines"] == 25
     assert load_preferences()["kokoro_speed"] == pytest.approx(1.1)
     fresh = await remote.get_panel("voice")
-    assert fresh["sections"][0]["fields"][0]["value"] == 25
+    fields = {f["path"]: f for s in fresh["sections"] for f in s["fields"]}
+    assert fields["context_lines"]["value"] == 25
     assert VoicePlugin(event_bus=state._event_bus).context_lines == 25
     assert not plugin.requested and plugin._pending == [{"event_id": "keep"}]
     plugin._client.call.assert_not_awaited()
@@ -186,7 +187,8 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     panel = await VoicePanel().describe(state, {})
     fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
     engine = fields["stt_engine"]
-    assert (engine["type"], engine["value"]) == ("dropdown", "whisper")
+    # Parakeet is the default on Apple silicon: voice in the web UI needs it.
+    assert (engine["type"], engine["value"]) == ("dropdown", "parakeet")
     assert engine["option_labels"] == {
         "whisper": "Whisper Base",
         "parakeet": "Parakeet v3",
@@ -196,13 +198,14 @@ async def test_transcription_engine_is_selectable_with_readable_labels(
     view._load_widgets()
     widgets = {w.config_path: w for ws in view._section_widgets for w in ws}
     shown = "".join(view._render_widget_modern(widgets["stt_engine"], 80, "last"))
-    assert "Transcription Engine: Whisper Base" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
+    assert "Transcription Engine: Parakeet v3" in re.sub(r"\x1b\[[0-9;]*m", "", shown)
 
     monkeypatch.setattr(speech_settings, "apple_silicon", lambda: False)
     # Elsewhere Parakeet is not offered, and saving it anyway is refused.
     panel = await VoicePanel().describe(state, {})
     fields = {f["path"]: f for s in panel["sections"] for f in s["fields"]}
     assert fields["stt_engine"]["options"] == ["whisper"]
+    assert fields["stt_engine"]["value"] == "whisper"
     assert fields["stt_engine"]["help"] == "Local speech recognition with Whisper Base."
     refused = await VoicePanel().act(
         state, "save", {"changes": {"stt_engine": "parakeet"}, "target": "device"}

@@ -650,7 +650,8 @@ export type PanelField = {
   action?: string | null;
 };
 
-export type PanelSection = { id: string; title: string; fields: PanelField[] };
+/** `open`: starts expanded even in a long form. */
+export type PanelSection = { id: string; title: string; open?: boolean; fields: PanelField[] };
 
 export type PanelAction = {
   id: string;

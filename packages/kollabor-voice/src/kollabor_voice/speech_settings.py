@@ -72,7 +72,8 @@ def speech_defaults():
     if (installed / "config.json").is_file():
         model = str(installed)
     return {
-        "stt_engine": "whisper",
+        # Voice in the web UI transcribes only with Parakeet (map_readiness).
+        "stt_engine": "parakeet" if apple_silicon() else "whisper",
         "tts_engine": "kokoro",
         "kokoro_voice": "af_heart",
         "kokoro_speed": 1.0,
