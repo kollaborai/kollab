@@ -2257,6 +2257,37 @@ def _pick_engine_port(
     raise RuntimeError(f"no free engine port in {port}-{port + tries - 1}")
 
 
+# launchd's PATH: what Kollab.app gets when it is opened from the Dock or Finder.
+GUI_PATH = {"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"}
+LOGIN_PATH_MARK = "KOLLAB_LOGIN_PATH"
+
+
+def _adopt_login_path() -> None:
+    """Swap a bare GUI PATH for the login shell's, the one a terminal launch has.
+
+    Kollab.app opened from the Dock starts `--web-ui` with launchd's PATH: voice
+    found neither livekit-server nor uv, and agents' shells missed the user's tools.
+    """
+    import subprocess
+
+    current = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if not set(current) <= GUI_PATH:
+        return
+    shell = os.environ.get("SHELL") or ("/bin/zsh" if sys.platform == "darwin" else "/bin/sh")
+    try:
+        out = subprocess.run(
+            [shell, "-lc", f'printf "{LOGIN_PATH_MARK}%s{LOGIN_PATH_MARK}" "$PATH"'],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return
+    # A profile may print its own lines around the marked PATH.
+    _, _, rest = out.partition(LOGIN_PATH_MARK)
+    login, found, _ = rest.partition(LOGIN_PATH_MARK)
+    if found and login:
+        os.environ["PATH"] = os.pathsep.join(dict.fromkeys(login.split(os.pathsep) + current))
+
+
 async def _handle_cli_web_ui(restart: bool = False) -> None:
     """Handle --web-ui: spawn the engine + browser UI, block until Ctrl+C.
 
@@ -2336,6 +2367,7 @@ async def _handle_cli_web_ui(restart: bool = False) -> None:
     print("\n  starting kollab web ui...")
     print(f"  engine: {engine_url}")
     print(f"  ui:     http://127.0.0.1:{webui_port}\n")
+    _adopt_login_path()  # before the engine starts: every agent and voice inherits it
 
     # Kollab.app's runtime runs isolated (-I -B, see scripts/desktop_release.py);
     # its children run the same way, or a pip --user kollab in ~/.local or a
