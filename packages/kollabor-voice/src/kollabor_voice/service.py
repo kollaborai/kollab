@@ -239,6 +239,10 @@ class VoiceService:
                 state = "error"
             elif not self.owner:
                 state = "off"
+            elif not self.owner.get("capture", True):
+                # A room's lease: its audio comes over audio.sock, never this mic, so
+                # "starting" would keep a newer room's worker waiting to claim.
+                state = "ready"
             elif age is not None and age < 1.5:
                 state = "listening"
             else:

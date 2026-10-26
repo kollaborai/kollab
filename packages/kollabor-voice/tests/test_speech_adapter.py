@@ -278,6 +278,20 @@ def test_room_lease_does_not_open_the_local_microphone(service):
     assert run(scenario()) is None and not opened
 
 
+def test_a_newer_room_sees_ready_while_an_older_room_holds_the_lease(service):
+    # A room whose browser left keeps the lease. The next room's worker waits for
+    # ready before it claims: "starting" kept it out for 20 minutes, no room at all.
+    async def scenario():
+        await service.dispatch(
+            {"op": "claim", "client_id": "livekit:old", "claim_id": "c1", "activated_at": 1, "capture": False}
+        )
+        return await service.dispatch({"op": "status"}), await SpeechAdapter(DirectClient(service)).readiness()
+
+    status, readiness = run(scenario())
+    assert status["owner"] == "livekit:old" and status["state"] == "ready"
+    assert readiness.state == "ready"
+
+
 def test_a_cancelled_synthesis_task_still_drains_the_generator(service):
     service.speech = FakeSpeech(chunks=500)
 
