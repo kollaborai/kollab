@@ -50,7 +50,7 @@ export const SETTINGS_TABS: readonly {
   {
     id: "prompts",
     label: "Prompts",
-    scope: "Per-user overrides, saved in ~/.kollab/prompt-overrides",
+    scope: "Shared libraries and each role's picks, saved in ~/.kollab",
   },
 ];
 

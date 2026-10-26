@@ -25,6 +25,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from .prompt_composition import (
+    DEFAULTS_LIBRARY,
+    active_variant,
+    added_sections_text,
+    is_base_section,
+    library_store,
+)
 from .prompt_overrides import DEFAULT_BUNDLE, get_default_store
 
 if TYPE_CHECKING:
@@ -129,6 +136,7 @@ class PromptRenderer:
         skip_volatile: bool = False,
         prompt_bundle: Optional[str] = None,
         override_store: Optional[Any] = None,
+        variant: Optional[str] = None,
     ):
         """Initialize the prompt renderer.
 
@@ -163,6 +171,35 @@ class PromptRenderer:
         # this bundle before the file on disk is read.
         self.prompt_bundle = prompt_bundle or DEFAULT_BUNDLE
         self.override_store = override_store
+        # Composition variant to render; None picks it from the active provider.
+        self.variant = variant
+        self._excluded: Optional[frozenset] = None
+
+    def active_provider(self) -> Optional[str]:
+        """Provider of the active profile, which picks the role's prompt variant."""
+        try:
+            profile = (
+                self.profile_manager.get_active_profile()
+                if self.profile_manager
+                else None
+            )
+            provider = getattr(profile, "provider", None)
+            return str(getattr(provider, "value", provider)) if provider else None
+        except Exception:
+            return None
+
+    def _excluded_keys(self) -> frozenset:
+        """_base section keys this role's active variant leaves out."""
+        if self._excluded is None:
+            try:
+                variant = active_variant(
+                    self.prompt_bundle, self.active_provider(), self.variant
+                )
+                self._excluded = frozenset(variant.get("exclude", []))
+            except Exception as exc:
+                logger.warning(f"Prompt composition for {self.prompt_bundle} failed: {exc}")
+                self._excluded = frozenset()
+        return self._excluded
 
     def _ensure_alias_utils(self) -> Optional[Dict[str, Any]]:
         """Ensure shell alias utilities are loaded."""
@@ -1062,10 +1099,18 @@ class PromptRenderer:
             # file to a section key (stem) namespaced by this render's
             # prompt bundle; seeded into the cache so the rebase loop and
             # the render loop see it exactly once.
+            # A role's composition may drop a _base section; a defaults-library
+            # edit replaces a _base section for every role a role override
+            # does not cover.
             store = self.override_store or get_default_store()
-            override = store.get_override(
-                self.prompt_bundle, store.section_key_for_path(path)
-            )
+            key = store.section_key_for_path(path)
+            base_section = is_base_section(path)
+            if base_section and key in self._excluded_keys():
+                self._file_cache[file_path] = ""
+                return ""
+            override = store.get_override(self.prompt_bundle, key)
+            if override is None and base_section:
+                override = library_store().get_override(DEFAULTS_LIBRARY, key)
             if override is not None:
                 content = self._finalize_override_content(str(path), override)
                 self._file_cache[file_path] = content
@@ -1154,6 +1199,7 @@ def render_system_prompt(
     skip_volatile: bool = False,
     prompt_bundle: Optional[str] = None,
     override_store: Optional[Any] = None,
+    variant: Optional[str] = None,
 ) -> str:
     """Convenience function to render a system prompt.
 
@@ -1167,6 +1213,7 @@ def render_system_prompt(
         conversation_logger: Optional conversation logger for log path in active_llm tag.
         prompt_bundle: Bundle name for prompt section override lookup.
         override_store: Override store to consult (defaults to the shared store).
+        variant: Composition variant to render; None picks it by provider.
 
     Returns:
         Processed prompt with commands replaced by their output and
@@ -1182,5 +1229,18 @@ def render_system_prompt(
         skip_volatile=skip_volatile,
         prompt_bundle=prompt_bundle,
         override_store=override_store,
+        variant=variant,
     )
+    # A whole role prompt (callers name its bundle; the per-turn rail does
+    # not) ends with the library sections the role adds, after _base.
+    if prompt_bundle is not None:
+        try:
+            extra = added_sections_text(
+                prompt_bundle, renderer.active_provider(), variant
+            )
+        except Exception as exc:
+            logger.warning(f"Library sections for {prompt_bundle} failed: {exc}")
+            extra = ""
+        if extra:
+            prompt_content = prompt_content.rstrip() + "\n\n" + extra + "\n"
     return renderer.render(prompt_content)
