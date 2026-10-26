@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-25
+
 ### Changed
 - Voice: Parakeet v3 is the default transcription engine on Apple silicon Macs,
   since voice in the Web UI transcribes only with it. Whisper Base stays the
