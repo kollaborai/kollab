@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-10-26
+
+### Fixed
+- A Web UI voice room whose page was closed now ends after a minute without
+  it: its worker stops and gives the voice service back. A reload within that
+  minute rejoins the same room (#336).
+- A voice start replaces an idle voice service that still runs an older
+  Kollab's code, so a release that changes voice takes effect without
+  stopping the service by hand. `/voice status` shows the service's code
+  (#336).
+- The Engine asks its own LiveKit server who is in a room directly, never
+  through `HTTP_PROXY` or the system proxy, which could keep a closed room
+  alive or end one still in use (#336).
+
 ## [0.18.4] - 2026-10-26
 
 ### Fixed
