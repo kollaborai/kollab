@@ -13,8 +13,9 @@ ANSI color/control sequences and tool-renderer fragments such as `Tool result:`
 headers. A Web UI that displays this value as plain text exposes escape codes and
 implementation details instead of a readable session timeline.
 
-The terminal/CLI contract must remain unchanged. This spec defines a browser
-boundary that returns normalized data rather than reusing terminal capture text.
+The socket-level terminal API remains unchanged. This spec defines normalized
+browser data and a shared transcript view rather than reusing terminal capture
+text. The CLI and plugin transcript defaults are specified below.
 
 ## Goals
 
@@ -24,21 +25,26 @@ boundary that returns normalized data rather than reusing terminal capture text.
 - Keep ANSI/control sequences out of browser payloads.
 - Avoid truncating a useful structured response merely because terminal preview
   formatting was applied first.
-- Keep `hub_capture` CLI/XML output backwards compatible.
+- Share bounded transcript rendering across `kollab --hub capture`,
+  `/hub capture`, and the `hub_capture` tool while preserving `--raw` terminal
+  output.
 
 ## Non-goals
 
 - Replacing the existing terminal/tmux capture implementation.
-- Exposing private conversation history or credentials.
+- Reconstructing persisted conversation history, system prompts, or credentials.
 - Adding a second agent execution or polling protocol.
 - Reproducing terminal colors in the browser.
 
 ## Proposed contract
 
 Add opt-in `plain` and `json` formats to the existing hub capture/console
-consumer path. The default terminal format remains unchanged. Browser/API
-clients select `format=plain` or `format=json` (the `/hub console` surface uses
-the same opt-in formats). The JSON mode returns:
+consumer path. The socket-level default terminal format remains unchanged.
+Browser/API clients select `format=plain` or `format=json` (the `/hub console`
+surface uses the same opt-in formats). The socket JSON format returns normalized
+event records as shown below. The CLI, `/hub capture`, and `hub_capture` tool use
+the same bounded transcript renderer by default; `kollab --hub capture ...
+--raw` explicitly selects the existing terminal path.
 
 ```json
 {
@@ -67,9 +73,12 @@ the same opt-in formats). The JSON mode returns:
 ```
 
 `kind` is one of `text`, `tool-call`, `tool-result`, `status`, `error`, or
-`message`. Unknown source records must degrade to `text` without failing the
-request. `text` is already normalized to UTF-8, stripped of ANSI CSI/OSC/control
-sequences, and has terminal carriage-return redraws resolved.
+`message`. User and assistant message records retain their `role` when available.
+Unknown source records must degrade to `text` without failing the request. `text`
+is already normalized to UTF-8, stripped of ANSI CSI/OSC/control sequences, and
+has terminal carriage-return redraws resolved. The transcript renderer labels
+user/assistant messages, tool calls/results with status, and status/error events;
+it omits tool arguments and reasoning events.
 
 The `plain` mode returns the same normalized content as newline-delimited UTF-8
 text, without JSON metadata or terminal color/control sequences. It is intended
@@ -92,15 +101,25 @@ its response shape must be stable enough for a later native event source.
    must never infer order from an incidental array reversal.
 7. Apply pagination before serialization limits. Return `truncated` and
    `next_cursor` rather than silently clipping a record.
+8. The common transcript renderer respects line and character budgets and keeps
+   the pagination marker when a record or page is truncated.
+9. The Hub display tap is a bounded 200-event in-memory ring. Mark capture as
+   truncated when older events have been evicted. `next_cursor` is process-local
+   and must not be persisted or reused after an engine restart.
 
 ## Compatibility and security
 
-- Existing `/hub capture`, `<hub_capture>`, and CLI `--hub capture` continue to
-  return the current terminal preview format when no format is supplied.
-- `plain` and `json` are explicitly opt-in and may be selected by `/hub console`
-  and browser/API consumers without changing the default terminal contract.
+- CLI `--hub capture`, `/hub capture`, and `<hub_capture>` use the bounded
+  transcript renderer by default. `kollab --hub capture ... --raw` retains the
+  prior terminal output path.
+- Socket `format=plain`, `format=json`, and terminal requests retain their
+  existing API semantics; the `/hub console` and browser/API opt-in formats do
+  not change.
 - The Web UI endpoint is scoped to identities visible to the requesting session
   and must reject unknown/offline targets with a typed 404 response.
+
+- The shared transcript includes user-authored text from bounded in-memory
+  capture events and is sensitive; it omits tool arguments and reasoning.
 - Do not include environment variables, access tokens, prompt secrets, or raw
   relay payloads in normalized records.
 - Escape text at the React rendering boundary; never inject captured text as HTML.
@@ -124,7 +143,9 @@ Backend:
 - Wrapper removal and metadata extraction.
 - Structured tool-call/tool-result mapping and unknown-record fallback.
 - Pagination/cursor and typed unknown/offline target errors.
-- Existing CLI/XML hub_capture snapshots remain unchanged.
+- CLI default and raw dispatch, transcript labels, tool errors, truncation,
+  ANSI/OSC/control cleanup, and user-message content.
+- Explicit plain and terminal transport snapshots remain unchanged.
 
 Frontend:
 
@@ -139,5 +160,6 @@ Frontend:
 1. Add normalization helpers and backend response tests.
 2. Add a Web UI endpoint or JSON mode behind the existing session API.
 3. Switch the Web UI capture panel to normalized records and add fixtures.
-4. Compare terminal `hub_capture` snapshots before/after; no CLI output changes.
+4. Compare CLI default and `--raw` snapshots; only the default changes to the
+   shared transcript, and the raw terminal path remains unchanged.
 5. Remove any temporary raw-stream fallback after one release cycle.

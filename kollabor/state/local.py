@@ -27,6 +27,8 @@ from typing import Any, Callable, List
 
 from kollabor.user_input_source import UserInputSource
 from kollabor_agent.runtime import get_agent_tool_scope
+from kollabor_agent.voice_admission import validate_voice_admission_context
+from kollabor_agent.yes_approval import YesApprovals
 from kollabor_ai.message_content import contains_image_content, content_to_text
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -181,6 +183,59 @@ def _web_command_output(result: Any, command_name: str) -> str:
     if footer:
         lines.extend(["", f"_{footer}_"])
     return "\n".join(lines)
+
+
+_MIN_MATCH = 3  # words a later reply's start must share with the played text
+
+
+def _played_cut(played: str, replies: list[str]) -> tuple[int, str] | None:
+    """Where playback of a voice turn's replies stopped: (reply index, its heard part).
+
+    `played` is what reached the speaker, the turn's replies in order, up to the
+    talk-over. A later reply is found by its first words, at least _MIN_MATCH
+    of them (all of a shorter one), so a common word at the very end of the
+    played text never starts one. None when nothing was heard.
+    """
+    spans = list(re.finditer(r"\w+", played.lower()))
+    heard = [m.group() for m in spans]
+    cut: tuple[int, int] | None = None  # (reply index, played word it starts at)
+    after = 0  # the first played word past the last reply found
+    for index, reply in enumerate(replies):
+        words = re.findall(r"\w+", reply.lower())
+        if not words or not heard:
+            continue  # a tool call with no prose says nothing
+        start = 0  # playback starts with the first reply that speaks
+        if cut is not None:
+
+            def starts_at(i: int) -> bool:
+                size = min(4, len(words), len(heard) - i)
+                return heard[i : i + size] == words[:size]
+
+            need = min(_MIN_MATCH, len(words))
+            start = next((i for i in range(after, len(heard) - need + 1) if starts_at(i)), None)
+            if start is None:
+                break
+        cut = (index, start)
+        # The next reply starts past the words of this one that were heard, so a
+        # repeated phrase or a short reply never matches inside it.
+        said = 0
+        while said < len(words) and start + said < len(heard) and heard[start + said] == words[said]:
+            said += 1
+        after = start + max(1, said)
+    return None if cut is None else (cut[0], played[spans[cut[1]].start() :])
+
+
+def _reply_text(message: Any) -> str:
+    """What a reply shows and says: an XML tool reply keeps its tags in content."""
+    shown = (message.metadata or {}).get("display_content")
+    return shown if isinstance(shown, str) else content_to_text(message.content)
+
+
+def _set_reply_text(message: Any, text: str) -> None:
+    if "display_content" in (message.metadata or {}):
+        message.metadata["display_content"] = text  # the tags stay for the model
+    else:
+        message.content = text
 
 
 class LocalStateService(StateService):
@@ -2774,6 +2829,14 @@ class LocalStateService(StateService):
         instead of acknowledging a turn that never entered the pipeline.
         """
         metadata = message if isinstance(message, dict) else {}
+        input_context = origin_context or metadata.get("origin_context")
+        claims_voice_origin = (
+            isinstance(input_context, dict)
+            and input_context.get("source") == "livekit_voice"
+        )
+        is_voice_origin = validate_voice_admission_context(input_context)
+        if claims_voice_origin and not is_voice_origin:
+            return {"accepted": False, "reason": "invalid voice admission capability"}
         text = content_to_text(message).strip()
         if not text:
             return {"accepted": False, "reason": "empty message"}
@@ -2786,7 +2849,7 @@ class LocalStateService(StateService):
         # control subcommands must stay available while a turn is
         # processing, and image-bearing /goal input must still reach
         # command parsing with its attachments promoted durably.
-        goal_handled = self._try_goal_command(text, message)
+        goal_handled = None if is_voice_origin else self._try_goal_command(text, message)
         if goal_handled is not None:
             return goal_handled
 
@@ -2802,7 +2865,9 @@ class LocalStateService(StateService):
         # the syntax in the chat composer so messaging an online agent is as
         # direct as typing ``@lapis message here`` or ``@broadcast hello``.
         hub_mention = (
-            parse_hub_mention(text) if not contains_image_content(message) else None
+            parse_hub_mention(text)
+            if not is_voice_origin and not contains_image_content(message)
+            else None
         )
         if hub_mention is not None:
             target, content = hub_mention
@@ -2827,7 +2892,8 @@ class LocalStateService(StateService):
             except Exception:
                 parser = executor = None
         if (
-            not contains_image_content(message)
+            not is_voice_origin
+            and not contains_image_content(message)
             and parser is not None
             and executor is not None
             and callable(getattr(parser, "is_slash_command", None))
@@ -2847,9 +2913,8 @@ class LocalStateService(StateService):
                 submit_kwargs["request_id"] = request_id or metadata["request_id"]
             if thread_id is not None or metadata.get("thread_id") is not None:
                 submit_kwargs["thread_id"] = thread_id or metadata["thread_id"]
-            context = origin_context or metadata.get("origin_context")
-            if context is not None:
-                submit_kwargs["origin_context"] = dict(context)
+            if input_context is not None:
+                submit_kwargs["origin_context"] = dict(input_context)
             submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)
@@ -3104,19 +3169,138 @@ class LocalStateService(StateService):
                 stop_reason="error",
             )
 
-    async def cancel_current_request(self) -> dict[str, Any]:
+    async def cancel_current_request(self, voice_turn_id: str | None = None) -> dict[str, Any]:
         """Cancel the currently processing LLM request.
 
         Delegates to LLMCoordinator.cancel_current_request(). Safe to
         call when nothing is processing -- it's a no-op in that case.
+        With `voice_turn_id`, only that voice turn: a typed turn or a hub
+        wake that started after it is not the voice turn's to stop.
         """
         llm = self._llm_service
         if llm is None:
             return {"cancelled": False, "reason": "no llm service"}
+        if voice_turn_id is not None:
+            bus = self._event_bus
+            acp = bus.get_service("acp_orchestrator") if bus is not None else None
+            if acp is not None and acp.active:
+                if acp.runner.cancel_queued(voice_turn_id):  # it never started: nothing runs for it
+                    return {"cancelled": True, "queued": True}
+                running = getattr(getattr(acp.runner, "_active_context", None), "request_id", None)
+            else:
+                running = getattr(getattr(llm, "_queue_processor", None), "open_voice_turn", None)
+            if running != voice_turn_id:
+                return {"cancelled": False}
         was_processing = getattr(llm, "is_processing", False)
         if hasattr(llm, "cancel_current_request"):
             llm.cancel_current_request()
         return {"cancelled": was_processing}
+
+    async def record_interrupted_voice_reply(
+        self, turn_id: str, text: str
+    ) -> dict[str, Any]:
+        """Keep the part of a voice reply that was played before a talk-over.
+
+        The worker posts what reached the speaker, possibly nothing. Once the
+        talked-over turn has finished unwinding, the history holds what the
+        listener heard, once per voice turn: the reply playback stopped in is cut
+        to it and marked interrupted, and the prose after it goes (a later tool
+        call stays, its tools ran). The conversation log gets the same cut.
+
+        Never waits on the turn: RPCs answer in order, so a Stop or an approval
+        answer sent after this one would wait too. The cut is queued on the turn
+        ({"recorded": False, "pending": True}) and lands once no round of it is
+        left, before any later round; open windows hear `voice_reply_cut`.
+        """
+        llm = self._llm_service
+        text = (text or "").strip()
+        if llm is None or not turn_id:
+            return {"recorded": False}
+        approvals = getattr(getattr(llm, "tool_executor", None), "yes_approvals", None)
+        if isinstance(approvals, YesApprovals):
+            approvals.reply_cut(turn_id)  # its ask was never heard whole: no yes answers it
+        queue = getattr(llm, "_queue_processor", None)
+        if queue is None:
+            return await self._cut_voice_reply(llm, turn_id, text)
+
+        def conversation():  # the live one: /resume and a new session change it
+            return getattr(getattr(llm, "conversation_logger", None), "session_id", None)
+
+        session = conversation()
+
+        async def cut() -> None:
+            if conversation() != session:
+                return  # the talked-over turn is not in this conversation
+            if (await self._cut_voice_reply(llm, turn_id, text)).get("recorded"):
+                from kollabor_tui.display_tap import publish_semantic
+
+                publish_semantic(self._event_bus, "voice_reply_cut", turn_id=turn_id)
+
+        # Under the turn lock, so the cut never lands between a tool call and its result.
+        queue.after_turn(turn_id, cut)
+        return {"recorded": False, "pending": True}
+
+    async def _cut_voice_reply(self, llm: Any, turn_id: str, text: str) -> dict[str, Any]:
+        from kollabor_events.data_models import ConversationMessage
+
+        history = llm.conversation_history
+        if any(
+            m.role == "assistant" and (m.metadata or {}).get("turn_id") == turn_id
+            for m in history
+        ):
+            return {"recorded": False, "duplicate": True}
+        said = [
+            m
+            for m in history
+            if m.role == "assistant" and (m.metadata or {}).get("voice_turn_id") == turn_id
+        ]
+        if said:
+            cut = _played_cut(text, [_reply_text(m) for m in said])
+            edits: dict[int, str | None] = {}  # reply position: its new text, None drops it
+            for position, message in enumerate(said):
+                metadata = message.metadata or {}
+                if cut is not None and position < cut[0]:
+                    continue  # heard whole
+                if cut is not None and position == cut[0]:
+                    _set_reply_text(message, cut[1])
+                    message.metadata = {**metadata, "interrupted": True, "turn_id": turn_id}
+                    edits[position] = cut[1]
+                elif metadata.get("tool_calls") or metadata.get("xml_tool_calls"):
+                    _set_reply_text(message, "")  # never heard, but its tools ran
+                    edits[position] = ""
+                else:
+                    history.remove(message)  # never heard
+                    edits[position] = None
+            rewrite = getattr(llm.conversation_logger, "rewrite_voice_turn", None)
+            if edits and callable(rewrite):
+                try:  # /resume and the engine's disk-seeded history read the log
+                    dropped = await rewrite(turn_id, len(said), edits) or {}
+                except Exception:
+                    logger.warning("could not log a voice talk-over cut", exc_info=True)
+                    dropped = {}
+                # The next record threads under what is left, never a dropped one.
+                while llm.current_parent_uuid in dropped:
+                    llm.current_parent_uuid = dropped[llm.current_parent_uuid]
+            return {"recorded": bool(edits), "replaced": bool(edits)}
+        if not text:
+            return {"recorded": False}
+        llm._add_conversation_message(
+            ConversationMessage(
+                role="assistant",
+                content=text,
+                metadata={"interrupted": True, "source": "voice", "turn_id": turn_id},
+            ),
+            parent_uuid=llm.current_parent_uuid,
+        )
+        try:  # the JSONL feeds /resume and the engine's disk-seeded history
+            llm.current_parent_uuid = await llm.conversation_logger.log_assistant_message(
+                text,
+                parent_uuid=llm.current_parent_uuid,
+                model=getattr(getattr(llm, "api_service", None), "model", None),
+            )
+        except Exception:
+            logger.warning("could not log an interrupted voice reply", exc_info=True)
+        return {"recorded": True}
 
     # === Resume (phase 4.5 step 7) ===
 
@@ -3198,7 +3382,7 @@ class LocalStateService(StateService):
         except Exception as e:
             raise ValueError(f"ConversationMessage import failed: {e}")
 
-        from kollabor_voice.observer import turn_display_texts
+        from kollabor_ai.response_channels import turn_display_texts
 
         loaded_messages: list[Any] = []
         display_messages: list[dict[str, Any]] = []

@@ -730,7 +730,7 @@ class TerminalLLMChat:
                 else:
                     response = await self._try_attach_permission_prompt(details)
                     if response is None:
-                        response = await self.renderer.layout_manager.show_permission_prompt(details)
+                        response = await self._show_terminal_permission_prompt(details)
                 # Convert to PermissionDecision using response handler. ACP
                 # attach clients return an opaque option ID; map it back to
                 # the enum kind only for the native decision machinery.
@@ -778,8 +778,21 @@ class TerminalLLMChat:
                     }
                 return decision
 
+            def cancel_confirmations() -> None:  # an ACP Stop
+                self._attach_permission_bridge.cancel_pending()
+                self.renderer.layout_manager.cancel_permission_prompt()
+
+            def park_confirmation(tool_id: str) -> None:
+                # Its turn went on: the terminal's prompt would answer the next
+                # message's keys, so it closes; the card stays open.
+                self._attach_permission_bridge.park(tool_id)
+                self.renderer.layout_manager.cancel_permission_prompt()
+
             self.permission_manager.set_confirmation_callback(
-                confirmation_callback_wrapper
+                confirmation_callback_wrapper,
+                cancel=cancel_confirmations,
+                park=park_confirmation,
+                settle=self._attach_permission_bridge.try_settle_response,
             )
             logger.info("Permission confirmation callback wired to layout manager")
         else:
@@ -2544,8 +2557,9 @@ class TerminalLLMChat:
                             ]
                         )
 
-                elif etype in ("permission_granted", "permission_denied"):
-                    # Another window (the web UI, a second terminal) answered.
+                elif etype in ("permission_granted", "permission_denied", "permission_parked"):
+                    # Another window (the web UI, a second terminal) answered, or
+                    # its turn went on and only its card stays open.
                     self._attach_permission_bridge.handle_client_resolution(
                         layout_manager=self.renderer.layout_manager, event=event
                     )
@@ -2674,6 +2688,15 @@ class TerminalLLMChat:
         self._startup_complete = True
         self._startup_ready.set()
 
+    async def _show_terminal_permission_prompt(self, details: Dict[str, Any]):
+        """This terminal's own prompt. One its turn already left open never shows:
+        a terminal prompt never outlives its turn (its keys would answer it)."""
+        from kollabor_events.permissions_models import ConfirmationResponse
+
+        if details.get("parked"):
+            return ConfirmationResponse.CANCEL
+        return await self.renderer.layout_manager.show_permission_prompt(details)
+
     async def _try_attach_permission_prompt(self, details: Dict[str, Any]):
         """Share ACP prompts with attached clients and the local terminal."""
         if not self.event_bus:
@@ -2697,7 +2720,9 @@ class TerminalLLMChat:
             display_tap=display_tap,
             rpc_server=rpc_server,
             details=dict(details),
-            timeout=300,
+            # A native prompt parks at 290 s and its card stays open; ACP's
+            # gives up after 5 min.
+            timeout=300 if is_acp else None,
             local_layout_manager=local_layout,
         )
 

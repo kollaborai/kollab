@@ -362,7 +362,7 @@ async def test_service_loads_one_local_classifier_and_routes_to_it(service):
     status = await client.call("classifier_prepare", model="qwen")
     assert status["name"] == "qwen" and status["state"] == "ready"
     assert calls[1:] == [("close", "laya"), ("prepare", "qwen")]
-    assert (await client.call("status"))["classifier"]["name"] == "qwen"
+    assert "classifier" not in await client.call("status")  # voice status stays classifier-free
 
     local = LocalClassifier(client, lambda: auth, "qwen")
     reply = await local.answer("Check the build.", "Sorry, was that for me?", "Yes.")

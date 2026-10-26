@@ -277,16 +277,9 @@ def is_machine_network_state_dir(state_dir: Path, root: Path | None = None) -> b
     living in a test root or another machine's checkout never touches this
     machine's records.
     """
-    base = kollab_root(root)
-    try:
-        state_dir = Path(state_dir).resolve()
-    except OSError:
-        return False
-    if state_dir.parent == base / "network":
-        return True
-    if state_dir.parent.name == "networks" and state_dir.parent.parent.parent == base / "workspaces":
-        return True
-    return False
+    from .relay_state import is_machine_network_state_dir as owns_state
+
+    return owns_state(state_dir, kollab_root(root))
 
 
 def mcp_settings_path(root: Path | None = None) -> Path:

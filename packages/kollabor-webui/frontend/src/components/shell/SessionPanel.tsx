@@ -456,6 +456,25 @@ export function SessionPanel({
           </SelectContent>
         </Select>
       </div>
+      {[
+        session.approval_mode_warning,
+        session.persistence_warning,
+        session.deletion_warning,
+      ].some(Boolean) ? (
+        <div className="flex flex-col gap-1">
+          {[
+            session.approval_mode_warning,
+            session.persistence_warning,
+            session.deletion_warning,
+          ]
+            .filter(Boolean)
+            .map((warning) => (
+              <p key={warning} className="text-destructive text-xs">
+                {warning}
+              </p>
+            ))}
+        </div>
+      ) : null}
       <Separator />
       <div className="flex flex-col gap-0.5">
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(() => { setMcpOpen(true); void loadMcp(); })}>

@@ -1,8 +1,8 @@
 """Voice classifier log: each decision on the left, what it saw and said on the right.
 
-Opened by ``/voice classifier``. Reads ``voice_plugin.classifier_log()``,
-the plugin's record of every classifier call (oldest first), and refreshes
-while open so a new decision shows up as you speak.
+Not part of voice: nothing in voice records or opens it. A feature that runs a
+classifier hands it an object with ``classifier_log()`` (every call, oldest
+first) and ``classifier_name``; it refreshes while open.
 """
 
 import logging
@@ -14,9 +14,11 @@ from kollabor_voice.classifiers import CLASSIFIERS, available_classifiers
 from kollabor_tui.altview.base import AltView, AltViewMetadata
 from kollabor_tui.design_system import C, T, solid, solid_fg, wrap_text
 from kollabor_tui.key_parser import KeyPress
-from kollabor_tui.status.core_widgets import VOICE_DECISION_WORDS
 
 logger = logging.getLogger(__name__)
+
+# What a decision is called in the list, e.g. "sent" for respond.
+VOICE_DECISION_WORDS = {"respond": "sent", "ignore": "ignored", "defer": "unsure"}
 
 
 def _word(entry: Dict[str, Any]) -> str:

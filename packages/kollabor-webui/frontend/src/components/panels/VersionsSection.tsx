@@ -20,10 +20,15 @@ export function VersionsSection({ api }: { api: EngineApi }) {
     <section aria-label="Versions" className="grid gap-2 border-t pt-3">
       <h4 className="text-muted-foreground text-xs font-medium">Versions</h4>
       <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[8rem_minmax(0,1fr)]">
-        {versionRows(config, __APP_VERSION__).map((row) => (
+        {versionRows(config, __APP_VERSION__, {
+          branch: __KOLLAB_BUILD_BRANCH__,
+          sha: __KOLLAB_BUILD_SHA__,
+        }).map((row) => (
           <span key={row.label} className="contents">
             <span className="text-muted-foreground">{row.label}</span>
-            <span className="font-mono break-all">{row.value}</span>
+            <span className="font-mono break-all" title={row.title}>
+              {row.value}
+            </span>
           </span>
         ))}
       </div>

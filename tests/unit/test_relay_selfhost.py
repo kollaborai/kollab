@@ -135,7 +135,7 @@ def test_bad_unix_socket_settings_are_refused_before_anything_is_created(argv, c
 
 def test_every_printed_config_reaches_the_relay_over_the_socket(tmp_path):
     settings = make_settings(tmp_path, unix_socket=Path(SOCKET), unix_socket_group="www-data")
-    assert selfhost.nginx_config(settings).count(f"proxy_pass http://unix:{SOCKET};") == 4
+    assert selfhost.nginx_config(settings).count(f"proxy_pass http://unix:{SOCKET};") == 6
     assert f"reverse_proxy unix/{SOCKET} {{" in selfhost.caddy_config(settings)
     unit = selfhost.systemd_unit(settings)
     # The unit makes the directory (0755: the proxy must traverse it; the socket file's 0660 is the lock)
@@ -200,26 +200,32 @@ def locations(config: str) -> list[str]:
     return [line.split()[-2] for line in config.splitlines() if line.startswith("location ")]
 
 
-def test_nginx_forwards_the_four_routes_and_nothing_else(tmp_path):
+def test_nginx_forwards_only_agent_and_phone_route_families(tmp_path):
     config = selfhost.nginx_config(make_settings(tmp_path))
     assert locations(config) == [
         "/.well-known/agent-keys.json",
         "/relay/v1/health",
         "/relay/v1/ws",
         "/relay/v1/enrollment/",
+        "/relay/v1/phone/ws",
+        "/relay/v1/phone/",
     ]
-    assert config.count("proxy_pass http://127.0.0.1:9078;") == 4
+    assert config.count("proxy_pass http://127.0.0.1:9078;") == 6
     assert config.count("limit_except POST") == 1
-    assert config.count("proxy_set_header X-Real-IP $remote_addr;") == 2
+    assert config.count("proxy_set_header X-Real-IP $remote_addr;") == 4
     assert 'proxy_set_header Connection "upgrade";' in config
     assert "\nlocation / " not in config
 
 
 def test_nginx_caps_connections_per_address_on_the_websocket_only(tmp_path):
     config = selfhost.nginx_config(make_settings(tmp_path))
-    assert config.count("limit_conn ") == 1
+    assert config.count("limit_conn ") == 2
     websocket = config.split("location = /relay/v1/ws {")[1].split("\n}")[0]
     assert "limit_conn kollab_agents_example_com 64;" in websocket  # the relay's own per-address cap
+    phone_socket = config.split("location = /relay/v1/phone/ws {")[1].split("\n}")[0]
+    assert "limit_conn kollab_agents_example_com 64;" in phone_socket
+    phone_assets = config.split("location /relay/v1/phone/ {")[1].split("\n}")[0]
+    assert "limit_conn " not in phone_assets
     # The zone is http-level, so in a paste meant for a server block it is a comment that says where it goes.
     assert zone_line(config) == "limit_conn_zone $binary_remote_addr zone=kollab_agents_example_com:10m;"
     assert not [line for line in config.splitlines() if line.startswith("limit_conn_zone")]

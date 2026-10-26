@@ -12,7 +12,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.tool_executor import ToolExecutionResult
@@ -27,12 +27,21 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import EventType
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.status.core_widgets import get_token_io_state
+from kollabor_tui.turn_context import current_turn
 
 from .tool_call_contract import is_text_written_call, resolve_text_tool_call
 from .tool_output_budget import (
     build_tool_output_store,
     pack_tool_history_and_results,
 )
+from .voice_admission import (
+    DEVICE_VOICE_SOURCE,
+    is_voice_origin,
+    revoke_voice_admission_context,
+    validate_voice_admission_context,
+    validate_voice_origin,
+)
+from .yes_approval import YesApprovals
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +54,84 @@ class QueuedInput:
 
     content: MessageContent
     voice: dict
+    origin_context: dict[str, Any] | None = None
+
+
+def merge_livekit_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    contexts = [
+        item.origin_context
+        for item in messages
+        if isinstance(item, QueuedInput)
+        and isinstance(item.origin_context, dict)
+        and item.origin_context.get("source") == "livekit_voice"
+    ]
+    if not contexts:
+        return None
+
+    def fail_closed() -> dict[str, Any]:
+        for context in contexts:
+            revoke_voice_admission_context(context)
+        # No grant, but the newest voice turn's id: its reply stream takes only
+        # events stamped with it, and would never end.
+        return _invalid_voice_context(_voice_turn_id(contexts[-1]))
+
+    # Any plain or untrusted item mixed into the batch invalidates voice
+    # authority for the combined LLM turn.
+    if len(contexts) != len(messages):
+        return fail_closed()
+    if any(not validate_voice_admission_context(context) for context in contexts):
+        return fail_closed()
+
+    signatures = {
+        (
+            context.get("voice_session_id"),
+            context.get("generation"),
+            context.get("turn_id"),
+            context.get("voice_tool_policy"),
+        )
+        for context in contexts
+    }
+    if len(signatures) != 1:
+        return fail_closed()
+
+    selected_context = dict(contexts[-1])
+    selected_capability = selected_context.get("admission_capability")
+    for context in contexts[:-1]:
+        if context.get("admission_capability") != selected_capability:
+            revoke_voice_admission_context(context)
+    return selected_context
+
+
+def merge_device_voice_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    """The /voice plugin's batch: its turn's grant, or fail closed (every tool refused).
+
+    Any /voice item makes the turn a voice turn, so the voice policy applies
+    whether or not its grant holds: one without a valid capability (never
+    admitted, mixed with typed input, or two turns at once) runs no tool.
+    """
+    items = [
+        m
+        for m in messages
+        if isinstance(m, QueuedInput)
+        and (m.voice or (m.origin_context or {}).get("source") == DEVICE_VOICE_SOURCE)
+    ]
+    if not items:
+        return None
+    contexts = [item.origin_context for item in items]
+    if (
+        len(items) == len(messages)
+        and all(validate_voice_origin(c) and c.get("source") == DEVICE_VOICE_SOURCE for c in contexts)
+        and len({c.get("turn_id") for c in contexts}) == 1
+    ):
+        return dict(contexts[-1])
+    for context in contexts:
+        revoke_voice_admission_context(context)
+    return _invalid_device_voice_context()
+
+
+def merge_voice_origin_contexts(messages: List[Any]) -> dict[str, Any] | None:
+    """The tool context of a batch: a LiveKit room's turn, a /voice turn, or none."""
+    return merge_livekit_origin_contexts(messages) or merge_device_voice_contexts(messages)
 
 
 def _config_int(config: Any, key: str, default: int) -> int:
@@ -229,6 +316,28 @@ def _xml_tool_call_entries(all_tools: List[Dict[str, Any]]) -> List[Dict[str, An
     return entries
 
 
+def _voice_turn_id(origin: Any) -> str | None:
+    """The LiveKit voice turn an origin context belongs to, if any."""
+    if isinstance(origin, dict) and origin.get("source") == "livekit_voice":
+        turn_id = origin.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    return None
+
+
+def _invalid_voice_context(turn_id: str | None) -> dict[str, Any]:
+    """A voice batch that failed closed: every tool refused, its events still stamped."""
+    context: dict[str, Any] = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+    if turn_id:
+        context["turn_id"] = turn_id
+    return context
+
+
+def _invalid_device_voice_context() -> dict[str, Any]:
+    """A /voice batch that failed closed: every tool refused."""
+    return {"source": DEVICE_VOICE_SOURCE, "voice_tool_policy": "invalid"}
+
+
 def _xml_display_metadata(
     all_tools: List[Dict[str, Any]],
     response: str,
@@ -393,6 +502,11 @@ class QueueProcessor:
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
+        self.active_origin_context: dict[str, Any] | None = None
+        self._voice_turn_token: Any = None  # current_turn stamp (_stamp_voice_turn)
+        self._open_voice_turn: str | None = None  # a voice turn with rounds still to run
+        self._after_turn: list[tuple[str, Callable[[], Awaitable[Any]]]] = []  # see after_turn
+        self._after_turn_flush: asyncio.Task | None = None
         self._cancel_processing = False
         self._cancel_generation = 0
         self._cancel_origin: CancellationOrigin | None = None
@@ -432,6 +546,9 @@ class QueueProcessor:
         was = self.is_processing
         self._is_processing = value
         if was and not value:
+            approvals = getattr(getattr(self, "tool_executor", None), "yes_approvals", None)
+            if isinstance(approvals, YesApprovals):
+                approvals.on_reply_done()  # its reply is finished: a yes answers what it asked
             self.note_chain_end()
 
     @property
@@ -453,6 +570,11 @@ class QueueProcessor:
     @property
     def cancel_generation(self) -> int:
         return self._cancel_generation
+
+    @property
+    def open_voice_turn(self) -> str | None:
+        """The voice turn with rounds still to run, if any."""
+        return self._open_voice_turn
 
     @property
     def cancel_origin(self) -> CancellationOrigin | None:
@@ -874,6 +996,17 @@ class QueueProcessor:
                         self.turn_completed = True
                         break
 
+                # Done, cancelled or cut off by new input: no round of it is left.
+                self._open_voice_turn = None
+                if self.turn_completed or self.cancel_processing:
+                    # Its grant ends with it. Only a turn cut off by new input
+                    # carries on, merged fail-closed in process_message_batch.
+                    revoke_voice_admission_context(self.active_origin_context)
+                    self.active_origin_context = None
+                if self._after_turn:
+                    async with self._turn_lock:
+                        await self._run_after_turn()
+
                 # Nothing left -- exit outer loop
                 if self.processing_queue.empty() or self.cancel_processing:
                     break
@@ -884,6 +1017,9 @@ class QueueProcessor:
 
         finally:
             self.is_processing = False  # ends the chain (note_chain_end)
+            self._open_voice_turn = None
+            if self._after_turn:  # a drain that died: its turn's cut lands once the lock is free
+                self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
             self.current_processing_tokens = 0
             self.processing_start_time = None
 
@@ -920,7 +1056,7 @@ class QueueProcessor:
         cache holds). A new session (epoch), or a history that compaction has
         emptied of them, gets them again.
         """
-        from kollabor_voice.observer import VOICE_RULES_MARK
+        from kollabor_voice.voice_context import VOICE_RULES_MARK
 
         for message in reversed(self.conversation_history):
             sent = (getattr(message, "metadata", None) or {}).get("voice")
@@ -949,11 +1085,33 @@ class QueueProcessor:
         """
         voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
         self.active_voice = voice_inputs[-1].voice if voice_inputs else None
+        merged_origin_context = merge_voice_origin_contexts(messages)
+        previous_origin_context = self.active_origin_context
+        if (
+            is_voice_origin(previous_origin_context)
+            and (
+                not isinstance(merged_origin_context, dict)
+                or merged_origin_context.get("admission_capability")
+                != previous_origin_context.get("admission_capability")
+            )
+        ):
+            revoke_voice_admission_context(previous_origin_context)
+            if isinstance(merged_origin_context, dict):
+                revoke_voice_admission_context(merged_origin_context)
+            # Its reply goes to the voice turn in it, else to the one it cut off.
+            turn_id = _voice_turn_id(merged_origin_context) or _voice_turn_id(previous_origin_context)
+            merged_origin_context = (
+                _invalid_voice_context(turn_id)
+                if turn_id or previous_origin_context.get("source") != DEVICE_VOICE_SOURCE
+                else _invalid_device_voice_context()
+            )
+        self.active_origin_context = merged_origin_context
+        self._open_voice_turn = _voice_turn_id(merged_origin_context)
         combined_message = combine_message_contents(
             [m.content if isinstance(m, QueuedInput) else m for m in messages]
         )
         if self.active_voice:
-            from kollabor_voice.observer import voice_preamble
+            from kollabor_voice.voice_context import voice_preamble
 
             combined_message = prepend_text(
                 voice_preamble(
@@ -962,16 +1120,26 @@ class QueueProcessor:
                 combined_message,
             )
 
+        metadata: dict[str, Any] = (
+            {"source": "voice", "voice": self.active_voice} if self.active_voice else {}
+        )
+        approvals = getattr(self.tool_executor, "yes_approvals", None)
+        if isinstance(approvals, YesApprovals) and (note := approvals.take_note()):
+            metadata["injected_context"] = note  # what the user's yes approved, model-only
+
         # Add user message to conversation history
         self._add_message_fn(
-            ConversationMessage(
-                role="user", content=combined_message,
-                metadata={"source": "voice", "voice": self.active_voice} if self.active_voice else {},
-            ),
+            ConversationMessage(role="user", content=combined_message, metadata=metadata),
             parent_uuid=current_parent_uuid,
         )
 
         # Execute LLM turn with user message
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=True,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=True,
             current_parent_uuid=current_parent_uuid,
@@ -986,15 +1154,34 @@ class QueueProcessor:
         Returns:
             Updated parent UUID
         """
+        if self.active_origin_context is not None:
+            return await self._execute_llm_turn(
+                user_message_provided=False,
+                current_parent_uuid=current_parent_uuid,
+                execution_context=self.active_origin_context,
+            )
         return await self._execute_llm_turn(
             user_message_provided=False,
             current_parent_uuid=current_parent_uuid,
+        )
+
+    async def _execute_tool_with_context(
+        self,
+        tool_data: dict[str, Any],
+        execution_context: dict[str, Any] | None,
+    ) -> ToolExecutionResult:
+        if execution_context is None:
+            return await self.tool_executor.execute_tool(tool_data)
+        return await self.tool_executor.execute_tool(
+            tool_data,
+            execution_context=execution_context,
         )
 
     async def _execute_llm_turn(
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Execute a single LLM turn (deduped from process_message_batch and continue_conversation).
 
@@ -1019,23 +1206,39 @@ class QueueProcessor:
         # The lock serializes turns; the second caller waits for the first
         # to finish rather than running concurrently.
         async with self._turn_lock:
+            await self._run_after_turn()  # a talk-over's cut of an earlier turn lands first
             self.last_turn_error = None
+            # Stamped under the lock: a turn still running when this one was
+            # queued clears its own stamp as it ends, never this one's.
+            self._stamp_voice_turn(_voice_turn_id(execution_context))
             try:
-                return await self._execute_llm_turn_inner(
-                    user_message_provided, current_parent_uuid
-                )
+                if execution_context is not None:
+                    parent_uuid = await self._execute_llm_turn_inner(
+                        user_message_provided,
+                        current_parent_uuid,
+                        execution_context=execution_context,
+                    )
+                else:
+                    parent_uuid = await self._execute_llm_turn_inner(
+                        user_message_provided, current_parent_uuid
+                    )
             except BaseException as exc:
                 # The one place every driver's turn passes through: a turn that
                 # raises (a denied pre-request hook, a crash before the provider
                 # call) kills its chain, whichever driver then swallows it.
                 if not self.cancel_processing:
                     self.last_turn_error = str(exc) or type(exc).__name__
+                if self._after_turn:  # queued while this round ran: lands once the lock is free
+                    self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
                 raise
+            await self._run_after_turn()  # and what was queued while this round ran
+            return parent_uuid
 
     async def _execute_llm_turn_inner(
         self,
         user_message_provided: bool,
         current_parent_uuid: str,
+        execution_context: dict[str, Any] | None = None,
     ) -> str:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Watchdog heartbeat: a turn is actually executing = forward progress.
@@ -1095,6 +1298,7 @@ class QueueProcessor:
 
         response = None
         parent_uuid = current_parent_uuid
+        shown_reply = ""  # on screen, not yet in history: a Stop during tools keeps it
 
         try:
             # Context service: attach context blocks (curator, snapshot,
@@ -1558,6 +1762,7 @@ class QueueProcessor:
                     tool_results=None,
                     thinking_content=thinking_blocks,
                 )
+                shown_reply = clean_response
                 voice = getattr(self, "active_voice", None)
                 has_spoken_text = clean_response.strip() or parsed_response.get("spoken_text")
                 if voice and has_spoken_text and not self.cancel_processing:
@@ -1590,9 +1795,15 @@ class QueueProcessor:
                 )
                 self.renderer.update_thinking(True, f"Executing {tool_desc}...")
 
-                native_results = await self._native_tools_handler.execute_tool_calls(
-                    self.tool_executor
-                )
+                if execution_context is None:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor
+                    )
+                else:
+                    native_results = await self._native_tools_handler.execute_tool_calls(
+                        self.tool_executor,
+                        execution_context=execution_context,
+                    )
                 self.renderer.update_thinking(False)
 
                 # Display native tool results
@@ -1640,7 +1851,7 @@ class QueueProcessor:
                             f"Executing {tool_desc}... ({i + 1}/{tool_count})",
                         )
 
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
 
                         self.renderer.update_thinking(False)
@@ -1668,7 +1879,7 @@ class QueueProcessor:
                     for i, tool_data in enumerate(all_tools):
                         if self.cancel_processing:
                             break
-                        result = await self.tool_executor.execute_tool(tool_data)
+                        result = await self._execute_tool_with_context(tool_data, execution_context)
                         xml_tool_results.append(result)
                         logger.info(
                             f"[TOOL-DISPLAY-DEBUG] calling display_tool_results "
@@ -1679,9 +1890,6 @@ class QueueProcessor:
                             [result], [tool_data]
                         )
                         await asyncio.sleep(0)
-
-            # Step 8: Bridge relay
-            await self._bridge_relay(clean_response)
 
             # First apply the per-result spill boundary, then pack the whole
             # native/XML batch against the remaining request budget. This is
@@ -1736,6 +1944,7 @@ class QueueProcessor:
                 thinking_content=thinking_list,
                 tool_calls=tool_call_entries,
                 provider_reasoning=_last_provider_reasoning(self.api_service),
+                voice_turn_id=self._voice_turn_metadata().get("voice_turn_id"),
             )
 
             # Add assistant message to conversation history
@@ -1769,6 +1978,7 @@ class QueueProcessor:
                 assistant_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                assistant_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1777,6 +1987,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 # Native tool results: add to history in native API format
                 # so provider can reconstruct tool_result turns correctly
@@ -1874,6 +2085,7 @@ class QueueProcessor:
                 xml_metadata.update(
                     _xml_display_metadata(all_tools, response, clean_response, hid_text_calls)
                 )
+                xml_metadata.update(self._voice_turn_metadata())
                 self._add_message_fn(
                     ConversationMessage(
                         role="assistant",
@@ -1882,6 +2094,7 @@ class QueueProcessor:
                     ),
                     parent_uuid=parent_uuid,
                 )
+                shown_reply = ""
 
                 history_results_xml = list(xml_tool_results)
                 if history_results_xml:
@@ -1961,6 +2174,7 @@ class QueueProcessor:
 
             self.turn_completed = True
             self.stats["total_thinking_time"] += thinking_duration
+            await self._keep_interrupted_reply(parent_uuid, shown_reply)
 
         except Exception as e:
             logger.error(f"Error processing message: {type(e).__name__}: {e}")
@@ -1968,6 +2182,49 @@ class QueueProcessor:
             error_msg = str(e) or f"{type(e).__name__} (no details)"
             if "'str' object has no attribute 'get'" in error_msg:
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
+
+            # Publish a typed failure separately from the generic UI error.
+            # Compaction hooks can react to context overflow, but the failed
+            # request is never resubmitted automatically.
+            error_code = getattr(e, "error_code", None) or getattr(e, "code", None)
+            nested_error = getattr(e, "error", None)
+            if not error_code and isinstance(nested_error, dict):
+                error_code = nested_error.get("code")
+            error_code = str(error_code)[:120] if error_code else None
+            error_text = str(e).lower()
+            context_window_exceeded = (
+                error_code
+                in {
+                    "model_context_window_exceeded",
+                    "context_window_exceeded",
+                    "context_length_exceeded",
+                }
+                or any(
+                    phrase in error_text
+                    for phrase in (
+                        "context window",
+                        "context_window",
+                        "maximum context length",
+                        "too many tokens",
+                        "prompt is too long",
+                    )
+                )
+            )
+            event_bus = getattr(self, "event_bus", None)
+            if event_bus is not None:
+                try:
+                    await event_bus.emit_with_hooks(
+                        EventType.LLM_REQUEST_ERROR,
+                        {
+                            "error_type": type(e).__name__,
+                            "error_code": error_code,
+                            "context_window_exceeded": context_window_exceeded,
+                        },
+                        "llm_service",
+                    )
+                except Exception:
+                    logger.exception("Failed to dispatch LLM request error hooks")
+
             self.message_display_service.display_error_message(error_msg)
             # Web clients follow the turn through semantic events, not the
             # terminal's red line; without this a failed turn ends silently.
@@ -1980,9 +2237,11 @@ class QueueProcessor:
         # tools were still running, and they would stop reading the stream.
         if self.turn_completed:
             self.active_voice = None
+            revoke_voice_admission_context(self.active_origin_context)
+            self.active_origin_context = None
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0
-            if context_size > 0:
+            if context_size > 0 and not self.last_turn_error:
                 publish_semantic(self.renderer, "usage_update", payload={
                     "sessionUpdate": "usage_update",
                     "used": int(self.session_stats.get("input_tokens", 0) or 0)
@@ -2000,8 +2259,95 @@ class QueueProcessor:
                 stop_reason=getattr(self.api_service, "last_stop_reason", "")
                 or "end_turn",
             )
+            self._stamp_voice_turn(None)
 
         return parent_uuid
+
+    def _stamp_voice_turn(self, turn_id: str | None) -> None:
+        """Every event of a voice turn carries its id, its turn_complete last.
+
+        The Engine streams a voice turn's reply by that id (request_id): the
+        next turn's stream starts before a talked-over turn's late events are
+        out, and its turn_complete would end that stream before the reply.
+        """
+        token, self._voice_turn_token = self._voice_turn_token, None
+        if token is not None:
+            try:
+                current_turn.reset(token)
+            except ValueError:  # set in another task: nothing of it is here
+                pass
+        if turn_id:
+            fields = {**current_turn.get(), "request_id": turn_id}
+            self._voice_turn_token = current_turn.set(fields)
+
+    def _voice_turn_metadata(self) -> dict[str, Any]:
+        """Which voice turn a reply belongs to: a talk-over after it finished cuts
+        it to the part that was heard (LocalStateService.record_interrupted_voice_reply)."""
+        turn_id = _voice_turn_id(self.active_origin_context)
+        return {"voice_turn_id": turn_id} if turn_id else {}
+
+    def after_turn(self, voice_turn: str, work: Callable[[], Awaitable[Any]]) -> None:
+        """Run `work` under the turn lock once `voice_turn` has no round left to run.
+
+        A turn writes its tool calls and their results under the lock, so a
+        history edit made in `work` never lands between them. Never waits: the
+        work is queued, holding nothing, and runs as the round holding the lock
+        ends (one that raised leaves it to a task, once the lock is free), as its
+        own turn ends, or first thing in the next round; with no round running,
+        right after this returns. No later round starts before it.
+        """
+        self._after_turn.append((voice_turn, work))
+        if self._open_voice_turn != voice_turn and not self._turn_lock.locked():
+            self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
+
+    async def _flush_after_turn(self) -> None:
+        async with self._turn_lock:
+            await self._run_after_turn()
+
+    async def _run_after_turn(self) -> None:
+        """The queued work whose turn has no round left (under the turn lock),
+        with what is queued while it runs: nothing starts a flush meanwhile."""
+        while due := [work for turn, work in self._after_turn if turn != self._open_voice_turn]:
+            self._after_turn = [item for item in self._after_turn if item[0] == self._open_voice_turn]
+            for work in due:
+                try:
+                    await work()
+                except Exception:
+                    logger.exception("work queued after a turn failed")
+
+    async def _keep_interrupted_reply(self, parent_uuid: str, shown: str = "") -> None:
+        """Keep the reply text a Stop cut off, marked interrupted.
+
+        The user watched it stream; without it the next turn answers a question
+        the model no longer remembers asking. A voice turn keeps it too, under
+        its voice turn id: the worker then cuts it to the part that was played
+        (LocalStateService.record_interrupted_voice_reply). A Stop during the
+        call cuts its stream; one while tools run leaves `shown`, the reply on
+        screen.
+        """
+        take = getattr(self._streaming_handler, "take_interrupted_text", None)
+        text = take() if callable(take) else ""
+        text = text if isinstance(text, str) and text.strip() else shown
+        if not isinstance(text, str) or not text.strip():
+            return
+        voice = self._voice_turn_metadata()
+        # History first: a second cancel can land on the await below, and the
+        # engine reads history when turn_complete goes out.
+        self._add_message_fn(
+            ConversationMessage(
+                role="assistant", content=text, metadata={"interrupted": True, **voice}
+            ),
+            parent_uuid=parent_uuid,
+        )
+        try:
+            await self.conversation_logger.log_assistant_message(
+                text,
+                parent_uuid=parent_uuid,
+                model=getattr(self.api_service, "model", None),
+                voice_turn_id=voice.get("voice_turn_id"),
+            )
+        except Exception:
+            logger.exception("Could not log the interrupted reply")
 
     # ------------------------------------------------------------------
     # Shared helpers (used by both native and XML tool paths)
@@ -2237,28 +2583,3 @@ class QueueProcessor:
                         )
 
         return clean_response, suppress_display, turn_complete
-
-    async def _bridge_relay(self, clean_response: str) -> None:
-        """Send response to external platform if last user message was from bridge."""
-        if not clean_response or not self.event_bus:
-            return
-        try:
-            hub = self.event_bus.get_service("hub_plugin")
-            if hub and getattr(hub, "_bridge", None):
-                history = getattr(
-                    self.event_bus.get_service("llm_service"),
-                    "conversation_history",
-                    [],
-                )
-                for msg in reversed(history):
-                    if msg.role == "user" and getattr(msg, "metadata", None):
-                        if msg.metadata.get("bridge_platform"):
-                            logger.info(
-                                "Bridge relay: sending response to external platform"
-                            )
-                            await hub.bridge_send(clean_response)
-                            break
-                    elif msg.role == "user":
-                        break
-        except Exception as e:
-            logger.debug(f"Bridge relay check: {e}")

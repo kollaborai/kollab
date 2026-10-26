@@ -34,6 +34,7 @@ import {
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
+import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -74,7 +75,9 @@ import {
 import {
   createContext,
   useContext,
+  useEffect,
   useMemo,
+  useLayoutEffect,
   useRef,
   type ComponentType,
   type FC,
@@ -115,7 +118,14 @@ export type ThreadProps = {
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
+  /** Visible status while a bounded history page is being fetched. */
+  historyStatus?: { kind: string; message: string } | undefined;
+  /** Loads the page immediately older than the current window. */
+  onLoadOlder?: (() => Promise<void>) | undefined;
+  onRetryHistory?: (() => void) | undefined;
+  historyStartIndex?: number | undefined;
 };
+
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
@@ -146,6 +156,10 @@ export const Thread: FC<ThreadProps> = ({
   commands = [],
   onOpenPanel,
   attachmentsEnabled = true,
+  historyStatus,
+  onLoadOlder,
+  onRetryHistory,
+  historyStartIndex = 0,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -157,6 +171,10 @@ export const Thread: FC<ThreadProps> = ({
         commands={commands}
         onOpenPanel={onOpenPanel}
         attachmentsEnabled={attachmentsEnabled}
+        historyStatus={historyStatus}
+        onLoadOlder={onLoadOlder}
+        onRetryHistory={onRetryHistory}
+        historyStartIndex={historyStartIndex}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -168,8 +186,57 @@ const ThreadRoot: FC<{
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   attachmentsEnabled: boolean;
-}> = ({ isEmpty, agents, commands, onOpenPanel, attachmentsEnabled }) => {
+  historyStatus: ThreadProps["historyStatus"];
+  onLoadOlder: ThreadProps["onLoadOlder"];
+  onRetryHistory: ThreadProps["onRetryHistory"];
+  historyStartIndex: number;
+}> = ({
+  isEmpty,
+  agents,
+  commands,
+  onOpenPanel,
+  attachmentsEnabled,
+  historyStatus,
+  onLoadOlder,
+  onRetryHistory,
+  historyStartIndex,
+}) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const scrollAnchorRef = useRef<{ height: number; top: number; start: number } | null>(null);
+
+  const userScrollRef = useRef(false);
+
+  // A voice room's turns arrive from the room, not from this composer's runs,
+  // so the top anchor never moves for them: while the room is live the chat
+  // follows the bottom, from the latest turn when the room starts.
+  const voiceLive = useVoiceRoomLive();
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (voiceLive && viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "instant" });
+  }, [voiceLive]);
+
+  useLayoutEffect(() => {
+    const anchor = scrollAnchorRef.current;
+    if (!anchor) return;
+    if (historyStatus?.kind === "error" || (
+      historyStatus?.kind === "ready" && historyStartIndex === anchor.start
+    )) {
+      scrollAnchorRef.current = null;
+      return;
+    }
+    if (historyStartIndex >= anchor.start) return;
+    const firstFrame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const viewport = viewportRef.current;
+        if (viewport) {
+          viewport.scrollTop = anchor.top + viewport.scrollHeight - anchor.height;
+        }
+        scrollAnchorRef.current = null;
+      });
+    });
+    return () => window.cancelAnimationFrame(firstFrame);
+  }, [historyStartIndex, historyStatus?.kind]);
 
   return (
     <ThreadPrimitive.Root
@@ -183,11 +250,66 @@ const ThreadRoot: FC<{
       }}
     >
       <ThreadPrimitive.Viewport
+        ref={viewportRef}
+        onWheel={(event) => {
+          if (event.deltaY < 0) userScrollRef.current = true;
+        }}
+        onTouchMove={() => {
+          userScrollRef.current = true;
+        }}
+        onKeyDown={(event) => {
+          if (["ArrowUp", "PageUp", "Home"].includes(event.key)) userScrollRef.current = true;
+        }}
+        onScroll={(event) => {
+          const viewport = event.currentTarget;
+          if (
+            viewport.scrollTop > 64 ||
+            !userScrollRef.current ||
+            !onLoadOlder ||
+            scrollAnchorRef.current ||
+            historyStatus?.kind === "loading" ||
+            historyStatus?.kind === "loading-older"
+          ) return;
+          scrollAnchorRef.current = {
+            height: viewport.scrollHeight,
+            top: viewport.scrollTop,
+            start: historyStartIndex,
+          };
+          void onLoadOlder()
+            .catch(() => {
+              scrollAnchorRef.current = null;
+            })
+            .finally(() => {
+              userScrollRef.current = false;
+            });
+        }}
         turnAnchor="top"
+        autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
+          {historyStatus ? (
+            <div
+              data-slot="history-status"
+              role={historyStatus.kind === "error" ? "alert" : "status"}
+              aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
+              className={cn(
+                "mx-auto mb-3 flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
+                historyStatus.kind === "error"
+                  ? "border border-destructive/30 bg-destructive/5 text-destructive"
+                  : "text-muted-foreground bg-muted/50",
+              )}
+            >
+              <span>{historyStatus.message}</span>
+              {historyStatus.kind === "error" && onRetryHistory ? (
+                <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
+                  Retry
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
           {/* Auto margins on the welcome and the footer center them together
               while the thread is empty, and unlike justify-center they never
               push the top out of reach when a tall hero overflows. */}
@@ -317,7 +439,10 @@ const Composer: FC<{
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
-  const voice = useVoiceMode();
+  // The mic starts the LiveKit room in this browser; /voice (the computer
+  // running the agent listens) stays a typed command, and its status line shows.
+  const terminalVoice = useVoiceMode();
+  const voice = useRoomVoiceMode() ?? terminalVoice;
   const placeholder = useContext(ComposerPlaceholderContext);
   // Text typed into a chat that is about to be swapped out would be lost, or
   // sent to the chat being left.
@@ -685,9 +810,10 @@ const Composer: FC<{
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
             <ComposerAttachments />
-            {voiceAvailable && voice.on ? (
-              <VoiceStatus activity={voice.activity} />
+            {voiceAvailable && terminalVoice.on ? (
+              <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
+            {voiceAvailable ? <VoiceRoomBar /> : null}
             <div className="aui-composer-row flex items-end gap-1.5">
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
@@ -736,14 +862,14 @@ function prettyCommandName(name: string): string {
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
 // One trailing button slot that morphs: stop while a run is going, send once
-// there is something to send, otherwise the /voice toggle (a mic, or the
-// pulsing listening button while voice is on) where the session offers it.
+// there is something to send, otherwise the voice mic (a mic, or the
+// pulsing listening button while the voice room is up) where the session offers it.
 const composerSlotMode = (
   s: AssistantState,
   voice: VoiceMode | null,
   awaitingPermission = false,
 ): ComposerSlotMode => {
-  // A /voice command is itself a chat run; hold the mic still through it
+  // A room starting or stopping (or a /voice command run); hold the mic still through it
   // rather than flashing stop.
   if (voice?.pending) return voice.on ? "listening" : "mic";
   if (!s.composer.isEmpty || !voice) return "send";
@@ -769,11 +895,7 @@ const VOICE_METER = [0.1, 0.3, 0.55, 0.8];
 /** Voice mode at a glance: the mic level, what voice is doing, the last line. */
 const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
   const level = activity?.level ?? 0;
-  const line = activity?.said
-    ? `Said “${activity.said}”`
-    : activity?.heard
-      ? `Heard “${activity.heard}”`
-      : "";
+  const line = activity?.heard ? `Heard “${activity.heard}”` : "";
   return (
     <div
       data-slot="aui_voice-status"
@@ -792,7 +914,7 @@ const VoiceStatus: FC<{ activity: VoiceActivity | null }> = ({ activity }) => {
         ))}
       </span>
       <span className="shrink-0 font-medium text-foreground capitalize">
-        {activity?.stage ?? "starting"}
+        {activity?.stage ?? (activity ? "Connecting…" : "Voice ready")}
       </span>
       {line ? <span className="min-w-0 truncate">{line}</span> : null}
     </div>

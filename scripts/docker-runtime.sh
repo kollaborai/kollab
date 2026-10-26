@@ -23,6 +23,7 @@ Environment:
   KOLLAB_DOCKER_HOME_VOLUME Named volume for /home/kollab/.kollab
   KOLLAB_DOCKER_ENV_FILE    Optional env-file passed to docker run
   KOLLAB_DOCKER_PORTS       Optional space-separated port mappings, e.g. "7433:7433 8080:8080"
+  KOLLAB_FRONTEND_DIST      Optional prebuilt UI for build; requires Python 3 and BuildKit
 EOF
 }
 
@@ -109,7 +110,32 @@ case "$command" in
         ;;
     build)
         require_docker
-        docker build --target runtime --tag "$IMAGE" "$CONTEXT"
+        build_args=(build --target runtime --tag "$IMAGE")
+        if [[ "${KOLLAB_FRONTEND_DIST+x}" ]]; then
+            # A named context replaces the frontend stage. Copy only validated
+            # assets, never the selected directory's parent or private siblings.
+            frontend_context=$(python3 - "$KOLLAB_FRONTEND_DIST" <<'PY'
+import pathlib, shutil, sys, tempfile
+
+selected = pathlib.Path(sys.argv[1])
+if not sys.argv[1] or selected.is_symlink() or not (selected / "index.html").is_file():
+    raise SystemExit("KOLLAB_FRONTEND_DIST must be a directory containing index.html, not a symlink")
+for asset in selected.rglob("*"):
+    if asset.is_symlink() or not (asset.is_dir() or asset.is_file()):
+        raise SystemExit(f"frontend assets must be ordinary files/directories: {asset}")
+context = pathlib.Path(tempfile.mkdtemp(prefix="kollab-frontend-context-"))
+try:
+    shutil.copytree(selected, context / "frontend-dist")
+except BaseException:
+    shutil.rmtree(context)
+    raise
+print(context)
+PY
+)
+            trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$frontend_context"' EXIT
+            build_args+=(--build-context "frontend=$frontend_context")
+        fi
+        docker "${build_args[@]}" "$CONTEXT"
         ;;
     smoke)
         require_docker

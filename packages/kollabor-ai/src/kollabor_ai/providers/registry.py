@@ -404,6 +404,27 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
     return ProviderType.ANTHROPIC
 
 
+def _cached_openai_oauth_context_window(
+    profile: Dict[str, Any], model_name: str
+) -> Optional[int]:
+    """Return fresh OAuth model metadata when available; never use the public registry."""
+    try:
+        from kollabor_ai.model_catalog import cached_provider_models
+
+        for model in cached_provider_models(profile):
+            if model.get("id") != model_name:
+                continue
+            window = model.get("context_window")
+            if type(window) is int and window > 0:
+                return window
+    except Exception:
+        # Model metadata is advisory. Keep the conservative ProviderConfig
+        # default rather than blocking startup if the cache is unavailable.
+        logger.debug("Unable to read cached OAuth context-window metadata")
+    return None
+
+
+
 def create_config_from_profile(
     profile: Dict[str, Any], provider_type: Optional[ProviderType] = None
 ) -> ProviderConfig:
@@ -479,11 +500,31 @@ def create_config_from_profile(
     if effort:
         base_fields["effort"] = effort
 
-    # Give compaction and the tool-output budget the model's real window: an explicit
-    # profile value wins, otherwise resolve it from the model registry by
-    # name/provider. Falls through to the config default if unresolved.
+    # Give compaction and the tool-output budget the model's real window. For
+    # OpenAI OAuth, provider catalog data is the upper boundary when available;
+    # an explicit profile value can make that window more conservative but must
+    # not inflate it. When the backend window is unknown, use the conservative
+    # ProviderConfig default instead of a public registry entry for another API.
     context_window = profile.get("context_window")
-    if context_window:
+    auth_type = profile.get("auth_type")
+    if hasattr(auth_type, "value"):
+        auth_type = auth_type.value
+    is_openai_oauth = (
+        provider_type == ProviderType.OPENAI_RESPONSES
+        and str(auth_type or "").lower() == "oauth"
+    )
+    if is_openai_oauth:
+        resolved = _cached_openai_oauth_context_window(
+            profile, base_fields["model"]
+        )
+        if context_window:
+            configured_window = int(context_window)
+            base_fields["context_window"] = (
+                min(configured_window, resolved) if resolved else configured_window
+            )
+        elif resolved:
+            base_fields["context_window"] = resolved
+    elif context_window:
         base_fields["context_window"] = int(context_window)
     else:
         try:

@@ -26,7 +26,7 @@ Kollab keeps its own protocols: the hub socket, attach, the network and the
 engine API. It adds the [Agent Client Protocol](https://agentclientprotocol.com)
 (ACP) in both directions, as the bridge to every other harness:
 
-- **Outbound.** Claude Code, Codex, Gemini CLI or any ACP agent runs as a kollab
+- **Outbound.** Claude Code, Codex or any ACP agent runs as a kollab
   agent: a name in the roster that gets and sends hub messages, opens in every
   window, and is reachable as `agent@device` on the network.
 - **Inbound.** `kollab acp` makes kollab an ACP agent, so an ACP client such as
@@ -34,7 +34,7 @@ engine API. It adds the [Agent Client Protocol](https://agentclientprotocol.com)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../diagrams/acp-bridge/overview-dark.svg">
-  <img alt="Kollab speaks ACP both ways: an ACP client such as Zed drives a kollab agent through kollab acp, and kollab runs Claude Code, Codex and Gemini CLI as hub members over ACP; the network makes every one of them reachable from your other devices." src="../diagrams/acp-bridge/overview-light.svg">
+  <img alt="Kollab speaks ACP both ways: an ACP client such as Zed drives a kollab agent through kollab acp, and kollab runs Claude Code and Codex as hub members over ACP; the network makes every one of them reachable from your other devices." src="../diagrams/acp-bridge/overview-light.svg">
 </picture>
 
 The diagrams come from [`scripts/build_acp_diagrams.py`](../../scripts/build_acp_diagrams.py).
@@ -44,7 +44,7 @@ Change a label there when this spec changes, then run it.
 
 | You can | How |
 |---|---|
-| Run Claude Code, Codex or Gemini CLI as a mesh member | `kollab --as claude --llm claude-code --detached`, or ask any agent: "start claude on Claude Code" |
+| Run Claude Code or Codex as a mesh member | `kollab --as claude --llm claude-code --detached`, or ask any agent: "start claude on Claude Code" |
 | Have any agent ask it something | "lapis, ask claude to review my diff": `hub_msg to="claude"`. Its final message returns on lapis's thread |
 | Let it start conversations and ask back | its kollab hub tools: `hub_msg`, `hub_ask` (waits for the answer), `hub_status`, `hub_agents` |
 | Chat with it yourself | terminal attach, web UI, phone: it is a kollab agent |
@@ -95,17 +95,11 @@ live runs for these versions and for any later update.
 |---|---|---|
 | `claude-code` | `npm install -g @anthropic-ai/claude-code`, then `claude` and `/login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/claude-0.89.0 --no-save @agentclientprotocol/claude-agent-acp@0.89.0` |
 | `codex-cli` | `npm install -g @openai/codex`, then `codex login` | `npm install --prefix ~/.local/share/kollab/acp-adapters/codex-2.1.1 --no-save @agentclientprotocol/codex-acp@2.1.1` |
-| `gemini-cli` | configure an authorized Gemini API key, Vertex credentials or an existing supported organization login | `npm install --prefix ~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save @google/gemini-cli@0.63.0`; that CLI runs as `gemini --acp` |
 
-Google retired consumer Google authentication for Gemini CLI on June 18, 2026,
-covering Code Assist for individuals and Google AI Pro/Ultra. The qualification
-account uses that retired path; reauthenticating it does not restore eligibility.
-The pinned CLI also supports API-key and Vertex authentication, so this refusal
-does not make every Gemini CLI mode unavailable. See Google's
-[consumer deprecation notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)
-and the CLI's [authentication setup](https://geminicli.com/docs/get-started/authentication/).
+Gemini CLI is not a built-in profile: Google retired it on June 18, 2026. A
+user-defined ACP profile can still run any ACP command.
 
-The three ship as profiles in `kollabor.llm.profiles`. `/llm` lists them under
+The two ship as profiles in `kollabor.llm.profiles`. `/llm` lists them under
 "ACP agents", and one whose adapter is missing on this device shows its install
 line. A profile holds only portable fields, so the sealed config can carry it to
 every device:
@@ -123,7 +117,7 @@ starts with those directories, so the adapter also starts under `kollab
 service`. A resolved path that disappears is resolved again; a command that
 can't be found fails the turn naming it.
 
-The three canonical profiles also check the managed adapter directories above
+The two canonical profiles also check the managed adapter directories above
 when shell resolution fails. This lets a Web UI or service launch find a pinned
 adapter without changing the user's global npm installation. A custom command
 is resolved as configured; its executable is never replaced by a built-in one.

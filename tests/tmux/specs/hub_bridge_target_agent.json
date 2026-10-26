@@ -1,0 +1,73 @@
+{
+  "name": "hub-bridge-target-agent",
+  "description": "Telegram bridge with bridge_target_agent naming a non-coordinator agent: that agent runs the bridge, a new Telegram message wakes it, and its answer goes back to the chat once. The coordinator never sees the message. Fake Bot API (tests/tmux/lib/fake_telegram.py), fake model, throwaway HOME, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 PATH=\"$R/.venv/bin:$PATH\" exec \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_telegram.py\" run \"$H/tg.port\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME, fake model, fake Telegram bot, bridge_target_agent=lapis",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && { tmux kill-session -t '=kollab-spec-bridge-lapis' 2>/dev/null; kill \"$(cat \"$O/fake.pid\")\" \"$(cat \"$O/tg.pid\")\" 2>/dev/null; }; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_telegram.py\" serve \"$H/tg.port\" >/dev/null 2>&1 & echo $! > \"$H/tg.pid\"); for _ in $(seq 1 50); do [ -s \"$H/fake.port\" ] && [ -s \"$H/tg.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}},\"permissions\":{\"approval_mode\":\"trust_all\"}},\"plugins\":{\"hub\":{\"bridge_enabled\":true,\"bridge_platform\":\"telegram\",\"bridge_token\":\"123:fake\",\"bridge_chat_id\":\"42\",\"bridge_target_agent\":\"lapis\",\"bridge_poll_interval\":1}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on $(cat \"$H/fake.port\"), fake telegram on $(cat \"$H/tg.port\")\"",
+      "assert_contains": "fake telegram on"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "koordinator\\*",
+      "timeout": 60,
+      "description": "the coordinator is up"
+    },
+    {
+      "action": "shell",
+      "description": "lapis starts in its own pane; only lapis connects the bridge",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"); tmux new-session -d -s kollab-spec-bridge-lapis -x 200 -y 50 \"cd \\\"$H/ws\\\" && HOME=\\\"$H\\\" KOLLAB_NO_KEYRING=1 PATH=\\\"$R/.venv/bin:$PATH\\\" exec \\\"$R/.venv/bin/python\\\" \\\"$R/tests/tmux/lib/fake_telegram.py\\\" run \\\"$H/tg.port\\\" --no-daemon --as lapis\"; for _ in $(seq 1 120); do grep -qs \"telegram bridge connected\" \"$H\"/.kollab/projects/*/logs/kollab.log && break; sleep 0.5; done; echo \"bridge connections: $(grep -hc \"telegram bridge connected\" \"$H\"/.kollab/projects/*/logs/kollab.log)\"",
+      "assert_contains": "bridge connections: 1$"
+    },
+    {
+      "action": "section",
+      "label": "a Telegram message wakes lapis"
+    },
+    {
+      "action": "shell",
+      "description": "the message reaches lapis and lapis takes a model turn",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"); kill -USR1 \"$(cat \"$H/tg.pid\")\"; for _ in $(seq 1 60); do tmux capture-pane -p -t '=kollab-spec-bridge-lapis:' | grep -q \"pong:\" && break; sleep 0.5; done; tmux capture-pane -p -t '=kollab-spec-bridge-lapis:' | grep -E \"Marco -> lapis|ping from telegram|pong:\"",
+      "assert_contains": "pong:"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "Marco -> lapis"
+    },
+    {
+      "action": "shell",
+      "description": "the answer goes back to the chat exactly once",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"); sleep 3; echo \"answers: $(grep -c \"\\\"pong:\" \"$H/sent.jsonl\")\"",
+      "assert_contains": "answers: 1$"
+    },
+    {
+      "action": "capture"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "ping from telegram",
+      "description": "the coordinator never sees the message"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-bridge-target.path\"); tmux kill-session -t '=kollab-spec-bridge-lapis' 2>/dev/null; kill \"$(cat \"$H/fake.pid\")\" \"$(cat \"$H/tg.pid\")\" 2>/dev/null; echo \"fakes stopped\"",
+      "assert_contains": "fakes stopped"
+    }
+  ]
+}

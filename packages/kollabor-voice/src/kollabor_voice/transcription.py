@@ -137,9 +137,9 @@ class TranscriptionEngine:
 
     def configure(self, force=False):
         """Start the selected engine. Slow for Parakeet; run it off the loop."""
-        from .classifiers import load_preferences
+        from .speech_settings import load_speech_preferences
 
-        engine = load_preferences(self.root)["stt_engine"]
+        engine = load_speech_preferences(self.root)["stt_engine"]
         if engine == self.engine and not force:
             return
         self.engine, self.failed_at, error, worker = engine, None, None, None

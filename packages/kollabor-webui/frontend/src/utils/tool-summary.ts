@@ -119,15 +119,6 @@ function summarizeTerminalCommand(command: string): string {
     );
   }
 
-  if (/^(?:npm|pnpm|yarn)\s+/.test(normalized)) {
-    const packageManager = normalized.split(/\s+/, 1)[0] ?? "package manager";
-    const script = normalized.match(/\b(?:run|exec)\s+([^\s]+)/)?.[1];
-    return withStepCount(
-      script ? `Run ${packageManager} · ${script}` : `Run ${packageManager}`,
-      count,
-    );
-  }
-
   if (/^ls\b/.test(normalized)) {
     const target = pathArgument(normalized);
     return withStepCount(
@@ -202,4 +193,12 @@ export function summarizeToolCall(toolName: string, argsText?: string): string {
   }
 
   return humanizeToolName(normalizedName);
+}
+
+/**
+ * The agent may not run this call unasked, so it asked for the user's OK in its
+ * reply instead (NEEDS_YES in kollabor_agent/yes_approval.py). Not a failure.
+ */
+export function askedForOk(errorLine: string | undefined): boolean {
+  return errorLine?.startsWith("Not run yet: this needs the user's OK") === true;
 }

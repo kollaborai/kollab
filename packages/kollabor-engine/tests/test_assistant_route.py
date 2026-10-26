@@ -511,6 +511,120 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     assert captured["controller"].errors == []
 
 
+async def _answer_parked_prompt(monkeypatch, decision, events):
+    """Answer a prompt a Stop left open; the daemon answers with ``events``."""
+    session = _FakeSession([])
+
+    async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
+        for event in events:
+            session._events.put_nowait(event)
+        return True
+
+    session.resolve_permission = AsyncMock(side_effect=resolve_permission)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+    answer = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-tool-result",
+                    "toolCallId": "permission_shell-3",
+                    "result": {"decision": decision, "scope": "once"},
+                }
+            ]
+        ),
+    )
+
+    async def drain():
+        async for _chunk in answer.stream:
+            pass
+
+    await asyncio.wait_for(drain(), 2)
+    return captured["controller"]
+
+
+@pytest.mark.asyncio
+async def test_a_parked_prompts_deny_ends_its_answer_without_a_turn(monkeypatch):
+    # Deny on a card its turn left open runs nothing: no turn_complete follows.
+    controller = await _answer_parked_prompt(
+        monkeypatch,
+        "deny",
+        [{"type": "permission_denied", "tool_id": "shell-3", "parked": True}],
+    )
+    assert controller.errors == []
+
+
+@pytest.mark.asyncio
+async def test_a_parked_prompts_allow_streams_the_turn_it_goes_on_with(monkeypatch):
+    controller = await _answer_parked_prompt(
+        monkeypatch,
+        "approve",
+        [
+            {"type": "permission_granted", "tool_id": "shell-3", "scope": "once", "parked": True},
+            {"type": "token", "text": "Two PRs are open."},
+            {"type": "turn_complete"},
+        ],
+    )
+    assert controller.text == ["Two PRs are open."]
+
+
+@pytest.mark.parametrize(
+    ("event", "decision"),
+    [
+        ({"type": "permission_granted", "scope": "once"}, "approve"),
+        ({"type": "permission_denied"}, "deny"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event, decision):
+    """A typed yes or no answers a parked card an earlier run showed: it closes at once."""
+    session = _FakeSession(
+        [
+            {**event, "tool_id": "shell-3", "parked": True},
+            {"type": "token", "text": "Done."},
+            {"type": "turn_complete"},
+        ]
+    )
+    card = {
+        "type": "tool-call",
+        "toolCallId": "permission_shell-3",
+        "toolName": "request_permission",
+        "args": {"tool_id": "shell-3", "details": {"parked": True}},
+        "argsText": "{}",
+    }
+    state = {
+        "messages": [
+            {"id": "u", "role": "user", "content": "make a notes file"},
+            {
+                "id": "permission-shell-3-0",
+                "role": "assistant",
+                "content": [card],
+                "status": {"type": "requires-action", "reason": "tool-calls"},
+            },
+        ]
+    }
+    sets = await _state_ops(
+        monkeypatch,
+        session,
+        [{"type": "add-message", "message": {"parts": [{"type": "text", "text": "yes"}]}}],
+        state,
+    )
+
+    # The card closes as soon as its answer lands, before the turn goes on.
+    path, message = sets[0]
+    assert path == ["messages", "1"]
+    assert message["content"][0]["result"] == {"decision": decision, "scope": "once"}
+    assert message["content"][0]["isError"] is (decision == "deny")
+    # Turn end: the card stays answered above the message that answered it.
+    final = sets[-2][1]
+    assert [m["role"] for m in final] == ["user", "assistant", "user", "assistant"]
+    assert final[1]["content"][0]["result"]["decision"] == decision
+    assert final[3]["content"] == [{"type": "text", "text": "Done."}]
+
+
 @pytest.mark.asyncio
 async def test_assistant_transport_maps_daemon_events_to_stream(monkeypatch):
     session = _FakeSession(

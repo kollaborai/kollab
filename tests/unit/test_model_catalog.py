@@ -1,5 +1,6 @@
 """list_provider_models: per-provider dispatch + graceful failure."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -109,6 +110,9 @@ async def test_oauth_dispatches_to_codex(monkeypatch):
     ids = [m["id"] for m in out]
     assert ids == ["gpt-5.6-sol", "gpt-5.5"]  # empty slug dropped
     assert out[0]["note"] == "272K ctx • effort: low/max"
+
+    assert out[0]["context_window"] == 272000
+    assert "context_window" not in out[1]
     assert out[1]["note"] == "codex"  # no metadata -> plain tag
 
 
@@ -287,3 +291,48 @@ async def test_fetch_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(model_catalog, "_openai_oauth_models", boom)
     out = await model_catalog.list_provider_models(_Profile(auth_type="oauth"))
     assert out == []
+
+
+def test_catalog_cache_v2_preserves_structured_oauth_context_window(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+    model_catalog._MEMORY_CACHE.clear()
+    profile = {"name": "openai-oauth", "provider": "openai_responses"}
+    models = [
+        {
+            "id": "gpt-6-luna",
+            "note": "272K ctx • effort: low/max",
+            "context_window": 272000,
+        }
+    ]
+
+    model_catalog._store(profile, models)
+
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert cached["version"] == 2
+    assert model_catalog.cached_provider_models(profile) == models
+
+
+def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "entries": {
+                    "openai-oauth": {
+                        "timestamp": 9999999999,
+                        "models": [{"id": "gpt-6-luna", "note": "500K ctx"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+
+    assert model_catalog._load_disk_cache() == {}

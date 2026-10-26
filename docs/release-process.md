@@ -74,10 +74,13 @@ fast-forwards it, so `main` ends clean and level by construction.
    from then on `/upgrade` swaps the binary and never touches the checkout.
 
 Done means `main` matches `origin/main`, `git status` lists none of the
-release's files, and `kollab --version` reports X.Y.Z inside and outside the
-repo. Any file still dirty is work outside the release: name it in the release
-report. Running agents keep the code they started with; list them and ask
-before restarting any.
+release's files, and `kollab --version` prints `Build: <branch> @ <8-character
+SHA>` immediately before the unchanged final `kollab X.Y.Z` line inside and
+outside the repo. Build identity comes from the exact checkout used to build the
+artifact; a detached checkout reports branch `unknown` but still reports the
+short SHA when HEAD is resolvable. Each unavailable field displays as `unknown`. Any other dirty file is work
+outside the release: name it in the release report. Running agents
+keep the code they started with; list them and ask before restarting any.
 
 ## Pre-Release Checklist
 
@@ -137,6 +140,14 @@ scripts/docker-runtime.sh smoke
    existing platforms, unsigned Tauri desktop bundles for macOS arm64 and
    x86_64, and Linux x86_64 AppImage/Debian packages. Publish the packages, then
    create the GitHub Release with every asset attached.
+   The Binaries workflow compiles one isolated `frontend-dist` artifact. Every
+   CLI producer passes that same output through `--frontend-dist`; desktop
+   stages those binaries, and PyPI publication supplies the downloaded output
+   through `KOLLAB_FRONTEND_DIST`. The `connection-service` workflow artifact
+   packages the same frontend for the operator's service rollout. These two
+   internal artifacts stay outside the 20-file public release manifest.
+   Missing selected output or a failed frontend build stops packaging; old
+   checkout output is never a successful build fallback.
 5. Verify the package page, the four CLI binaries and their `.sha256` files,
    both architectures' `kollab-desktop-macos-*` `.app.zip`/`.dmg` pairs,
    both `kollab-desktop-linux-x86_64-X.Y.Z` packages and their checksums,

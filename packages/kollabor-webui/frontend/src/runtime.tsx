@@ -14,6 +14,7 @@ import {
   cancelPendingPermission,
   pendingPermissions,
   permissionOwner,
+  promptParkedSinceShown,
   samePendingPermission,
   type PendingPermission,
 } from "@/utils/permission-cancel";
@@ -31,9 +32,21 @@ import type {
   HistoryMessage,
   PermissionPrompt,
   Session,
+  SessionEvent,
   TurnError,
 } from "./api";
 import { isToolOutputBatch } from "./api";
+import { shownMessagesChanged } from "./history-merge";
+import {
+  apartFromLive,
+  applyLiveEvent,
+  emptyLiveTurn,
+  historyReplacesLiveTurn,
+  isLiveMessage,
+  liveMessage,
+  replacedLiveTurn,
+  type LiveTurn,
+} from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
 import {
@@ -54,7 +67,7 @@ export type EngineState = {
    * messages. Set when the history loads, and by the engine when a turn this
    * page ran ends; a later reload appends only what lies past it.
    */
-  synced?: { history: number; messages: number };
+  synced?: { history: number; messages: number; start?: number };
   error?: string;
   usage?: {
     inputTokens: number;
@@ -65,6 +78,8 @@ export type EngineState = {
 };
 
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
+// The converter reads convertConfig off a message: "none" ends its join group.
+type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
 const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
 
 const PermissionCancellationContext = createContext<{
@@ -148,6 +163,8 @@ function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
   turnError?: TurnError | null,
+  historyStartIndex = 0,
+  sessionId = "",
 ): ThreadMessageLike[] {
   type RestoredToolCall = {
     type: "tool-call";
@@ -308,6 +325,10 @@ function historyToMessages(
 
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
+  // The ACP request that produced a reply: a passive window swaps its live
+  // copy of that reply for this row (see historyReplacesLiveTurn).
+  const replyMetadata = (metadata: Record<string, unknown> | null) =>
+    asString(metadata?.request_id) ? { metadata: { custom: { requestId: asString(metadata?.request_id) } } } : {};
   const restoredStatus = (metadata: Record<string, unknown> | null): ThreadMessageLike["status"] => {
     const reason = asString(metadata?.stop_reason);
     if (metadata?.provider === "acp" && reason && reason !== "end_turn") {
@@ -352,7 +373,7 @@ function historyToMessages(
     if (firstReply !== undefined && reply) messages[firstReply] = { ...reply, status };
     else {
       messages.push({
-        id: `history-${turnError.history_length}-error`,
+        id: `history-${historyStartIndex + turnError.history_length}-error`,
         role: "assistant",
         content: "",
         status,
@@ -360,8 +381,41 @@ function historyToMessages(
     }
   };
 
-  history.forEach((message, sourceIndex) => {
-    if (sourceIndex === turnError?.history_length) showTurnError();
+  // A voice turn can start with its reply (the greeting has no user message),
+  // and assistant-ui joins adjacent assistant messages: the reply before a new
+  // voice turn ends its group, so the two turns show apart.
+  let lastReply: { index: number; voiceTurn: string | null } | undefined;
+  const startReply = (metadata: Record<string, unknown> | null) => {
+    const voiceTurn = asString(metadata?.voice_turn_id) ??
+      (metadata?.interrupted === true ? asString(metadata?.turn_id) : null);
+    if (voiceTurn && lastReply && lastReply.voiceTurn !== voiceTurn) {
+      messages[lastReply.index] = {
+        ...messages[lastReply.index],
+        convertConfig: { joinStrategy: "none" },
+      } as JoinableMessage;
+      closeTurn();
+    }
+    return voiceTurn;
+  };
+  const pushReply = (message: ThreadMessageLike, voiceTurn: string | null) => {
+    messages.push(message);
+    lastReply = { index: messages.length - 1, voiceTurn };
+    firstReply ??= messages.length - 1;
+  };
+
+  const toolOutputResult = (message: HistoryMessage) => {
+    const metadata = asRecord(message.metadata);
+    const reference = asString(metadata?.history_output_ref);
+    const preview = historyContentToThreadContent(message.content);
+    return reference && sessionId
+      ? { kind: "history-output-preview", sessionId, reference, preview }
+      : preview;
+  };
+
+
+  history.forEach((message, pageIndex) => {
+    const sourceIndex = historyStartIndex + pageIndex;
+    if (pageIndex === turnError?.history_length) showTurnError();
     const metadata = asRecord(message.metadata);
     // Initialization context remains in model history and Trajectory, not Chat.
     if (metadata?.system_initialization === true) return;
@@ -397,6 +451,7 @@ function historyToMessages(
       });
       // A turn that was only agent status stays in the Trajectory tab.
       if (!content.length) return;
+      lastReply = undefined;  // a shown prompt already ends the reply's group
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
@@ -412,17 +467,19 @@ function historyToMessages(
         // Nothing to show: the agent chose not to answer (e.g. a hub message
         // that was only an acknowledgement).
         if (!content.length) return;
-        messages.push({
+        const voiceTurn = startReply(metadata);
+        pushReply({
           id: `history-${sourceIndex}`,
           role: "assistant",
           content,
           status: restoredStatus(metadata),
-        });
-        firstReply ??= messages.length - 1;
+          ...replyMetadata(metadata),
+        }, voiceTurn);
         finalReplyAt = message.timestamp;
         return;
       }
       // A step with tool calls; the turn's final reply comes after it.
+      const voiceTurn = startReply(metadata);
       turnTools += calls.length;
       finalReplyAt = undefined;
 
@@ -445,13 +502,13 @@ function historyToMessages(
         callsById.set(call.toolCallId, call);
         content.push(call);
       }
-      messages.push({
+      pushReply({
         id: `history-${sourceIndex}`,
         role: "assistant",
         content,
         status: restoredStatus(metadata),
-      });
-      firstReply ??= messages.length - 1;
+        ...replyMetadata(metadata),
+      }, voiceTurn);
       return;
     }
 
@@ -459,7 +516,7 @@ function historyToMessages(
       const callId = toolResultId(message);
       const existingCall = callId ? callsById.get(callId) : undefined;
       if (existingCall) {
-        existingCall.result = historyContentToThreadContent(message.content);
+        existingCall.result = toolOutputResult(message);
         existingCall.isError = toolResultIsError(message);
         // History keeps only how long the call ran (seconds), not when; the
         // elapsed hook and the group total read just completedAt - startedAt.
@@ -482,7 +539,7 @@ function historyToMessages(
           asString(asRecord(message.metadata)?.tool_name) || "tool result",
         args: {},
         argsText: "{}",
-        result: historyContentToThreadContent(message.content),
+        result: toolOutputResult(message),
         isError: toolResultIsError(message),
       };
       messages.push({
@@ -534,7 +591,7 @@ const converter = (
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = state.messages.map((message) => {
+  const stored = apartFromLive(state.messages).map((message) => {
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)
@@ -628,6 +685,7 @@ export function EngineRuntimeProvider({
   sessionId,
   initialState,
   onStale,
+  liveEvents,
   children,
 }: {
   api: EngineApi;
@@ -635,6 +693,8 @@ export function EngineRuntimeProvider({
   initialState: EngineState;
   /** Reload the thread whole: the prompt it waits on closed in another window. */
   onStale?: () => void;
+  /** Session-stream events, fed by App's followEvents loop. */
+  liveEvents?: { current: ((event: SessionEvent) => void) | null };
   children: ReactNode;
 }) {
   const turnRef = useRef<TurnClock>(newTurnClock());
@@ -743,6 +803,59 @@ export function EngineRuntimeProvider({
     }
   }, [api, sessionId, onStale, runtime]);
 
+  // A turn this page did not start (another window, the agent's terminal, a
+  // peer's message) streams through App's event subscription. Its events fold
+  // into one ephemeral assistant message so a passive window watches the
+  // reply arrive; nothing is persisted — the history reload at turn_complete
+  // replaces it, and a page that runs the turn itself ignores these.
+  const liveTurn = useRef<LiveTurn>(emptyLiveTurn());
+  const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    if (!liveEvents) return;
+    const importLiveState = (messages: ThreadMessageLike[]) => {
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      if (!shown) return;
+      runtime.thread.importExternalState({
+        ...shown,
+        messages,
+        synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
+      });
+    };
+    liveEvents.current = (event: SessionEvent) => {
+      const thread = runtime.thread.getState();
+      if (thread.isRunning) return;
+      const previous = liveTurn.current;
+      const next = applyLiveEvent(previous, event);
+      if (next === previous) return;
+      liveTurn.current = next;
+      if (next.held && next.parts === previous.parts) return;  // held back: nothing new to show
+      const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+      if (!shown) return;
+      // A turn that ended is dropped now: the reload its event triggers appends
+      // the finished (or stopped) reply from history, and keeping both would
+      // show it twice (assistant-ui keeps every message by id). A stopped turn
+      // stays, no longer running, until its own turn_complete brings that reply.
+      const kept = shown.messages.filter((message) => !isLiveMessage(message));
+      const live = liveMessage(next);
+      if (!live && kept.length === shown.messages.length) return;
+      importLiveState(live ? [...kept, live] : kept);
+      // Bounded: if the history never carries the reply, the text goes anyway.
+      clearTimeout(settleTimer.current);
+      if (next.settled && live) {
+        settleTimer.current = setTimeout(() => {
+          if (liveTurn.current.parts !== next.parts || !liveTurn.current.settled) return;
+          liveTurn.current = replacedLiveTurn(liveTurn.current);  // a held turn starts now
+          const state = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+          if (!state) return;
+          const held = liveMessage(liveTurn.current);
+          const kept = state.messages.filter((m) => !isLiveMessage(m));
+          importLiveState(held ? [...kept, held] : kept);
+        }, 5000);
+      }
+    };
+    return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
+  }, [runtime, liveEvents]);
+
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
   // after them. Only the history past what the thread shows is appended:
@@ -762,21 +875,56 @@ export function EngineRuntimeProvider({
       onStale?.();
       return;
     }
+    // The turn behind the shown prompt ended and left it open: reload whole too.
+    if (!thread.isRunning && promptParkedSinceShown(thread.messages, initialState.messages)) {
+      onStale?.();
+      return;
+    }
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
     // A run that ended without a sync point (an older engine, a dropped
     // stream) leaves the thread to its next full load.
     if (thread.isRunning || !shown || !from || shown.messages.length !== from.messages) return;
-    const tail = initialState.messages.filter((message) => {
+    if (!initialState.synced) return;
+    if (shownMessagesChanged(shown.messages, initialState.messages)) {
+      onStale?.();
+      return;
+    }
+    const currentStart = from.start ?? 0;
+    const nextStart = initialState.synced.start ?? currentStart;
+    const currentIds = new Set(shown.messages.map((message) => String(message.id ?? "")));
+    const historyIndex = (message: ThreadMessageLike) => {
       const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
-      return index !== undefined && Number(index) >= from.history;
+      return index === undefined ? null : Number(index);
+    };
+    const older = nextStart < currentStart
+      ? initialState.messages.filter((message) => {
+          const index = historyIndex(message);
+          const id = String(message.id ?? "");
+          return index !== null && index >= nextStart && index < currentStart && !currentIds.has(id);
+        })
+      : [];
+    const tail = initialState.messages.filter((message) => {
+      const index = historyIndex(message);
+      return index !== null && index >= from.history && !currentIds.has(String(message.id ?? ""));
     });
-    if (!tail.length || !initialState.synced) return;
-    const messages = [...shown.messages, ...tail];
+    if (!older.length && !tail.length && nextStart >= currentStart) return;
+    // A live turn this page is only watching rides at the end, outside the
+    // synced bookkeeping, until the history carries its reply (replaced above).
+    const replaced = historyReplacesLiveTurn(liveTurn.current, tail);
+    if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
+    const held = replaced ? liveMessage(liveTurn.current) : null;  // the queued turn it held back
+    const liveShown = replaced ? (held ? [held] : []) : shown.messages.filter(isLiveMessage);
+    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const messages = [...older, ...kept, ...tail, ...liveShown];
     runtime.thread.importExternalState({
       ...shown,
       messages,
-      synced: { history: initialState.synced.history, messages: messages.length },
+      synced: {
+        history: Math.max(from.history, initialState.synced.history),
+        start: Math.min(currentStart, nextStart),
+        messages: messages.length,
+      },
     });
   }, [initialState, runtime, onStale]);
 
@@ -825,12 +973,23 @@ export function buildInitialState(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[] = [],
   lastTurnError: TurnError | null = null,
+  historyStartIndex = 0,
 ): EngineState {
-  const messages = historyToMessages(history, pendingPermissions, lastTurnError);
+  const messages = historyToMessages(
+    history,
+    pendingPermissions,
+    lastTurnError,
+    historyStartIndex,
+    sessionId,
+  );
   return {
     sessionId,
     sessions,
     messages,
-    synced: { history: history.length, messages: messages.length },
+    synced: {
+      history: historyStartIndex + history.length,
+      start: historyStartIndex,
+      messages: messages.length,
+    },
   };
 }

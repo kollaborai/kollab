@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,7 +23,6 @@ from .network_security import (
     host_is_allowed,
     interface_networks_for_hosts,
     is_forwarded_client_header,
-    networks_for_phone_peers,
     request_origin_is_safe,
     validate_bind_hosts,
 )
@@ -63,8 +63,29 @@ def _is_local(request: Request) -> bool:
     return address.is_loopback
 
 
+def _validate_frontend_dir(directory: Path) -> Path:
+    if directory.is_symlink() or not (directory / "index.html").is_file():
+        raise ValueError("Frontend output must be a directory containing index.html")
+    if any(asset.is_symlink() for asset in directory.rglob("*")):
+        raise ValueError("Frontend assets must not be symlinks")
+    return directory
+
+
+def _explicit_frontend_dir() -> Path | None:
+    selected = os.environ.get("KOLLAB_FRONTEND_DIST")
+    if selected is None:
+        return None
+    if not selected:
+        raise ValueError("KOLLAB_FRONTEND_DIST must name a built frontend directory containing index.html")
+    return _validate_frontend_dir(Path(selected))
+
+
 def _assistant_static_dir() -> Path | None:
-    """Return the first available assistant-ui build directory."""
+    """Return the selected app, or the normal source/installed build."""
+
+    selected = _explicit_frontend_dir()
+    if selected is not None:
+        return selected
 
     # An editable checkout can also contain an older packaged bundle. Its
     # freshly built source output is the implementation being developed.
@@ -93,6 +114,9 @@ def create_app(
     *,
     bind_hosts: Sequence[str] | None = None,
 ) -> FastAPI:
+    # Refuse an invalid explicit selection before allocating clients or serving
+    # any page; it must never become permission to use an older bundle.
+    _explicit_frontend_dir()
     bind_hosts = validate_bind_hosts(bind_hosts or configured_bind_hosts())
     trusted_hosts = allowed_hostnames(bind_hosts)
     interface_networks = interface_networks_for_hosts(bind_hosts)
@@ -107,30 +131,6 @@ def create_app(
 
     app = FastAPI(title="Kollab WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
 
-
-    def current_client_networks():
-        networks = interface_networks
-        try:
-            from kollabor_engine.phone_access import get_phone_access
-
-            state = get_phone_access().view()
-            settings = state["settings"]
-            if state["peers"] and settings["endpoint"] and settings["server_public_key"]:
-                peer_networks = networks_for_phone_peers(state["peers"])
-                networks = tuple(
-                    sorted(
-                        set(networks) | set(peer_networks),
-                        key=lambda network: (
-                            network.version,
-                            int(network.network_address),
-                            network.prefixlen,
-                        ),
-                    )
-                )
-        except Exception as exc:
-            # A corrupt/unavailable phone state must not broaden network access.
-            logger.warning("phone access subnet unavailable: %s", type(exc).__name__)
-        return networks
 
     @app.middleware("http")
     async def private_webui_boundary(request: Request, call_next):
@@ -159,7 +159,7 @@ def create_app(
                 "Forwarded client headers are unsupported; connect directly to Kollab.", 400
             )
         client_host = request.client.host if request.client else ""
-        if sensitive and not client_in_networks(client_host, current_client_networks()):
+        if sensitive and not client_in_networks(client_host, interface_networks):
             return deny("This Kollab WebUI is available only on configured private networks.")
         if sensitive and not request_origin_is_safe(request, trusted_hosts):
             return deny("API access must use the same allowed WebUI origin.")

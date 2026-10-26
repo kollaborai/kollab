@@ -162,6 +162,7 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
     )
     assert snapshot.device == "laptop-kollab"
     assert snapshot.relay_online is True
+    assert snapshot.contact_route == f"kollabor.ai/c/{contact_route_hex(commands.client.public_key)}"
     assert snapshot.local_agents == ("koordinator",)
     assert snapshot.remote_agents == ("infra@home-server",)
     assert "laptop-kollab" in snapshot.offline_devices
@@ -171,6 +172,39 @@ async def test_connect_snapshot_names_requests_roster_and_offline_devices(tmp_pa
     assert request.categories == ("conversation:send", "provider:openai:api_key")
     assert snapshot.knocks == 0
     assert fingerprint not in repr(snapshot)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "state"),
+    [
+        ("https://directory.example:8443", "online"),
+        ("https://directory.example:8443", "reconnecting"),
+        ("", "offline"),
+    ],
+)
+async def test_snapshot_contact_route_matches_status_even_while_offline(tmp_path, origin, state):
+    bridge = SimpleNamespace(
+        trust_level=lambda: "open",
+        device_name=lambda: "laptop-kollab",
+        network_name=lambda: "a-display-name",
+        remote_agents=lambda: [],
+        plugin=SimpleNamespace(_presence=None, _identity=None),
+    )
+    commands = _relay_commands(tmp_path, agent_bridge=bridge)
+    commands.client.state.origin = origin
+    commands.client._state = state
+
+    snapshot = await commands.connect_snapshot()
+    status = await commands.format_status()
+
+    domain = origin.removeprefix("https://")
+    expected = f"{domain}/c/{contact_route_hex(commands.client.public_key)}" if domain else ""
+    assert snapshot.contact_route == expected
+    assert snapshot.relay_online is (state == "online")
+    assert f"contact route {expected or 'none'}" in status
+    assert commands.client.public_key not in repr(snapshot)
+    assert snapshot.network == "a-display-name"
 
 
 @pytest.mark.asyncio
