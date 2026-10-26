@@ -11,9 +11,11 @@ import copy
 import json
 import logging
 import time
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+import anyio
 from fastapi import APIRouter, HTTPException  # type: ignore[import-not-found]
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
@@ -48,6 +50,17 @@ def _foreign_queued_client_completion(event: Dict[str, Any], request_ids: set[st
             and str(event.get("request_id") or "") not in request_ids)
 
 
+def _contains_reserved_voice_origin(value: Any) -> bool:
+    if isinstance(value, dict):
+        origin_context = value.get("origin_context")
+        if isinstance(origin_context, dict) and origin_context.get("source") == "livekit_voice":
+            return True
+        return any(_contains_reserved_voice_origin(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_reserved_voice_origin(item) for item in value)
+    return False
+
+
 class MessageRequest(BaseModel):
     content: Any
     continuation: bool = False
@@ -58,6 +71,14 @@ class MessageRequest(BaseModel):
 
 @router.post("/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
+    if _contains_reserved_voice_origin(
+        {"origin_context": body.origin_context, "content": body.content}
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Voice origin context is reserved for the Engine voice session router",
+        )
+
     registry = get_session_registry()
     session = registry.get(session_id)
     if not session:
@@ -136,7 +157,12 @@ async def stream_events(session_id: str):
     A client that reloads mid-turn loses the POST /message stream, but the
     daemon keeps working - and if it is blocked on a permission prompt, the
     answer never produces visible output. This lets a reconnecting client pick
-    the turn back up. Ends at turn_complete so it does not leak subscriptions.
+    the turn back up. It does not end at turn_complete: the daemon starts a
+    queued turn right after the last one, and a stream that closed there would
+    drop that turn's first events (already queued behind turn_complete) and
+    miss the rest until the client reconnected. It ends when the client leaves,
+    after EVENT_IDLE_TIMEOUT_SECONDS of silence or when the daemon closes; the
+    finally below releases the subscription.
     """
     registry = get_session_registry()
     session = registry.get(session_id)
@@ -167,9 +193,6 @@ async def stream_events(session_id: str):
                     return
 
                 yield {"data": sse.serialize(event)}
-
-                if event.get("type") == "turn_complete":
-                    return
         finally:
             session.unsubscribe(queue)
 
@@ -435,6 +458,30 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
         controller.state = {"messages": messages}
     else:
         state["messages"] = messages
+
+
+def _assistant_close_shown_prompt(
+    messages: List[Dict[str, Any]], call_id: str, result: Dict[str, Any]
+) -> None:
+    """Put the answer on a prompt card an earlier message shows.
+
+    The message is replaced, not edited in place, so the next progress publish
+    sees it changed and sends it.
+    """
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(content, list):
+            continue
+        for at, part in enumerate(content):
+            if isinstance(part, dict) and part.get("toolCallId") == call_id:
+                parts = list(content)
+                parts[at] = {
+                    **part,
+                    "result": result,
+                    "isError": result["decision"] == "deny",
+                }
+                messages[index] = {**message, "content": parts}
+                return
 
 
 async def _assistant_set_synced(
@@ -749,12 +796,13 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
         )
         submitted_contents: List[MessageContent] = []
         request_ids: set[str] = set()
+        answered_prompts: set[str] = set()  # daemon tool ids this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
         # What the client holds; progress publishes only send what differs.
-        sent_messages = state_messages
+        sent_messages = list(state_messages)
         last_publish = float("-inf")
         # Streamed text the throttle has not published yet.
         stream_held = False
@@ -860,13 +908,19 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     if option_id is None:
                         resolved = await session.resolve_permission(source_tool_id, decision, scope)
                     else:
-                        resolved = await session.resolve_permission(source_tool_id, decision, scope, option_id=str(option_id))
+                        resolved = await session.resolve_permission(
+                            source_tool_id,
+                            decision,
+                            scope,
+                            option_id=str(option_id),
+                        )
                     saw_action = True
                     if not resolved:
                         controller.add_error(
                             f"No pending permission for tool_id '{source_tool_id}'"
                         )
                         return
+                    answered_prompts.add(source_tool_id)
                 else:
                     controller.add_error(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
@@ -922,7 +976,11 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                     add_streamed_text("reasoning", thinking)
                 elif event_type == "acp_update":
                     update = event.get("update") or {}
-                    if not isinstance(update, dict) or update.get("sessionUpdate") not in {"tool_call", "tool_call_update"}:
+                    if (
+                        not isinstance(update, dict)
+                        or update.get("sessionUpdate")
+                        not in {"tool_call", "tool_call_update"}
+                    ):
                         continue
                     tool_id = str(update.get("toolCallId") or "")
                     if not tool_id:
@@ -1053,6 +1111,14 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                                 "isError": permission_result["decision"] == "deny",
                             }
                         )
+                    else:
+                        # A card an earlier run showed, answered by this run's
+                        # message (a typed yes or no answers a parked card).
+                        _assistant_close_shown_prompt(
+                            state_messages,
+                            f"permission_{source_tool_id}",
+                            permission_result,
+                        )
                     permission_controller = permission_controllers.pop(
                         source_tool_id, None
                     )
@@ -1062,6 +1128,24 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
                             permission_result,
                         )
                     publish_progress()
+                    if (
+                        event.get("parked")
+                        and event_type != "permission_granted"
+                        and source_tool_id in answered_prompts
+                        and not submitted_contents
+                    ):
+                        # A prompt its turn left open, answered no: no turn
+                        # follows it (an Allow goes on with one).
+                        _assistant_update_message_state(
+                            state_messages,
+                            session_id,
+                            submitted_contents,
+                            assistant_parts,
+                            {"type": "complete", "reason": "stop"},
+                        )
+                        if persist_message_state:
+                            _assistant_set_messages(controller, state_messages)
+                        return
                 elif event_type == "error":
                     turn_error = str(event.get("message") or "") or "engine error"
                     if not persist_message_state:
@@ -1105,7 +1189,23 @@ async def assistant_transport(session_id: str, body: AssistantRequest):
             session.unsubscribe(queue)
 
     stream = create_run(run_callback, state=body.state)
-    return AssistantTransportResponse(_assistant_protocol_stream(stream, completion))
+    protocol_stream = _assistant_protocol_stream(stream, completion)
+
+    class _OwnedAssistantTransportResponse(AssistantTransportResponse):
+        async def stream_response(self, send):
+            try:
+                await super().stream_response(send)
+            finally:
+                # Cancellation can arrive during downstream send, outside the
+                # generators. Close every owned layer explicitly so create_run
+                # releases its callback/subscription without stopping the daemon.
+                with anyio.CancelScope(shield=True):
+                    async with AsyncExitStack() as closing:
+                        closing.push_async_callback(stream.aclose)
+                        closing.push_async_callback(protocol_stream.aclose)
+                        closing.push_async_callback(self.body_iterator.aclose)
+
+    return _OwnedAssistantTransportResponse(protocol_stream)
 
 
 class CancelRequest(BaseModel):

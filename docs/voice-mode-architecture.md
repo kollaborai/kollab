@@ -1,7 +1,7 @@
 # Kollab Voice Mode Architecture (Spec)
 
-Status: Draft spec only. Nothing here is built yet.
-Author: Marco (dictated), written up by Marclone.
+Status: Historical draft. Superseded by issue 301: the intent classifier is no longer part of voice and every final transcript goes straight to the agent turn (see features/voice-mode.md). The classifier modules stay for other features.
+Author: Marco (dictated), written up by his supervising agent session.
 
 ## Goal
 
@@ -42,6 +42,31 @@ flowchart LR
   - ask clarifying questions.
 - It cannot run tools, edit files, or take gated actions. Anything substantive goes to the worker.
 - Latency budget: first audio within roughly 1 second of the utterance ending.
+
+## 2a. Handoff queue
+
+Status: design only, not built. Today only the responder's model key and activity snapshot exist (`packages/kollabor-voice/src/kollabor_voice/responder.py`); there is no queue code.
+
+- Every utterance the fast responder cannot answer from the conversation and the activity snapshot becomes one queue item. The item carries the user's exact words, a generated id, and a timestamp. Nothing is paraphrased on the way in.
+- Results travel back on the same queue as separate items that name the id of the question they answer. The fast responder matches results to questions by id, never by position or wording, and reads each aloud when it arrives. The speaker never waits on research.
+- Ordering: items are delivered to the worker oldest first. A result may arrive out of order; it is still matched by id and spoken as "about your question on X" when other items were answered in between.
+- Dedup: an item whose normalized text matches a still-open item (same words after trimming case and filler) is attached to that item as a repeat instead of becoming a second task. A repeat of an answered question is a new item.
+- Worker busy mid-turn: the worker is never interrupted by the queue. Pending items are collected and handed over with the worker's next model-visible turn, the same way other non-human context already reaches it (see 2b). While an item waits, the responder can say it is queued and what the worker is doing now, from the activity snapshot.
+- A cancelled or abandoned item is closed with a short result so the responder never waits on it forever.
+- Decision gates are unchanged: a queue item that asks for a gated action is only a request. The worker still raises the gate and Marco still approves it (section 4).
+
+## 2b. Hidden worker nudge
+
+Status: design only, not built. The delivery mechanism below exists; the voice nudge text, template and settings do not.
+
+- When voice mode is on, the worker gets a short nudge saying this is speaker-enabled voice mode, shows the conversation so far, and tells it to provide the information to the speaker through the queue results in 2a.
+- Hidden from the UI by the convention Kollab already uses for non-displayed runtime context: `LLMCoordinator.inject_system_message(content, subtype=...)` (`kollabor/llm/llm_coordinator.py:164`) queues an agent HUD entry (`queue_agent_hud`, `llm_coordinator.py:1740`) that is merged into the next real turn as an `<agent_hud>` block (`kollabor/llm/agent_hud.py:71-96`). It never creates its own turn. The web UI strips that block before display (`stripAgentHud`, `packages/kollabor-webui/frontend/src/api.ts:172`; parsed in `hub-notes.ts:155`). Existing callers use the same call with their own subtype, for example `crystal_nudge` (`plugins/hub/plugin.py:9707`) and `goal_context` (`kollabor/goals/driver.py:249`). The voice nudge would use subtype `voice_mode`.
+- Parameterized template. Proposed parameters: `{conversation}` (the last N exchanges, oldest first), `{window}` (N), `{pending}` (open queue item ids and their exact words). Proposed default wording:
+
+  > Voice mode is on and a speaker is listening. Conversation so far: {conversation}. Open spoken questions: {pending}. Provide the information the speaker asked for as results on the voice queue, short enough to say aloud. Gated actions still need explicit approval.
+
+- Settings keys, under the existing `kollabor.voice.*` namespace (`kollabor.voice.responder_model` already exists): `kollabor.voice.nudge_enabled`, `kollabor.voice.nudge_window` (default 10 exchanges), `kollabor.voice.nudge_template` (text above as the default). Each needs a default and a `/config` widget entry when built, so wording or window size can be fixed without a code change.
+- The nudge only supplies context. It grants no permission and cannot disable a gate; gates stay enforced in the engine (section 4).
 
 ## 3. Worker model
 

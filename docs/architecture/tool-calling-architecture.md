@@ -1049,51 +1049,34 @@ handlers at `plugin.py:3309-3369`.
 
 ```xml
 <hub_capture name="worker-1" lines="100"/>
+<hub_capture name="worker-1" format="plain"/>
+<hub_capture name="worker-1" format="terminal"/>
 ```
 
-Delegates to `_handle_capture_command` which delegates to
-orchestrator `_cmd_capture`, which for a single agent returns:
+Hub-identity captures use the shared bounded transcript renderer by default:
 
 ```
-[hub_capture]
-[capture: worker-1 @ 2m 14s, 100 lines]
-<last 10 lines of captured tmux buffer>
+User: summarize the failing tests
+Assistant: I will inspect the failures.
+Tool call: file_read
+Tool result [ok] file_read: Read 20 lines
 ```
 
-Note the **two** headers — the outer `[hub_capture]\n` wrapper
-from the hub plugin, and the inner `[capture: name @ duration, N lines]\n`
-from the orchestrator's `_cmd_capture`. The "N lines" in the
-inner header is the COUNT of total lines in the buffer, not the
-number shown (always the last 10).
+The renderer labels user/assistant messages, tool calls/results with name and
+status, status events, and errors. It strips ANSI/OSC/control sequences and
+carriage-return redraws, enforces line/character limits, and includes a cursor
+marker when the page is truncated. Tool arguments and reasoning are omitted.
+Recent user-authored text is included by design and should be treated as
+sensitive; the capture does not reconstruct persisted conversation history.
 
-For `name="all"` (capture from every agent), the orchestrator
-joins per-agent blocks with `\n============================================================\n`.
+`/hub capture` and `kollab --hub capture` use this transcript by default.
+`kollab --hub capture <name> [lines] --raw` and `format="terminal"` retain the
+previous terminal rendering. `format="plain"` keeps the explicit normalized
+text-only API. For orchestrator-only sessions without semantic records, the
+plugin uses a sanitized text fallback rather than inventing message roles.
 
-If the result exceeds 2000 characters, it's truncated:
-
-```
-[hub_capture]
-[capture: worker-1 @ 2m 14s, 500 lines]
-<content>
-... (truncated)
-```
-
-Errors from `_cmd_capture`:
-
-```
-[hub_capture]
-Agent 'worker-1' not found
-[hub_capture]
-Invalid line count: foo
-[hub_capture]
-Usage: /sub capture <agent_name|all> [lines]
-[hub_capture]
-Agent orchestrator not initialized
-```
-
-Source: `plugins/hub/plugin.py:2784-2795`,
-`_cmd_capture` at `plugins/agent_orchestrator/plugin.py:659-735`.
-Truncation at `plugin.py:2791-2793`.
+Unknown identities, missing sockets, and transport failures return an actionable
+error instead of an empty transcript.
 
 ##### Task lifecycle: `<task_checkpoint>` / `<task_complete>` / `<task_approve>` / `<task_reject>`
 
@@ -1521,6 +1504,12 @@ No agent-facing XML tags. This plugin hooks `LLM_REQUEST_PRE` and
 `LLM_REQUEST_POST` to monitor prompt size and trigger auto-compaction
 when thresholds are crossed. The agent doesn't invoke it directly —
 it runs transparently on every request.
+
+The plugin preserves only a bounded number of recent Task Ledger assignments that are
+still active, paused, or explicitly targeted; archived completed tasks are summarized.
+A typed request-error hook can trigger one forced compaction after a context-window
+failure, without replaying the failed request. Compaction state is published separately
+so the TUI and Web UI can show paused, running, ready-to-retry, and failed states.
 
 #### deep_thought plugin (`plugins/deep_thought/plugin.py`)
 

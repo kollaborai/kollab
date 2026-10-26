@@ -1,0 +1,80 @@
+{
+  "name": "hub-email-wake",
+  "description": "Email Wake: a new mail in a scripted local IMAP inbox (tests/tmux/lib/fake_imap.py, Gmail-like, IDLE) wakes the running agent. Old mail never wakes it; the new one arrives as a direct message with sender, subject and body framed as untrusted, the fake model answers, and the log names the uid, not the content. Throwaway HOME, fake model, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"); cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 PATH=\"$R/.venv/bin:$PATH\" exec \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_imap.py\" run \"$H/imap.port\" --no-daemon'",
+    "app_init_sleep": 3,
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "label": "setup"
+    },
+    {
+      "action": "shell",
+      "description": "throwaway HOME, fake model, fake IMAP inbox with two old mails",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"; [ -s \"$P\" ] && O=$(cat \"$P\") && { kill \"$(cat \"$O/fake.pid\")\" \"$(cat \"$O/imap.pid\")\" 2>/dev/null; }; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-email-wake.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws\"; touch \"$H/.kollab/connect-guide-seen\"; (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); (\"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_imap.py\" serve \"$H/imap.port\" >/dev/null 2>&1 & echo $! > \"$H/imap.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && [ -s \"$H/imap.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}},\"permissions\":{\"approval_mode\":\"trust_all\"}},\"plugins\":{\"hub\":{\"email_enabled\":true,\"email_address\":\"me@example.com\",\"email_app_password\":\"not-a-real-password\",\"email_filter\":\"category:primary\"}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; echo \"fake model on $(cat \"$H/fake.port\"), fake imap on $(cat \"$H/imap.port\")\"",
+      "assert_contains": "fake imap on"
+    },
+    {
+      "action": "start_app"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "[0-9]+ msg \\| [0-9]+ tok",
+      "timeout": 60,
+      "description": "status bar up"
+    },
+    {
+      "action": "shell",
+      "description": "the agent watches the inbox from the next uid: the two old mails never wake it",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"); for _ in $(seq 1 60); do grep -qs \"email bridge: watching\" \"$H\"/.kollab/projects/*/logs/kollab.log && break; sleep 0.5; done; grep -ho \"email bridge: watching .* from uid [0-9]*\" \"$H\"/.kollab/projects/*/logs/kollab.log | tail -1",
+      "assert_contains": "from uid 3"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "Subject: old"
+    },
+    {
+      "action": "section",
+      "label": "new mail wakes the agent"
+    },
+    {
+      "action": "shell",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"); kill -USR1 \"$(cat \"$H/imap.pid\")\" && echo \"mail delivered\"",
+      "assert_contains": "mail delivered"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "Subject: Game night invite",
+      "timeout": 15,
+      "description": "the email reaches the agent"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "untrusted content"
+    },
+    {
+      "action": "wait_for",
+      "pattern": "pong:",
+      "timeout": 30,
+      "description": "the agent took a model turn"
+    },
+    {
+      "action": "shell",
+      "description": "the log names the uid, never the subject or body",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"); for _ in $(seq 1 20); do grep -qs \"bridge incoming (email)\" \"$H\"/.kollab/projects/*/logs/kollab.log && break; sleep 0.5; done; grep -h \"bridge incoming (email)\" \"$H\"/.kollab/projects/*/logs/kollab.log | tail -1 | sed \"s/ *- plugin.py.*//\"",
+      "assert_contains": "email -> koordinator: uid 3"
+    },
+    {
+      "action": "section",
+      "label": "cleanup"
+    },
+    {
+      "action": "shell",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-email-wake.path\"); kill \"$(cat \"$H/fake.pid\")\" \"$(cat \"$H/imap.pid\")\" 2>/dev/null; echo \"fakes stopped\"",
+      "assert_contains": "fakes stopped"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 /**
- * Sidebar agent order saved by the engine (engine: sidebar_order.py). Local
+ * Sidebar order saved by the engine (engine: sidebar_order.py). Local
  * persona keys use workspace + identity; duplicate live rows add stable session
  * IDs while retaining the persona key as an offline/restart fallback. Remote
  * keys add network + device scope to keep identically named agents independent.
@@ -21,6 +21,32 @@ export function orderKey(
 ): string {
   const parts = ["pos", ...(scope?.length ? scope : []), folder || "", (name || "").trim().toLowerCase()];
   return JSON.stringify(parts);
+}
+
+/** The network API exposes device names, not immutable device IDs; a rename is a new key. */
+export function deviceOrderKey(networkId: string, device: string): string {
+  return JSON.stringify(["device", networkId, device]);
+}
+
+function deviceOrderRows<Device extends { device: string }>(networkId: string, devices: Device[]) {
+  const folder = JSON.stringify(["devices", networkId]);
+  return devices.map((device) => ({ key: deviceOrderKey(networkId, device.device), folder, device }));
+}
+
+/** Rank whole device groups without changing their workspaces or agent rows. */
+export function orderedDevices<Device extends { device: string }>(networkId: string, devices: Device[], saved: string[]): Device[] {
+  return groupByFolder(deviceOrderRows(networkId, devices), saved).flatMap((group) => group.rows.map((row) => row.device));
+}
+
+/** Device moves share the agent preference file and retain all unrelated or absent keys. */
+export function reorderDevicesWithinNetwork<Device extends { device: string }>(
+  networkId: string,
+  devices: Device[],
+  key: string,
+  to: number,
+  saved: string[],
+): string[] | null {
+  return reorderWithinFolder(groupByFolder(deviceOrderRows(networkId, devices), saved), key, to, saved);
 }
 
 /** Scope duplicate rows by API session ID; persona keys remain durable fallbacks. */
@@ -147,20 +173,20 @@ export function groupByFolder<T extends OrderRow>(rows: T[], order: string[]): F
   return [...groups].map(([folder, list]) => ({ folder, rows: list }));
 }
 
-/** The order to save after `key` moves one place within its folder; null when it cannot move. */
-export function moveWithinFolder<T extends OrderRow>(
+/** Save a drop at an absolute position in the row's folder; invalid/no-op drops do not write. */
+export function reorderWithinFolder<T extends OrderRow>(
   groups: FolderGroup<T>[],
   key: string,
-  by: -1 | 1,
+  to: number,
   saved: string[],
 ): string[] | null {
   const group = groups.find((g) => g.rows.some((row) => row.key === key));
   if (!group) return null;
   const from = group.rows.findIndex((row) => row.key === key);
-  const to = from + by;
-  if (to < 0 || to >= group.rows.length) return null;
+  if (!Number.isInteger(to) || to < 0 || to >= group.rows.length || to === from) return null;
   const rows = [...group.rows];
-  [rows[from], rows[to]] = [rows[to], rows[from]];
+  const [moved] = rows.splice(from, 1);
+  rows.splice(to, 0, moved);
   const persistedAliases = new Set<string>();
   const persistRows = (items: T[]) => items.flatMap((row) => {
     const keys = [row.key];

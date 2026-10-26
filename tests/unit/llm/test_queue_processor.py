@@ -8,13 +8,19 @@ from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kollabor.llm.streaming_handler import StreamingHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.queue_processor import (
     QueueProcessor,
     _tool_results_requiring_followup,
 )
 from kollabor_agent.tool_executor import ToolExecutionResult
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
+from tests.unit.llm.voice_admission_helpers import (
+    make_voice_origin_context,
+    revoke_voice_admission_context,
+)
 
 
 @dataclass
@@ -177,6 +183,559 @@ class TestQueueProcessor(unittest.TestCase):
         self.message_display_service.display_error_message.assert_called_once_with(
             "LLM provider not available"
         )
+        event_types = [call.args[0] for call in self.event_bus.emit_with_hooks.await_args_list]
+        self.assertIn(EventType.LLM_REQUEST_ERROR, event_types)
+        self.streaming_handler.call_llm.assert_awaited_once()
+
+    def _stop_after_streaming(self, *chunks):
+        """Run a turn whose reply streams `chunks` and is then stopped.
+
+        Uses the real StreamingHandler: the text a Stop keeps lives in it.
+        Returns what happened in order: "history" for each message added, then
+        the semantic event types, so a test can check the engine's turn_complete
+        read comes after the row.
+        """
+
+        async def call_llm(*, streaming_callback, **_):
+            for chunk in chunks:
+                await streaming_callback(chunk)
+            raise asyncio.CancelledError("Request cancelled by user")
+
+        order = []
+        self.renderer.get_service.return_value.publish.side_effect = (
+            lambda event: order.append(event["type"])
+        )
+        self.add_message_fn.side_effect = lambda *a, **k: order.append("history")
+        self.processor._streaming_handler = StreamingHandler(
+            SimpleNamespace(call_llm=call_llm), MagicMock(), self.renderer
+        )
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+        return order
+
+    def _assistant_messages(self):
+        return [
+            call.args[0]
+            for call in self.add_message_fn.call_args_list
+            if call.args[0].role == "assistant"
+        ]
+
+    def test_a_stop_keeps_the_text_already_shown(self):
+        order = self._stop_after_streaming("Hello ", "wor")
+
+        replies = self._assistant_messages()
+        self.assertEqual([m.content for m in replies], ["Hello wor"])
+        self.assertEqual(replies[0].metadata, {"interrupted": True})
+        self.assertEqual(self.add_message_fn.call_args.kwargs["parent_uuid"], "t")
+        logged = self.conversation_logger.log_assistant_message
+        logged.assert_awaited_once()
+        self.assertEqual(logged.await_args.args[0], "Hello wor")
+        # the engine reads history when turn_complete goes out
+        self.assertLess(order.index("history"), order.index("turn_complete"))
+
+    def test_a_stop_before_any_text_keeps_nothing(self):
+        for chunks in ((), ("\n",)):
+            with self.subTest(chunks=chunks):
+                self.add_message_fn.reset_mock()
+                self.conversation_logger.reset_mock()
+
+                self._stop_after_streaming(*chunks)
+
+                self.assertEqual(self._assistant_messages(), [])
+                self.conversation_logger.log_assistant_message.assert_not_awaited()
+
+    def test_a_stopped_voice_turn_keeps_its_text_under_its_voice_turn(self):
+        """The worker then cuts it to the part that was played, which may be none."""
+        voice = make_voice_origin_context(turn_id="turn-9")
+        # a talk-over revokes the grant before the cancel lands
+        revoke_voice_admission_context(voice)
+        self.processor.active_origin_context = voice
+
+        self._stop_after_streaming("Hello wor")
+
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.content, "Hello wor")
+        self.assertEqual(reply.metadata, {"interrupted": True, "voice_turn_id": "turn-9"})
+        logged = self.conversation_logger.log_assistant_message
+        self.assertEqual(logged.await_args.kwargs["voice_turn_id"], "turn-9")
+
+    def _reply_with(self, text):
+        """A model call that answers `text` with no tools, through the real turn."""
+        self.streaming_handler.call_llm = AsyncMock(return_value=text)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.response_parser.parse_response.return_value = {
+            "content": text,
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=(text, False, False)
+        )
+
+    def test_a_voice_reply_names_its_voice_turn(self):
+        """A talk-over after the reply finished cuts that reply to what was heard."""
+        self.processor.active_origin_context = make_voice_origin_context(turn_id="turn-9")
+        self._reply_with("The build is green.")
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        [reply] = self._assistant_messages()
+        self.assertEqual(reply.metadata.get("voice_turn_id"), "turn-9")
+        self.processor.active_origin_context = None
+        self.assertEqual(self.processor._voice_turn_metadata(), {})
+
+    def test_every_event_of_a_voice_turn_carries_its_id(self):
+        """The Engine streams a voice turn's reply by its id: a talked-over turn's
+        late events, its turn_complete above all, end no other turn's stream."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap, publish_semantic
+        from kollabor_tui.turn_context import current_turn
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("Sure.")
+
+        running = []  # which voice turn the daemon says runs (a talk-over cancels only it)
+
+        async def call_llm(*_args, **_kwargs):
+            running.append(self.processor.open_voice_turn)
+            publish_semantic(self.renderer, "token", text="Sure.")
+            return "Sure."
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+
+        async def turn():
+            voice = QueuedInput(
+                "is it green", {}, origin_context=make_voice_origin_context("turn-9")
+            )
+            await self.processor.process_message_batch([voice], "parent")
+            publish_semantic(self.renderer, "token", text="typed reply")  # the next turn
+            return current_turn.get()
+
+        after = self.loop.run_until_complete(turn())
+        self.assertEqual(running, ["turn-9"])
+        ids = [
+            (e["type"], e.get("request_id"))
+            for e in tap.get_snapshot()
+            if e["type"] in ("token", "turn_complete")
+        ]
+        self.assertEqual(
+            ids,
+            [("token", "turn-9"), ("turn_complete", "turn-9"), ("token", None)],
+        )
+        self.assertNotIn("request_id", after)
+
+    def test_a_voice_turn_that_fails_says_so_on_its_own_stream(self):
+        """Its error and turn_complete carry its id: the Engine says the error and
+        ends the stream, never waits out the idle timeout."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self.streaming_handler.call_llm = AsyncMock(side_effect=RuntimeError("provider down"))
+        voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+        self.loop.run_until_complete(self.processor.process_message_batch([voice], "parent"))
+        ids = [
+            (e["type"], e.get("request_id"))
+            for e in tap.get_snapshot()
+            if e["type"] in ("error", "turn_complete")
+        ]
+        self.assertEqual(ids, [("error", "turn-9"), ("turn_complete", "turn-9")])
+
+    def test_a_turn_that_ends_while_a_voice_turn_waits_leaves_its_stamp_alone(self):
+        """A hub turn still running when a voice turn queues ends by clearing its
+        own stamp: the voice turn's stays its own, and goes when it ends."""
+        from kollabor_agent.queue_processor import QueuedInput
+        from kollabor_tui.display_tap import DisplayTap, publish_semantic
+        from kollabor_tui.turn_context import current_turn
+
+        tap = DisplayTap()
+        self.renderer.get_service = MagicMock(return_value=tap)
+        self._reply_with("Sure.")
+        self.streaming_handler.call_llm = AsyncMock(return_value="Sure.")
+
+        async def voice_turn():
+            voice = QueuedInput(
+                "is it green", {}, origin_context=make_voice_origin_context("turn-9")
+            )
+            await self.processor.process_message_batch([voice], "parent")
+            publish_semantic(self.renderer, "token", text="typed reply")  # the next turn
+            return current_turn.get()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()  # a hub turn is running
+            waiting = asyncio.create_task(voice_turn())
+            await asyncio.sleep(0.01)
+            self.processor._stamp_voice_turn(None)  # the hub turn ends
+            self.processor._turn_lock.release()
+            return await waiting
+
+        after = self.loop.run_until_complete(scenario())
+        tokens = [e.get("request_id") for e in tap.get_snapshot() if e["type"] == "token"]
+        self.assertEqual(tokens, [None])  # the typed turn's token: not the old voice id
+        self.assertNotIn("request_id", after)
+
+    def _talk_over_turns(self):
+        """A voice reply in history, the cut's service, and what each model call saw."""
+        from kollabor.state.local import LocalStateService
+
+        self._reply_with("Let me check.")
+        reply = ConversationMessage(
+            role="assistant", content="Let me check.", metadata={"voice_turn_id": "turn-9"}
+        )
+        self.conversation_history.append(reply)
+        llm = SimpleNamespace(
+            _queue_processor=self.processor, conversation_history=self.conversation_history,
+            conversation_logger=SimpleNamespace(), current_parent_uuid="parent",
+        )
+        seen = []
+
+        async def call_llm(*args, **kwargs):
+            seen.append(reply.content)
+            return "Let me check."
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        return reply, LocalStateService(llm, profile_manager=object(), event_bus=None), seen
+
+    def test_a_talk_over_cut_waits_for_the_voice_turns_last_round(self):
+        """The turn lock is free between a turn's rounds: a cut taken there would
+        land before the rest of the turn, which its one post per turn never cuts."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        answers = []
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            self.processor.turn_completed = False  # its tools ran: one more round
+            # The talk-over, between the rounds: answered at once, holding nothing.
+            answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            await self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            )
+            return reply.content
+
+        # then the cut landed, as the turn ended: before the drain returned
+        self.assertEqual(self.loop.run_until_complete(scenario()), "Let me")
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check.", "Let me check."])  # its last round ran uncut
+        self.assertIsNone(self.processor._open_voice_turn)
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_talk_over_then_speaking_again_cuts_before_the_next_turns_first_round(self):
+        """Talk over and speak again at once: the new turn's model call sees the cut."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        answers = []
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            if not answers:  # the reply is playing: the user talks over it, then speaks
+                answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
+                await self.processor.enqueue(QueuedInput(
+                    "and the blue one", {}, origin_context=make_voice_origin_context("turn-10")
+                ))
+                self.processor.turn_completed = False  # it still had a round to run
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            await self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            )
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check.", "Let me"])  # turn-10's first round: cut
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_stopped_voice_turn_leaves_the_next_turn_its_own_grant(self):
+        """A Stop, a talk-over or an error while a voice turn's tool runs ends that
+        turn. The next turn, spoken or typed, never runs on the ended turn's grant:
+        an invalid one refuses all its tools. Its events keep the id of the voice
+        turn whose reply stream waits for them (the newest voice turn in it, else
+        the one it cut off), or that stream would never end."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        seen = []
+        invalid = {"source": "livekit_voice", "voice_tool_policy": "invalid"}
+        # Input that cuts in while the turn still has a round to run fails closed.
+        cases = (
+            ("stop", True, "own"),
+            ("stop", False, None),
+            ("error", True, "own"),
+            ("new input", True, {**invalid, "turn_id": "turn-2"}),
+            ("new input", False, {**invalid, "turn_id": "turn-1"}),
+        )
+        for ended_by, said, expected in cases:
+            with self.subTest(ended_by=ended_by, said=said):
+                seen.clear()
+                spoken = make_voice_origin_context("turn-2")  # a turn's end revokes its grant
+                after = QueuedInput("and the blue one", {}, origin_context=spoken) if said else "and the blue one"
+                expected = spoken if expected == "own" else expected
+
+                async def turn(**kwargs):
+                    seen.append(kwargs.get("execution_context"))
+                    self.processor.turn_completed = len(seen) > 1
+                    if len(seen) == 1 and ended_by == "stop":  # its tool runs, the Stop lands
+                        self.processor.request_cancellation(origin="human")
+                    return "parent"
+
+                async def next_round():  # the turn's next round
+                    if ended_by == "error":
+                        raise RuntimeError("the model went away")
+                    await self.processor.enqueue(after)  # the input arrives as it runs
+
+                self.processor._execute_llm_turn = turn
+                drain = lambda: self.processor.process_queue(  # noqa: E731
+                    MagicMock(), lambda m: self.processor.process_message_batch(m, "parent"), next_round
+                )
+                self.loop.run_until_complete(self.processor.enqueue(QueuedInput(
+                    "is it green", {}, origin_context=make_voice_origin_context("turn-1")
+                )))
+                self.loop.run_until_complete(drain())
+                if ended_by != "new input":
+                    self.processor.cancel_processing = False  # the next message clears the latch
+                    self.loop.run_until_complete(self.processor.enqueue(after))
+                    self.loop.run_until_complete(drain())
+                self.assertEqual(seen[1], expected)
+                self.assertIsNone(self.processor.active_origin_context)
+
+    def test_a_cut_queued_during_another_round_lands_as_that_round_ends(self):
+        """A hub wake's round holds the lock when the talk-over comes: the cut
+        waits for it, then lands with no next turn needed."""
+        reply, state, seen = self._talk_over_turns()
+        answers = []
+        first_call = self.streaming_handler.call_llm.side_effect
+
+        async def call_llm(*args, **kwargs):
+            answers.append(await state.record_interrupted_voice_reply("turn-9", "Let me"))
+            return await first_call(*args, **kwargs)
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.loop.run_until_complete(self.processor.continue_conversation("parent"))
+        self.assertEqual(answers, [{"recorded": False, "pending": True}])
+        self.assertEqual(seen, ["Let me check."])  # never cut under the round
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_cut_queued_behind_the_lock_lands_before_the_next_round(self):
+        reply, state, seen = self._talk_over_turns()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()  # something else is writing
+            answer = await state.record_interrupted_voice_reply("turn-9", "Let me")
+            self.processor._turn_lock.release()
+            await self.processor.continue_conversation("parent")
+            return answer
+
+        self.assertEqual(self.loop.run_until_complete(scenario()), {"recorded": False, "pending": True})
+        self.assertEqual(seen, ["Let me"])  # its model call saw the cut
+
+    def test_a_cut_never_waits_behind_a_round_about_to_take_the_lock(self):
+        """The lock is free but a woken round has it next: the cut still answers at
+        once, so nothing behind it on the connection waits out that round."""
+        reply, state, seen = self._talk_over_turns()
+
+        async def scenario():
+            await self.processor._turn_lock.acquire()
+            woken = asyncio.create_task(self.processor.continue_conversation("parent"))
+            await asyncio.sleep(0)  # it waits on the lock
+            self.processor._turn_lock.release()  # and takes it next
+            answer = await asyncio.wait_for(
+                state.record_interrupted_voice_reply("turn-9", "Let me"), 0.05
+            )
+            await woken
+            return answer
+
+        self.assertEqual(self.loop.run_until_complete(scenario()), {"recorded": False, "pending": True})
+        self.assertEqual(seen, ["Let me"])  # and it landed before that round's model call
+
+    def test_a_cut_queued_while_a_flush_runs_lands_in_that_flush(self):
+        """A flush holds the lock while it runs a cut, so one queued meanwhile starts
+        no flush of its own: the running flush takes it too, not the next round."""
+        ran, gate = [], asyncio.Event()
+
+        async def first():
+            await gate.wait()  # a big log being cut
+            ran.append("first")
+
+        async def second():
+            ran.append("second")
+
+        async def scenario():
+            self.processor.after_turn("turn-8", first)  # no round running: a flush starts
+            await asyncio.sleep(0)
+            self.assertTrue(self.processor._turn_lock.locked())  # and is cutting
+            self.processor.after_turn("turn-9", second)
+            gate.set()
+            await self.processor._after_turn_flush
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(ran, ["first", "second"])
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_round_that_raises_leaves_its_cut_to_a_task_once_the_lock_is_free(self):
+        """A round that raises skips its end-of-round flush (here a pre-request hook
+        cancels it): a cut queued during it lands from a task, not at the next round."""
+        reply, state, seen = self._talk_over_turns()
+
+        async def hooks(*args, **kwargs):
+            if not self.processor._after_turn:  # talked over while the round runs
+                await state.record_interrupted_voice_reply("turn-9", "Let me")
+            return {"cancelled": True}
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=hooks)
+
+        async def scenario():
+            with self.assertRaises(asyncio.CancelledError):
+                await self.processor._execute_llm_turn(True, "parent")
+            await asyncio.wait_for(self.processor._after_turn_flush, 1)
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_drain_that_dies_leaves_its_turns_cut_to_a_task(self):
+        """The cut waits for its voice turn to end; a drain cancelled before then
+        ends the turn in its finally, and a task lands the cut."""
+        from kollabor_agent.queue_processor import QueuedInput
+
+        reply, state, seen = self._talk_over_turns()
+        queued = asyncio.Event()
+
+        async def batch(messages):
+            await self.processor.process_message_batch(messages, "parent")
+            await state.record_interrupted_voice_reply("turn-9", "Let me")  # turn-9 is open
+            queued.set()
+            await asyncio.Event().wait()  # the drain dies here
+
+        async def scenario():
+            voice = QueuedInput("is it green", {}, origin_context=make_voice_origin_context("turn-9"))
+            await self.processor.enqueue(voice)
+            drain = asyncio.create_task(self.processor.process_queue(
+                MagicMock(), batch, lambda: self.processor.continue_conversation("parent")
+            ))
+            await queued.wait()
+            self.assertEqual(reply.content, "Let me check.")  # never cut under its turn
+            drain.cancel()
+            try:
+                await drain
+            except asyncio.CancelledError:
+                pass
+            await asyncio.wait_for(self.processor._after_turn_flush, 1)
+
+        self.loop.run_until_complete(scenario())
+        self.assertEqual(reply.content, "Let me")
+        self.assertEqual(self.processor._after_turn, [])
+
+    def test_a_stop_while_tools_run_keeps_the_reply_shown_before_them(self):
+        """The reply joins history after its tools; a Stop in between kept nothing."""
+        self.streaming_handler.call_llm = AsyncMock(
+            return_value="Running it.\n<terminal>sleep 9</terminal>"
+        )
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 0
+        self.tool_executor.execute_tool = AsyncMock(
+            side_effect=asyncio.CancelledError("Request cancelled by user")
+        )
+        self.response_parser.parse_response.return_value = {
+            "content": "Running it.",
+            "components": {},
+            "turn_completed": False,
+        }
+        self.response_parser.get_all_tools.return_value = [
+            {"id": "terminal_1", "type": "terminal", "command": "sleep 9"}
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("Running it.", False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="t",
+            )
+        )
+
+        replies = self._assistant_messages()
+        self.assertEqual(
+            [(m.content, m.metadata) for m in replies],
+            [("Running it.", {"interrupted": True})],
+        )
+
+    def test_context_window_failure_emits_typed_error_without_retry(self):
+        class ContextWindowExceeded(RuntimeError):
+            error_code = "context_window_exceeded"
+
+        self.streaming_handler.call_llm.side_effect = ContextWindowExceeded(
+            "model context window exceeded"
+        )
+
+        self.api_service._provider = SimpleNamespace(
+            config=SimpleNamespace(context_window=272_000)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True, current_parent_uuid="overflow",
+            )
+        )
+
+        error_call = next(
+            call
+            for call in self.event_bus.emit_with_hooks.await_args_list
+            if call.args[0] is EventType.LLM_REQUEST_ERROR
+        )
+        error_data = error_call.args[1]
+        self.assertEqual(error_data["error_code"], "context_window_exceeded")
+        self.assertTrue(error_data["context_window_exceeded"])
+        self.streaming_handler.call_llm.assert_awaited_once()
+        tap = self.renderer.get_service.return_value
+        self.assertNotIn(
+            "usage_update",
+            [call.args[0]["type"] for call in tap.publish.call_args_list],
+        )
+
 
     def test_pre_request_hook_can_withhold_tools_for_one_request(self):
         self.native_tools_handler.tools = [{"name": "terminal"}]
@@ -242,6 +801,94 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self.processor.active_voice, voice)
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
+
+    def test_the_users_yes_tells_the_model_what_it_approved(self):
+        """The note rides on the yes itself, model-only, once."""
+        from kollabor_agent.yes_approval import YesApprovals
+
+        approvals = YesApprovals()
+        self.processor.tool_executor = MagicMock(yes_approvals=approvals)
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        approvals.ask({"type": "terminal", "id": "c1", "command": "gh pr list"})
+        approvals.on_reply_done()
+        approvals.on_human_input("yes")
+
+        self.loop.run_until_complete(self.processor.process_message_batch(["yes"], "parent"))
+        yes = self.add_message_fn.call_args.args[0]
+        self.assertEqual(yes.content, "yes")
+        self.assertIn("gh pr list", yes.metadata["injected_context"])
+
+        self.loop.run_until_complete(self.processor.process_message_batch(["thanks"], "parent"))
+        self.assertNotIn("injected_context", self.add_message_fn.call_args.args[0].metadata)
+
+    def test_what_a_reply_asked_opens_when_its_chain_ends(self):
+        """A yes answers a reply only once it is finished: the chain's end is that point."""
+        from kollabor_agent.yes_approval import YesApprovals
+
+        approvals = YesApprovals()
+        self.processor.tool_executor = MagicMock(yes_approvals=approvals)
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        self.processor.is_processing = True
+        approvals.ask(call)
+        approvals.on_human_input("yes")  # while the reply is still written: answers nothing
+        self.assertFalse(approvals.take({**call, "id": "c0"}))
+        approvals.ask(call)
+        self.processor.is_processing = False
+        approvals.on_human_input("yes")
+        self.assertTrue(approvals.take({**call, "id": "c2"}))
+
+    def test_livekit_origin_survives_tool_continuation(self):
+        from kollabor_agent.queue_processor import QueuedInput
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+        self.processor.turn_completed = False
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent-uuid")
+        queued = QueuedInput("show status", {}, origin_context=origin_context)
+
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([queued], "parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+        self.processor._execute_llm_turn.reset_mock()
+        self.processor.turn_completed = False
+
+        self.loop.run_until_complete(
+            self.processor.continue_conversation("parent-uuid")
+        )
+
+        self.assertEqual(
+            self.processor._execute_llm_turn.await_args.kwargs["execution_context"],
+            origin_context,
+        )
+
+
+    def test_mixed_voice_turn_provenance_fails_closed(self):
+        from kollabor_agent.queue_processor import (
+            QueuedInput,
+            merge_livekit_origin_contexts,
+        )
+        from kollabor_agent.voice_admission import validate_voice_admission_context
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        voice_context = make_voice_origin_context("turn-1")
+        merged = merge_livekit_origin_contexts(
+            [
+                QueuedInput("voice text", {}, origin_context=voice_context),
+                "typed input",
+            ]
+        )
+
+        self.assertEqual(merged["source"], "livekit_voice")
+        self.assertEqual(merged["voice_tool_policy"], "invalid")
+        self.assertEqual(merged["turn_id"], "turn-1")  # its reply stream still waits
+        self.assertFalse(validate_voice_admission_context(voice_context))
+        self.assertFalse(validate_voice_admission_context(merged))
+
 
     def test_voice_rules_ride_a_sessions_first_turn_then_a_short_nudge(self):
         from kollabor_agent.queue_processor import QueuedInput
@@ -502,7 +1149,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(
             return_value="assistant-uuid"
         )
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("test response", False, False)
@@ -561,7 +1207,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("intermediate answer", False, False)
@@ -625,7 +1270,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Running it.", False, False)
@@ -681,6 +1325,246 @@ class TestQueueProcessor(unittest.TestCase):
         ]
         self.assertEqual(response_events, [{"type": "response", "text": "Running it."}])
 
+    def test_model_first_compaction_resumes_once_after_staging(self):
+        """The same user turn resumes only after the staged swap is applied."""
+        from kollabor_events import EventType
+        from plugins.context_compaction_plugin import ContextCompactionPlugin
+
+        history = self.conversation_history
+        history.extend(
+            ConversationMessage(
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"prior message {index}",
+            )
+            for index in range(12)
+        )
+        compact_values = {
+            "plugins.context_compaction.keep_recent": 2,
+            "plugins.context_compaction.max_summary_tokens": 2000,
+        }
+        compact_config = MagicMock()
+        compact_config.get = lambda key, default=None: compact_values.get(key, default)
+        plugin = ContextCompactionPlugin(
+            "test", MagicMock(), MagicMock(), compact_config
+        )
+        plugin._llm_service = SimpleNamespace(
+            conversation_history=history,
+            session_stats=self.session_stats,
+            is_processing=False,
+            _pending_agent_hud=[],
+        )
+        plugin._conversation_logger = SimpleNamespace(session_id="session-1")
+        plugin._awaiting_model = True
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+
+        summary_started = asyncio.Event()
+        release_summary = asyncio.Event()
+
+        async def summarize(*_args, **_kwargs):
+            summary_started.set()
+            await release_summary.wait()
+            return "S" * 200
+
+        plugin._call_summarization_llm = AsyncMock(side_effect=summarize)
+        applied_swaps = []
+
+        async def emit_with_hooks(*args, **kwargs):
+            event_type = args[0] if args else kwargs["event_type"]
+            data = args[1] if len(args) > 1 else kwargs.get("data", {})
+            if event_type == EventType.LLM_REQUEST_PRE:
+                had_pending_compaction = plugin._pending_compaction is not None
+                data = await plugin._apply_pending_compaction(data, MagicMock())
+                if had_pending_compaction:
+                    applied_swaps.append(list(history))
+            return data
+
+        self.event_bus.emit_with_hooks = AsyncMock(side_effect=emit_with_hooks)
+        llm_call_count = 0
+        request_snapshots = []
+        llm_responses = [
+            "Preparing the requested work. <compact>task: continue</compact>",
+            "The original response is complete.",
+        ]
+
+        async def call_llm(*_args, **_kwargs):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            request_snapshots.append(
+                [
+                    (message.role, message.content, dict(message.metadata or {}))
+                    for message in history
+                ]
+            )
+            return llm_responses[llm_call_count - 1]
+
+        self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
+        self.native_tools_handler.tool_calling_enabled = False
+        self.api_service.has_pending_tool_calls.return_value = False
+        self.api_service.get_last_provider_reasoning = MagicMock(return_value=None)
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.last_thinking_content = None
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.tool_executor.is_cancelled.return_value = False
+        self.tool_executor.take_executed_count.return_value = 1
+        self.tool_executor.format_result_for_conversation.return_value = (
+            "[compact] history staged"
+        )
+
+        async def execute_compact(tool_data, *_args, **_kwargs):
+            return await plugin._handle_compact_tool(tool_data)
+
+        self.tool_executor.execute_tool = AsyncMock(side_effect=execute_compact)
+        self.response_parser.parse_response.side_effect = [
+            {
+                "content": "Preparing the requested work.",
+                "components": {},
+                "turn_completed": False,
+            },
+            {
+                "content": "The original response is complete.",
+                "components": {},
+                "turn_completed": True,
+            },
+        ]
+        self.response_parser.get_all_tools.side_effect = [
+            [
+                {
+                    "id": "compact_1",
+                    "type": "compact",
+                    "notes": "task: continue",
+                    "_position": 29,
+                }
+            ],
+            [],
+        ]
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            return_value="assistant-uuid"
+        )
+        self.conversation_logger.log_system_message = AsyncMock()
+        self.processor._bridge_relay = AsyncMock()
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            side_effect=[
+                ("Preparing the requested work.", False, False),
+                ("The original response is complete.", False, False),
+            ]
+        )
+        self.renderer.get_service = MagicMock(return_value=MagicMock())
+
+        def append_message(message, **_kwargs):
+            history.append(message)
+
+        self.add_message_fn.side_effect = append_message
+        parent_uuid = ["parent-uuid"]
+        late_message = ConversationMessage(
+            role="user", content="arrived while compaction was running"
+        )
+        batch_inputs = []
+        turn_complete_calls = []
+        turn_complete_at_batch_return = []
+        continuation_calls = 0
+
+        def capture_semantic(_renderer, event_type, **_payload):
+            if event_type == "turn_complete":
+                turn_complete_calls.append(llm_call_count)
+
+        async def process_batch(messages):
+            batch_inputs.append(list(messages))
+            turn = asyncio.create_task(
+                self.processor.process_message_batch(messages, parent_uuid[0])
+            )
+            try:
+                await asyncio.wait_for(summary_started.wait(), timeout=2)
+                history.append(late_message)
+            finally:
+                release_summary.set()
+            parent_uuid[0] = await turn
+            turn_complete_at_batch_return.append(len(turn_complete_calls))
+
+        async def continue_turn():
+            nonlocal continuation_calls
+            continuation_calls += 1
+            parent_uuid[0] = await self.processor.continue_conversation(
+                parent_uuid[0]
+            )
+
+        async def run_queue():
+            await self.processor.enqueue("original user request")
+            await asyncio.wait_for(
+                self.processor.process_queue(
+                    MagicMock(), process_batch, continue_turn
+                ),
+                timeout=5,
+            )
+
+        try:
+            with patch(
+                "kollabor_agent.queue_processor.publish_semantic",
+                side_effect=capture_semantic,
+            ):
+                self.loop.run_until_complete(run_queue())
+        finally:
+            release_summary.set()
+            pending_tasks = tuple(plugin._compaction_tasks)
+            if pending_tasks:
+                self.loop.run_until_complete(
+                    asyncio.gather(*pending_tasks, return_exceptions=True)
+                )
+
+        self.assertEqual(batch_inputs, [["original user request"]])
+        self.assertEqual(turn_complete_at_batch_return, [0])
+        self.assertEqual(turn_complete_calls, [2])
+        self.assertEqual(continuation_calls, 1)
+        self.assertEqual(self.streaming_handler.call_llm.await_count, 2)
+        self.tool_executor.execute_tool.assert_awaited_once()
+        self.assertEqual(len(applied_swaps), 1)
+        self.assertIsNone(plugin._pending_compaction)
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertEqual(sum(message is late_message for message in history), 1)
+
+        self.assertEqual(len(request_snapshots), 2)
+        first_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[0]
+            if role == "user" and content == "original user request"
+        ]
+        second_request_users = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == "original user request"
+        ]
+        self.assertEqual(len(first_request_users), 1)
+        self.assertLessEqual(len(second_request_users), 1)
+        late_in_resumed_request = [
+            content
+            for role, content, _metadata in request_snapshots[1]
+            if role == "user" and content == late_message.content
+        ]
+        self.assertEqual(len(late_in_resumed_request), 1)
+        compact_summaries = [
+            content
+            for _role, content, metadata in request_snapshots[1]
+            if metadata.get("context_compaction")
+        ]
+        self.assertEqual(len(compact_summaries), 1)
+
+        tool_batches = [
+            message for message in history if message.metadata.get("tool_output_batch")
+        ]
+        self.assertEqual(len(tool_batches), 1)
+        self.assertEqual(len(tool_batches[0].metadata["xml_tool_results"]), 1)
+        final_responses = [
+            message
+            for message in history
+            if message.role == "assistant"
+            and message.content == "The original response is complete."
+        ]
+        self.assertEqual(len(final_responses), 1)
+
+
     def test_native_and_xml_results_log_display_data_without_changing_model_calls(self):
         native = SimpleNamespace(id="native-one", name="file_edit", input={"file": "owned.txt"})
         diffs = [{"path": "owned.txt", "old_text": "before", "new_text": "after"}]
@@ -711,7 +1595,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "xml-one", "type": "terminal", "command": "echo xml"},
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant-uuid")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("Checking", False, False))
         self.loop.run_until_complete(self.processor._execute_llm_turn_inner(
@@ -784,7 +1667,6 @@ class TestQueueProcessor(unittest.TestCase):
             return_value="assistant-uuid"
         )
         self.conversation_logger.log_system_message = AsyncMock()
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("On it.", False, False)
@@ -873,7 +1755,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a-uuid")
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             side_effect=lambda raw, clean, *a, **k: (clean, False, False)
@@ -919,7 +1800,6 @@ class TestQueueProcessor(unittest.TestCase):
         }
         self.response_parser.get_all_tools.return_value = []
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="a")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=(".", False, False)
@@ -975,7 +1855,6 @@ class TestQueueProcessor(unittest.TestCase):
             {"id": "read", "type": "terminal", "command": "true"}
         ]
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="assistant")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("I'll recheck the voice mode files.", False, False)
@@ -1035,7 +1914,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.conversation_logger.log_system_message = AsyncMock()
         self.event_bus.emit_with_hooks = AsyncMock(return_value={})
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(
             return_value=("Which file should I inspect?", False, False)
@@ -1232,155 +2110,6 @@ class TestQueueProcessor(unittest.TestCase):
         )
         self.assertEqual(result, ("x", False, False))
 
-    # ------------------------------------------------------------------
-    # Tests for _bridge_relay
-    # ------------------------------------------------------------------
-
-    def test_bridge_relay_no_event_bus(self):
-        """No-op when event_bus is None."""
-        self.processor.event_bus = None
-        # Should not raise
-        self.loop.run_until_complete(
-            self.processor._bridge_relay("some response")
-        )
-
-    def test_bridge_relay_empty_response(self):
-        """No-op when clean_response is empty."""
-        self.loop.run_until_complete(self.processor._bridge_relay(""))
-
-    def test_bridge_relay_no_hub_plugin(self):
-        """No-op when hub_plugin service is not available."""
-        self.event_bus.get_service = MagicMock(return_value=None)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-        self.event_bus.get_service.assert_called_with("hub_plugin")
-
-    def test_bridge_relay_hub_no_bridge(self):
-        """No-op when hub_plugin exists but has no _bridge."""
-        hub = MagicMock()
-        hub._bridge = None
-        self.event_bus.get_service = MagicMock(return_value=hub)
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
-    def test_bridge_relay_sends_to_bridge(self):
-        """Sends clean_response to bridge when bridge platform found in history."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("relay this"))
-        hub.bridge_send.assert_called_once_with("relay this")
-
-    def test_bridge_relay_skips_non_bridge_users(self):
-        """Does not relay when no user message has bridge_platform metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata=None),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("should not relay"))
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_stops_at_first_bridge_user(self):
-        """Finds the most recent bridge user (reversed history search)."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-        hub.bridge_send = AsyncMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "slack"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Should find discord (most recent bridge user) and send
-        hub.bridge_send.assert_called_once_with("msg")
-
-    def test_bridge_relay_stops_at_first_non_bridge_user(self):
-        """Stops searching at the first user message without bridge metadata."""
-        hub = MagicMock()
-        hub._bridge = MagicMock()
-
-        @dataclass
-        class MockMsg:
-            role: str
-            metadata: Optional[dict] = None
-
-        llm_service = MagicMock()
-        llm_service.conversation_history = [
-            MockMsg(role="user", metadata={"bridge_platform": "discord"}),
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # non-bridge user
-            MockMsg(role="assistant"),
-            MockMsg(role="user", metadata=None),  # most recent, no bridge -> breaks loop
-        ]
-
-        def get_service(name):
-            if name == "hub_plugin":
-                return hub
-            if name == "llm_service":
-                return llm_service
-            return None
-
-        self.event_bus.get_service = MagicMock(side_effect=get_service)
-        self.loop.run_until_complete(self.processor._bridge_relay("msg"))
-        # Reversed: last user has metadata=None -> hits elif branch, breaks immediately
-        hub.bridge_send.assert_not_called()
-
-    def test_bridge_relay_exception_handled_gracefully(self):
-        """Exceptions in bridge relay are caught and logged."""
-        self.event_bus.get_service = MagicMock(side_effect=RuntimeError("boom"))
-        # Should not raise
-        self.loop.run_until_complete(self.processor._bridge_relay("hello"))
-
     def test_file_ingestion_uses_raw_hash_for_unchanged_read_detection(self):
         """Rendered read headers must not replace the disk-content hash."""
         from kollabor_ai.context_service.hash_utils import compute_hash
@@ -1442,7 +2171,6 @@ class TestQueueProcessor(unittest.TestCase):
         self.tool_executor.is_cancelled.return_value = False
         self.tool_executor.take_executed_count.return_value = 0
         self.conversation_logger.log_assistant_message = AsyncMock(return_value="id")
-        self.processor._bridge_relay = AsyncMock()
         self.processor._drain_env_block = MagicMock(return_value=None)
         self.processor._emit_llm_response_and_handle = AsyncMock(return_value=("final", False, False))
 

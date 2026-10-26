@@ -84,6 +84,7 @@ class PermissionHook:
             "allowed": decision.allowed,
             "reason": decision.reason,
             "risk_level": decision.risk_level.name,
+            "needs_yes": decision.needs_yes,
         }
 
         if not decision.allowed:

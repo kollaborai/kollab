@@ -137,6 +137,148 @@ class TestLLMServiceIntegration(unittest.TestCase):
             # Check queue size (background task mocked to prevent consumption)
             self.assertEqual(self.service.processing_queue.qsize(), 1)
 
+    def test_livekit_origin_is_preserved_in_queued_input(self):
+        from kollabor_agent.queue_processor import QueuedInput
+
+        message = "show status"
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            result = asyncio.run(
+                self.service.process_user_input(message, origin_context=origin_context)
+            )
+
+        self.assertEqual(result["status"], "queued")
+        queued = self.service.processing_queue.get_nowait()
+        self.assertIsInstance(queued, QueuedInput)
+        self.assertEqual(queued.content, message)
+        self.assertEqual(queued.origin_context, origin_context)
+
+    def test_only_the_users_own_yes_runs_what_the_agent_asked_for(self):
+        """A hidden voice turn (the greeting) is an instruction, never the user's answer."""
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        greeting = {**make_voice_origin_context("greet"), "voice_hidden": True}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call)
+            approvals.on_reply_done()
+            asyncio.run(self.service.process_user_input("yes", origin_context=greeting, may_answer=True))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            asyncio.run(self.service.process_user_input("Yes.", may_answer=True))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))
+
+    def test_a_yes_said_over_the_agent_answers_nothing(self):
+        """Words that started while the agent was still talking never count as the yes."""
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        over = {**make_voice_origin_context("t2"), "voice_talk_over": True}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call, make_voice_origin_context("t1"))
+            approvals.on_reply_done()
+            asyncio.run(self.service.process_user_input("yeah", origin_context=over, may_answer=True))
+        self.assertFalse(approvals.take({**call, "id": "c2"}))
+
+    def test_only_a_person_answering_live_says_the_yes(self):
+        """The TUI, an attached window, the web composer and voice answer an ask; no other source does."""
+        from types import SimpleNamespace
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        handler = self.service._message_handler
+        sources = [
+            ("cli_initial", False),
+            ("pipe", False),
+            ("hub_message", False),  # a person's hub message handed to an ACP agent
+            ("bridge:email", False),  # a source nobody listed never answers
+            ("user", True),
+            ("hub_attachment", True),
+            ("state_rpc", True),
+            ("voice", True),
+        ]
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            for source, answers in sources:
+                approvals.ask(call)
+                approvals.on_reply_done()
+                asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source=source)))
+                self.assertEqual(approvals.take({**call, "id": "c2"}), answers, source)
+
+    def test_a_prompt_sent_straight_to_the_model_answers_no_ask(self):
+        """/agent and /skill generation call process_user_input themselves: closed by default."""
+        from types import SimpleNamespace
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            approvals.ask(call)
+            approvals.on_reply_done()
+            asyncio.run(self.service.process_user_input("Yes."))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            handler = self.service._message_handler
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="user")))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))  # the ask was still open for the user
+
+    def test_a_hub_message_is_a_persons_input_but_never_a_yes(self):
+        from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, YES_SOURCES, UserInputSource
+
+        self.assertIn(UserInputSource.HUB_MESSAGE.value, HUMAN_USER_INPUT_SOURCES)
+        self.assertNotIn(UserInputSource.HUB_MESSAGE.value, YES_SOURCES)
+
+    def test_a_hub_peers_yes_answers_nothing(self):
+        """Another agent's "Yes." is a turn like any, never the user's answer to the ask."""
+        from types import SimpleNamespace
+
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        approvals = self.service.tool_executor.yes_approvals
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        handler = self.service._message_handler
+        with (
+            patch.object(self.service, "conversation_logger") as mock_logger,
+            patch.object(self.service, "_process_queue"),
+            patch.object(self.service, "_continue_conversation", AsyncMock()),
+            patch.object(handler, "_hub_continue_blocked", return_value=False),
+        ):
+            mock_logger.log_user_message = AsyncMock(return_value="test-uuid")
+            mock_logger.log_system_message = AsyncMock()
+            approvals.ask(call, make_voice_origin_context("t1"))
+            approvals.on_reply_done()
+            # submit_human_input's "agent" source: a network-attached agent, or a
+            # hub message whose profile could not be read
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="agent")))
+            # a native hub message: injected, then TRIGGER_LLM_CONTINUE
+            asyncio.run(handler.handle_llm_continue({"source": "hub:lapis", "content": "Yes."}, None))
+            # steering (the goal driver's context item): an agent HUD message
+            asyncio.run(self.service.inject_system_message("Yes.", subtype="goal_context"))
+            self.assertFalse(approvals.take({**call, "id": "c2"}))
+            asyncio.run(handler.handle_user_input({"message": "Yes."}, SimpleNamespace(source="state_rpc")))
+        self.assertTrue(approvals.take({**call, "id": "c2"}))  # the ask was still open for the user
+
+
     def test_process_user_input_displays_before_lazy_alias_rebuild(self):
         """First submit must echo immediately before alias/prompt rebuild work."""
         message = "Test user input"
@@ -227,6 +369,35 @@ class TestLLMServiceIntegration(unittest.TestCase):
         asyncio.run(cancel_and_drain())
 
         self.assertTrue(self.service.cancel_processing)
+
+    def _stop_with_permissions(self):
+        """Stop the turn; return the permission manager it reached."""
+        permissions = MagicMock()
+        self.event_bus.get_service.side_effect = (
+            lambda name: permissions if name == "permission_manager" else None
+        )
+
+        async def cancel_and_drain():
+            self.service.cancel_current_request()
+            await self.service._task_manager.wait_for_tasks()
+
+        asyncio.run(cancel_and_drain())
+        return permissions
+
+    def test_a_stop_leaves_an_open_approval_prompt_open(self):
+        """A Stop ends the turn at once; its card stays open for Allow or a yes."""
+        self.service.is_processing = True
+        permissions = self._stop_with_permissions()
+        permissions.park_confirmations.assert_called_once_with()
+        permissions.cancel_confirmations.assert_not_called()
+
+    def test_an_acp_stop_answers_an_open_approval_prompt_cancelled(self):
+        acp = SimpleNamespace(cancel=AsyncMock())
+        with patch.object(self.service, "_selected_active_acp_orchestrator", return_value=acp):
+            permissions = self._stop_with_permissions()
+        permissions.cancel_confirmations.assert_called_once_with()
+        permissions.park_confirmations.assert_not_called()
+        acp.cancel.assert_awaited_once()
 
     def test_idle_human_cancel_supersedes_remote_cancellation_generation(self):
         async def scenario():
@@ -645,7 +816,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         """Test user input hook callback processing."""
         # Test data
         event_data = {"message": "Test user message"}
-        event = MagicMock()
+        event = MagicMock(source="user")  # typed in the TUI
 
         # Patch on the coordinator (MessageHandler accesses coordinator.process_user_input)
         mock_process = AsyncMock(return_value={"status": "processed"})
@@ -654,7 +825,7 @@ class TestLLMServiceHookIntegration(unittest.TestCase):
         result = asyncio.run(self.service._handle_user_input(event_data, event))
 
         mock_process.assert_called_once_with(
-            "Test user message", pre_displayed=False
+            "Test user message", pre_displayed=False, may_answer=True
         )
         self.assertEqual(result["status"], "processed")
 

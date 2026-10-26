@@ -338,11 +338,21 @@ class ACPOrchestrator:
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append(ConversationMessage(role="user", content=text, metadata=metadata))
+        # A row that landed outside the turn it belongs to (a peer's admitted
+        # message, steering, a flushed observation) announces itself: the
+        # engine warms its mirror and watching windows reload before
+        # turn_complete. The turn's own opening row stays quiet, like the
+        # native user_message path -- its sender shows it locally and
+        # turn_complete reloads everyone.
+        if source in {"agent", "observation", "steering"}:
+            publish_semantic(
+                self.event_bus, "hub_message", message_id=request_id, input_source=source
+            )
         display = getattr(llm, "message_display_service", None)
         # Hub already drew incoming messages. The batched model context is
         # persisted as a HUD for web/history replay, never echoed as user input.
         if display is not None and source not in {"agent", "observation"}:
-            from kollabor_voice.observer import strip_voice_preamble
+            from kollabor_voice.voice_context import strip_voice_preamble
 
             # A mic turn shows what was said, never the voice rules sent with it.
             display.display_user_message(strip_voice_preamble(text))

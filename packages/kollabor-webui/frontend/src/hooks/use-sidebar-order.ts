@@ -28,7 +28,8 @@ export function useSidebarOrder(api: EngineApi) {
     [controller],
   );
   const save = useCallback((next: string[]) => controller.save(next), [controller]);
-  return useMemo(() => ({ ...state, stamp, sync, save }), [state, stamp, sync, save]);
+  const beginDrag = useCallback(() => controller.beginDrag(), [controller]);
+  return useMemo(() => ({ ...state, stamp, sync, save, beginDrag }), [state, stamp, sync, save, beginDrag]);
 }
 
 export type SidebarOrder = ReturnType<typeof useSidebarOrder>;

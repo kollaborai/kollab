@@ -113,3 +113,144 @@ export function frameInterval(size: number, lively: boolean, strained: boolean):
   const base = lively ? (size >= 72 ? 1 / 60 : 1 / 30) : size >= 72 ? 1 / 30 : size >= 40 ? 1 / 24 : 1 / 20;
   return strained ? base * 2 : base;
 }
+
+/**
+ * Seconds a tool's look stays up once shown. A call that lands in 50 ms
+ * still reads as a beat at the laptop instead of yanking it in and out.
+ */
+export const TOOL_HOLD = 0.9;
+/** Seconds a thinking blip between two tool calls waits before it shows. */
+export const TOOL_GAP = 0.35;
+
+/**
+ * When the next activity may take the stage from the one shown: 0 = now. A
+ * tool's look holds TOOL_HOLD, and a breath of thinking waits TOOL_GAP to see
+ * whether the next call follows; errors and offline cut in at once.
+ */
+export function holdUntil(shownIsTool: boolean, nextUrgent: boolean, nextIsThinking: boolean, shownSince: number, now: number): number {
+  return shownIsTool && !nextUrgent ? Math.max(shownSince + TOOL_HOLD, nextIsThinking ? now + TOOL_GAP : 0) : 0;
+}
+
+/** What an avatar shows, and what waits out a tool's hold to replace it. */
+export type Stage<A extends string> = { activity: A; since: number; queued: A | null; queuedAt: number };
+
+/**
+ * One wanted activity arrives. Back to the one shown: the blip in between
+ * never happened. Otherwise it takes over now (`switched`) or waits out the hold.
+ */
+export function stageActivity<A extends string>(
+  stage: Stage<A>,
+  next: A,
+  now: number,
+  shownIsTool: boolean,
+  nextUrgent: boolean,
+): { stage: Stage<A>; switched: boolean } {
+  if (next === stage.activity) return { stage: { ...stage, queued: null }, switched: false };
+  if (next === stage.queued) return { stage, switched: false };
+  const until = holdUntil(shownIsTool, nextUrgent, next === ("thinking" as string), stage.since, now);
+  if (now < until) return { stage: { ...stage, queued: next, queuedAt: until }, switched: false };
+  return { stage: { ...stage, queued: null, queuedAt: until }, switched: true };
+}
+
+/** Seconds in one round of the typing routine (each gem runs a little faster or slower). */
+export const FRENZY = 3.4;
+
+const ease = (a: number, b: number, p: number) => a + (b - a) * smooth(p);
+
+/**
+ * Typing as a performance, in rounds: nose to the screen reading what is
+ * there, a jerk back with hands up ("wait..."), a slam back down onto the
+ * keys, then hammering at them with a stomp on every keystroke. `lean` is
+ * toward the screen (-1 pulled back .. 1 nose on it), `pitch` nods down onto
+ * the keys, `lift` and `squash` are the stomps, `roll` the shake, `hands`
+ * how hard the hands hammer (0..1) and `raise` how far they are up off the
+ * keys. The first round starts from rest; later ones flow out of the last.
+ */
+export function frenzy(
+  since: number,
+  seed = 0,
+): { lean: number; pitch: number; lift: number; squash: number; roll: number; hands: number; raise: number } {
+  const span = FRENZY * (0.9 + 0.2 * ((seed / (2 * Math.PI)) % 1));
+  const u = Math.max(0, since) % span;
+  // A later round leans in from wherever the hammering left the body.
+  const from = since < span ? REST : hammer(span - 1.45);
+  if (u < 0.9) {
+    const p = u / 0.35;
+    return {
+      lean: ease(from.lean, 1, p),
+      pitch: ease(from.pitch, 0.04, p),
+      lift: ease(from.lift, 0, p),
+      squash: ease(from.squash, 0, p),
+      roll: ease(from.roll, 0, p),
+      hands: 0.25,
+      raise: 0,
+    };
+  }
+  if (u < 1.25) {
+    const p = (u - 0.9) / 0.18;
+    return { lean: ease(1, -0.7, p), pitch: ease(0.04, -0.2, p), lift: ease(0, 0.045, p), squash: ease(0, -0.03, p), roll: 0, hands: 0, raise: smooth(p) };
+  }
+  if (u < 1.45) {
+    const p = (u - 1.25) / 0.2;
+    const impact = p > 0.7 ? Math.sin(((p - 0.7) / 0.3) * Math.PI) : 0;
+    return {
+      lean: ease(-0.7, 0.35, p),
+      pitch: ease(-0.2, 0.06, p),
+      lift: ease(0.045, -0.02, p),
+      squash: ease(-0.03, 0, p) + 0.09 * impact,
+      roll: 0,
+      hands: p,
+      raise: 1 - smooth(p),
+    };
+  }
+  return hammer(u - 1.45);
+}
+
+const REST = { lean: 0, pitch: 0, lift: 0, squash: 0, roll: 0, hands: 0, raise: 0 };
+
+/** Hammering the keys `k` seconds in: a stomp about eight times a second. */
+function hammer(k: number) {
+  const up = Math.abs(Math.sin(Math.PI * 8 * k));
+  return {
+    lean: 0.35 + 0.08 * Math.sin(k * 5),
+    pitch: 0.06 + 0.025 * up,
+    lift: 0.02 * up - 0.02,
+    squash: 0.04 * (1 - up) ** 3,
+    roll: 0.025 * Math.sin(k * 31),
+    hands: 1,
+    raise: 0,
+  };
+}
+
+/**
+ * Thinking out loud with the whole body: the head rolls from side to side and
+ * tips up at the ideas, the weight sways, and every few seconds a quick
+ * "hmm!" double nod. Away from the laptop only; at it the gem peers instead.
+ */
+export function ponder(since: number, seed = 0): { pitch: number; roll: number; lift: number; slide: number } {
+  const t = since + seed;
+  const c = (since + 1.2) % 2.9;
+  const hmm = c < 0.5 ? Math.sin((c / 0.5) * 2 * Math.PI) * Math.sin((c / 0.5) * Math.PI) : 0;
+  return {
+    pitch: -0.05 - 0.05 * Math.sin(t * 0.7) + 0.09 * hmm,
+    roll: 0.14 * Math.sin(t * 1.1),
+    lift: 0.022 * Math.sin(t * 2.2) ** 2,
+    slide: 0.05 * Math.sin(t * 0.55),
+  };
+}
+
+/**
+ * At the laptop between keystrokes (reading, or thinking over a tool's
+ * result): face pressed up close to the screen, nodding along line by line,
+ * now and then sitting back to take it in before leaning in again.
+ */
+export function peer(since: number, seed = 0): { lean: number; pitch: number } {
+  const t = since + seed;
+  const c = (since + seed) % 4.2;
+  const back = c > 3.3 ? Math.sin(((c - 3.3) / 0.9) * Math.PI) : 0;
+  const into = smooth(since / 0.4);
+  return {
+    lean: into * (0.85 + 0.1 * Math.sin(t * 0.9)) - 1.2 * back,
+    pitch: into * (0.03 + 0.025 * Math.sin(t * 3.4)) - 0.12 * back,
+  };
+}

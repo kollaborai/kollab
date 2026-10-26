@@ -24,10 +24,14 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { formatContent } from "@/utils/format-content";
-import { humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
+import { askedForOk, humanizeToolName, summarizeToolCall } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
 
+import { EngineApi } from "@/api";
+
 const ANIMATION_DURATION = 200;
+
+const historyOutputApi = new EngineApi();
 
 const pressable = "active:scale-[0.98]";
 
@@ -170,6 +174,7 @@ function ToolFallbackTrigger({
   status,
   isError,
   errorLine,
+  asked,
   displayTitle,
   detail,
   className,
@@ -181,6 +186,8 @@ function ToolFallbackTrigger({
   /** The call finished with an error result: red icon plus `errorLine`. */
   isError?: boolean;
   errorLine?: string;
+  /** Not run: the agent asked for the user's OK in its reply instead. */
+  asked?: boolean;
   displayTitle?: string;
   detail?: string;
 }) {
@@ -188,9 +195,9 @@ function ToolFallbackTrigger({
   const isRunning = statusType === "running";
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
-  const isFailed = isError === true && statusType === "complete";
+  const isFailed = isError === true && statusType === "complete" && !asked;
 
-  const Icon = isFailed ? XCircleIcon : statusIconMap[statusType];
+  const Icon = asked ? AlertCircleIcon : isFailed ? XCircleIcon : statusIconMap[statusType];
   const label = isCancelled && !displayTitle ? "Cancelled: " : "";
   const summary = displayTitle ?? summarizeToolCall(toolName, argsText);
 
@@ -226,6 +233,11 @@ function ToolFallbackTrigger({
         {detail && (
           <span data-slot="tool-fallback-trigger-status" className="block truncate text-xs" title={detail}>
             {detail}
+          </span>
+        )}
+        {asked && (
+          <span data-slot="tool-fallback-trigger-asked" className="block truncate text-xs">
+            Asked for your OK
           </span>
         )}
         {isFailed && (
@@ -319,16 +331,86 @@ function ToolFallbackArgs({
   );
 }
 
+function HistoryOutputResult({
+  sessionId,
+  reference,
+  preview,
+}: {
+  sessionId: string;
+  reference: string;
+  preview: unknown;
+}) {
+  const [content, setContent] = useState<unknown>();
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const showMore = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await historyOutputApi.getHistoryOutput(sessionId, reference);
+      setContent(response.content);
+      setLoaded(true);
+    } catch {
+      setError("Full tool output could not be loaded. Check the connection and retry.");
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, reference, sessionId]);
+
+  return (
+    <div data-slot="history-output-preview" className="mt-1 space-y-2">
+      <pre className="bg-muted/50 text-foreground/90 max-w-full rounded-md p-2.5 text-xs whitespace-pre-wrap wrap-anywhere">
+        {formatContent(loaded ? content : preview)}
+      </pre>
+      {!loaded ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" variant="outline" onClick={() => void showMore()} disabled={loading}>
+            {loading ? <LoaderIcon className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+            {loading ? "Loading output…" : "Show more"}
+          </Button>
+          {error ? <span role="alert" className="text-destructive text-xs">{error}</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
 function ToolFallbackResult({
   result,
   isError,
+  asked,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
   result?: unknown;
   isError?: boolean;
+  asked?: boolean;
 }) {
   if (result === undefined) return null;
+
+  const historyOutput = asRecord(result);
+  if (
+    historyOutput?.kind === "history-output-preview" &&
+    typeof historyOutput.sessionId === "string" &&
+    typeof historyOutput.reference === "string"
+  ) {
+    return (
+      <div data-slot="tool-fallback-result" className={cn("aui-tool-fallback-result", className)} {...props}>
+        <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
+          Output preview:
+        </p>
+        <HistoryOutputResult
+          sessionId={historyOutput.sessionId}
+          reference={historyOutput.reference}
+          preview={historyOutput.preview}
+        />
+      </div>
+    );
+  }
   const card = harnessCard(result);
   // Typed card content can include a diff beside rawOutput. Keep that richer
   // representation intact instead of flattening the result envelope to JSON.
@@ -345,10 +427,10 @@ function ToolFallbackResult({
       <p
         className={cn(
           "aui-tool-fallback-result-header text-xs font-medium",
-          isError ? "text-destructive" : "text-muted-foreground",
+          isError && !asked ? "text-destructive" : "text-muted-foreground",
         )}
       >
-        {isError ? "Error:" : card ? "Output:" : "Result:"}
+        {asked ? "Not Run:" : isError ? "Error:" : card ? "Output:" : "Result:"}
       </p>
       {card && content.length > 0 ? content.map((value, index) => {
         const block = asRecord(value);
@@ -692,6 +774,8 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
     status?.type === "requires-action" &&
     (approval != null || interrupt != null);
   const failed = (isError === true || cardStatus === "failed") && result !== undefined;
+  const errorLine = failed ? toolErrorLine(result) : undefined;
+  const asked = askedForOk(errorLine);
 
   const [open, setOpen] = useState(needsApproval);
   const [prevNeedsApproval, setPrevNeedsApproval] = useState(needsApproval);
@@ -707,7 +791,8 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
         argsText={argsText}
         status={displayStatus}
         isError={failed}
-        errorLine={failed ? toolErrorLine(result) : undefined}
+        errorLine={errorLine}
+        asked={asked}
         displayTitle={displayTitle}
         detail={detail || undefined}
         title={displayTitle}
@@ -730,7 +815,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {(!isCancelled || card) && <ToolFallbackResult result={result} isError={failed} />}
+        {(!isCancelled || card) && <ToolFallbackResult result={result} isError={failed} asked={asked} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

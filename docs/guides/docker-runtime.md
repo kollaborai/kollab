@@ -17,6 +17,26 @@ scripts/docker-runtime.sh build
 
 The resulting image is tagged `kollab:local-runtime` by default.
 
+Ordinary builds compile the frontend in a Node 24 stage, then pass that isolated
+output to the wheel build through `KOLLAB_FRONTEND_DIST`. A failed frontend or
+workspace wheel build stops the image build.
+
+To reuse the same compiled UI as a native binary or connection-service artifact:
+
+```bash
+KOLLAB_FRONTEND_DIST=/absolute/path/to/selected/frontend-dist \
+  scripts/docker-runtime.sh build
+```
+
+This requires BuildKit named contexts and Python 3 on the host. The wrapper
+validates the entry page and rejects symlinks, copies only those assets into a
+temporary context containing `frontend-dist/`, then uses
+`--build-context frontend=<temporary-context>` to replace the source frontend
+stage. No frontend compilation runs for this path. The temporary context is
+removed after success or failure; shared checkout output is untouched. Never
+pass an operator rollout directory, backups, credentials or private state as a
+Docker build context.
+
 ## Smoke Test
 
 ```bash

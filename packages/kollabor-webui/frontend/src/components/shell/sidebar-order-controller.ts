@@ -23,6 +23,8 @@ export type SidebarOrderController = {
   snapshot(): SidebarOrderView;
   stamp(): number;
   sync(from: number, snapshot: SidebarOrderSnapshot | undefined): void;
+  /** Freeze polled ranks during a gesture; release on drop, cancel, or unmount. */
+  beginDrag(): () => void;
   save(next: string[]): Promise<void>;
 };
 
@@ -53,6 +55,7 @@ export function createSidebarOrderController(
   let view = initialSidebarOrder();
   let edits = 0;
   let pendingWrites = 0;
+  let dragHolds = 0;
   let latestSave = 0;
   let queueEpoch = 0;
   let queue = Promise.resolve();
@@ -62,8 +65,18 @@ export function createSidebarOrderController(
   return {
     snapshot: () => ({ ...view, order: [...view.order] }),
     stamp: () => edits,
+    beginDrag() {
+      edits += 1;
+      dragHolds += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        dragHolds -= 1;
+      };
+    },
     sync(from, incoming) {
-      if (!incoming || pendingWrites > 0 || from !== edits) return;
+      if (!incoming || dragHolds > 0 || pendingWrites > 0 || from !== edits) return;
       const next = copySnapshot(incoming);
       if (next.revision < confirmed.revision) return;
       confirmed = next;

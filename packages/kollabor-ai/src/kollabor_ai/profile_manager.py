@@ -1072,17 +1072,6 @@ class ProfileManager:
                 "@agentclientprotocol/codex-acp@2.1.1"
             ),
         },
-        "gemini-cli": {
-            "provider": "acp",
-            "command": ["gemini", "--acp"],
-            "pass_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            "description": "Gemini CLI over ACP",
-            "install_guidance": (
-                "Install with: npm install --prefix "
-                "~/.local/share/kollab/acp-adapters/gemini-0.63.0 --no-save "
-                "@google/gemini-cli@0.63.0"
-            ),
-        },
     }
 
     def __init__(self, config=None, cli_profile: Optional[str] = None):

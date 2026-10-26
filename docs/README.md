@@ -36,7 +36,7 @@ status: active
 - [Config Hooks](features/config-hooks.md) - JSON-based hooks (no Python needed)
 - [Web Settings Panels](features/web-settings-panels.md) - Browser settings tabs, including per-user prompt overrides
 - [Dynamic System Prompts](features/dynamic-system-prompts.md) - Runtime prompt rendering
-- [Phone Access](features/phone-access.md) - Private-network WireGuard phone provisioning and PWA setup
+- [PhoneLink](features/phone-access.md) - QR pairing over the Kollab connection
 
 ## Plugins
 

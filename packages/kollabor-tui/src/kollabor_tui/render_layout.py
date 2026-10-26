@@ -791,18 +791,20 @@ class LayoutManager:
         self._dirty = True
         self._request_render()
 
-        # CRITICAL: Yield to event loop to allow render loop to display the prompt
-        # Without this, we block before the UI can render, causing a deadlock
-        await asyncio.sleep(0.1)  # Give render loop time to update screen
+        try:
+            # CRITICAL: Yield to event loop to allow render loop to display the prompt
+            # Without this, we block before the UI can render, causing a deadlock
+            await asyncio.sleep(0.1)  # Give render loop time to update screen
 
-        # Wait for user keypress
-        await self._permission_response_event.wait()
-
-        # Clear permission view, restore normal status
-        self._permission_view = None
-        self.update_area_content("thinking", [])
-        self._dirty = True
-        self._request_render()
+            # Wait for user keypress
+            await self._permission_response_event.wait()
+        finally:
+            # Clear permission view, restore normal status. A wait the hook's
+            # 5 min timeout cancels left it up, catching keys.
+            self._permission_view = None
+            self.update_area_content("thinking", [])
+            self._dirty = True
+            self._request_render()
 
         return self._permission_response
 

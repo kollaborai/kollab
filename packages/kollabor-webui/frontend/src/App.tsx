@@ -1,9 +1,13 @@
+import { refreshesOnEvent } from "./live-follow";
+import type { SessionEvent } from "./api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
+import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
@@ -13,6 +17,13 @@ import { GemStudio, type StudioFocus } from "@/components/gems/GemStudio";
 import { KollabLogo } from "@/components/icons/kollab-logo";
 import { titleCase } from "@/components/panels/panel-model";
 import type { Activity } from "@/components/gems/gem-face";
+
+import {
+  contextCompactionStatusTitle,
+  isUrgentContextCompactionStatus,
+  parseContextCompactionStatus,
+  type ContextCompactionStatus,
+} from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
@@ -34,6 +45,9 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+
+  HISTORY_PAGE_SIZE,
+  type HistoryPage,
   type AgentBundleEntry,
   type AgentNetwork,
   type OfflineAgent,
@@ -52,13 +66,24 @@ import {
   useEngineRuntimeState,
   type EngineState,
 } from "./runtime";
+import { VoiceRoomProvider } from "./voice/voice-room";
+
+import {
+  historyPageCache,
+  loadLatestHistoryPage,
+
+  loadOlderHistoryPage,
+  mergeOlderHistoryPage,
+} from "./history-cache";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
-import { LearnPage } from "@/components/learn/LearnPage";
-import { navigateToLearn, readLearnRoute, type LearnRoute } from "@/learn/catalog";
+import { LearnDialog } from "@/components/learn/LearnDialog";
+import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
+import { navigateToLearn } from "@/learn/catalog";
+import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -126,9 +151,14 @@ function RuntimeShell({
   eventActivity,
   onOpenProperties,
   refreshSignal,
+  supervisorEvents,
   view,
   onViewChange: setView,
   locked,
+  historyStatus,
+  onLoadOlder,
+  onRetryHistory,
+  historyStartIndex,
 }: {
   session: Session;
   profiles: Profile[];
@@ -148,11 +178,16 @@ function RuntimeShell({
   /** This session's Properties (its gem, double-clicked). */
   onOpenProperties: () => void;
   refreshSignal: number;
+  supervisorEvents: StreamEvent[];
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked: string;
+  historyStatus: { kind: string; message: string } | undefined;
+  onLoadOlder: () => Promise<void>;
+  onRetryHistory: () => void;
+  historyStartIndex: number;
 }) {
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
@@ -260,6 +295,7 @@ function RuntimeShell({
               </ol>
             </details>
           )}
+          <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
             {view === "chat" ? (
               <Thread
@@ -276,6 +312,11 @@ function RuntimeShell({
                 workspace={session.workspace ?? ""}
                 device={session.device ?? ""}
                 locked={locked}
+
+                historyStatus={historyStatus}
+                onLoadOlder={onLoadOlder}
+                onRetryHistory={onRetryHistory}
+                historyStartIndex={historyStartIndex}
               />
             ) : (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
@@ -304,9 +345,12 @@ function RuntimeShell({
   );
 }
 
-export default function App() {
-  const [learnRoute, setLearnRoute] = useState<LearnRoute | null>(() => readLearnRoute(window.location));
-  const previousLearnRouteRef = useRef(learnRoute);
+export default function App({ contained = false }: { contained?: boolean } = {}) {
+  const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
+  const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
+  const whatsNewActive = pageRoute.kind === "whats-new";
+  const pageOpen = pageRoute.kind !== "chat";
+  const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
@@ -336,10 +380,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
-    const syncLearnRoute = () => {
-      const nextRoute = readLearnRoute(window.location);
-      setLearnRoute(nextRoute);
-      if (nextRoute) {
+    const syncPageRoute = () => {
+      const nextRoute = readMainPageRoute(window.location);
+      setPageRoute(nextRoute);
+      if (nextRoute.kind !== "chat") {
         setStudioOpen(false);
         setStudioFocus(null);
         setProfilesOpen(false);
@@ -349,22 +393,22 @@ export default function App() {
         setSettingsOpen(false);
       }
     };
-    window.addEventListener("popstate", syncLearnRoute);
-    return () => window.removeEventListener("popstate", syncLearnRoute);
+    window.addEventListener("popstate", syncPageRoute);
+    return () => window.removeEventListener("popstate", syncPageRoute);
   }, []);
 
   useEffect(() => {
-    const leavingLearn = previousLearnRouteRef.current !== null && learnRoute === null;
-    previousLearnRouteRef.current = learnRoute;
-    if (leavingLearn) {
+    const leavingPage = previousPageOpenRef.current && !pageOpen;
+    previousPageOpenRef.current = pageOpen;
+    if (leavingPage) {
       window.requestAnimationFrame(() => document.getElementById("app-main-pane")?.focus());
     }
-  }, [learnRoute]);
+  }, [pageOpen]);
 
   const returnToChat = useCallback(() => {
-    if (!readLearnRoute(window.location)) return;
-    window.history.pushState(null, "", "/");
-    setLearnRoute(null);
+    if (readMainPageRoute(window.location).kind === "chat") return;
+    window.history.pushState(null, "", pagePath("/", window.location.pathname));
+    setPageRoute({ kind: "chat" });
   }, []);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("session");
   const [settingsIntent, setSettingsIntent] = useState<{
@@ -404,14 +448,38 @@ export default function App() {
   // the chat that was open, so the reason shows under the row clicked.
   const [opening, setOpening] = useState<{ id: string; error?: string } | null>(null);
   const [initialState, setInitialState] = useState<EngineState | null>(null);
+
+  const [historyStatus, setHistoryStatus] = useState<{
+    sessionId: string;
+    kind: "loading" | "loading-older" | "error" | "empty";
+    message: string;
+  } | null>(null);
+  const historyPagesRef = useRef(new Map<string, HistoryPage>());
+  type PendingPermissions = NonNullable<Parameters<typeof buildInitialState>[3]>;
+  const historyContextRef = useRef(new Map<string, {
+    sessions: Session[];
+    pendingPermissions: PendingPermissions;
+  }>());
+  const olderLoadRef = useRef(new Set<string>());
+
+  const olderLoadQueuedRef = useRef(new Set<string>());
+  const loadOlderHistoryRef = useRef<((sessionId: string, prefetch?: boolean) => Promise<void>) | null>(null);
+  const historyPrefetchRef = useRef(new Set<string>());
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [supervisorEvents, setSupervisorEvents] = useState<StreamEvent[]>([]);
   // Bumped to remount the runtime: it reads its initial state only on mount.
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  // Live-turn events flow from followEvents into the open thread's runtime;
+  // the runtime registers its handler through this ref on mount.
+  const liveEventsRef = useRef<((event: SessionEvent) => void) | null>(null);
   const [sessionView, setSessionView] = useState<SessionView>("chat");
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   // Folded from the open session's events, so a hub-driven turn still animates.
   const eventActivityRef = useRef(NO_LIVE_ACTIVITY);
   const [eventActivity, setEventActivity] = useState<Activity | null>(null);
+
+  const [contextCompactionStatus, setContextCompactionStatus] =
+    useState<ContextCompactionStatus | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
@@ -443,6 +511,11 @@ export default function App() {
   );
 
   useEffect(() => abortRecovery, [abortRecovery]);
+
+
+  useEffect(() => {
+    setContextCompactionStatus(null);
+  }, [activeId]);
 
   const { stamp: stampHidden, sync: syncHidden } = hiddenAgents;
   const { stamp: stampOrder, sync: syncOrder } = sidebarOrder;
@@ -529,29 +602,152 @@ export default function App() {
   }, [workspacePath]);
 
   const loadState = useCallback(
-    async (sessionId: string, nextSessions: Session[]) => {
-      // Opening never waits on the daemon: the engine answers from its warm
-      // mirror or the disk seed at once, reconciles in the background, and
-      // the history_updated event lands here as a reload. A prompt that
-      // arrives later comes as an event anyway.
-      const [history, permissions] = await Promise.all([
-        api.getHistory(sessionId),
-        api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
-      ]);
-      // The daemon's answer comes as history_updated, which can fire before
-      // the stream below is open; see followEvents.
-      if (history.stale) staleHistoryRef.current.add(sessionId);
-      else staleHistoryRef.current.delete(sessionId);
-      return buildInitialState(
-        sessionId,
-        nextSessions,
-        history.history || [],
-        permissions.pending_prompts || [],
-        history.last_turn_error ?? null,
-      );
+    async (sessionId: string, nextSessions: Session[], quiet = false) => {
+      // A refresh of an open chat shows no banner: the thread is already there.
+      if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
+      try {
+        const [loaded, permissions] = await Promise.all([
+          loadLatestHistoryPage(sessionId, api, historyPageCache),
+          api.getPermissions(sessionId).catch(() => ({ pending_prompts: [] })),
+        ]);
+        const page = loaded.page;
+        const pendingPermissions = permissions.pending_prompts || [];
+        historyPagesRef.current.set(sessionId, page);
+        historyContextRef.current.set(sessionId, { sessions: nextSessions, pendingPermissions });
+        if (loaded.error) {
+          staleHistoryRef.current.add(sessionId);
+          setHistoryStatus({
+            sessionId,
+            kind: "error",
+            message: "Couldn't refresh history; showing the saved conversation. Retry to update.",
+          });
+        } else if (page.stale) {
+          staleHistoryRef.current.add(sessionId);
+          setHistoryStatus({
+            sessionId,
+            kind: "loading",
+            message: "Saved history is still syncing with the engine…",
+          });
+        } else {
+          staleHistoryRef.current.delete(sessionId);
+          setHistoryStatus(page.history.length ? null : {
+            sessionId,
+            kind: "empty",
+            message: "No conversation messages yet.",
+          });
+        }
+        return buildInitialState(
+          sessionId,
+          nextSessions,
+          page.history,
+          pendingPermissions,
+          page.last_turn_error ?? null,
+          page.start_index,
+        );
+      } catch (reason) {
+        setHistoryStatus({
+          sessionId,
+          kind: "error",
+          message: "Couldn't load conversation history. Check the connection and retry.",
+        });
+        throw reason;
+      }
     },
     [],
   );
+
+  const loadOlderHistory = useCallback(async (sessionId: string, prefetch = false) => {
+    if (olderLoadRef.current.has(sessionId)) {
+      if (!prefetch) olderLoadQueuedRef.current.add(sessionId);
+      return;
+    }
+    const current = historyPagesRef.current.get(sessionId);
+    if (!current || !current.has_more_older) return;
+    olderLoadRef.current.add(sessionId);
+    if (!prefetch && activeIdRef.current === sessionId) {
+      setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
+    }
+    try {
+      const older = await loadOlderHistoryPage(
+        sessionId,
+        current,
+        api,
+        historyPageCache,
+      );
+      if (!older) {
+        throw new Error("History paging cursor is missing. Retry loading the conversation.");
+      }
+      if (!older.history.length) {
+        const exhausted = { ...current, has_more_older: false, older_cursor: null };
+        historyPagesRef.current.set(sessionId, exhausted);
+        if (!prefetch && activeIdRef.current === sessionId) setHistoryStatus(null);
+        return;
+      }
+      if (prefetch) return;
+
+      const updated = mergeOlderHistoryPage(current, older);
+      if (updated.start_index >= current.start_index) {
+        throw new Error("The engine returned no older history messages.");
+      }
+      historyPagesRef.current.set(sessionId, updated);
+      await historyPageCache.store(sessionId, updated);
+      const context = historyContextRef.current.get(sessionId);
+      if (context && activeIdRef.current === sessionId) {
+        const nextState = buildInitialState(
+          sessionId,
+          context.sessions,
+          updated.history,
+          context.pendingPermissions,
+          updated.last_turn_error ?? null,
+          updated.start_index,
+        );
+        setInitialState((previous) =>
+          previous?.sessionId === sessionId ? nextState : previous,
+        );
+      }
+      if (activeIdRef.current === sessionId) setHistoryStatus(null);
+    } catch {
+      if (!prefetch && activeIdRef.current === sessionId) {
+        setHistoryStatus({
+          sessionId,
+          kind: "error",
+          message: "Couldn't load older messages. Scroll up or retry to try again.",
+        });
+      }
+    } finally {
+      olderLoadRef.current.delete(sessionId);
+      if (
+        olderLoadQueuedRef.current.delete(sessionId) &&
+        activeIdRef.current === sessionId
+      ) {
+        void loadOlderHistoryRef.current?.(sessionId, false);
+      }
+    }
+  }, []);
+  loadOlderHistoryRef.current = loadOlderHistory;
+
+  const retryHistory = useCallback(() => {
+    const sessionId = activeIdRef.current;
+    if (!sessionId) return;
+    void loadState(sessionId, sessions).then((nextState) => {
+      if (activeIdRef.current === sessionId) setInitialState(nextState);
+    }).catch(() => {});
+  }, [loadState, sessions]);
+
+
+  useEffect(() => {
+    if (!activeId || initialState?.sessionId !== activeId) return;
+    const page = historyPagesRef.current.get(activeId);
+    if (!page?.history.length || !page.has_more_older) return;
+    const key = `${activeId}:${page.start_index}:${page.end_index}:${page.older_cursor ?? "end"}`;
+    if (historyPrefetchRef.current.has(key)) return;
+    historyPrefetchRef.current.add(key);
+    const frame = window.requestAnimationFrame(() => {
+      void loadOlderHistory(activeId, true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeId, initialState?.sessionId, initialState?.synced?.history, initialState?.synced?.start, loadOlderHistory]);
+
 
   useEffect(() => {
     const controller = new AbortController();
@@ -563,7 +759,7 @@ export default function App() {
         const seeded = staleHistoryRef.current.has(sessionId);
         const nextSessions = await loadSessions();
         if (controller.signal.aborted || activeId !== sessionId) return;
-        const nextState = await loadState(sessionId, nextSessions);
+        const nextState = await loadState(sessionId, nextSessions, true);
         if (controller.signal.aborted || activeId !== sessionId) return;
         // Still the seed: the daemon's answer comes as history_updated.
         if (seeded && staleHistoryRef.current.has(sessionId)) return;
@@ -580,37 +776,37 @@ export default function App() {
       setEventActivity(null);
     };
     const followEvents = async () => {
-      // A turn is streaming; its history is still growing.
-      let midTurn = false;
       resetEventActivity();
+      setSupervisorEvents([]);
       while (!controller.signal.aborted && activeId) {
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
-            if (["token", "thinking", "tool_start", "tool_result"].includes(type)) midTurn = true;
+            if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
+
+            const compactionStatus = parseContextCompactionStatus(event);
+            if (compactionStatus !== undefined) {
+              setContextCompactionStatus(compactionStatus);
+            }
             // Same-value sets bail out, so a token stream does not re-render App.
             eventActivityRef.current = nextLiveActivity(eventActivityRef.current, event);
             setEventActivity(liveActivity(eventActivityRef.current));
-            // hub_message: another agent's message just landed in the
-            // history, ahead of the reply it wakes. One that lands mid-turn
-            // waits for turn_complete, which reloads the whole turn.
+            // hub_message / history_updated: another agent's or window's
+            // message just landed in the history, mid-turn or not.
             // permission_request: a turn this page did not start (typed in the
             // agent's terminal) waits on a prompt this page can answer too.
-            if (
-              type === "hub_message" || type === "history_updated"
-                ? !midTurn
-                : ["turn_complete", "error", "permission_request"].includes(type)
-            ) {
-              void refreshActiveState(activeId);
-            }
-            if (type === "turn_complete") midTurn = false;
+            if (refreshesOnEvent(type)) void refreshActiveState(activeId);
+            // A turn this page did not start still streams here: fold the
+            // events into the ephemeral live message (a no-op while this
+            // page runs the turn itself through the transport).
+            liveEventsRef.current?.(event);
           }, () => {
             // A reconnect may have missed the last turn's end.
             resetEventActivity();
-            // Open, so nothing slips past from here. The history_updated that
-            // replaces a seed can have fired before this stream existed: ask
-            // again now.
-            if (staleHistoryRef.current.has(activeId)) void refreshActiveState(activeId);
+            // Open, so nothing slips past from here. An event fired while the
+            // stream was down (or before it existed, like the history_updated
+            // that replaces a seed) left no trace: reconcile from history.
+            void refreshActiveState(activeId);
           });
         } catch {
           if (controller.signal.aborted) break;
@@ -1011,9 +1207,10 @@ export default function App() {
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider>
+      <SidebarProvider className={`bg-muted/40 ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
+          whatsNewActive={whatsNewActive}
           sessions={sessions}
           profiles={profiles}
           api={api}
@@ -1046,6 +1243,7 @@ export default function App() {
           onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
           onLearn={() => navigateToLearn()}
+          onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
             setStudioFocus(null);
             setStudioOpen(true);
@@ -1123,15 +1321,14 @@ export default function App() {
             onSessionUpdated={handleSessionUpdated}
           />
         ) : null}
+        {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
-          className="h-svh max-h-svh min-h-svh overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
-          {learnRoute ? (
-            <LearnPage route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} />
-          ) : null}
-          <div className={learnRoute ? "hidden" : "contents"}>
+          {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
+          <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
             <div
               role="status"
@@ -1147,32 +1344,68 @@ export default function App() {
               <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
             </div>
           ) : null}
-          {activeSession && initialState ? (
-            <EngineRuntimeProvider
-              key={`${activeId}:${runtimeEpoch}`}
-              api={api}
-              sessionId={activeSession.session_id}
-              initialState={initialState}
-              onStale={() => void resetThread(activeSession.session_id)}
+          {contextCompactionStatus ? (
+            <div
+              role={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "alert"
+                  : "status"
+              }
+              aria-live={
+                isUrgentContextCompactionStatus(contextCompactionStatus.status)
+                  ? "assertive"
+                  : "polite"
+              }
+              className="bg-amber-500/10 text-amber-700 dark:text-amber-300 flex flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2 text-sm"
             >
-              <RuntimeShell
-                session={activeSession}
-                profiles={profiles}
-                agents={agents}
-                liveAgents={liveAgents}
-                remoteAgents={network.remote}
-                refreshSignal={refreshSignal}
-                onSessionUpdated={handleSessionUpdated}
-                onOpenSettings={openSettings}
-                onHistoryCleared={() => resetThread(activeSession.session_id)}
-                onActivity={setActiveActivity}
-                eventActivity={eventActivity}
-                onOpenProperties={() => openProperties(activeSession.session_id)}
-                view={sessionView}
-                onViewChange={setSessionView}
-                locked={busy ? busyMessage || "Loading…" : ""}
-              />
-            </EngineRuntimeProvider>
+              <strong>
+                {contextCompactionStatusTitle(contextCompactionStatus.status)}
+              </strong>
+              <span>{contextCompactionStatus.message}</span>
+              {contextCompactionStatus.action ? (
+                <span className="font-medium">{contextCompactionStatus.action}</span>
+              ) : null}
+            </div>
+          ) : null}
+          {activeSession && initialState ? (
+            // Outside the epoch key: a thread reload (resetThread) must not
+            // stop the voice room, as a talk-over that cuts a reply reloads it.
+            <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>
+              <EngineRuntimeProvider
+                key={`${activeId}:${runtimeEpoch}`}
+                api={api}
+                sessionId={activeSession.session_id}
+                initialState={initialState}
+                onStale={() => void resetThread(activeSession.session_id)}
+                liveEvents={liveEventsRef}
+              >
+                <RuntimeShell
+                  session={activeSession}
+                  profiles={profiles}
+                  agents={agents}
+                  liveAgents={liveAgents}
+                  remoteAgents={network.remote}
+                  refreshSignal={refreshSignal}
+                  supervisorEvents={supervisorEvents}
+                  onSessionUpdated={handleSessionUpdated}
+                  onOpenSettings={openSettings}
+                  onHistoryCleared={() => resetThread(activeSession.session_id)}
+                  onActivity={setActiveActivity}
+                  eventActivity={eventActivity}
+                  onOpenProperties={() => openProperties(activeSession.session_id)}
+                  view={sessionView}
+                  onViewChange={setSessionView}
+                  locked={busy ? busyMessage || "Loading…" : ""}
+
+                  historyStatus={historyStatus?.sessionId === activeSession.session_id
+                    ? { kind: historyStatus.kind, message: historyStatus.message }
+                    : undefined}
+                  onLoadOlder={() => loadOlderHistory(activeSession.session_id)}
+                  onRetryHistory={retryHistory}
+                  historyStartIndex={initialState.synced?.start ?? 0}
+                />
+              </EngineRuntimeProvider>
+            </VoiceRoomProvider>
           ) : (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">

@@ -124,7 +124,12 @@ class NativeToolsHandler:
             logger.warning(f"Failed to load native tools: {e}")
             self.tools = None
 
-    async def execute_tool_calls(self, tool_executor) -> List[Any]:
+    async def execute_tool_calls(
+        self,
+        tool_executor,
+        *,
+        execution_context: dict[str, Any] | None = None,
+    ) -> List[Any]:
         """Execute tool calls from native API response.
 
         Processes tool calls returned by the API's native function calling
@@ -152,7 +157,13 @@ class NativeToolsHandler:
                 mcp_tool_names=set(self.mcp_integration.tool_registry.keys()),
                 plugin_handler_names=set(tool_executor.plugin_handlers.keys()),
             )
-            result = await tool_executor.execute_tool(tool_data)
+            if execution_context is None:
+                result = await tool_executor.execute_tool(tool_data)
+            else:
+                result = await tool_executor.execute_tool(
+                    tool_data,
+                    execution_context=execution_context,
+                )
             results.append(result)
 
             logger.debug(

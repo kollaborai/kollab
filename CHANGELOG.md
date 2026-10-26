@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-25
+
 ### Added
-- Web: add a responsive Learn page with ten guided topics, contextual links, local progress, and changelog-backed What's New.
+- Web: PhoneLink has its own Settings tab, expiring QR invitations, local phone
+  approval and per-phone revocation over the existing `/connect` transport.
+  The directory now includes a same-origin browser portal; its deployment is
+  checked before the app offers a QR.
+- Web: Learn opens as a compact modal with ten reference topics, plain navigation, and an X to close. What's New has its own page and sidebar action.
+- Engine: Web UI-created agents survive engine and Web UI restarts, restoring the same conversation; use `/quit` or Web UI Delete to stop them. A Delete that stops an agent but cannot update its saved record keeps the agent listed with a retry hint instead of vanishing or stopping it twice; unreadable approval mode reports as unknown with a warning instead of guessing, and both the session panel and the delete error say what to do.
 - Profiles can be copied with `/model copy` or from the Web UI; ACP command and runtime settings persist. Profile cards show provider and a sanitized endpoint or ACP adapter.
 - Invalid profiles are reported individually without blocking valid profiles; missing active/default selections warn at startup.
 - Docs: add a product-ready checklist and PR template requiring evidence or a
@@ -26,28 +33,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web: Confirm before removing an override and show progress while saving or
   removing it.
 - Web: Sidebar agents are grouped by workspace and can be manually ordered within local and remote workspace groups.
-- Web: Phone Access provisions one WireGuard peer per phone with a one-time QR and standalone home-screen portal. The operator configures the VPN endpoint, UDP forwarding, DNS, and host apply helper.
+- PhoneLink: the connection service no longer supplies the phone app. A small
+  loader fetches it from your computer over the encrypted session and runs it
+  only after the computer's signature on the app files checks out against the
+  host key in the QR; a tampered or mismatched app is refused. Both screens show
+  the computer's fingerprint beside a longer 12-character pairing code, each
+  phone shows when it was last seen, and Revoke removes a phone in one tap.
+  The loader is installable to the Home Screen and opens its verified copy.
+- Build: `kollab --version` shows the source branch and short SHA before the
+  version line. The Web UI and signed PhoneLink app show the same identity;
+  Python wheels and binaries embed the full SHA.
+- Web: PhoneLink shows Open on This Phone and Copy Link under the QR code, so a phone can link itself with the same invitation (five minutes, still approved on the computer).
+- Hub: the idle supervisor now proves its wakes work. Wakes that produce no
+  completed coordinator turn are counted; once enough land while the
+  coordinator is stalled, an alert names the blocker (including the last turn
+  error) in `/hub status`, the log, attached web clients, and the configured
+  notifier channel. Undelivered worker nudges surface there too instead of
+  vanishing. Spec: `docs/specs/hub-idle-supervisor.md`.
+- Hub: a task handed to an agent with a task id stays on the ledger as
+  "handoff awaiting ack" in `/hub status` until the agent acknowledges it;
+  unacknowledged after two minutes it is resent once, then alerted. Failed
+  sends are listed in `/hub status`, and a message that fell back to the
+  mailbox reports "queued for" instead of "delivered to".
+- Hub: email wake. New mail in one IMAP inbox becomes a direct hub message
+  that wakes the configured agent (read-only, IDLE). Guide:
+  `docs/guides/email-wake-setup.md`.
+- Web: hub supervisor alerts show as a dismissible banner above the chat.
 
 ### Changed
-- ACP: the built-in `gemini-cli` profile forwards `GEMINI_API_KEY` and
-  `GOOGLE_API_KEY` to the Gemini CLI child; other provider keys stay filtered
-  and other ACP profiles are unchanged.
-- ACP: Gemini missing-auth guidance now lists API-key and Vertex AI setup
-  routes; live qualification remains open.
 - Hub: Dream Model selects a provider-supported model for dreaming. A blank
   override uses the shared fast model, then the active session model.
+- Hub capture commands show a bounded readable transcript by default; `--raw`
+  keeps the previous terminal output.
+- Voice: the voice package no longer imports `kollabor_ai`, which its Python 3.12 runtime cannot
+  install. The host-side helper that shows stored voice turns as screens draw them
+  (`turn_display_texts`) now lives in `kollabor_ai.response_channels`, and a voice-package
+  test fails if a service module imports a host package. Fixes #301.
+- Web: PhoneLink starts with the newest 50 conversation messages, caches bounded
+  history pages locally, loads older messages on scroll, and fetches full tool
+  output only after Show more. Negotiated compressed PhoneLink frames carry the
+  150 KB first-page budget within the three-round-trip synthetic relay check.
+- Web: Sidebar agents use smaller avatars, clearer names and status text, consistent group spacing, and neutral selection colors shared with the rest of the app.
 
 ### Fixed
+- Web: disconnecting or revoking a phone closes buffered assistant streams without leaving event subscriptions running. Explicit Stop still cancels the agent turn.
+- Build: one selected frontend is reused by CLI, desktop, service and Python packages. Invalid selections and failed source builds stop instead of silently serving older UI.
+- Network: attached clients show the owning connection's Knocks address.
 - ACP profile switching now uses the ACP harness instead of native provider construction. Missing native providers raise a profile-specific actionable error.
 - Environment-backed API keys are not copied into config; configure the target profile's environment variable first. Keyring references remain shared.
 - Profile API responses, state snapshots, and CLI summaries omit URL userinfo/query/fragment, credential-like path segments, header values, ACP command arguments, and local runtime paths; unchanged redacted endpoint edits preserve server-side configuration.
 - Updating a model-less ACP profile to a native provider now requires a native model; invalid combinations return an actionable validation error without mutating the profile.
 - Web: a long profile name or model no longer widens the Profiles dialog past a phone screen and hides its buttons.
 - Web: Sidebar order is engine-persisted and revision-checked across clients. Unreadable order data is preserved with a recovery warning; a missing first-run file is normal.
-- Web: the Agents lesson now explains sidebar workspace grouping and Move Up/Move Down row ordering, and lesson progress never overwrites a stored entry it could not read. The Voice lesson documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
+- Web: agent guidance covers sidebar workspace grouping and drag ordering. Learn no longer tracks completion or shows a progress counter. The Voice topic documents the Hub Dream Model control: it sets a cheaper model for background agent dreaming only and does not change voice replies.
+- Web: the main pane shares the sidebar's rounded inset frame; footer actions stay on one row or form two balanced rows. Wrapped changelog entries retain their full text.
+- Engine: model-requested context compaction stages the new history before
+  resuming the same turn, rather than ending before the follow-up response.
+- Bound automatic compaction to recent live hub tasks, expose its pause/recovery state in the TUI and Web UI (terminal states are re-announced at the start of the next turn so a banner is never missed), add a Learn topic, and use OAuth model context-window metadata when available instead of an unrelated generic model limit.
+- Web: the open chat shows messages from other agents or windows while a turn
+  is running and re-syncs after every reconnect; a tool card shown mid-turn
+  picks up its result when the turn finishes.
+- Web: a stopped turn no longer leaves the agent's gem acting out a dead tool
+  call.
+- Web: a window watching an ACP agent's turn that started elsewhere streams its
+  reply and tools live, keeps a stopped reply on screen until the stored one
+  replaces it, and streams a turn queued right behind it. Prose the agent sends
+  after a cancel is neither shown nor stored. The reply shows no stray "2 / 2"
+  branch picker once it is stored, and it no longer blanks out and retypes, or
+  shows twice, when rows land before it.
+- Hub: the Telegram bridge wakes its target agent, and disconnecting the email
+  bridge no longer waits out an IMAP IDLE.
+- Context-compaction emergency recovery prioritizes the latest human request,
+  excludes non-intended, group, and other-agent hub notices plus standalone HUD
+  and stale assignments, preserves direct-to-agent requests without TaskLedger
+  IDs, and caps the wrapped recovery message at 8,000 characters.
+- Web: PhoneLink QR codes scale to fit their panel without cutting off the corner markers, so phone cameras can recognize the complete code.
+- Voice: a spoken reply no longer pauses about a second between sentences; each
+  sentence's silent lead-in is cut to a short breath.
+- Chat: a reply you stop keeps the text shown so far, also when you stop it
+  while its tools run.
+- Voice: talking over a reply keeps only the part that was played, marked
+  interrupted, and the voice room stays up while the chat reloads to show it.
+  A reply that ran tools is cut where you stopped it and the unheard rest is
+  dropped, a reply you talked over before it was heard goes, the saved
+  conversation keeps the cut, and a typed reply is never touched.
+- Voice: talking over a reply while its tool waits on your approval or runs a
+  long command no longer stalls the agent's connection: the stop, the approval
+  answer and the next turn all still get through.
+- Chat: a resumed conversation sends a saved reply that only ran tools as
+  nothing, not as an empty message, which the Anthropic API rejects.
+- Voice: a reply after a round of hub messages alone is spoken again; with a
+  provider that does not stream it stayed silent.
+- Voice: every reply speaks its last sentence, which was dropped, so a short
+  reply such as the answer after a talk-over is heard. The latency line keeps
+  Hear, Think and Speak when the reply's Total arrives.
+- Voice: while the voice room is on, the chat follows the conversation to the
+  latest turn. The greeting shows as a message of its own instead of running
+  into the reply before it, and the latency line wraps rather than being cut
+  off on a phone or a narrow window.
+
+### Removed
+- ACP: the retired Gemini CLI is gone: the built-in `gemini-cli` profile and
+  its Apps catalog entry are removed.
 
 ### Security
-- Restrict WebUI token bootstrap and phone APIs to exact private interface/phone-peer subnets; validate Host/Origin, disable forwarded-header trust, and never persist or redisclose client private keys.
+- Web UI: its API and engine routes answer only clients on the private
+  subnets of the interfaces it binds, from the same origin; a request with an
+  unknown Host or any forwarded-client header is refused.
 
 ## [0.17.0] - 2026-10-19
 

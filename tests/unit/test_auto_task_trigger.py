@@ -82,7 +82,7 @@ REAL_HANDOFFS = {
 # nothing (same incident, same author).
 NON_HANDOFFS = {
     "peridot_guard_rail_followup": (
-        "Guard rail before you start: your spawn cwd is /Users/malmazan/dev/"
+        "Guard rail before you start: your spawn cwd is ~/dev/"
         "kollab — the shared checkout mid-flight. Do NOT read/edit/commit "
         "there. Work exclusively in your scratch clone /tmp/kollab-taskledger "
         "(git clone https://github.com/kollaborai/kollab.git, branch "

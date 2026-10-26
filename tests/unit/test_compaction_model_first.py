@@ -99,16 +99,142 @@ class TestModelFirst(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ledger.injected), 1)
         await _drain(plugin)
 
-    async def test_compact_tag_starts_compaction_and_ends_turn(self):
+    async def test_compact_tag_stages_before_resuming_model_turn(self):
         plugin, _bus, _llm = _plugin(ledger=_Ledger())
         plugin._awaiting_model = True
-        result = await plugin._handle_compact_tool({"id": "t1", "notes": "task: X"})
+        plugin._call_summarization_llm = AsyncMock(return_value="S" * 200)
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+
+        result = await asyncio.wait_for(
+            plugin._handle_compact_tool({"id": "t1", "notes": "task: X"}),
+            timeout=1,
+        )
+
         self.assertTrue(result.success)
-        self.assertTrue(result.metadata.get("end_turn"))
-        self.assertTrue(plugin._compaction_in_progress)
+        self.assertFalse(result.metadata.get("end_turn", False))
+        self.assertIsNotNone(plugin._pending_compaction)
+        self.assertFalse(plugin._compaction_in_progress)
         self.assertFalse(plugin._awaiting_model)
-        self.assertEqual(plugin._model_notes, "task: X")
+        self.assertIsNone(plugin._model_notes)
+        self.assertEqual(plugin._call_summarization_llm.await_count, 1)
+        compact_summary = next(
+            message
+            for message in plugin._pending_compaction
+            if message.metadata.get("context_compaction")
+        )
+        self.assertIn("task: X", compact_summary.content)
+
+    async def test_compact_tag_returns_actionable_failure_without_retry(self):
+        plugin, _bus, _llm = _plugin(ledger=_Ledger())
+        plugin._awaiting_model = True
+        plugin._call_summarization_llm = AsyncMock(
+            side_effect=RuntimeError("summarizer unavailable")
+        )
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+
+        try:
+            result = await asyncio.wait_for(
+                plugin._handle_compact_tool({"id": "t1", "notes": "task: X"}),
+                timeout=1,
+            )
+        finally:
+            await _drain(plugin)
+
+        self.assertFalse(result.success)
+        self.assertIn("/compact now", result.error)
+        self.assertIn("not applied", result.error)
+        self.assertEqual(plugin._call_summarization_llm.await_count, 1)
+        self.assertIsNone(plugin._pending_compaction)
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertIsNone(plugin._model_notes)
+
+    async def test_compact_tag_keeps_staged_swap_if_logging_fails(self):
+        plugin, _bus, _llm = _plugin(ledger=_Ledger())
+        plugin._awaiting_model = True
+        plugin._call_summarization_llm = AsyncMock(return_value="S" * 200)
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock(
+            side_effect=RuntimeError("event logger unavailable")
+        )
+
+        result = await asyncio.wait_for(
+            plugin._handle_compact_tool({"id": "t1", "notes": "task: X"}),
+            timeout=1,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIsNotNone(plugin._pending_compaction)
+        self.assertEqual(plugin._consecutive_failures, 0)
+        self.assertEqual(plugin._compaction_status, "ready_to_retry")
         await _drain(plugin)
+
+    async def test_compact_tag_does_not_clear_notes_for_active_run(self):
+        plugin, _bus, _llm = _plugin(ledger=_Ledger())
+        plugin._compaction_in_progress = True
+        plugin._model_notes = "notes owned by the active compaction"
+
+        result = await asyncio.wait_for(
+            plugin._handle_compact_tool({"id": "t2", "notes": "new notes"}),
+            timeout=1,
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("already running", result.error)
+        self.assertEqual(plugin._model_notes, "notes owned by the active compaction")
+
+    async def test_compact_tag_disabled_returns_actionable_failure(self):
+        plugin, _bus, _llm = _plugin(ledger=_Ledger())
+        plugin._disabled_for_session = True
+        plugin._awaiting_model = True
+        plugin._call_summarization_llm = AsyncMock(return_value="S" * 200)
+
+        result = await asyncio.wait_for(
+            plugin._handle_compact_tool({"id": "t1", "notes": "task: X"}),
+            timeout=1,
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("disabled for this session", result.error.lower())
+        self.assertIn("new session", result.error.lower())
+        plugin._call_summarization_llm.assert_not_awaited()
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertIsNone(plugin._model_notes)
+
+    async def test_compact_tag_cancellation_cancels_bounded_compaction_task(self):
+        plugin, _bus, _llm = _plugin(ledger=_Ledger())
+        plugin._awaiting_model = True
+        summary_started = asyncio.Event()
+
+        async def block_until_cancelled(*_args, **_kwargs):
+            summary_started.set()
+            await asyncio.Event().wait()
+
+        plugin._call_summarization_llm = AsyncMock(side_effect=block_until_cancelled)
+        plugin._write_compaction_checkpoint = MagicMock(return_value=None)
+        plugin._log_compaction_event = AsyncMock()
+        handler_task = asyncio.create_task(
+            plugin._handle_compact_tool({"id": "t1", "notes": "task: X"})
+        )
+        compaction_task = None
+        try:
+            await asyncio.wait_for(summary_started.wait(), timeout=1)
+            compaction_task = plugin._compaction_task
+            handler_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(handler_task, timeout=1)
+        finally:
+            await _drain(plugin)
+
+        self.assertIsNotNone(compaction_task)
+        self.assertTrue(compaction_task.cancelled())
+        self.assertFalse(plugin._compaction_in_progress)
+        self.assertIsNone(plugin._pending_compaction)
+        self.assertIsNone(plugin._model_notes)
+        self.assertEqual(plugin._compaction_status, "failed")
+        self.assertIn("cancelled", plugin._compaction_status_message.lower())
+        self.assertTrue(plugin._compaction_status_action)
 
     async def test_notes_land_verbatim_in_summary(self):
         plugin, _bus, llm = _plugin(ledger=None)

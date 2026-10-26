@@ -119,6 +119,43 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(llm_service.conversation_history[-1].metadata["agent_hud"])
         self.assertEqual(event_bus.emitted[0][0], EventType.TRIGGER_LLM_CONTINUE)
 
+    async def test_generated_hub_task_id_is_carried_into_conversation_metadata(self):
+        """A minted OPEN card must be linkable from its archived hub message."""
+        llm_service = FakeLLMService()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        tasks_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tasks_dir.cleanup)
+        plugin._task_ledger = TaskLedger(tasks_dir.name)
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._route_message = AsyncMock(return_value=[])
+        plugin._display_hub_message = MagicMock()
+        plugin._identity = AgentRuntime(
+            name="coder",
+            identity="sapphire",
+            agent_id="sapphire-id",
+            state="idle",
+        )
+
+        await plugin._on_message_received(
+            HubMessage(
+                action="message",
+                from_agent="koordinator-id",
+                from_identity="koordinator",
+                to="sapphire",
+                content="[work assignment] inspect the compaction regression",
+                scope=MessageScope.DIRECT.value,
+                metadata={"task_assignment": True},
+            )
+        )
+
+        archived = llm_service.conversation_history[-1]
+        task_id = archived.metadata.get("task_id")
+        self.assertTrue(task_id)
+        self.assertEqual(plugin._task_ledger.get(task_id).status, "open")
+
+
     async def test_direct_operator_message_wakes_target_from_another_window(self):
         """A direct @ message is not suppressed as passive human broadcast."""
         llm_service = FakeLLMService()
@@ -159,6 +196,80 @@ class TestHubWakeOrder(unittest.IsolatedAsyncioTestCase):
             "human is typing in koordinator's window",
             llm_service.conversation_history[0].content,
         )
+
+    async def test_a_yes_from_hub_msg_or_a_bridge_answers_no_ask(self):
+        """`kollab --hub msg` and the email bridge wake the agent; their "yes" is never the user's answer."""
+        from types import SimpleNamespace
+
+        from kollabor_agent.yes_approval import YesApprovals
+
+        llm_service = FakeLLMService()
+        approvals = YesApprovals()
+        call = {"type": "terminal", "id": "c1", "command": "gh pr list"}
+        approvals.ask(call)
+        approvals.on_reply_done()
+        llm_service.tool_executor = SimpleNamespace(yes_approvals=approvals)
+        llm_service.process_user_input = AsyncMock()
+        event_bus = FakeEventBus(llm_service)
+        plugin = HubPlugin(event_bus=event_bus)
+        plugin._task_ledger = None
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._identity = AgentRuntime(name="coder", identity="sapphire", state="idle")
+
+        for message in (
+            HubMessage(
+                action="message",
+                from_agent="human",
+                from_identity="me",
+                to="sapphire",
+                content="Yes.",
+                scope=MessageScope.DIRECT.value,
+                metadata={"source": "cli", "operator_message": True},
+            ),
+            HubMessage(
+                action="message",
+                from_agent="bridge:email",
+                to="sapphire",
+                content="Yes.",
+                scope=MessageScope.DIRECT.value,
+            ),
+        ):
+            await plugin._on_message_received(message)
+
+        self.assertNotIn(EventType.USER_INPUT, [emitted[0] for emitted in event_bus.emitted])
+        llm_service.process_user_input.assert_not_awaited()
+        self.assertFalse(approvals.take({**call, "id": "c2"}))
+
+    async def test_a_hub_msg_to_an_acp_agent_is_never_the_users_yes(self):
+        """An ACP agent takes `kollab --hub msg` as the person's input, outside YES_SOURCES."""
+        from kollabor.user_input_source import YES_SOURCES, UserInputSource
+
+        llm_service = FakeLLMService()
+        llm_service.submit_human_input = AsyncMock(return_value={"status": "queued"})
+        plugin = HubPlugin(event_bus=FakeEventBus(llm_service))
+        plugin._task_ledger = None
+        plugin._presence = MagicMock()
+        plugin._presence.publish = MagicMock()
+        plugin._identity = AgentRuntime(name="coder", identity="sapphire", state="idle")
+        plugin._agent_dispatch_mode = lambda llm: "acp"
+
+        await plugin._on_message_received(
+            HubMessage(
+                action="message",
+                from_agent="human",
+                from_identity="me",
+                to="sapphire",
+                content="Yes.",
+                scope=MessageScope.DIRECT.value,
+                metadata={"source": "cli", "operator_message": True},
+            )
+        )
+
+        llm_service.submit_human_input.assert_awaited_once()
+        source = llm_service.submit_human_input.await_args.kwargs["source"]
+        self.assertEqual(source, UserInputSource.HUB_MESSAGE)
+        self.assertNotIn(source, YES_SOURCES)
 
     async def test_pure_standing_by_ack_queues_hud_without_wake(self):
         llm_service = FakeLLMService()

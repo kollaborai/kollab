@@ -1,6 +1,6 @@
 # Web Settings Panels
 
-The web UI (`kollab --web-ui`) has a **Settings** dialog with eight tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it inspects default and agent-bundle sections and saves per-user overrides without changing bundled files. On a phone the dialog is a full-screen sheet.
+The web UI (`kollab --web-ui`) has a **Settings** dialog with nine tabs. Most mirror the terminal's fullscreen screens (`/config`, `/llm`, `/model`, `/setup`, `/connect`, `/voice config`) through the same daemon-owned code, so a change saved in the browser shows up in the terminal and the other way round. The Prompts tab is browser-only: it inspects default and agent-bundle sections and saves per-user overrides without changing bundled files. On a phone the dialog is a full-screen sheet.
 
 Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-unified-config.md).
 
@@ -13,11 +13,24 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 | Loadouts | The same list as terminal `/llm`: use one, create, edit, delete (delete asks twice). | The profile manager the terminal `/llm` uses. |
 | Model | Reasoning effort and the model picker for the active provider (terminal `/model`). | The profile manager the terminal `/model` uses. |
 | Setup | The first-run wizard as steps: provider, API key, endpoint, model, optional connection test, Save and Activate. A bad key shows a redacted error; a missing key jumps back to the key step. | A new profile, activated, through the same code as terminal `/setup`. |
-| Network | Your agent network: status, this device, join requests with accept and reject, trust level, rename, and New Join Code. Knocks opens the knock screen: ringing knocks (accept, reject, block), the knocks this device placed (stop), missed knocks, blocked routes, contacts, and who may knock. | The network state the terminal `/connect` and `/connect knocks` use. |
-| Voice | Classifier, transcript context, speech engine, Kokoro and VibeVoice settings, plus transcription, microphone and current readiness (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
+| Network | Overview shows the network and this device. Access contains trust, device name, join requests, and New Join Code. Knocks contains incoming and outgoing knocks, missed knocks, blocked routes, contacts, and who may knock. | The network state the terminal `/connect` and `/connect knocks` use. |
+| PhoneLink | Link a phone with an expiring QR code and local approval over the existing Kollab connection. | Private phone identities on this computer; no provider credential sync to the phone. |
+| Voice | Transcript context, speech engine, Kokoro and VibeVoice settings, plus transcription, microphone and current readiness (terminal `/voice config`). | **Save for This Device**, to `~/.kollab/voice/preferences.json` on the device running Kollab. Saving never starts listening. |
 | Prompts | Browse the default prompt and agent-bundle sections in assembly order, edit sections marked editable, and preview the assembled prompt. | Per-user overrides under `~/.kollab/prompt-overrides/<bundle>/<section>.md`; bundled prompt files are unchanged. |
 
 A change that is not saved yet is marked "changed" on its field; closing the dialog with unsaved changes asks first.
+
+## Network sections
+
+The Network tab has three compact sections:
+
+- **Overview** shows the daemon's current network, trust, device, connection, and agent details. Its Knocks Address is plain text from the connection that owns the network, with a Copy action only when the daemon explicitly permits it. A missing address reads **Unavailable**. Copy reports the browser's actual result; it does not open the address.
+- **Access** shows Trust as one choice among the options supplied by the daemon. Changing a choice uses the existing trust action and its permission semantics. The device-name field has an explicit **Save** button; its unsaved text stays intact when switching sections or changing Trust. Pending join requests keep their Accept and confirmed Reject actions. **New Join Code** still shows a one-time reveal with no Copy action.
+- **Knocks** shows the existing `/connect knocks` controls and rows: Who May Knock, expected and blocked routes, incoming and outgoing knocks, missed knocks, blocked routes, and contacts. Expected and blocked route text stays local until **Apply** or Enter; a successful submission clears only that field, while rejection keeps its text and field error. Who May Knock still changes immediately. Row confirmations and **Clear Missed** keep their existing actions. Refresh reloads this section without leaving it or discarding an unsaved device name.
+
+Sections do not create another network state or action path. Join forms and wizards still open on the existing panel stack and return with Back. A read-only or unavailable network shows its existing notice and no extra actions; a device with no network retains **Start a New Network** and **Join With a Code** in Overview.
+
+Switching top-level settings tabs retains Knocks route drafts. Leaving Knocks for Overview or Access closes that child view and discards its unsaved route text, matching Back. The device-name draft remains on the Network root until saved or the dialog closes.
 
 ## Slash commands in the chat
 
@@ -56,5 +69,6 @@ The daemon polls the config files once a second and reloads when another process
 
 ## Testing
 
+- Frontend summary, copy-metadata, and Knocks draft contracts: from `packages/kollabor-webui/frontend`, run `node --test tests/panel-summary.test.ts tests/option-label.test.ts tests/knocks-controls.test.ts`. Clipboard permission, typing and Apply, and the rendered Network sections need a browser check separately.
 - `tests/unit/test_fullscreen_unavailable.py`, `tests/unit/test_altview_unavailable.py`: web commands never open a fullscreen view.
 - `tests/tmux/specs/config_attach_daemon_opens.json`: default (daemon plus attached window) launch in a throwaway HOME; the attached `/config` opens and a Global slider save persists in the file. Run with `tests/tmux/lib/test_runner.sh tests/tmux/specs/config_attach_daemon_opens.json`.

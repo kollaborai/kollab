@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Learn — Kollab Model</title>
+<style>
+:root {
+  color-scheme: dark;
+  --page: oklch(.145 0 0);
+  --chrome: oklch(.18 0 0);
+  --panel: oklch(.205 0 0);
+  --fill: oklch(.269 0 0);
+  --active: oklch(.371 0 0);
+  --text: oklch(.985 0 0);
+  --muted: oklch(.708 0 0);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  background: var(--page);
+  color: var(--text);
+}
+@media (pointer: fine) { html { font-size: 90%; } }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+button, select { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: transparent; }
+button:focus-visible, select:focus-visible { outline: 2px solid #999; outline-offset: 3px; }
+button { transition: background-color 140ms ease, color 140ms ease; }
+button:active { transform: translateY(1px); }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.application { display: grid; grid-template-columns: 15.5rem 1fr; gap: .65rem; height: 100dvh; padding: .65rem; }
+.app-sidebar { display: flex; flex-direction: column; padding: 1.15rem 1rem .7rem; background: var(--chrome); border-radius: 1rem; }
+.brand { padding: .2rem .5rem; font-size: 1rem; font-weight: 600; }
+.learn-launch { margin-top: auto; padding: .65rem .5rem; text-align: left; border-radius: .5rem; font-size: .875rem; }
+.learn-launch:hover { background: var(--fill); }
+.app-main { position: relative; border-radius: 1rem; }
+.composer { position: absolute; bottom: 1.2rem; left: 10%; right: 10%; height: 4.5rem; border-radius: 1rem; background: var(--chrome); }
+dialog {
+  width: min(1040px, calc(100vw - 2rem));
+  height: min(620px, calc(100dvh - 3rem));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 1rem;
+  background: var(--page);
+  color: var(--text);
+  overflow: hidden;
+  outline: 0;
+  box-shadow: 0 20px 85px rgb(0 0 0 / 45%);
+}
+dialog[open] { display: flex; flex-direction: column; animation: enter 160ms ease-out; }
+dialog::backdrop { background: rgb(0 0 0 / 56%); }
+@keyframes enter { from { opacity: 0; transform: translateY(5px) scale(.99); } to { opacity: 1; transform: none; } }
+.modal-header { display: flex; flex: 0 0 auto; align-items: center; gap: 1rem; min-height: 4rem; padding: .8rem 1rem .7rem 1.25rem; }
+.modal-title { margin: 0; font-size: 1rem; font-weight: 600; }
+.view-switch { display: inline-flex; gap: .15rem; padding: .2rem; border-radius: .5rem; background: var(--chrome); }
+.view-switch button { min-height: 1.9rem; padding: .35rem .75rem; border-radius: .35rem; font-size: .875rem; color: var(--muted); }
+.view-switch button[aria-selected="true"] { background: var(--fill); color: var(--text); }
+.view-switch button:hover { color: var(--text); }
+.close { display: flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: .45rem; border-radius: 50%; margin-left: auto; color: var(--muted); }
+.close:hover { background: var(--fill); color: var(--text); }
+.close svg { width: 1rem; height: 1rem; }
+.model-main { display: grid; grid-template-columns: minmax(0,1fr) 18rem; gap: 1rem; flex: 1; min-height: 0; padding: 0 1rem 1rem; }
+.map-area { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.map-scroll { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; border-radius: .75rem; scrollbar-width: thin; scrollbar-color: #3b3b3b transparent; }
+.diagram-canvas { position: relative; min-height: 400px; height: 100%; }
+.network-model { position: relative; display: flex; flex-direction: column; gap: 1.35rem; min-height: 400px; height: 100%; padding: 1.2rem; background: #121212; border-radius: .75rem; transition: background-color 160ms ease; }
+.network-model.is-selected { background: #161616; }
+.network-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; width: fit-content; max-width: 100%; padding: .2rem .4rem; margin: -.2rem -.4rem 0; border-radius: .4rem; text-align: left; }
+.network-heading .kind { color: var(--muted); font-size: .75rem; }
+.network-heading strong { font-size: .875rem; font-weight: 550; }
+.network-heading:hover { background: #ffffff09; }
+.devices { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); align-items: stretch; gap: 1.2rem; flex: 1; min-height: 0; }
+.device-region { display: flex; flex-direction: column; min-width: 0; padding: 1rem; border-radius: .75rem; background: #1a1a1a; transition: opacity 180ms ease, background-color 160ms ease; }
+.device-region.is-related { background: #202020; }
+.device-region.is-selected { background: #292929; }
+.device-region.is-unrelated { opacity: .48; }
+.region-heading { display: flex; flex-direction: column; align-items: flex-start; gap: .25rem; width: fit-content; max-width: 100%; padding: .3rem .4rem; margin: -.3rem -.4rem .95rem; border-radius: .4rem; text-align: left; }
+.region-heading:hover { background: #ffffff08; }
+.kind { font-size: .75rem; font-weight: 400; color: var(--muted); line-height: 1.4; }
+.region-heading strong { font-size: .875rem; font-weight: 550; line-height: 1.4; }
+.workspace-region { display: flex; flex-direction: column; min-width: 0; flex: 1; padding: 1rem .8rem .8rem; border-radius: .625rem; background: #262626; transition: background-color 160ms ease; }
+.workspace-region.is-related { background: #303030; }
+.workspace-region.is-selected { background: #393939; }
+.workspace-region .region-heading { margin-bottom: 1.4rem; }
+.workspace-region .region-heading strong { font-weight: 500; }
+.folder-name { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.agent-node { display: flex; align-items: center; gap: .65rem; width: 100%; min-width: 0; min-height: 6.1rem; margin-top: auto; padding: .55rem; border-radius: .625rem; background: #353535; text-align: left; }
+.agent-node:hover { background: #414141; }
+.agent-node.is-selected { background: #4a4a4a; }
+.agent-avatar { width: 4.75rem; height: 4.75rem; flex: 0 0 auto; object-fit: cover; mix-blend-mode: lighten; }
+.agent-text { display: flex; flex-direction: column; min-width: 0; gap: .2rem; }
+.agent-text strong { font-size: .95rem; font-weight: 550; line-height: 1.4; }
+.agent-text .kind { font-size: .7rem; }
+.agent-role { font-size: .8rem; line-height: 1.4; color: #c6c6c6; overflow-wrap: anywhere; }
+.device-contact { display: flex; flex-direction: column; align-items: flex-start; gap: .2rem; width: 100%; padding: .9rem 0 .1rem; text-align: left; border-radius: .4rem; }
+.device-contact span { font-size: .75rem; color: #b7b7b7; line-height: 1.4; }
+.device-contact small { font-size: .7rem; color: #858585; line-height: 1.5; }
+.device-contact:hover span { color: var(--text); }
+.map-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; flex: 0 0 auto; padding: .8rem .2rem .1rem; font-size: .75rem; color: var(--muted); }
+.map-footer p { margin: 0; line-height: 1.5; }
+.swap { padding: .25rem .45rem; margin: -.25rem -.45rem; border-radius: .35rem; color: #d0d0d0; font-size: .75rem; }
+.swap:hover { background: var(--fill); }
+.route-svg { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; overflow: visible; opacity: 0; transition: opacity 180ms ease; }
+.diagram-canvas[data-mode="messaging"] .route-svg { opacity: 1; }
+.route-halo { fill: none; stroke: #131313; stroke-width: 5; }
+.route-line { fill: none; stroke: #d6d6d6; stroke-width: 1.5; stroke-linecap: round; }
+.context-pane { min-width: 0; min-height: 0; overflow-y: auto; padding: .45rem .4rem .5rem .25rem; scrollbar-width: thin; scrollbar-color: #3b3b3b transparent; }
+.context-content { animation: context-enter 120ms ease-out; }
+@keyframes context-enter { from { opacity: .55; transform: translateX(3px); } to { opacity: 1; transform: none; } }
+.context-kind { margin: 0 0 .6rem; font-size: .75rem; line-height: 1.4; color: var(--muted); }
+.context-title { margin: 0; font-size: 1.125rem; line-height: 1.4; font-weight: 600; }
+.context-description { margin: .8rem 0 1.2rem; font-size: .875rem; line-height: 1.7; color: #bcbcbc; }
+.context-section { margin: 1.25rem 0 0; min-width: 0; }
+.context-section h3 { margin: 0 0 .6rem; font-size: .8rem; font-weight: 550; line-height: 1.5; }
+.context-section p { margin: .6rem 0 0; color: #a7a7a7; font-size: .8rem; line-height: 1.65; overflow-wrap: anywhere; }
+.relation-list { display: flex; flex-direction: column; gap: .3rem; margin: 0; padding: 0; list-style: none; }
+.relation-button { display: flex; justify-content: space-between; align-items: center; gap: .5rem; width: 100%; padding: .55rem .65rem; text-align: left; background: var(--chrome); border-radius: .45rem; font-size: .8rem; line-height: 1.4; }
+.relation-button:hover { background: var(--fill); }
+.relation-button small { color: var(--muted); font-size: .7rem; }
+.identity { margin: .8rem 0 0; }
+.identity dt { margin-top: .65rem; font-size: .75rem; line-height: 1.5; color: var(--muted); }
+.identity dd { margin: .15rem 0 0; font-size: .875rem; line-height: 1.5; }
+.code { display: block; min-width: 0; padding: .7rem .8rem; border-radius: .5rem; background: var(--chrome); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; line-height: 1.65; overflow-wrap: anywhere; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .95em; overflow-wrap: anywhere; }
+.read-topic { display: inline-flex; align-items: center; gap: .3rem; margin: 1.5rem 0 0 -.55rem; padding: .4rem .55rem; border-radius: .4rem; font-size: .75rem; color: #d4d4d4; text-align: left; }
+.read-topic:hover { background: var(--fill); }
+.read-topic svg { width: .85rem; height: .85rem; }
+.breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .1rem; margin: 1rem 0 .2rem -.25rem; font-size: .7rem; line-height: 1.5; color: #858585; }
+.breadcrumbs button { padding: .15rem .25rem; border-radius: .25rem; color: #a7a7a7; font-size: .7rem; text-align: left; }
+.breadcrumbs button:hover { background: var(--fill); color: var(--text); }
+.back { display: inline-flex; align-items: center; gap: .3rem; padding: .35rem; margin: -.35rem 0 1rem -.35rem; border-radius: .35rem; font-size: .75rem; color: var(--muted); }
+.back:hover { background: var(--fill); color: var(--text); }
+.back svg { width: .9rem; height: .9rem; }
+.topic-select { width: 100%; min-width: 0; padding: .5rem .65rem; margin: 0 0 1rem; border-radius: .45rem; border: 0; background: var(--chrome); font-size: .8rem; }
+.reference-title { font-size: 1rem; }
+.reference p, .reference li { font-size: .8rem; line-height: 1.7; color: #bcbcbc; overflow-wrap: anywhere; }
+.reference h3 { margin: 1.2rem 0 .6rem; font-size: .8rem; font-weight: 550; }
+.reference ol { margin: 0; padding-left: 1.2rem; }
+.reference li { padding-left: .25rem; margin-bottom: .6rem; }
+.reference .note { color: #999; font-size: .75rem; }
+@media (min-width: 761px) and (max-width: 980px) {
+  .model-main { grid-template-columns: minmax(0,1fr) 15rem; }
+  .agent-avatar { width: 3rem; height: 3rem; }
+  .agent-node { gap: .5rem; }
+}
+@media (max-width: 760px) {
+  .model-main { display: flex; flex-direction: column; gap: .8rem; }
+  .map-area { flex: 1; min-height: 0; }
+  .context-pane { flex: 0 0 155px; max-height: 155px; padding: .85rem 1rem; border-radius: .625rem; background: var(--chrome); }
+  .context-kind { margin-bottom: .35rem; }
+  .context-description { margin: .55rem 0 .8rem; }
+  .context-pane[data-reference="true"] { flex-basis: 45%; max-height: 45%; }
+  .context-section { margin-top: .8rem; }
+  .identity { display: grid; grid-template-columns: 6rem 1fr; gap: .35rem .5rem; margin-top: .7rem; }
+  .identity dt, .identity dd { margin: 0; }
+  .relation-list { flex-direction: row; flex-wrap: wrap; }
+  .relation-list li { flex: 1 1 12rem; }
+  .read-topic { margin-top: .8rem; }
+  .breadcrumbs { margin-top: .65rem; }
+  .diagram-canvas, .network-model { min-height: 370px; }
+}
+@media (max-width: 600px) {
+  .application { grid-template-columns: 10rem 1fr; }
+  dialog { width: calc(100vw - 1rem); height: min(620px, calc(100dvh - 1.5rem)); border-radius: .8rem; }
+  .modal-header { min-height: 3.8rem; padding: .75rem .7rem .65rem .9rem; gap: .65rem; }
+  .modal-title { font-size: .875rem; }
+  .view-switch button { padding: .35rem .55rem; font-size: .8rem; }
+  .model-main { padding: 0 .7rem .7rem; gap: .65rem; }
+  .network-model { height: auto; padding: 1rem; gap: 1.15rem; }
+  .diagram-canvas { height: auto; }
+  .devices { grid-template-columns: minmax(0,1fr); gap: 1rem; }
+  .device-region { padding: 1rem; }
+  .workspace-region { min-height: 12.25rem; }
+  .workspace-region .region-heading { margin-bottom: 1rem; }
+  .agent-node { min-height: 6.1rem; }
+  .agent-avatar { width: 4.5rem; height: 4.5rem; }
+  .context-pane { flex-basis: 145px; max-height: 145px; padding: .8rem .85rem; }
+  .map-footer { padding-top: .55rem; }
+  .context-title { font-size: 1rem; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div class="application" aria-label="Kollab">
+  <aside class="app-sidebar"><div class="brand">Kollab</div><button type="button" class="learn-launch" id="open-learn">Learn</button></aside>
+  <main class="app-main" aria-hidden="true"><div class="composer"></div></main>
+</div>
+<dialog id="model-dialog" aria-labelledby="learn-title" tabindex="-1">
+  <header class="modal-header">
+    <h1 class="modal-title" id="learn-title">Learn</h1>
+    <div class="view-switch" role="tablist" aria-label="Model view">
+      <button id="structure-tab" type="button" role="tab" aria-selected="true" aria-controls="model-content" data-mode="structure">Structure</button>
+      <button id="messaging-tab" type="button" role="tab" aria-selected="false" aria-controls="model-content" data-mode="messaging">Messaging</button>
+    </div>
+    <button type="button" id="close-learn" class="close" aria-label="Close Learn" title="Close Learn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </header>
+  <div class="model-main" id="model-content" role="tabpanel" aria-labelledby="structure-tab">
+    <section class="map-area" aria-label="Example Kollab model">
+      <div class="map-scroll" id="map-scroll">
+        <div class="diagram-canvas" id="diagram-canvas" data-mode="structure">
+          <section class="network-model model-node" data-node="network" aria-label="Example network">
+            <button class="network-heading" type="button" data-select="network"><span class="kind">Network</span><strong>Example network</strong></button>
+            <div class="devices">
+              <section class="device-region model-node" data-node="desk" aria-label="Desk computer">
+                <button class="region-heading" type="button" data-select="desk"><span class="kind">Device</span><strong>Desk computer</strong></button>
+                <section class="workspace-region model-node" data-node="example" aria-label="Example workspace">
+                  <button class="region-heading" type="button" data-select="example"><span class="kind">Workspace</span><strong>Example workspace</strong><span class="folder-name">/projects/example-app</span></button>
+                  <button class="agent-node model-node" type="button" data-node="lapis" data-select="lapis" aria-label="lapis, Koordinator agent">
+                    <img class="agent-avatar" src="../assets/koordinator.png" width="76" height="76" alt="">
+                    <span class="agent-text"><span class="kind">Agent handle</span><strong>lapis</strong><span class="agent-role">Koordinator</span></span>
+                  </button>
+                </section>
+                <button class="device-contact" type="button" data-select="desk"><span>Knocks address</span><small>Shared on this connection</small></button>
+              </section>
+              <section class="device-region model-node" data-node="laptop" aria-label="Laptop">
+                <button class="region-heading" type="button" data-select="laptop"><span class="kind">Device</span><strong>Laptop</strong></button>
+                <section class="workspace-region model-node" data-node="notes" aria-label="Notes workspace">
+                  <button class="region-heading" type="button" data-select="notes"><span class="kind">Workspace</span><strong>Notes workspace</strong><span class="folder-name">/projects/research-notes</span></button>
+                  <button class="agent-node model-node" type="button" data-node="jade" data-select="jade" aria-label="jade, Backend agent">
+                    <img class="agent-avatar" src="../assets/backend.png" width="76" height="76" alt="">
+                    <span class="agent-text"><span class="kind">Agent handle</span><strong>jade</strong><span class="agent-role">Backend</span></span>
+                  </button>
+                </section>
+                <button class="device-contact" type="button" data-select="laptop"><span>Knocks address</span><small>Shared on this connection</small></button>
+              </section>
+            </div>
+          </section>
+          <svg class="route-svg" id="route-svg" aria-hidden="true">
+            <defs><marker id="route-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 1 1 L 9 5 L 1 9 z" fill="#d6d6d6"/></marker></defs>
+            <path class="route-halo" id="route-halo"/>
+            <path class="route-line" id="route-path" marker-end="url(#route-arrow)"/>
+          </svg>
+        </div>
+      </div>
+      <div class="map-footer"><p id="map-caption">Select a device, workspace, or agent.</p><button class="swap" type="button" id="swap-direction" hidden>Swap direction</button></div>
+    </section>
+    <aside class="context-pane" id="context-pane" aria-label="Selected model context" data-reference="false"><div id="context-content"></div></aside>
+  </div>
+  <p class="sr-only" id="selection-status" role="status" aria-live="polite"></p>
+</dialog>
+<script type="application/json" id="topic-data">[{"id":"networks","title":"Kollab networks","summary":"A Kollab network lets trusted Kollab installs find one another and share agent presence. It is a Kollab peer mesh, not a VPN or a public chat room.","howTo":["On the computer that will invite another device, open the Network settings or enter /connect in chat.","Create a one-time invite code and share it only with the person who should join.","Accept the invite on the other trusted Kollab install, then check that both devices appear in the sidebar.","Open a device to browse its available workspaces and agents."],"example":"Invite a second computer with a one-time code, then use the sidebar to reach an agent running on that computer.","note":"Treat invite codes as private. Do not post them in a public channel or include them in screenshots."},{"id":"devices","title":"Devices","summary":"A device is one computer running Kollab. The sidebar shows which computers are in your network and lets you browse their available work.","howTo":["Expand Networks in the sidebar.","Choose the computer you want to use.","Open one of that device's workspaces, then select an agent or session.","If a computer is missing, confirm that Kollab is running there and that it joined the same network."],"example":"Keep a build agent on your workstation and open that device from a laptop when you want to review its work."},{"id":"workspaces","title":"Workspaces","summary":"A workspace is a project folder. Choosing a folder keeps its sessions, local agents, and project context together.","howTo":["Use the workspace picker to select a project folder.","Choose an agent that is available in that folder.","Start a session; new work is created in the selected workspace.","Switch folders from the same picker when you move to another project."],"example":"Use one workspace for the Kollab repository and another for a customer project so their sessions and local agents stay separate."},{"id":"agents","title":"Agents","summary":"Agents are named collaborators with their own instructions and optional skills. Rosters group agents; teams can start several agents together. In the sidebar, local agents are grouped under their workspace so you can tell which project each one works in.","howTo":["Open Agents to see the rosters and teams available in the selected workspace.","Choose a single agent for a focused task, or a team when the work needs parallel roles.","Give the agent a concrete result to produce and how you will verify it.","Drag an agent row to reorder it within its workspace. Rows move aside while you drag; drop to save. The order is saved by this Kollab instance and restored on refresh.","Drag past the sidebar edge and release on the Release to hide cue to tuck an agent into Hidden Agents. You can restore it there; hiding does not stop or delete it.","If another device changed the order at the same time, the sidebar refreshes and asks you to retry; your change is not silently lost.","Review its output and tests before using the result."],"example":"Ask a coding agent to add a small feature, name the relevant files, and require it to run the focused tests before reporting back. Then move its workspace row to the top so the next session starts there."},{"id":"profiles","title":"Provider profiles","summary":"A profile chooses the provider, base URL/endpoint, model, and reasoning effort for a session. The name is only a label; the endpoint is where requests go. A profile is separate from the agent's role and instructions.","howTo":["Choose a saved profile; review its provider, base URL/endpoint, model, and reasoning effort before starting a session.","When copying a profile, check the provider and endpoint shown in the copy form. Stored fields the form does not show, including an ACP command, are preserved.","Keyring-backed credentials and sign-in profiles remain stored, but environment-sourced or provisioned keys do not move to the copy. Set its KOLLAB_\u003cPROFILE>_API_KEY or sign in separately.","Select the profile before starting a session. It does not change the chosen agent."],"example":"Copy an ACP-backed profile and confirm its command remains available. If its source key came from KOLLAB_\u003cPROFILE>_API_KEY or KOLLAB_API_KEY, set a profile-specific key for the copy or authenticate again.","note":"Profile names do not guarantee the provider endpoint. Verify the base URL, and never paste key values into prompts or Hub messages."},{"id":"koordinator","title":"Koordinator","summary":"The koordinator keeps a multi-agent effort organized: it tracks assignments, asks for progress, and routes work to the right agent.","howTo":["Start or join the hub that owns the work.","Give the koordinator a bounded goal, acceptance checks, and any no-go constraints.","Check the task board and ask for a report when an assignment finishes.","Review the delivered changes and test evidence yourself before accepting them."],"example":"Split a feature into one UI task and one test task, then ask the koordinator to report both results and the integration check.","note":"A coordinator organizes work; it does not replace review or make an untested change safe to ship."},{"id":"hub-messaging","title":"Hub messaging","summary":"Hub messages coordinate agents across a shared channel. Messages are visible to the hub, so they are not private direct messages.","howTo":["Address a message to the agent's identity, not its general agent type.","State the task, relevant context, and the evidence you want back.","Use the shared channel for coordination that other hub members should see.","Never send passwords, API keys, private keys, or one-time access codes in hub chat."],"example":"Send `hub_msg to=\"lapis\"` with a short request such as “check the Learn links and report any broken routes.”","note":"Hub messages are visible to other members; do not assume a message is private."},{"id":"voice","title":"Voice mode","summary":"Voice mode lets you speak to the active chat. The microphone is not enabled just by opening Kollab; you turn voice mode on explicitly.","howTo":["Open the Voice controls or enter /voice status to check the current state.","Enter /voice on when you are ready to speak.","Talk to the active chat and wait for its response.","Enter /voice off when you are done to release the microphone."],"example":"Say “summarize the last answer in three steps,” then use /voice off when the conversation is finished.","note":"Opening Learn never turns on the microphone. Use /voice status if you are unsure whether voice is active. Separately, /config > Hub > Dream Model picks a cheaper model ID (supported by your active provider) for background agent dreaming only; blank falls back to the shared kollabor.llm.fast_model, then the active session model, reusing your active profile's endpoint and credentials. Dream Model does not change voice replies: the fast voice-responder call path is not wired yet."},{"id":"system-prompts","title":"System prompts","summary":"An agent's system prompt describes how it should work. Project agent files can include reusable sections with Kollab's prompt renderer.","howTo":["Open the System Prompts settings to review the prompt used by the current agent.","For a project agent, edit its system_prompt.md in that workspace's .kollab/agents/\u003cagent-name>/ folder.","Keep reusable prompt fragments in that agent's sections/ folder and include them with a supported \u003ctrender> include.","Restart or reload the agent when its startup prompt changes, then verify the rendered result."],"example":"Add a short “verify before reporting” section and include it with `\u003ctrender type=\"include\" path=\"sections/verify.md\" />`.","note":"Prompt sections are not Agent Skills. Skills use their own SKILL.md directory contract."},{"id":"phone-access","title":"PhoneLink","summary":"Open the same Kollab app on your phone through your existing Kollab connection. Scan a QR code, approve the phone on your computer, and continue in its browser.","howTo":["Connect this computer to your Kollab network with /connect or Settings > Network.","Open Settings > PhoneLink and choose Link a Phone. The connection service must support PhoneLink before a code is offered.","Scan the QR with your phone's camera. It opens Kollab in Safari or Chrome; no WireGuard app or personal server setup is needed.","Check that the pairing codes match, then approve the phone on your computer. The invitation expires after five minutes and links one phone.","Bookmark Kollab to return in the same phone browser. Remove a phone in PhoneLink to withdraw its access."],"example":"Start a task at your desk, then open your Kollab bookmark on your phone to check the same agents, read their work, and answer an approval request.","note":"Keep the computer awake, online, and running Kollab. PhoneLink gives a trusted phone app control; provider calls and tools run on the computer, with no credential setup on the phone. Keep the QR invitation private. Existing WireGuard access is optional under Advanced Settings."}]</script>
+<script>
+(() => {
+  'use strict';
+  const topics = JSON.parse(document.getElementById('topic-data').textContent);
+  const topicById = Object.fromEntries(topics.map(topic => [topic.id, topic]));
+  const dialog = document.getElementById('model-dialog');
+  const canvas = document.getElementById('diagram-canvas');
+  const contextPane = document.getElementById('context-pane');
+  const context = document.getElementById('context-content');
+  const mapCaption = document.getElementById('map-caption');
+  const selectionStatus = document.getElementById('selection-status');
+  const swap = document.getElementById('swap-direction');
+  const launcher = document.getElementById('open-learn');
+  const state = { mode: 'structure', selected: 'network', sender: 'lapis', reference: null };
+  const nodes = {
+    network: { id: 'network', label: 'Example network', kind: 'Network', parent: null, children: ['desk','laptop'], topic: 'networks' },
+    desk: { id: 'desk', label: 'Desk computer', kind: 'Device', parent: 'network', children: ['example'], topic: 'devices' },
+    laptop: { id: 'laptop', label: 'Laptop', kind: 'Device', parent: 'network', children: ['notes'], topic: 'devices' },
+    example: { id: 'example', label: 'Example workspace', kind: 'Workspace', parent: 'desk', children: ['lapis'], path: '/projects/example-app', topic: 'workspaces' },
+    notes: { id: 'notes', label: 'Notes workspace', kind: 'Workspace', parent: 'laptop', children: ['jade'], path: '/projects/research-notes', topic: 'workspaces' },
+    lapis: { id: 'lapis', label: 'lapis', kind: 'Agent', parent: 'example', children: [], role: 'Koordinator', topic: 'agents' },
+    jade: { id: 'jade', label: 'jade', kind: 'Agent', parent: 'notes', children: [], role: 'Backend', topic: 'agents' },
+  };
+  const escape = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const inline = value => String(value).split(String.fromCharCode(96)).map((part,index) => index % 2 ? '<code>' + escape(part) + '</code>' : escape(part)).join('');
+  const backIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>';
+  const forwardIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+  function ancestors(id) {
+    const result = [];
+    let current = nodes[id];
+    while (current) { result.unshift(current.id); current = current.parent ? nodes[current.parent] : null; }
+    return result;
+  }
+  function descendants(id) {
+    return [id, ...nodes[id].children.flatMap(descendants)];
+  }
+  function relatedNodes(id) {
+    return id === 'route' ? [...new Set([...ancestors('lapis'), ...ancestors('jade')])] : [...new Set([...ancestors(id), ...descendants(id)])];
+  }
+  function relationList(ids) {
+    return '<ul class="relation-list">' + ids.map(id => '<li><button class="relation-button" type="button" data-context-select="' + id + '"><span>' + escape(nodes[id].label) + '</span><small>' + escape(nodes[id].kind) + '</small></button></li>').join('') + '</ul>';
+  }
+  function breadcrumbs(id) {
+    return '<nav class="breadcrumbs" aria-label="Belongs to">' + ancestors(id).map((nodeId,index) => (index ? '<span aria-hidden="true">/</span>' : '') + '<button type="button" data-context-select="' + nodeId + '">' + escape(nodes[nodeId].label) + '</button>').join('') + '</nav>';
+  }
+  function readTopic(id, label) {
+    return '<button class="read-topic" type="button" data-reference="' + id + '">' + escape(label || 'Read topic') + forwardIcon + '</button>';
+  }
+  function modelContext() {
+    if (state.selected === 'route') {
+      const recipient = state.sender === 'lapis' ? 'jade' : 'lapis';
+      return '<p class="context-kind">Example message path</p><h2 class="context-title">' + state.sender + ' → ' + recipient + '</h2><p class="context-description">Address the recipient agent by its identity.</p><code class="code">hub_msg to="' + recipient + '"</code><section class="context-section"><h3>Recipient</h3>' + relationList([recipient]) + '<p>' + recipient + ' is the handle. ' + nodes[recipient].role + ' describes the agent’s role.</p></section><section class="context-section"><h3>Channel visibility</h3><p>Hub messages are visible to the hub. They are not private direct messages.</p></section><section class="context-section"><h3>Device contact is separate</h3><p>Agents on the same device connection share its Knocks address within this workspace and network. Address messages with the agent handle.</p></section>' + readTopic('hub-messaging', 'Read Hub messaging');
+    }
+    const node = nodes[state.selected];
+    let body = '';
+    if (node.kind === 'Network') {
+      body = '<p class="context-description">Trusted Kollab installs find one another and share agent presence.</p><section class="context-section"><h3>Contains devices</h3>' + relationList(node.children) + '</section><section class="context-section"><p>Open a device to browse its workspaces and agents.</p><p>This is a Kollab peer mesh, not a VPN or a public chat room.</p></section>';
+    } else if (node.kind === 'Device') {
+      body = '<p class="context-description">One computer running Kollab. Its workspaces keep each project’s agents and sessions together.</p><section class="context-section"><h3>Contains workspaces</h3>' + relationList(node.children) + '</section><section class="context-section"><h3>Device-shared Knocks address</h3><code class="code">domain/c/16 hex</code><p>This is the address format. Agents on the same device connection within this workspace and network share its contact address.</p></section>' + breadcrumbs(node.id);
+    } else if (node.kind === 'Workspace') {
+      body = '<p class="context-description">A project folder that keeps sessions, local agents, and project context together.</p><code class="code">' + escape(node.path) + '</code><section class="context-section"><h3>Contains agents</h3>' + relationList(node.children) + '</section><section class="context-section"><h3>On this device</h3>' + relationList([node.parent]) + '</section>' + breadcrumbs(node.id);
+    } else {
+      const device = nodes[node.parent].parent;
+      body = '<dl class="identity"><dt>Agent handle</dt><dd><code>' + node.id + '</code></dd><dt>Agent role</dt><dd>' + node.role + '</dd></dl><p class="context-description">' + (node.role === 'Koordinator' ? 'The Koordinator organizes assignments and routes work to agents.' : 'This example agent has a Backend role. Its identity is ' + node.id + '.') + '</p><section class="context-section"><h3>Address the agent</h3><code class="code">hub_msg to="' + node.id + '"</code><p>Use the handle when addressing a message, rather than the agent’s role.</p></section><section class="context-section"><h3>Device contact</h3>' + relationList([device]) + '<p>The device’s Knocks address is shared. There is no agent-specific Knocks link.</p></section>' + breadcrumbs(node.id);
+    }
+    return '<p class="context-kind">' + node.kind + '</p><h2 class="context-title">' + escape(node.label) + '</h2>' + body + readTopic(node.topic, 'Read ' + (node.topic === 'networks' ? 'Network topic' : topicById[node.topic].title));
+  }
+  function referenceContext() {
+    const topic = topicById[state.reference];
+    return '<div class="reference"><button type="button" class="back" data-back>' + backIcon + 'Back to model</button><select class="topic-select" aria-label="Reference topic" data-topic-select>' + topics.map(item => '<option value="' + item.id + '"' + (item.id === topic.id ? ' selected' : '') + '>' + escape(item.title) + '</option>').join('') + '</select><h2 class="context-title reference-title">' + escape(topic.title) + '</h2><p>' + inline(topic.summary) + '</p><h3>How to get started</h3><ol>' + topic.howTo.map(step => '<li>' + inline(step) + '</li>').join('') + '</ol><h3>Example</h3><p>' + inline(topic.example) + '</p>' + (topic.note ? '<p class="note">' + inline(topic.note) + '</p>' : '') + '</div>';
+  }
+  function renderContext() {
+    contextPane.dataset.reference = state.reference ? 'true' : 'false';
+    context.innerHTML = '<div class="context-content">' + (state.reference ? referenceContext() : modelContext()) + '</div>';
+    contextPane.scrollTop = 0;
+    for (const button of context.querySelectorAll('[data-context-select]')) button.addEventListener('click', () => selectNode(button.dataset.contextSelect));
+    for (const button of context.querySelectorAll('[data-reference]')) button.addEventListener('click', () => { state.reference = button.dataset.reference; renderContext(); context.querySelector('[data-back]').focus({preventScroll:true}); });
+    const back = context.querySelector('[data-back]');
+    if (back) back.addEventListener('click', () => { state.reference = null; renderContext(); });
+    const select = context.querySelector('[data-topic-select]');
+    if (select) select.addEventListener('change', () => { state.reference = select.value; renderContext(); context.querySelector('[data-topic-select]').focus({preventScroll:true}); });
+  }
+  function updateRelationships() {
+    const related = new Set(relatedNodes(state.selected));
+    for (const element of canvas.querySelectorAll('[data-node]')) {
+      const id = element.dataset.node;
+      element.classList.toggle('is-selected', id === state.selected);
+      element.classList.toggle('is-related', related.has(id));
+      element.classList.toggle('is-unrelated', !related.has(id));
+    }
+    for (const button of canvas.querySelectorAll('[data-select]')) button.setAttribute('aria-pressed', String(button.dataset.select === state.selected));
+  }
+  function selectNode(id) {
+    if (!nodes[id]) return;
+    state.selected = id;
+    state.reference = null;
+    updateRelationships();
+    renderContext();
+    selectionStatus.textContent = nodes[id].kind + ': ' + nodes[id].label + '. Related model elements are highlighted.';
+  }
+  function updateRoute() {
+    if (!dialog.open) return;
+    const from = canvas.querySelector('[data-node="' + state.sender + '"]').getBoundingClientRect();
+    const recipient = state.sender === 'lapis' ? 'jade' : 'lapis';
+    const to = canvas.querySelector('[data-node="' + recipient + '"]').getBoundingClientRect();
+    const box = canvas.getBoundingClientRect();
+    const stacked = Math.abs(from.top - to.top) > 90;
+    let d;
+    if (stacked) {
+      const sx = from.left - box.left, sy = from.top - box.top + from.height / 2;
+      const tx = to.left - box.left, ty = to.top - box.top + to.height / 2;
+      const bend = Math.min(sx,tx) - 27;
+      d = 'M ' + sx + ' ' + sy + ' C ' + bend + ' ' + sy + ', ' + bend + ' ' + ty + ', ' + tx + ' ' + ty;
+    } else {
+      const rightward = from.left < to.left;
+      const sx = (rightward ? from.right : from.left) - box.left, sy = from.top - box.top + from.height / 2;
+      const tx = (rightward ? to.left : to.right) - box.left, ty = to.top - box.top + to.height / 2;
+      const bend = rightward ? 28 : -28;
+      d = 'M ' + sx + ' ' + sy + ' C ' + (sx + bend) + ' ' + (sy - 52) + ', ' + (tx - bend) + ' ' + (ty - 52) + ', ' + tx + ' ' + ty;
+    }
+    document.getElementById('route-path').setAttribute('d',d);
+    document.getElementById('route-halo').setAttribute('d',d);
+    document.getElementById('route-svg').setAttribute('viewBox','0 0 ' + canvas.clientWidth + ' ' + canvas.clientHeight);
+  }
+  function setMode(mode) {
+    state.mode = mode;
+    state.reference = null;
+    state.selected = mode === 'messaging' ? 'route' : 'network';
+    canvas.dataset.mode = mode;
+    for (const button of document.querySelectorAll('[data-mode][role="tab"]')) {
+      const active = button.dataset.mode === mode;
+      button.setAttribute('aria-selected',String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    document.getElementById('model-content').setAttribute('aria-labelledby',mode === 'messaging' ? 'messaging-tab' : 'structure-tab');
+    swap.hidden = mode !== 'messaging';
+    mapCaption.textContent = mode === 'messaging' ? 'Example path: ' + state.sender + ' → ' + (state.sender === 'lapis' ? 'jade' : 'lapis') : 'Select a device, workspace, or agent.';
+    updateRelationships();
+    renderContext();
+    requestAnimationFrame(updateRoute);
+  }
+  for (const button of canvas.querySelectorAll('[data-select]')) button.addEventListener('click', () => selectNode(button.dataset.select));
+  const modeButtons = Array.from(document.querySelectorAll('[data-mode][role="tab"]'));
+  for (const button of modeButtons) {
+    button.addEventListener('click', () => setMode(button.dataset.mode));
+    button.addEventListener('keydown', event => {
+      if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+      event.preventDefault();
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : 1 - modeButtons.indexOf(button);
+      modeButtons[index].focus();
+      setMode(modeButtons[index].dataset.mode);
+    });
+  }
+  swap.addEventListener('click', () => { state.sender = state.sender === 'lapis' ? 'jade' : 'lapis'; setMode('messaging'); });
+  document.getElementById('close-learn').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', event => {
+    if (event.target !== dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+  });
+  dialog.addEventListener('close', () => launcher.focus());
+  launcher.addEventListener('click', () => { dialog.showModal(); dialog.focus({preventScroll:true}); requestAnimationFrame(updateRoute); });
+  const observer = new ResizeObserver(() => requestAnimationFrame(updateRoute));
+  observer.observe(canvas);
+  dialog.showModal();
+  dialog.focus({preventScroll:true});
+  setMode('structure');
+})();
+</script>
+</body>
+</html>

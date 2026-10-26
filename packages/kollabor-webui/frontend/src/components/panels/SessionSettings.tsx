@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/select";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { bundleName, titleCase } from "./panel-model";
-import { PhoneAccessSection } from "./PhoneAccessSection";
 import { VersionsSection } from "./VersionsSection";
 
 /**
@@ -234,7 +233,6 @@ export function SessionSettings({
             </span>
           )}
         </div>
-        <PhoneAccessSection api={api} />
         <VersionsSection api={api} />
       </div>
       <footer className="bg-muted/30 flex shrink-0 flex-col gap-2 px-4 py-3 sm:px-6">

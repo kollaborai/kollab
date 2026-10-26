@@ -23,9 +23,10 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.snapshots import ProfileSnapshot
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.session_naming import session_display_name
 from kollabor_config.config_utils import get_conversations_dir
@@ -145,11 +146,17 @@ class EngineSession:
         solo: bool = False,
         stop_on_owner_exit: bool = False,
         launch_brief: Optional[str] = None,
+        webui_owned: bool = False,
     ):
         self.session_id = session_id
         self.launch_brief = launch_brief or ""
         self.solo = solo
         self.stop_on_owner_exit = stop_on_owner_exit
+        # Only sessions created through the WebUI are detached and reowned
+        # across engine shutdown. CLI-created sessions keep the old stop policy.
+        self.webui_owned = bool(webui_owned)
+
+        self.on_persistence_changed: Optional[Callable[["EngineSession"], None]] = None
         self.user_token = user_token
         self.workspace = self._resolve_workspace(workspace)
         self.system_prompt = system_prompt or ""
@@ -161,6 +168,16 @@ class EngineSession:
         self.agent = agent
         self.requested_identity = identity
         self.approval_mode = approval_mode
+        # Actionable warnings for facts that could not be read or saved.
+        # They never carry private transport or filesystem details, and None
+        # means no known problem.
+        self.approval_mode_warning: Optional[str] = None
+        self.persistence_warning: Optional[str] = None
+        # Delete stopped the daemon but its durable owner record is still
+        # present: the row stays listed and a retried Delete clears it
+        # without stopping anything a second time.
+        self.deletion_pending = False
+        self.deletion_warning: Optional[str] = None
         self.mcp_server_names = mcp_server_names or []
         # Started outside this engine (a terminal, another engine) and attached
         # by adopt(): shutdown detaches. display_name is its own conversation's
@@ -178,6 +195,8 @@ class EngineSession:
         # truth; this is refreshed on demand so synchronous readers (to_dict,
         # the history route) don't have to await mid-render.
         self.history: List[Dict[str, Any]] = []
+        # Thread ids a message was sent on; a voice room may bind only one of these.
+        self.known_thread_ids: set[str] = set()
         # The daemon's messages as sent, and the digest it gave for them: a
         # refresh asks for only what follows (an agent on another computer
         # would otherwise send its whole history over the network every turn).
@@ -236,8 +255,35 @@ class EngineSession:
 
     # === lifecycle ===
 
-    async def initialize(self) -> None:
-        """Spawn the daemon and start tracking its event stream."""
+    def _notify_persistence_changed(self) -> None:
+        """Persist changed public session metadata without interrupting chat."""
+        callback = getattr(self, "on_persistence_changed", None)
+        if callback is None:
+            return
+        try:
+            callback(self)
+        except Exception:
+            logger.exception("could not update persisted metadata for session %s", self.session_id)
+            # Report the failure, never the underlying path or transport error.
+            self.persistence_warning = (
+                "This agent's saved details could not be updated. It keeps "
+                "running, but an engine restart may restore older details. "
+                "The next successful save clears this."
+            )
+        else:
+            self.persistence_warning = None
+
+
+    async def initialize(
+        self,
+        on_spawned: Optional[Callable[["EngineSession"], Awaitable[None]]] = None,
+    ) -> None:
+        """Spawn the daemon, persist its owner record, then initialize it.
+
+        ``on_spawned`` is awaited immediately after attach, before any profile,
+        approval, or history RPC can block. WebUI persistence therefore exists
+        as soon as the daemon PID and socket are known.
+        """
         profile_name = getattr(self.profile, "name", None) or str(self.profile or "")
         is_acp = str(getattr(self.profile, "provider", "")).lower() == "acp"
         if is_acp:
@@ -262,7 +308,10 @@ class EngineSession:
             solo=self.solo,
             profile_env=inline_profile_env(self.profile),
             stop_on_owner_exit=self.stop_on_owner_exit,
+            webui_owned=self.webui_owned,
         )
+        if on_spawned is not None:
+            await on_spawned(self)
         if isinstance(self.profile, str):
             # Inbound clients pass a portable profile name. The daemon loads
             # it in the requested workspace, whose config can differ from the
@@ -328,11 +377,19 @@ class EngineSession:
             raise
 
     @classmethod
-    async def adopt(cls, found: Dict[str, Any]) -> "EngineSession":
-        """Open a live agent this engine did not start (a discover_sessions row).
+    async def adopt(
+        cls,
+        found: Dict[str, Any],
+        *,
+        owned: bool = False,
+        webui_owned: bool = False,
+        created_at: Optional[datetime] = None,
+    ) -> "EngineSession":
+        """Attach to a discoverable or manifest-reowned local agent.
 
-        Nothing about the agent changes: its profile and approval mode are read
-        from it, never set, and closing the session only detaches.
+        Ordinary discovery remains external and detach-only. A WebUI manifest
+        may explicitly transfer process ownership after the prior engine exits;
+        profile and approval settings are still read, never mutated.
         """
         session_id = str(found["session_id"])
         # What presence says it runs: the row keeps its model while a busy
@@ -350,7 +407,8 @@ class EngineSession:
             agent=str(found.get("agent") or "") or None,
             identity=str(found.get("identity") or "") or None,
         )
-        session.external = True
+        session.external = not webui_owned
+        session.webui_owned = bool(webui_owned)
         session.display_name = str(found.get("name") or "")
         session.device = str(found.get("device") or "")
         discovered_workspace = str(found.get("workspace") or "") or None
@@ -370,15 +428,34 @@ class EngineSession:
                     session.conversation_id = log_path.stem
             except OSError:
                 pass
-        if found.get("created_at"):
+        if created_at is not None:
+            session.created_at = (
+                created_at.replace(tzinfo=timezone.utc)
+                if created_at.tzinfo is None
+                else created_at.astimezone(timezone.utc)
+            )
+        elif found.get("created_at"):
             # keep it aware: created_at is timezone-aware since the 3.14
             # launch-runtime change (datetime.now(timezone.utc) above), and a
             # naive/aware mix would break any comparison or subtraction.
             session.created_at = datetime.fromtimestamp(
                 float(found["created_at"]), timezone.utc
             )
+        if not session.conversation_id:
+            # The per-port manifest stores only the opaque log identifier, not
+            # history contents. Restrict it to a filename component before it
+            # is used to resolve a path below the workspace conversations dir.
+            conversation_id = str(found.get("conversation_id") or "")
+            if (
+                conversation_id
+                and Path(conversation_id).name == conversation_id
+                and conversation_id not in {".", ".."}
+            ):
+                session.conversation_id = conversation_id
         try:
-            session.daemon = await get_daemon_pool().adopt(session_id, found)
+            session.daemon = await get_daemon_pool().adopt(
+                session_id, found, owned=owned, webui_owned=webui_owned
+            )
             # An existing pool-owned handle belongs to its original session;
             # this attached view only owns its own subscriptions/tasks.
             session._borrowed_daemon = session.daemon.launcher is not None
@@ -396,7 +473,7 @@ class EngineSession:
         except BaseException:
             if session.daemon is not None:
                 try:
-                    await session.shutdown()
+                    await session.shutdown(stop_daemon=not webui_owned)
                 except BaseException as cleanup_error:
                     logger.warning("adopted session cleanup failed (%s)", type(cleanup_error).__name__)
             raise
@@ -404,23 +481,48 @@ class EngineSession:
 
     async def _read_agent_facts(self) -> None:
         """An adopted agent's profile, approval mode and, on another computer, folder."""
+        # Each fact is read independently: one failed read reports a warning
+        # for that fact only, and the others still land. The daemon's private
+        # error details stay in the log, never in a warning string.
         try:
             revision = self._profile_revision
             profile = await self.state.get_active_profile()
             # A profile-change event can arrive while this initial RPC waits.
             if revision == self._profile_revision:
                 self.profile = profile
-            mode = (await self.state.get_permission_state()).approval_mode
-            self.approval_mode = str(mode or "").lower()
-            if self.device:
-                # Its folder is on that computer: what its own daemon reports.
-                self.workspace = (await self.state.get_system_info()).cwd or None
+
+                self._notify_persistence_changed()
         except Exception as e:
             logger.debug(
                 "session %s: could not read its profile: %s", self.session_id, e
             )
+        try:
+            mode = (await self.state.get_permission_state()).approval_mode
+            self.approval_mode = str(mode or "").lower()
+            self.approval_mode_warning = None
+        except Exception as e:
+            self.approval_mode_warning = (
+                "This agent's approval mode could not be read, so it shows as "
+                "unknown. Open the agent again or send it a message to refresh it."
+            )
+            logger.debug(
+                "session %s: could not read its approval mode: %s", self.session_id, e
+            )
+        if self.device:
+            try:
+                # Its folder is on that computer: what its own daemon reports.
+                self.workspace = (await self.state.get_system_info()).cwd or None
+            except Exception as e:
+                logger.debug(
+                    "session %s: could not read its folder: %s", self.session_id, e
+                )
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, stop_daemon: bool = True) -> None:
+        """Close session tasks and either stop or detach the daemon.
+
+        Delete and `/quit` keep the default stop behavior. The engine lifespan
+        passes ``False`` only for explicitly WebUI-owned persistent sessions.
+        """
         tasks = (
             self._facts_task,
             self._event_task,
@@ -440,7 +542,11 @@ class EngineSession:
         self._history_refresh_task = None
         self._active_turn_task = None
         if not self._borrowed_daemon:
-            await get_daemon_pool().stop(self.session_id)
+            pool = get_daemon_pool()
+            if stop_daemon:
+                await pool.stop(self.session_id)
+            else:
+                await pool.detach(self.session_id)
         self.daemon = None
 
     # === daemon access ===
@@ -562,6 +668,8 @@ class EngineSession:
             ) or ""
             if native_session_id and not getattr(self, "conversation_id", ""):
                 self.conversation_id = native_session_id
+
+                self._notify_persistence_changed()
             if native_session_id and display_history and display_history[0].get("role") == "user":
                 # Old resumed bases lost initialization metadata. Recover it
                 # from typed source records for display only; the daemon and
@@ -713,19 +821,93 @@ class EngineSession:
         origin_context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
-        return await self.state.send_message(
-            content,
-            request_id=request_id,
-            thread_id=thread_id,
-            origin_context=origin_context,
+        voice_turn = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
         )
+        if voice_turn:
+            # The capability was issued in this process; the daemon checks its own,
+            # so mirror it there, but only while this process still holds it.
+            if not validate_voice_admission_context(origin_context):
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+            admitted = await self.voice_admission("admit", context=origin_context)
+            if admitted.get("admitted") is not True:
+                return {"accepted": False, "reason": "invalid voice admission capability"}
+        try:
+            result = await self.state.send_message(
+                content,
+                request_id=request_id,
+                thread_id=thread_id,
+                origin_context=origin_context,
+            )
+        except BaseException:
+            if voice_turn:
+                await self.voice_admission("revoke", context=origin_context)
+            raise
+        if voice_turn and not (isinstance(result, dict) and result.get("accepted")):
+            await self.voice_admission("revoke", context=origin_context)
+        if thread_id and isinstance(result, dict) and result.get("accepted"):
+            self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
+        return result
 
-    def cancel_turn(self) -> None:
-        """Ask the daemon to cancel the in-flight turn (fire and forget)."""
+    async def voice_admission(self, action: str, **params: Any) -> Dict[str, Any]:
+        """Admit or revoke a voice capability in this session's daemon."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_admission", {"action": action, **params}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_admission expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        return result
+
+    async def record_interrupted_reply(self, turn_id: str, text: str) -> Dict[str, Any]:
+        """Keep the part of a voice reply the listener heard before talking over it."""
+        if self.daemon is None or self.daemon.rpc is None:
+            raise RuntimeError(f"session {self.session_id} has no live daemon")
+        result = await self.daemon.rpc.call(
+            "state.voice_interrupted_reply", {"turn_id": turn_id, "text": text}
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.voice_interrupted_reply expected a result dict")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if result.get("recorded"):
+            await self.refresh_history(notify=True)  # open windows hear the new row
+        return result
+
+    def cancel_turn(self, voice_turn_id: str | None = None) -> None:
+        """Ask the daemon to cancel the in-flight turn (fire and forget).
+
+        With `voice_turn_id`, only while that voice turn is the one running: a
+        typed turn that started after it runs on.
+        """
         if self.daemon is None:
             return
+        if voice_turn_id is None:
+            self._active_turn_task = asyncio.create_task(
+                self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            )
+            # A cancelled tool call may never report a result or a turn end: tell
+            # the open windows so a gem does not keep acting out the dead call.
+            # Its late tool result arrives marked, so it restarts nothing.
+            self.daemon.mark_cancelled()
+            self._emit_event({"type": "turn_cancelled"})
+            return
+
+        async def cancel_voice_turn() -> None:
+            result = await self.state.cancel_current_request(voice_turn_id=voice_turn_id)
+            # Marked only for a stop that happened: a refused or queued cancel
+            # leaves the running typed turn's tools unmarked.
+            if result.get("cancelled") and not result.get("queued"):
+                if self.daemon is not None:
+                    self.daemon.mark_cancelled()
+                self._emit_event({"type": "turn_cancelled"})
+
         self._active_turn_task = asyncio.create_task(
-            self.state.cancel_current_request(), name=f"cancel-{self.session_id}"
+            cancel_voice_turn(), name=f"cancel-{self.session_id}"
         )
 
     async def cancel_owned_turn(self, request_id: str) -> Dict[str, Any]:
@@ -741,6 +923,8 @@ class EngineSession:
             raise ValueError(str(result["error"]))
         if not isinstance(result.get("cancelled"), bool):
             raise TypeError("state.acp_cancel expected a cancelled boolean")
+        if result["cancelled"]:
+            self.daemon.mark_cancelled()
         return {**result, "request_id": request_id}
 
     # === permissions ===
@@ -821,6 +1005,11 @@ class EngineSession:
                     # any burst. turn_complete does its own awaited refresh.
                     self._schedule_refresh()
 
+                elif etype == "voice_reply_cut":
+                    # A talk-over's cut queued while its turn unwound landed
+                    # after the RPC answered: open windows reload the cut reply.
+                    self._schedule_refresh(notify=True)
+
                 elif etype == "permission_request":
                     # Store the whole normalized event, not just the raw
                     # details: a client that reloads mid-prompt needs to
@@ -828,6 +1017,14 @@ class EngineSession:
                     tool_id = str(event.get("tool_id") or "")
                     if tool_id:
                         self._pending_permissions[tool_id] = event
+                elif etype == "permission_parked":
+                    # Its turn ended and left the prompt open (a Stop, or 5 min
+                    # unanswered): a window that loads it now must know.
+                    tool_id = str(event.get("tool_id") or "")
+                    stored = self._pending_permissions.get(tool_id)
+                    if stored is not None:
+                        details = {**(stored.get("details") or {}), "parked": True}
+                        self._pending_permissions[tool_id] = {**stored, "details": details}
                 elif etype == "acp_waiting":
                     self.acp_waiting = bool(event.get("waiting"))
                 elif etype == "plan":
@@ -845,6 +1042,8 @@ class EngineSession:
                     payload = event.get("profile")
                     if isinstance(payload, dict) and payload.get("name"):
                         self.profile = ProfileSnapshot.from_dict(payload)
+
+                        self._notify_persistence_changed()
                         self._profile_revision += 1
                         if self.profile.provider != "acp":
                             self.acp_plan = {}
@@ -890,9 +1089,20 @@ class EngineSession:
             "agent": agent_name,
             "workspace": self.workspace,
             "device": self.device,
-            "approval_mode": _APPROVAL_MODE_MAP.get(
-                self.approval_mode, ApprovalMode.TRUST_ALL
-            ).value,
+            # The mode name, matching permissions.py; None (unknown) while the
+            # facts read has not answered or last failed. Reporting a guessed
+            # mode here would let the UI act on permissions the agent does not
+            # have.
+            "approval_mode": (
+                self.approval_mode
+                if self.approval_mode in _APPROVAL_MODE_MAP
+                and not self.approval_mode_warning
+                else None
+            ),
+            "approval_mode_warning": self.approval_mode_warning,
+            "persistence_warning": self.persistence_warning,
+            "deletion_pending": self.deletion_pending,
+            "deletion_warning": self.deletion_warning,
             "created_at": self.created_at.isoformat(),
             "total_turns": self.total_turns,
             "total_input_tokens": self.total_input_tokens,

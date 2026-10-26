@@ -5,7 +5,7 @@ the voiceprint (one embedding, no audio) is kept, in the voice root: private to
 this OS user and never synced. With the gate on, each speech segment is scored
 against it. A segment below the threshold is `other_speaker` (a TV, other
 people, voice's own playback): it stays in the transcript as context and is
-never sent to the classifier or the agent.
+never sent to the agent.
 """
 
 from __future__ import annotations

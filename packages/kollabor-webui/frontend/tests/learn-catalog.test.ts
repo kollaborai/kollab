@@ -14,6 +14,7 @@ const expectedIds: LearnTopicId[] = [
   "workspaces",
   "agents",
   "profiles",
+  "context-compaction",
   "koordinator",
   "hub-messaging",
   "voice",
@@ -21,7 +22,7 @@ const expectedIds: LearnTopicId[] = [
   "phone-access",
 ];
 
-test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
+test("Learn catalog keeps all eleven public topic IDs stable and useful", () => {
   assert.deepEqual(LEARN_TOPICS.map((topic) => topic.id), expectedIds);
   for (const topic of LEARN_TOPICS) {
     assert.ok(topic.title.length > 0, `${topic.id} needs a title`);
@@ -29,13 +30,26 @@ test("Learn catalog keeps all ten public topic IDs stable and useful", () => {
     assert.ok(topic.howTo.length >= 3, `${topic.id} needs a short how-to`);
     assert.ok(topic.example.length > 15, `${topic.id} needs an example`);
   }
-  assert.match(getLearnTopic("phone-access").title, /WireGuard/i);
+  assert.equal(getLearnTopic("phone-access").title, "PhoneLink");
 
   const profile = getLearnTopic("profiles");
   const profileGuidance = [profile.summary, ...profile.howTo, profile.example, profile.note].join(" ");
   assert.match(profileGuidance, /endpoint/i);
   assert.match(profileGuidance, /ACP command/i);
   assert.match(profileGuidance, /KOLLAB_<PROFILE>_API_KEY/);
+});
+
+
+test("PhoneLink lesson no longer advertises manual WireGuard setup", () => {
+  const phone = getLearnTopic("phone-access");
+  const guidance = [phone.summary, ...phone.howTo, phone.example, phone.note].join(" ");
+
+  assert.match(guidance, /pairing/i);
+  assert.match(guidance, /newest messages first/i);
+  assert.match(guidance, /load older history on demand/i);
+  assert.match(guidance, /retry action if a load fails/i);
+  assert.match(guidance, /Show more to load the full output/i);
+  assert.doesNotMatch(guidance, /WireGuard|Advanced Settings/i);
 });
 
 test("voice lesson documents the Dream Model control without overstating voice impact", () => {
@@ -89,4 +103,18 @@ test("Learn URLs round-trip and invalid topic IDs give an actionable route state
     requestedTopic: "missing",
   });
   assert.equal(readLearnRoute({ pathname: "/", search: "?topic=agents" }), null);
+  assert.deepEqual(readLearnRoute({ pathname: "/relay/v1/phone/learn", search: "?topic=phone-access" }), {
+    kind: "topic", topicId: "phone-access",
+  });
+});
+
+
+test("agents lesson explains Web UI persistence and explicit stop actions", () => {
+  const agents = getLearnTopic("agents");
+  const guidance = [agents.summary, ...agents.howTo, agents.example, agents.note].join(" ");
+  assert.match(guidance, /Web UI/);
+  assert.match(guidance, /engine restarts/);
+  assert.match(guidance, /conversation/);
+  assert.match(guidance, /Delete/);
+  assert.match(guidance, /\/quit/);
 });

@@ -1,9 +1,8 @@
 """Audio of the lines voice says itself, kept on disk so they play at once.
 
-Acks, "Sorry, was that for me?" and still-working lines come from a fixed set
-(acks.LINES). Each is synthesized once per voice, then replayed from
-root/cache/speech without the speech engine. Agent replies are one-off text
-and never kept.
+Still-working lines come from a fixed set (acks.LINES). Each is synthesized
+once per voice, then replayed from root/cache/speech without the speech
+engine. Agent replies are one-off text and never kept.
 """
 
 from __future__ import annotations
@@ -21,14 +20,13 @@ import time
 import zlib
 from pathlib import Path
 
-from .classifiers import load_preferences
 from .control import manifest
-from .speech_settings import speech_key
+from .speech_settings import load_speech_preferences, speech_key
 
 log = logging.getLogger(__name__)
 
 # The producers that only speak acks.LINES; any other producer is agent text.
-PRODUCERS = frozenset({"voice-classifier", "voice-progress"})
+PRODUCERS = frozenset({"voice-progress"})
 KEEP_S = 3 * 24 * 3600  # since the file last played
 # A file is this header, then the sentence's float32 samples.
 HEADER = struct.Struct("<4sII")  # magic, sample rate, crc32 of the samples
@@ -45,7 +43,7 @@ class SpeechCache:
         if producer_id not in PRODUCERS:
             return None
         try:
-            voice = dict(speech_key(load_preferences(self.root)))
+            voice = dict(speech_key(load_speech_preferences(self.root)))
             if voice.get("vibevoice_prompt"):
                 # A custom voice can be recorded again under the same file name.
                 stat = Path(voice["vibevoice_prompt"]).expanduser().stat()

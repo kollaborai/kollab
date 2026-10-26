@@ -609,6 +609,210 @@ class TestLifecycle:
 # ---------------------------------------------------------------------------
 
 
+class TestCaptureModes:
+    @pytest.mark.asyncio
+    async def test_toggles_transcript_mode_and_refreshes(
+        self, altview: HubConsoleAltView
+    ):
+        altview._refresh_feed = MagicMock()
+
+        assert altview._transcript_mode is False
+        await altview.handle_input(_make_keypress("t", "t"))
+        assert altview._transcript_mode is True
+        assert altview._feed_mode_generation == 1
+        assert altview._refresh_feed.call_count == 1
+
+        await altview.handle_input(_make_keypress("t", "t"))
+        assert altview._transcript_mode is False
+        assert altview._feed_mode_generation == 2
+        assert altview._refresh_feed.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_t_keeps_working_as_agent_input_when_attached(
+        self, altview: HubConsoleAltView
+    ):
+        altview.attached_to = "lapis"
+        altview._attached_socket = "/tmp/lapis.sock"
+
+        await altview.handle_input(_make_keypress("char", "t"))
+
+        assert altview._transcript_mode is False
+        assert altview._input_buffer == "t"
+        assert altview._feed_mode_generation == 0
+
+    @pytest.mark.asyncio
+    async def test_transcript_mode_uses_shared_capture_renderer(
+        self, altview: HubConsoleAltView
+    ):
+        from plugins.hub.capture import normalize_records, render_transcript
+
+        payload = {
+            "lines": normalize_records(
+                [
+                    {"type": "user_message", "text": "question"},
+                    {"type": "token", "text": "answer"},
+                ]
+            ),
+            "truncated": False,
+        }
+        altview._transcript_mode = True
+        capture = AsyncMock(return_value=(payload, None))
+        raw = AsyncMock(return_value=["legacy raw line"])
+
+        with (
+            patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
+            patch("plugins.hub.messenger.AgentMessenger.request_output", raw),
+        ):
+            await altview._fetch_feed_from_socket("lapis", "/tmp/lapis.sock")
+
+        capture.assert_awaited_once_with(
+            "/tmp/lapis.sock",
+            lines=100,
+            timeout=5.0,
+            capture_format="json",
+            max_chars=10_000,
+        )
+        raw.assert_not_awaited()
+        expected = render_transcript(
+            payload, identity="lapis", max_lines=100, max_chars=10_000
+        )
+        assert altview.feed_lines == expected.splitlines()
+        assert altview._feed_is_raw is False
+
+    @pytest.mark.asyncio
+    async def test_transcript_capture_failure_is_visible(
+        self, altview: HubConsoleAltView
+    ):
+        altview._transcript_mode = True
+        capture = AsyncMock(return_value=(None, "connection refused"))
+
+        with (
+            patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
+            patch(
+                "plugins.hub.messenger.AgentMessenger.request_output",
+                new=AsyncMock(),
+            ) as raw,
+        ):
+            await altview._fetch_feed_from_socket("lapis", "/tmp/lapis.sock")
+
+        assert altview.feed_lines == ["(capture failed: connection refused)"]
+        assert altview._feed_is_raw is False
+        raw.assert_not_awaited()
+
+    def test_transcript_mode_is_explicitly_unavailable_for_self(
+        self, altview: HubConsoleAltView
+    ):
+        altview._transcript_mode = True
+        altview._my_identity = "zircon"
+        altview.agents = [{"identity": "zircon", "socket_path": "/tmp/zircon.sock"}]
+
+        altview._refresh_feed()
+
+        assert altview.feed_lines == ["(transcript capture unavailable for this agent)"]
+        assert altview._feed_is_raw is False
+
+    @pytest.mark.asyncio
+    async def test_reenter_restores_raw_default_and_invalidates_old_requests(
+        self, altview: HubConsoleAltView
+    ):
+        altview._transcript_mode = True
+        generation = altview._feed_mode_generation
+        altview._resolve_my_identity = MagicMock()
+        altview._refresh_agents = MagicMock()
+        altview._refresh_feed = MagicMock()
+
+        await altview.on_enter(MagicMock())
+
+        assert altview._transcript_mode is False
+        assert altview._feed_mode_generation == generation + 1
+        altview._refresh_feed.assert_called_once_with()
+
+    def test_footer_exposes_the_available_mode_toggle(self, altview: HubConsoleAltView):
+        from kollabor_tui.design_system import T
+
+        renderer = MagicMock()
+        altview._renderer = renderer
+
+        with patch(
+            "plugins.altview.hub_console_altview.solid",
+            side_effect=lambda text, *_args: text,
+        ):
+            altview._render_footer(120, 40, T())
+            assert "t: transcript" in renderer.write_at.call_args.args[2]
+
+            altview._transcript_mode = True
+            altview._render_footer(120, 40, T())
+            assert "t: raw" in renderer.write_at.call_args.args[2]
+
+    @pytest.mark.asyncio
+    async def test_old_capture_result_is_ignored_after_mode_switch(
+        self, altview: HubConsoleAltView
+    ):
+        import asyncio
+
+        response = asyncio.get_running_loop().create_future()
+        started = asyncio.Event()
+
+        async def request_capture(*_args, **_kwargs):
+            started.set()
+            return await response
+
+        altview._transcript_mode = True
+        with (
+            patch(
+                "plugins.hub.messenger.AgentMessenger.request_capture", request_capture
+            ),
+            patch(
+                "plugins.hub.messenger.AgentMessenger.request_output",
+                new=AsyncMock(),
+            ) as raw,
+        ):
+            task = asyncio.create_task(
+                altview._fetch_feed_from_socket("lapis", "/tmp/lapis.sock")
+            )
+            await started.wait()
+            altview._transcript_mode = False
+            altview._feed_mode_generation += 1
+            altview.feed_lines = ["(loading raw output...)"]
+            response.set_result(({"lines": [], "truncated": False}, None))
+            await task
+
+        assert altview.feed_lines == ["(loading raw output...)"]
+        raw.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_raw_default_preserves_ansi_capture_and_panel_output(
+        self, altview: HubConsoleAltView
+    ):
+        from kollabor_tui.design_system import T
+
+        colored = "\033[32magent: ready\033[0m"
+        raw = AsyncMock(return_value=[colored])
+        capture = AsyncMock()
+
+        assert altview._transcript_mode is False
+        with (
+            patch("plugins.hub.messenger.AgentMessenger.request_output", raw),
+            patch("plugins.hub.messenger.AgentMessenger.request_capture", capture),
+        ):
+            await altview._fetch_feed_from_socket("lapis", "/tmp/lapis.sock")
+
+        raw.assert_awaited_once_with("/tmp/lapis.sock", lines=100)
+        capture.assert_not_awaited()
+        assert altview.feed_lines == [colored]
+        assert altview._feed_is_raw is True
+
+        writes: list[str] = []
+        renderer = MagicMock()
+        renderer.write_raw.side_effect = writes.append
+        renderer.write_at.return_value = None
+        renderer.move_cursor.return_value = None
+        altview._renderer = renderer
+        altview._render_feed_panel(3, 80, T())
+
+        assert any(colored in written for written in writes)
+
+
 class TestFeedPanelBackgroundFill:
     """Verify that _render_feed_panel always fills the full panel width.
 

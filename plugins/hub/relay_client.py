@@ -38,7 +38,6 @@ from .device_names import (
     default_network_name,
     key_label,
 )
-from .device_primary import reconcile_join_with_choice, retire_primary_network
 from .dns.discovery import _PublicResolver
 from .relay_state import (
     ID,
@@ -51,6 +50,7 @@ from .relay_state import (
     RelayStateStore,
     canonical_origin,
     failure_text,
+    is_machine_network_state_dir,
     parse_invite,
     strict_json,
     validate_key,
@@ -72,8 +72,8 @@ PROTOCOLS_HEADER = "X-Kollab-Relay-Protocols"
 KNOCK_FRAMES = frozenset({"knock", "knock_answer", "knock_result"})
 # A route lookup or a links declaration waits this long for the directory.
 CONTROL_TIMEOUT = 10.0
-MAX_FRAME = 65536
-MAX_CIPHERTEXT = 49152
+MAX_FRAME = 512 * 1024
+MAX_CIPHERTEXT = 448 * 1024
 MAX_PEERS = 256
 MAX_PENDING = 16
 MAX_REPLAY = 4096
@@ -87,9 +87,23 @@ APPLICATION_METHODS = frozenset(
         "secure_identity",
         "secure_packet",
         "peer.forward",
+        "phone_session",
+        "phone_http",
     }
 )
 MAX_APPLICATION_PAYLOAD = 24 * 1024
+
+MAX_PHONE_APPLICATION_PAYLOAD = 320 * 1024
+_PHONE_APPLICATION_METHODS = frozenset({"phone_session", "phone_http"})
+
+
+
+def _application_payload_limit(method: str) -> int:
+    return (
+        MAX_PHONE_APPLICATION_PAYLOAD
+        if method in _PHONE_APPLICATION_METHODS
+        else MAX_APPLICATION_PAYLOAD
+    )
 MAX_PEER_PENDING = 4
 MAX_DISPATCH = 16
 MAX_PEER_DISPATCH = 4
@@ -213,6 +227,10 @@ class RelayClient:
         self._control_lock = asyncio.Lock()
         self._control: tuple[str, tuple[str, object], asyncio.Future] | None = None
 
+    def sign(self, message: bytes) -> str:
+        """Sign with this room's device key (the host key a phone pinned from its QR)."""
+        return self._store.key.sign(message).signature.hex()
+
     def status(self) -> dict:
         return {
             "state": self._state,
@@ -306,6 +324,10 @@ class RelayClient:
         join only reconciles with that choice (plugins/hub/device_primary.py
         -- and even clearing there needs the join to be for the chosen
         network itself, clearing a leftover of an older primary of it)."""
+        if not is_machine_network_state_dir(self.state_dir):
+            return
+        from .device_primary import reconcile_join_with_choice
+
         reconcile_join_with_choice(
             state_dir=self.state_dir,
             origin=self.state.origin,
@@ -346,6 +368,10 @@ class RelayClient:
         self.rotate_room()
         self.state.network_name = ""  # rotate keeps the name; leaving forgets it
         self._store.save()
+        if not is_machine_network_state_dir(state_dir):
+            return
+        from .device_primary import retire_primary_network
+
         retire_primary_network(
             departing_primary,
             state_dir=state_dir,
@@ -942,13 +968,15 @@ class RelayClient:
                 future.exception()
 
     @staticmethod
-    def _application_payload(payload: dict) -> dict:
+    def _application_payload(
+        payload: dict, *, limit: int = MAX_APPLICATION_PAYLOAD
+    ) -> dict:
         """Copy a bounded JSON object before crossing an asynchronous boundary."""
         if not isinstance(payload, dict):
             raise RelayError("application payload must be a JSON object")
         try:
             raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-            value = strict_json(raw, limit=MAX_APPLICATION_PAYLOAD)
+            value = strict_json(raw, limit=limit)
             # Leave nesting headroom for the encrypted envelope's payload and
             # arguments/result objects; accepted data must also be receivable.
             strict_json('{"payload":{"arguments":' + raw + "}}", limit=MAX_CIPHERTEXT)
@@ -976,7 +1004,9 @@ class RelayClient:
             raise RelayError(
                 "application timeout must be greater than zero and at most 300 seconds"
             )
-        arguments = self._application_payload(payload)
+        arguments = self._application_payload(
+            payload, limit=_application_payload_limit(method)
+        )
         if peer_key not in self.state.approvals:
             raise RelayError("peer requires explicit local approval")
         if self._state != "online" or peer_key not in self._peers:
@@ -1097,7 +1127,8 @@ class RelayClient:
                 ):
                     return
                 result = self._application_payload(
-                    await handler(key, method, arguments)
+                    await handler(key, method, arguments),
+                    limit=_application_payload_limit(method),
                 )
         except TimeoutError:
             error = "deadline"
@@ -1469,7 +1500,9 @@ class RelayClient:
                     error=error,
                 )
                 return
-            arguments = self._application_payload(payload["arguments"])
+            arguments = self._application_payload(
+                payload["arguments"], limit=_application_payload_limit(method)
+            )
             identity = (key, frame["session"], body["id"], method)
             if identity in self._dispatch:
                 # A callback may outlive its envelope's replay retention. A
@@ -1510,7 +1543,9 @@ class RelayClient:
                     raise RelayError("application error cannot include a result")
                 result = None
             else:
-                result = self._application_payload(payload["result"])
+                result = self._application_payload(
+                    payload["result"], limit=_application_payload_limit(payload["method"])
+                )
             pending = self._application_pending.get(payload["reply_to"])
             if (
                 pending is not None

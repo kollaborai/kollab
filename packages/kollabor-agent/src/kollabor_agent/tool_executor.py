@@ -18,6 +18,15 @@ from .file_operations_executor import FileOperationsExecutor
 from .mcp_integration import MCPIntegration
 from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
+from .voice_admission import is_voice_origin
+from .voice_tool_policy import (
+    MAX_VOICE_COMMAND_SECONDS,
+    MAX_VOICE_OUTPUT_BYTES,
+    VoiceTerminalPlan,
+    VoiceToolDecision,
+    VoiceToolExecutionGuard,
+)
+from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +129,8 @@ class ToolExecutor:
         if config:
             interactive_shell = config.get("terminal.interactive_shell", False)
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
+        self._voice_tool_guard = VoiceToolExecutionGuard()
+        self.yes_approvals = YesApprovals()
 
         # True while a tool is genuinely executing. The TurnWatchdog reads this
         # (like an in-flight API call) so a long-running foreground tool — e.g.
@@ -448,7 +459,19 @@ class ToolExecutor:
         self._executed_count = 0
         return count
 
-    async def execute_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    def _ask_for_yes(self, tool_data: Dict[str, Any], context: Dict[str, Any] | None) -> str:
+        """Keep a call for the user's yes; what the model reads in place of its result."""
+        self.yes_approvals.ask(tool_data, context)  # never a hidden turn's call
+        if isinstance(context, dict) and context.get("voice_hidden") is True:
+            return NOT_IN_HIDDEN_TURN
+        return NEEDS_YES
+
+    async def execute_tool(
+        self,
+        tool_data: Dict[str, Any],
+        *,
+        execution_context: Dict[str, Any] | None = None,
+    ) -> ToolExecutionResult:
         """Execute a single tool and emit tool_start/tool_result to the tap.
 
         Every tool path funnels through here - XML tools from queue_processor
@@ -459,6 +482,55 @@ class ToolExecutor:
 
         tool_id = tool_data.get("id", "unknown")
         tool_name = self._get_display_name(tool_data)
+        approval = "yes" if self.yes_approvals.take(tool_data) else None
+        voice_decision: VoiceToolDecision | None = None
+        if is_voice_origin(execution_context):
+            voice_decision = self._voice_tool_guard.evaluate(
+                tool_data,
+                execution_context,
+                repository_root=self.workspace or Path.cwd(),
+            )
+            if approval is None:
+                approval = "ask"  # a voice turn asks for a yes, never waits on a prompt
+            elif voice_decision.reason_code == "confirmation_required":
+                # Their yes OK'd it: the guard plans it again, argv with no shell.
+                voice_decision = self._voice_tool_guard.evaluate(
+                    tool_data,
+                    execution_context,
+                    repository_root=self.workspace or Path.cwd(),
+                    approved=True,
+                )
+            if not voice_decision.allowed:
+                reason_code = voice_decision.reason_code or "command_blocked"
+                message = voice_decision.message or "Voice tool policy denied this action."
+                error = f"{reason_code}: {message}"
+                if reason_code == "confirmation_required":
+                    error = self._ask_for_yes(tool_data, execution_context)
+                logger.info(f"Voice tool {tool_id} not run: {reason_code}")
+                result = ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_data.get("type", "unknown"),
+                    success=False,
+                    error=error,
+                    metadata={
+                        "reason_code": reason_code,
+                        "voice_tool_policy": execution_context.get("voice_tool_policy"),
+                    },
+                )
+                self._executed_count += 1
+                publish_semantic(
+                    self.event_bus,
+                    "tool_result",
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    success=False,
+                    output="",
+                    error=result.error,
+                    execution_time=0.0,
+                    metadata=result.metadata,
+                )
+                return result
+
         raw_operation_id = tool_data.get("id")
         if (
             isinstance(raw_operation_id, str)
@@ -490,12 +562,19 @@ class ToolExecutor:
         )
 
         try:
-            result = await self._execute_tool_inner(
-                tool_data,
-                operation_generation=operation_generation,
-                operation_call_id=operation_call_id,
-                operation_call_id_generated=operation_call_id_generated,
-            )
+            inner_kwargs: Dict[str, Any] = {
+                "operation_generation": operation_generation,
+                "operation_call_id": operation_call_id,
+                "operation_call_id_generated": operation_call_id_generated,
+            }
+            if execution_context is not None:
+                inner_kwargs["execution_context"] = execution_context
+                inner_kwargs["voice_decision"] = voice_decision
+            approval_token = call_approval.set(approval)
+            try:
+                result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            finally:
+                call_approval.reset(approval_token)
             self._executed_count += 1
 
             if self._tool_output_store is not None:
@@ -533,6 +612,8 @@ class ToolExecutor:
         operation_generation: int | None = None,
         operation_call_id: str | None = None,
         operation_call_id_generated: bool = False,
+        execution_context: Dict[str, Any] | None = None,
+        voice_decision: VoiceToolDecision | None = None,
     ) -> ToolExecutionResult:
         """Execute a single tool (terminal, MCP, or file operation).
 
@@ -552,6 +633,28 @@ class ToolExecutor:
         if tool_type == "git":
             tool_data = {**tool_data, "type": "terminal"}
             tool_type = "terminal"
+
+        voice_terminal_plan: VoiceTerminalPlan | None = None
+        if is_voice_origin(execution_context):
+            decision = voice_decision or self._voice_tool_guard.evaluate(
+                tool_data,
+                execution_context,
+                repository_root=self.workspace or Path.cwd(),
+            )
+            if not decision.allowed:
+                reason_code = decision.reason_code or "command_blocked"
+                message = decision.message or "Voice tool policy denied this action."
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=f"{reason_code}: {message}",
+                    metadata={
+                        "reason_code": reason_code,
+                        "voice_tool_policy": execution_context.get("voice_tool_policy"),
+                    },
+                )
+            voice_terminal_plan = decision.plan
 
         # Check for cancellation before starting
         if self.is_cancelled():
@@ -598,6 +701,10 @@ class ToolExecutor:
                 final_data = pre_call_results.get("main", {}).get("final_data", {})
                 permission_decision = final_data.get("permission_decision", {})
                 reason = permission_decision.get("reason", "Permission denied")
+                if permission_decision.get("needs_yes") is True:
+                    # A prompt it did not wait on: the manager's own decision, never
+                    # a tool's text, keeps the call for the user's yes.
+                    reason = self._ask_for_yes(tool_data, execution_context)
 
                 logger.warning(f"Tool {tool_id} execution denied: {reason}")
                 return ToolExecutionResult(
@@ -654,7 +761,13 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        result = await self._execute_terminal_command(tool_data)
+                        if voice_terminal_plan is not None:
+                            result = await self._execute_voice_terminal_plan(
+                                tool_data,
+                                voice_terminal_plan,
+                            )
+                        else:
+                            result = await self._execute_terminal_command(tool_data)
                         logger.debug(
                             f"_execute_terminal_command completed for {tool_id}"
                         )
@@ -864,6 +977,41 @@ class ToolExecutor:
             )
 
         return results
+
+    async def _execute_voice_terminal_plan(
+        self,
+        tool_data: Dict[str, Any],
+        plan: VoiceTerminalPlan,
+    ) -> ToolExecutionResult:
+        """Run a canonical voice plan with argv, never through a command shell."""
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run_argv(
+                plan.argv,
+                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                cwd=plan.canonical_cwd,
+                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+            )
+        finally:
+            self._active_shell_executor = None
+
+        return ToolExecutionResult(
+            tool_id=tool_data.get("id", "unknown"),
+            tool_type="terminal",
+            success=result.success,
+            output=result.stdout if result.success else result.stderr,
+            error=(
+                ""
+                if result.success
+                else result.error or f"Exit code {result.exit_code}: {result.stderr}"
+            ),
+            execution_time=result.execution_time,
+            metadata={
+                "voice_terminal_plan_id": plan.plan_id,
+                "voice_action_digest": plan.digest,
+                "classification": plan.classification,
+            },
+        )
 
     async def _execute_terminal_command(
         self, tool_data: Dict[str, Any]

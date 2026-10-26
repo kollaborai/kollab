@@ -8,6 +8,52 @@ This guide covers signed public discovery and the optional encrypted-presence re
 
 Kollab 0.9.0 installed with plain `pip install kollab` includes the relay client, service, supervisor, and Redis client dependency. A2A server/signing support remains optional: install `kollab[a2a]` only when operating the separate A2A receiver. Upgrade older installations with `pip install --upgrade kollab`. The dated deployment summary describes a source deployment, independently of package installation checks.
 
+## Source artifact and operator diagnostics
+
+The internal `connection-service` artifact carries the supervisor, worker,
+self-host entrypoint, discovery publisher and the existing encrypted relay
+client. Its source allowlist includes the canonical launcher/version helpers
+and root `pyproject.toml` for version detection. Install only its hashed service
+requirements from the extracted artifact directory:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r scripts/relay/requirements.txt
+.venv/bin/python kollabor_cli_main.py relay run --help
+```
+
+Use that venv directly. The included `pyproject.toml` describes the full source
+workspace; `uv run`, `uv sync`, and installing the artifact root as a project
+would attempt to discover workspace packages absent from this headless artifact.
+The deployment helper uses the plain venv/pip commands above.
+
+On a relay you operate, run transport diagnostics with an isolated state directory:
+
+```sh
+.venv/bin/python scripts/relay/peer_probe.py \
+  --origin https://agents.example.com \
+  --workspace "$HOME/kollab-probe/workspace" \
+  --state-dir "$HOME/kollab-probe/state"
+```
+
+Each stdin line accepts one of: `status`, `peers`, `approve KEY`, `revoke KEY`,
+`ping KEY`, `invite FILE`, `join FILE`, `leave`, or `quit`; EOF also exits.
+`KEY` is the full peer public key. `invite FILE` writes a new mode-0600 file
+without overwriting an existing path. `join FILE` and `--invitation-file FILE`
+read a regular, user-owned private file and never print its contents. Signed
+discovery, durable publisher pins and the advertised same-origin native relay
+endpoint are checked before attachment. Joining an invitation approves its
+inviter; the inviter must explicitly approve the other client before ping works.
+
+The probe rejects managed network state, including symlink aliases, before
+constructing a client. It installs no application handler and cannot dispatch
+agent or workspace tools. Exit disables and closes the diagnostic connection.
+JSON lines contain `result` and `status`; errors report fixed codes or exception
+class names without raw exception text. `measure_capacity.py --help` describes
+the bounded generated-client measurement, which uses fresh signed discovery
+and records that it has no persistent publisher pin across isolated runs.
+
 ## Self-host a directory in one command
 
 For one host, `kollab relay serve --domain <domain>` replaces the supervised relay, the standalone publisher and the static file server described further down: no config file, no Docker, no Redis.
@@ -19,7 +65,7 @@ kollab relay serve --domain agents.example.com
 One process runs the relay (one worker on the in-memory backend), signs the discovery document and renews it every 60 seconds (it names the relay only while the relay is ready), and serves it at `/.well-known/agent-keys.json` on the same port. It listens on plain HTTP at `127.0.0.1:9078` (`--bind`, `--port`), or on a unix socket for a proxy on the same host (`--unix-socket`, below); a TLS proxy in front is the only public endpoint. On start it creates or loads its state, prints what is left to do, and prints `ready` once the relay answers and the document is published. What is left is always the same three things:
 
 1. **DNS.** One TXT record: `_agent.agents.example.com  TXT  "v=aid1;u=https://agents.example.com/.well-known/agent-keys.json"`.
-2. **The TLS proxy.** Terminate TLS for `agents.example.com` and forward these four routes to the port, nothing else: `GET /.well-known/agent-keys.json`, `GET /relay/v1/health`, the WebSocket at `/relay/v1/ws` and `POST /relay/v1/enrollment/*`. Knocks ride the WebSocket. Never forward `/relay/v1/metrics`. `--print nginx` and `--print caddy` print that config for your settings; both set `X-Real-IP` from the connecting client. The nginx output also caps open WebSockets per client address with `limit_conn` (64 by default, the relay's own per-address limit): the one `limit_conn_zone` line it needs belongs once in the `http { }` block, so it is printed as a comment at the top (`nginx -t` fails naming the zone if you skip it). Caddy has no per-address connection limit; `--print caddy` says so, and the relay's own cap is then the only one (use nginx, or a firewall rule, for a cap at the edge).
+2. **The TLS proxy.** Terminate TLS for `agents.example.com` and forward these routes to the port, nothing else: `GET /.well-known/agent-keys.json`, `GET /relay/v1/health`, the WebSocket at `/relay/v1/ws` and `POST /relay/v1/enrollment/*`, plus the PhoneLink WebSocket at `/relay/v1/phone/ws` and browser assets under `/relay/v1/phone/`. Knocks ride the WebSocket. Never forward `/relay/v1/metrics`. `--print nginx` and `--print caddy` print that config for your settings; both set `X-Real-IP` from the connecting client. The nginx output also caps open WebSockets per client address with `limit_conn` (64 by default, the relay's own per-address limit): the one `limit_conn_zone` line it needs belongs once in the `http { }` block, so it is printed as a comment at the top (`nginx -t` fails naming the zone if you skip it). Caddy has no per-address connection limit; `--print caddy` says so, and the relay's own cap is then the only one (use nginx, or a firewall rule, for a cap at the edge).
 3. **Keeping it running.** `--install` writes the systemd unit to `/etc/systemd/system/kollab-relay-<domain>.service` (with sudo when you are not root), enables it at boot and starts it; `--uninstall` stops and removes it. The unit runs the same command as the same user on the same state directory, so moving from a shell to systemd keeps the published identity. `--install` creates the state directory and key first, because the unit may write only there, and refuses a directory another `relay serve` is using: stop the one in your shell first. `--print systemd` prints the same unit for a setup you manage yourself.
 
 Then every device runs `/connect agents.example.com` and joins with a code, as on kollabor.ai.
@@ -88,6 +134,10 @@ Configure the HTTPS reverse proxy for the same origin:
 - Serve `GET /.well-known/agent-keys.json` from the publisher output with `application/json` and `Cache-Control: no-store`.
 - Forward `GET /relay/v1/health` to the supervisor's private health listener.
 - Forward WebSocket upgrades at `/relay/v1/ws` to the private worker listeners.
+- Forward WebSocket upgrades at `/relay/v1/phone/ws` to those same workers, and
+  `GET /relay/v1/phone/` (path prefix, including `status` and assets) to them.
+  Deploy the matching browser bundle on every worker. PhoneLink must not be
+  offered until the public status reports ready and the portal assets load.
 - Forward `POST /relay/v1/enrollment/` (path prefix) to the private worker listeners. Without this route, `/connect code`, joining with a code, `/connect accept`, and `/connect reject` cannot reach the relay. See the [beacon HTTP contract](../specs/agent-public-beacon.md#http-and-websocket-contract) for the exact route list.
 - Knocks, contact-route lookups and cross-room link declarations ride the WebSocket; there is no `/relay/v1/contact/` route to forward (a proxy that still forwards it gets 404s from the relay).
 - Do not publish `/relay/v1/metrics`. Keep worker listeners and metrics private.

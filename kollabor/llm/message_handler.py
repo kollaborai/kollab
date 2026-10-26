@@ -11,10 +11,12 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from kollabor.user_input_source import YES_SOURCES
 from kollabor_agent.queue_processor import (
     MAX_CONTINUATION_TURNS,
     RepeatedToolErrorBreaker,
 )
+from kollabor_agent.voice_admission import validate_voice_admission_context
 from kollabor_ai.message_content import content_to_text
 
 if TYPE_CHECKING:
@@ -164,19 +166,40 @@ class MessageHandler:
                     }
                 return {"status": "startup_hold", "requeued": True}
 
+        origin_context = data.get("origin_context")
+        claims_voice_origin = (
+            isinstance(origin_context, dict)
+            and origin_context.get("source") == "livekit_voice"
+        )
+        if claims_voice_origin and not validate_voice_admission_context(origin_context):
+            return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+        if not claims_voice_origin:
+            origin_context = None
+        origin_kwargs = {"origin_context": origin_context} if origin_context else {}
+        # Only a person answering live (YES_SOURCES) answers what the agent asked
+        # them. A hub peer's message (the "agent" source) is a turn like the user's,
+        # but its words never do.
+        if getattr(event, "source", None) in YES_SOURCES:
+            origin_kwargs["may_answer"] = True
+
         if data.get("source") == "voice" and data.get("voice"):
             plugin = self._coordinator.event_bus.get_service("voice_plugin")
             if plugin is None:
                 return {"status": "rejected", "reason": "Voice admission is unavailable"}
+            # The turn's grant comes only from the admission (VoicePlugin.admit),
+            # never from the event: the voice tool policy governs it either way.
             return await plugin.admit(
                 data,
-                lambda: self._coordinator.process_user_input(
-                    message, pre_displayed=pre_displayed, voice=data["voice"]
+                lambda tool_context=None: self._coordinator.process_user_input(
+                    message,
+                    pre_displayed=pre_displayed,
+                    voice=data["voice"],
+                    **{**origin_kwargs, "origin_context": tool_context},
                 ),
             )
 
         result = await self._coordinator.process_user_input(
-            message, pre_displayed=pre_displayed
+            message, pre_displayed=pre_displayed, **origin_kwargs
         )
         return result  # type: ignore[no-any-return]
 

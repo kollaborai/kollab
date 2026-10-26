@@ -64,3 +64,47 @@ test("a row whose chat is not open acts out the tool its presence carries", () =
   assert.equal(presenceActivity(undefined), null);
   assert.equal(presenceActivity({ name: "", type: "" }), null);
 });
+
+test("the live lifecycle: tool_start -> tool_result -> thinking, then idle", () => {
+  const start = { type: "tool_start", tool_id: "a", tool_name: "terminal: ls" };
+  assert.equal(liveActivity(fold(start)), "typing");
+  assert.equal(liveActivity(fold(start, { type: "tool_result", tool_id: "a" })), "thinking");
+  for (const end of ["turn_complete", "error", "turn_cancelled"]) {
+    assert.equal(liveActivity(fold(start, { type: "tool_result", tool_id: "a" }, { type: "thinking" }, { type: end })), null, end);
+  }
+});
+
+test("a stopped or failed turn clears a tool that never reported its result", () => {
+  const start = { type: "tool_start", tool_id: "a", tool_name: "terminal: sleep 99" };
+  for (const end of ["turn_cancelled", "error", "turn_complete"]) {
+    assert.deepEqual(fold(start, { type: end }), NO_LIVE_ACTIVITY, end);
+  }
+});
+
+test("a tool_result for another id leaves the running tool alone", () => {
+  const live = fold(
+    { type: "tool_start", tool_id: "a", tool_name: "file_read: x" },
+    { type: "tool_start", tool_id: "b", tool_name: "terminal: ls" },
+    { type: "tool_result", tool_id: "a" },
+  );
+  assert.equal(liveActivity(live), "typing");
+});
+
+test("a cancelled turn's late tool events never restart the gem", () => {
+  // A tool that ignored the stop signal reports ~2s after turn_cancelled:
+  // the engine marks its result, then the daemon hides its spinner. This is
+  // the sequence the engine sends; it must leave the gem idle.
+  const start = { type: "tool_start", tool_id: "a", tool_name: "terminal: sleep 99" };
+  const late = { type: "tool_result", tool_id: "a", cancelled: true };
+  const spinnerOff = { type: "thinking", active: false, message: "" };
+  const toolRow = { type: "message", message_type: "tool" };
+  assert.equal(liveActivity(nextLiveActivity(NO_LIVE_ACTIVITY, late)), null);
+  assert.equal(liveActivity(fold(start, { type: "turn_cancelled" }, late, spinnerOff, toolRow)), null);
+  // A spinner that turns on is a thought.
+  assert.equal(liveActivity(fold({ type: "thinking", active: true, message: "Thinking..." })), "thinking");
+  // The next turn arrives unmarked and animates as usual.
+  assert.equal(
+    liveActivity(fold({ type: "turn_cancelled" }, { type: "tool_start", tool_id: "b", tool_name: "file_grep: x" })),
+    "searching",
+  );
+});

@@ -195,6 +195,55 @@ class RelayState:
         )
 
 
+def _resolved_state_path(path: Path) -> Path:
+    """Resolve aliases, allowing new tails but never ignoring access/loop errors."""
+    resolved = path.resolve()
+    ancestor = resolved
+    missing = []
+    while True:
+        try:
+            physical = ancestor.resolve(strict=True)
+        except FileNotFoundError:
+            if ancestor.parent == ancestor:
+                raise
+            missing.append(ancestor.name)
+            ancestor = ancestor.parent
+        else:
+            return physical.joinpath(*reversed(missing))
+
+
+def is_machine_network_state_dir(state_dir: Path, root: Path | None = None) -> bool:
+    """Whether state belongs to this machine's v1 or v2 network layout.
+
+    Resolve every managed layout location, including workspace/network links,
+    so both aliases and physical targets retain their owner. Failure to inspect
+    a layout is an error, never permission to treat its state as isolated.
+    """
+    try:
+        base = _resolved_state_path(root if root is not None else Path.home() / ".kollab")
+        state_dir = _resolved_state_path(Path(state_dir))
+        if state_dir.parent == _resolved_state_path(base / "network"):
+            return True
+        workspaces = _resolved_state_path(base / "workspaces")
+        if state_dir.parent.name == "networks" and state_dir.parent.parent.parent == workspaces:
+            return True
+        try:
+            entries = list(workspaces.iterdir())
+        except FileNotFoundError:
+            return False
+        for workspace in entries:
+            try:
+                if not stat.S_ISDIR(workspace.stat().st_mode):
+                    continue
+            except FileNotFoundError:
+                pass  # A dangling workspace alias still owns its future target.
+            if state_dir.parent == _resolved_state_path(workspace / "networks"):
+                return True
+    except (OSError, RuntimeError) as exc:
+        raise RelayError("cannot establish relay state ownership", "state_ownership") from exc
+    return False
+
+
 def default_workspace_state_dir(workspace: Path) -> Path:
     """Where a workspace's primary network state lives when a caller does not
     pin one: the v2 device/workspace layout once it exists, else the v1

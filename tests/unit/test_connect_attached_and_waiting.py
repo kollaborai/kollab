@@ -186,7 +186,7 @@ class _Rig:
 
 
 def test_snapshot_survives_the_json_round_trip_and_hides_the_request_id():
-    snapshot = _snapshot()
+    snapshot = _snapshot(contact_route="kollabor.ai/c/0123456789abcdef")
 
     back = ConnectSnapshot.from_wire(json.loads(json.dumps(snapshot.to_wire())))
 
@@ -198,6 +198,52 @@ def test_snapshot_survives_the_json_round_trip_and_hides_the_request_id():
     )
     assert _ENROLLMENT_ID not in "\n".join(lines)
     assert all(len(line) <= 100 for line in lines)
+
+
+def test_contact_route_round_trip_accepts_the_full_domain_length():
+    domain = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+    route = f"{domain}/c/0123456789abcdef"
+    snapshot = _snapshot(domain=domain, contact_route=route, relay_online=False)
+    assert len(domain) == 253 and len(route) == 272
+    assert ConnectSnapshot.from_wire(json.loads(json.dumps(snapshot.to_wire()))) == snapshot
+
+
+def test_a_running_daemon_without_contact_route_leaves_it_unavailable():
+    wire = _snapshot().to_wire()
+    del wire["contact_route"]
+    assert ConnectSnapshot.from_wire(wire).contact_route == ""
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        None,
+        False,
+        [],
+        "https://kollabor.ai/c/0123456789abcdef",
+        "other.example/c/0123456789abcdef",
+        "/c/0123456789abcdef",
+        "kollabor.ai/c/0123456789abcdeF",
+        "kollabor.ai/c/0123456789abcde",
+        "kollabor.ai/c/" + "a" * 64,
+        "kollabor.ai/c/0123456789abcdef/ops",
+        "kollabor.ai/c/0123456789abcdef?agent=ops",
+        "kollabor.ai/c/0123456789abcdef\n",
+        "x" * 273,
+    ],
+)
+def test_contact_route_wire_rejects_noncanonical_or_off_shape_values(route):
+    wire = _snapshot().to_wire()
+    wire["contact_route"] = route
+    with pytest.raises(ValueError, match="invalid connect snapshot"):
+        ConnectSnapshot.from_wire(wire)
+
+
+def test_contact_route_cannot_exist_without_its_network_domain():
+    wire = _snapshot(domain="").to_wire()
+    wire["contact_route"] = "kollabor.ai/c/0123456789abcdef"
+    with pytest.raises(ValueError, match="invalid connect snapshot"):
+        ConnectSnapshot.from_wire(wire)
 
 
 @pytest.mark.parametrize(

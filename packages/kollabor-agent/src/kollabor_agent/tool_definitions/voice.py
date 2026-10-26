@@ -30,7 +30,8 @@ def register_all():
             ],
             key_rules=[
                 "Use only for an active voice conversation. Never activate a microphone from a tool.",
-                "Speech is classified before playback. If rejected, follow the returned nudge and shorten it once.",
+                "Speech is checked for spoken format before playback. "
+                "If rejected, follow the returned nudge and shorten it once.",
                 "The final reply is spoken automatically. Explicit speech and the final "
                 "reply share a reply ID, preventing duplicate playback.",
             ],

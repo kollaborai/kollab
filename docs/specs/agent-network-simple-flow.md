@@ -1181,7 +1181,7 @@ and how C is made relay-less are in `tests/live/m3/README.md`.
 `kollab relay serve --domain <domain>` is the whole setup (Story 6). One process
 runs the relay, keeps the signed discovery document published and serves it as
 the key file, all on one local port. What stays with the operator is one
-`_agent.<domain>` TXT record and a TLS proxy with four routes; the command
+`_agent.<domain>` TXT record and a TLS proxy for the service routes; the command
 prints both. Operator detail is in
 [kollabor-ai-discovery-publication.md](../operations/kollabor-ai-discovery-publication.md).
 
@@ -1190,8 +1190,8 @@ prints both. Operator detail is in
   directory. This is the published identity. Restarts reuse it; lose it and every
   device that pinned the old key refuses the new one, so it gets backed up. A
   directory that runs the standalone publisher today is adopted as it is.
-- **What it prints.** The TXT record value and the four routes (key file, health,
-  websocket, `enrollment/*`); knocks ride the websocket. `--print nginx|caddy` prints that
+- **What it prints.** The TXT record value and the service routes (key file, health,
+  websocket, `enrollment/*`, and the PhoneLink browser/socket routes); knocks ride the websocket. `--print nginx|caddy` prints that
   proxy config and `--print systemd` a unit that runs the same command as the
   same user on the same state directory. `--install` writes that unit (sudo when
   not root), enables and starts it, after creating the state directory the unit
@@ -1337,3 +1337,40 @@ document before it merges.
   network would hold. Not built; after launch.
 - Blocks and the contact list are per device. The sealed config (section 9)
   could carry them to every device on the network.
+
+## 16. PhoneLink (Marco, 2026-10-20)
+
+A phone opens the same Kollab app through the `/connect` directory. The person
+opens **Settings > PhoneLink**, chooses **Link a Phone**, scans an expiring QR
+with the phone camera, compares the pairing codes and approves on the computer.
+The phone can bookmark the opened app in the same browser. The computer stays awake and
+online. No WireGuard app, personal server, key entry or router changes belong
+to the flow, and there is no manual WireGuard option.
+
+A phone is an app controller, not a joined agent-network device. It gets an
+isolated private room and its own identity, local approval, and revocation.
+It is not enrolled for the agent network's sealed configuration sync. Provider
+calls and tools run on the computer, without credential setup on the phone.
+The same engine supplies the roster and
+remote chats already available on the computer. Its tool permissions still
+apply. Removing the phone closes its requests immediately; restarting the engine
+retains its approved identity. See [PhoneLink](../features/phone-access.md).
+
+One engine exclusively owns the device-wide phone state and live rooms. Other
+engines refuse phone management until that owner closes; they cannot report a
+revocation while a different engine continues serving the phone. Saved local
+approval pins restore transport approval after an interrupted write or restart.
+An already-running standby claims ownership on its next local PhoneLink API
+request, including panel polling; phone reconnect alone does not activate it.
+
+The existing directory serves the browser app and transports opaque requests.
+Native-client origin rules stay in place; a dedicated same-origin browser entry
+uses the existing registration, backplane and capacity controls. Phone content
+has a fresh ephemeral session inside the authenticated relay envelope. No
+public engine listener or arbitrary destination proxy is introduced. Pairing
+and revoke APIs are local-only. No new `/connect` command is added.
+
+The app checks the directory's PhoneLink capability before offering a QR. Source
+implementation, isolated encrypted-channel tests, public directory activation,
+and a real phone scan are separate proof gates. Self-hosting a directory keeps
+using the existing `kollab relay serve`/`run` lifecycle and the same app bundle.

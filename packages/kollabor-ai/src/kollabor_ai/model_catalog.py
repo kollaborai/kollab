@@ -34,7 +34,7 @@ DEFAULT_TIMEOUT = 8.0
 # Disk cache. Same shape as kollabor_agent.agent_manager's agent metadata
 # cache: versioned JSON, discarded whole on version mismatch or TTL expiry.
 # Bump CACHE_VERSION when the cached entry shape changes.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CACHE_TTL_SECONDS = 3600  # 1h -- provider catalogs move slowly
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -63,13 +63,19 @@ def _profile_key(profile: Any) -> str:
     """Cache key for a profile: its name, falling back to its provider."""
     if profile is None:
         return ""
-    name = str(getattr(profile, "name", "") or "")
+    if isinstance(profile, dict):
+        name = str(profile.get("name") or "")
+        provider = str(profile.get("provider") or "")
+    else:
+        name = str(getattr(profile, "name", "") or "")
+        provider = str(getattr(profile, "provider", "") or "")
     if name:
         return name
     try:
-        return (profile.get_provider() or "").lower()
+        get_provider = profile.get_provider
+        return str(get_provider() or "").lower()
     except Exception:
-        return str(getattr(profile, "provider", "") or "").lower()
+        return provider.lower()
 
 
 def _load_disk_cache() -> Dict[str, Dict[str, Any]]:
@@ -113,7 +119,7 @@ def _fresh(entry: Any, max_age: float) -> bool:
 
 def cached_provider_models(
     profile: Any, max_age: float = CACHE_TTL_SECONDS
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """Cached catalog for a profile. Never fetches, never blocks, never raises.
 
     This is what synchronous callers (loadout synthesis, name resolution) read.
@@ -133,7 +139,7 @@ def cached_provider_models(
     return list(entry.get("models", []))  # type: ignore[union-attr]
 
 
-def _store(profile: Any, models: List[Dict[str, str]]) -> None:
+def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
     """Record a fetched catalog in both the memory and disk caches."""
     key = _profile_key(profile)
     if not key:
@@ -150,7 +156,7 @@ async def get_provider_models(
     *,
     max_age: float = CACHE_TTL_SECONDS,
     timeout: float = DEFAULT_TIMEOUT,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """Cached-then-live catalog for a profile.
 
     Returns the cached list when it is younger than ``max_age``; otherwise
@@ -180,7 +186,7 @@ OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 async def list_provider_models(
     profile: Any, timeout: float = DEFAULT_TIMEOUT
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """Return the active provider's catalog as ``[{"id", "note"}]``.
 
     Args:
@@ -221,7 +227,7 @@ async def list_provider_models(
     return []
 
 
-async def _openai_oauth_models() -> List[Dict[str, str]]:
+async def _openai_oauth_models() -> List[Dict[str, Any]]:
     """Codex backend models for the OpenAI OAuth (ChatGPT) profile.
 
     The backend reports context window and supported effort levels per model,
@@ -237,14 +243,15 @@ async def _openai_oauth_models() -> List[Dict[str, str]]:
 
     details = await query_codex_model_details(tokens.access_token, tokens.account_id)
 
-    result: List[Dict[str, str]] = []
+    result: List[Dict[str, Any]] = []
     for model in details:
         slug = str(model.get("slug") or "")
         if not slug:
             continue
         parts = []
         window = model.get("context_window")
-        if isinstance(window, int) and window > 0:
+        has_context_window = type(window) is int and window > 0
+        if has_context_window:
             parts.append(f"{window // 1000}K ctx")
         efforts = [
             str(level.get("effort"))
@@ -253,7 +260,13 @@ async def _openai_oauth_models() -> List[Dict[str, str]]:
         ]
         if efforts:
             parts.append(f"effort: {'/'.join(efforts)}")
-        result.append({"id": slug, "note": " • ".join(parts) or "codex"})
+        catalog_entry: Dict[str, Any] = {
+            "id": slug,
+            "note": " • ".join(parts) or "codex",
+        }
+        if has_context_window:
+            catalog_entry["context_window"] = window
+        result.append(catalog_entry)
     return result
 
 
@@ -300,7 +313,7 @@ def _models_endpoint(base_url: str) -> str:
     return f"{base}/models"
 
 
-async def _openai_compatible_models(profile: Any) -> List[Dict[str, str]]:
+async def _openai_compatible_models(profile: Any) -> List[Dict[str, Any]]:
     """Catalog from any OpenAI-compatible ``GET {base_url}/models`` endpoint.
 
     Covers plain OpenAI API keys, custom vendors that speak the OpenAI wire
@@ -337,7 +350,7 @@ async def _openai_compatible_models(profile: Any) -> List[Dict[str, str]]:
         return []
 
     entries = data.get("data") if isinstance(data, dict) else data
-    result: List[Dict[str, str]] = []
+    result: List[Dict[str, Any]] = []
     skipped = 0
     for model in entries or []:
         if isinstance(model, str):
@@ -363,12 +376,12 @@ async def _openai_compatible_models(profile: Any) -> List[Dict[str, str]]:
     return result
 
 
-async def _openrouter_models() -> List[Dict[str, str]]:
+async def _openrouter_models() -> List[Dict[str, Any]]:
     """Live OpenRouter catalog with context length + tool support notes."""
     from kollabor_ai.providers.openrouter_model_info import OpenRouterModelInfo
 
     models = await OpenRouterModelInfo().list_models()
-    result: List[Dict[str, str]] = []
+    result: List[Dict[str, Any]] = []
     for model in models:
         model_id = str(model.get("id") or "")
         if not model_id:
@@ -388,7 +401,7 @@ ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
 
-async def _anthropic_models(profile: Any) -> List[Dict[str, str]]:
+async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
     """Live Anthropic catalog with context length + tool support notes.
 
     Reads the API key and endpoint from the profile (keyring / env / config).
@@ -439,7 +452,7 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, str]]:
         logger.warning("Anthropic model catalog fetch failed: %s", e)
         return []
 
-    result: List[Dict[str, str]] = []
+    result: List[Dict[str, Any]] = []
     for model in data.get("data", []):
         model_id = str(model.get("id") or "")
         if not model_id:

@@ -1,0 +1,66 @@
+{
+  "name": "phonelink-signed-app",
+  "description": "PhoneLink serves its app from the computer and the phone checks the computer's signature before running any page code. Runs the unit tests for the signature, a tampered bundle and last-seen, the phone-side verifier's tests, confirms the built loader a directory serves carries no app code, and (when Chromium is installed) drives the real loader in a browser against a scratch relay and PhoneLink host on scratch ports and a scratch HOME.",
+  "config": {
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "section",
+      "title": "The computer signs the app and a tampered bundle is refused"
+    },
+    {
+      "action": "shell",
+      "command": "PATH=\"$PWD/.venv/bin:$PATH\" python -m pytest tests/unit/test_phone_link_app.py -q 2>&1 | tail -3; echo PY_DONE",
+      "description": "Run the host-side signature and last-seen tests"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "passed",
+      "description": "host-side tests pass"
+    },
+    {
+      "action": "assert_not_contains",
+      "pattern": "failed",
+      "description": "no host-side test fails"
+    },
+    {
+      "action": "shell",
+      "command": "(cd packages/kollabor-webui/frontend && node --test tests/phone-app-verify.test.ts 2>&1 | grep -E '^\u2139 (pass|fail)'); echo JS_DONE",
+      "description": "Run the phone-side verifier tests"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "\u2139 fail 0",
+      "description": "phone-side verifier refuses every tampered case"
+    },
+    {
+      "action": "section",
+      "title": "The directory-served loader carries no app code"
+    },
+    {
+      "action": "shell",
+      "command": "d=packages/kollabor-webui/frontend/dist/phonelink; if [ -f $d/loader/loader.js ] && [ ! -e $d/loader/phone-app.js.gz ] && [ -f $d/app/phone-app.js.gz ]; then echo LOADER_ONLY_OK; else echo LOADER_ONLY_FAIL; fi",
+      "description": "Loader dir has loader.js and no app; app dir has the app"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "LOADER_ONLY_OK",
+      "description": "the relay-served directory holds only the loader"
+    },
+    {
+      "action": "section",
+      "title": "Real browser, scratch ports, scratch HOME"
+    },
+    {
+      "action": "shell",
+      "command": "real=$(eval echo ~$(id -un)); for c in \"$real/Library/Caches/ms-playwright\" \"$real/.cache/ms-playwright\"; do [ -d \"$c\" ] && export PLAYWRIGHT_BROWSERS_PATH=\"$c\"; done; (cd packages/kollabor-webui/frontend && PATH=\"$PWD/../../../.venv/bin:$PATH\" timeout 110 node tests/phonelink-browser-e2e.mjs 2>&1 | grep -E 'PASS|Error' | head -3); echo E2E_DONE",
+      "description": "Pair, load the signed app, relaunch, and refuse a tampered copy in Chromium"
+    },
+    {
+      "action": "assert_contains",
+      "pattern": "PASS phonelink browser e2e",
+      "description": "browser end-to-end proof passes"
+    }
+  ]
+}

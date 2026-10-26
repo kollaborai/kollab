@@ -23,8 +23,48 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: frontend/shared
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Compile the selected frontend once
+        working-directory: packages/kollabor-webui/frontend
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build -- --outDir "$RUNNER_TEMP/kollab-frontend"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/kollab-frontend
+          if-no-files-found: error
+
+      - name: Package the connection service with the same frontend
+        run: |
+          mkdir -p "$RUNNER_TEMP/kollab-service"
+          python scripts/relay/build_service.py "$RUNNER_TEMP/kollab-service/source.tar.gz" --frontend-dist "$RUNNER_TEMP/kollab-frontend"
+          cd "$RUNNER_TEMP/kollab-service"
+          sha256sum source.tar.gz > source.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: connection-service
+          path: ${{ runner.temp }}/kollab-service/*
+          if-no-files-found: error
+
   build:
     name: binary/${{ matrix.platform }}
+    needs: frontend
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -49,6 +89,12 @@ jobs:
         with:
           cache-suffix: ${{ github.job }}  # one cache per job, see ci.yml
 
+      - name: Download the selected frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/kollab-frontend
+
       # Builds the wheels from this commit, packs them with a portable CPython,
       # then runs the binary: --version, kollab's imports and an HTTPS request.
       - name: Build the binary and check that it runs
@@ -57,7 +103,7 @@ jobs:
           # science, the scie builder pex runs, reads the Python Standalone Builds
           # release from the GitHub API; unauthenticated, runner IPs hit the rate limit.
           SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
-        run: python scripts/build_binary.py --out dist/bin ${VERSION:+--expect-version "$VERSION"}
+        run: python scripts/build_binary.py --frontend-dist "$RUNNER_TEMP/kollab-frontend" --out dist/bin ${VERSION:+--expect-version "$VERSION"}
 
       # Its wheels are picked for glibc 2.28, so it must start on a distro that old.
       - name: Check it runs on the oldest supported Linux

@@ -104,16 +104,36 @@ class TestMessageHandler(unittest.TestCase):
     def test_handle_user_input(self):
         """Test user input handler."""
         data = {"message": "hello"}
-        event = MagicMock()
+        event = MagicMock(source="user")  # typed in the TUI
 
         result = self.loop.run_until_complete(
             self.handler.handle_user_input(data, event)
         )
 
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=False
+            "hello", pre_displayed=False, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
+
+    def test_handle_livekit_input_forwards_trusted_origin_context(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        origin_context = make_voice_origin_context("turn-1")
+
+        self.loop.run_until_complete(
+            self.handler.handle_user_input(
+                {"message": "show status", "origin_context": origin_context},
+                event=MagicMock(source="state_rpc"),  # how a room turn arrives
+            )
+        )
+
+        self.coordinator.process_user_input.assert_called_once_with(
+            "show status",
+            pre_displayed=False,
+            origin_context=origin_context,
+            may_answer=True,
+        )
+
 
     def test_handle_user_input_pre_displays_while_startup_pending(self):
         """Non-empty input should echo immediately while startup is still pending."""
@@ -134,14 +154,14 @@ class TestMessageHandler(unittest.TestCase):
         self.loop.create_task(release_startup())
 
         result = self.loop.run_until_complete(
-            self.handler.handle_user_input({"message": "hello"}, MagicMock())
+            self.handler.handle_user_input({"message": "hello"}, MagicMock(source="user"))
         )
 
         self.coordinator.message_display_service.display_user_message.assert_called_once_with(
             "hello"
         )
         self.coordinator.process_user_input.assert_called_once_with(
-            "hello", pre_displayed=True
+            "hello", pre_displayed=True, may_answer=True
         )
         self.assertEqual(result, {"status": "processed"})
 
