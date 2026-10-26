@@ -70,7 +70,8 @@ def test_readiness_maps_download_progress_and_refuses_whisper():
     }
     assert map_readiness(ready).state == "ready"
     whisper = {**ready, "transcription": {"state": "ready", "engine": "whisper"}}
-    assert map_readiness(whisper).state == "error"  # never claim Parakeet
+    refused = map_readiness(whisper)  # never claim Parakeet
+    assert refused.state == "error" and "Settings > Voice" in refused.detail
     downloading = {
         "state": "downloading",
         "detail": "parakeet / model.safetensors",

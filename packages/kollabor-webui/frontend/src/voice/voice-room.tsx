@@ -112,7 +112,6 @@ export function VoiceRoomBar() {
   const notice = remoteNotice(room);
   const interrupting = isInterrupting(room);
   const dl = room.download;
-  const busy = room.state === "starting" || room.state === "stopping";
   const latency = latencyText(room);
   return (
     <div data-slot="aui_voice-room" className="flex min-w-0 flex-col gap-1 px-1 text-xs text-muted-foreground">
@@ -120,7 +119,8 @@ export function VoiceRoomBar() {
         {active ? (
           <button
             type="button"
-            disabled={busy}
+            // Enabled while starting: a first start installs voice for minutes.
+            disabled={room.state === "stopping"}
             aria-label="Stop voice room"
             title="Stop Voice"
             onClick={() => void ctx.controller.stop()}
@@ -154,6 +154,12 @@ export function VoiceRoomBar() {
           </>
         ) : null}
       </div>
+      {active && room.detail && !dl ? (
+        // What a start is doing: on first use, installing voice support.
+        <div role="status" data-slot="aui_voice-room-detail">
+          {room.detail}
+        </div>
+      ) : null}
       {room.error ? (
         <div role="alert" className="text-destructive">
           {room.error}

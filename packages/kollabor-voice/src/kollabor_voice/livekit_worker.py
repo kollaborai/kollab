@@ -819,8 +819,11 @@ async def amain() -> None:
 def main() -> None:
     try:
         asyncio.run(amain())
-    except AdapterError:
-        raise SystemExit(2)  # already reported to the Engine as voice.error
+    except AdapterError as exc:
+        # Already reported to the Engine as voice.error; this line is the reason a
+        # start that never joined gives (voice_livekit._read_ready).
+        print(f"WORKER_ERROR {exc}", flush=True)
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

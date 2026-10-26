@@ -97,7 +97,7 @@ export function FormPanel({
             return (
               <details
                 key={section.id}
-                open={q || failed || small ? true : undefined}
+                open={q || failed || small || section.open ? true : undefined}
                 className="group rounded-lg bg-muted/30"
               >
                 <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm font-medium select-none [&::-webkit-details-marker]:hidden">
