@@ -12745,7 +12745,7 @@ class HubPlugin(BasePlugin):
             message = "not on a network: cannot capture agents on other devices"
             return _CaptureOutcome(message, error=message)
         try:
-            socket_path = await relay.attach(target)
+            socket_path = await relay.attach(target, quiet=True)
         except Exception as exc:  # AttachRefused, RelayError, transport: the reason is the answer
             message = f"capture of {target} refused: {exc}"
             return _CaptureOutcome(message, error=message)
@@ -15163,7 +15163,7 @@ class HubPlugin(BasePlugin):
 
         return {"network": network, "device": device, "trust": trust, "agents": agents}
 
-    async def _handle_network_attach_request(self, to: str) -> str:
+    async def _handle_network_attach_request(self, to: str, *, quiet: bool = False) -> str:
         """Answer a local `network_attach`: a one-shot socket to agent@device.
 
         The web UI opens an agent on another computer through this
@@ -15178,7 +15178,8 @@ class HubPlugin(BasePlugin):
             relay = getattr(self, "_relay_agent", None)
         if relay is None or not hasattr(relay, "attach"):
             raise ValueError("opening agents from the network is not available on this build")
-        return await relay.attach(format_handle(*handle))
+        handle_text = format_handle(*handle)
+        return await (relay.attach(handle_text, quiet=True) if quiet else relay.attach(handle_text))
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int

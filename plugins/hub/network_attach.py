@@ -100,6 +100,8 @@ class _Channel:
     checked: float = 0.0
     pump: asyncio.Task | None = None
     closed: bool = False
+    # A capture: a read, so the device running the agent posts no open/close line.
+    quiet: bool = False
 
 
 class _Pacer:
@@ -189,16 +191,20 @@ class NetworkAttach:
 
     # -- requester ------------------------------------------------------
 
-    async def open(self, peer: str, agent_id: str, name: str) -> str:
-        """Open ``name`` on ``peer``; return a one-shot socket path to connect to."""
+    async def open(self, peer: str, agent_id: str, name: str, *, quiet: bool = False) -> str:
+        """Open ``name`` on ``peer``; return a one-shot socket path to connect to.
+
+        ``quiet`` (a capture) asks that device not to post its open/close lines.
+        """
         if self._closed:
             raise RelayError("network attach is closed")
         if len(self._channels) >= MAX_CHANNELS:
             raise RelayError("too many open agents on other computers; close one first")
         channel = _Channel(id=secrets.token_hex(16), peer=peer, name=name, requester=True)
-        response = await self._send(
-            peer, ATTACH_OPEN, {"channel": channel.id, "agent_id": agent_id, "name": name}
-        )
+        request = {"channel": channel.id, "agent_id": agent_id, "name": name}
+        if quiet:
+            request["quiet"] = True
+        response = await self._send(peer, ATTACH_OPEN, request)
         refused = response.get("refused")
         if isinstance(refused, str) and refused:
             raise AttachRefused(refused[:500])
@@ -324,10 +330,14 @@ class NetworkAttach:
             reader=reader,
             writer=writer,
             checked=time.monotonic(),
+            quiet=payload.get("quiet") is True,
         )
         self._channels[(peer, channel_id)] = channel
         channel.pump = asyncio.create_task(self._pump(channel))
-        self._notice(f"{self._peer_name(peer)} opened {name} from the network")
+        if channel.quiet:
+            logger.info("network attach: %s captured %s", self._peer_name(peer), name)
+        else:
+            self._notice(f"{self._peer_name(peer)} opened {name} from the network")
         return {"open": True}
 
     async def _allowed(self, channel: _Channel) -> bool:
@@ -475,7 +485,7 @@ class NetworkAttach:
         # cancelled here: mid-send, it holds the peer's secure session.
         if channel.writer is not None:
             channel.writer.close()
-        if not channel.requester:
+        if not channel.requester and not channel.quiet:
             self._notice(why or f"{self._peer_name(channel.peer)} closed {channel.name}")
         if tell_peer:
             with contextlib.suppress(Exception):

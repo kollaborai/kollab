@@ -108,7 +108,7 @@ async def test_cross_device_capture_uses_trust_checked_network_attach_by_default
     outcome = await plugin._capture_target(REMOTE_HANDLE, 10, capture_format="json")
 
     assert outcome.text == "safe transcript"
-    plugin._relay_agent.attach.assert_awaited_once_with(REMOTE_HANDLE)
+    plugin._relay_agent.attach.assert_awaited_once_with(REMOTE_HANDLE, quiet=True)
     captured_peer = plugin._capture_peer_output.await_args.args[0]
     assert captured_peer.identity == REMOTE_HANDLE
     assert plugin._capture_peer_output.await_args.kwargs["socket_path_override"] == ATTACHED_SOCKET
