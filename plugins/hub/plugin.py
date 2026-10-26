@@ -20,6 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
@@ -41,6 +42,7 @@ from .capture import (
     normalize_text,
     paginate,
     plain_text,
+    redact_secrets,
     render_transcript,
 )
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
@@ -1871,19 +1873,29 @@ class HubPlugin(BasePlugin):
             "hub_cron_delete", self._handle_hub_cron_delete_tool
         )
 
-        # hub_capture (self-closing, optional lines/format attributes)
+        # hub_capture (self-closing, optional lines/format/raw/allow_cross_device attributes)
         def _extract_hub_capture(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "cap_name": attrs.get("name", "").strip(),
                 "cap_lines": attrs.get("lines") or "50",
                 "cap_format": (attrs.get("format") or "").strip().lower(),
+                **{
+                    flag: attrs[flag].lower() == "true"
+                    for flag in ("raw", "allow_cross_device")
+                    if flag in attrs
+                },
             }
 
         cap_pat = tag_pattern(
             "hub_capture",
             required={"name": "some"},
-            valid={"lines": r"\d+", "format": r"(?:terminal|plain|json)"},
+            valid={
+                "lines": r"\d+",
+                "format": r"(?:terminal|plain|json)",
+                "raw": r"(?:true|false)",
+                "allow_cross_device": r"(?:true|false)",
+            },
             end="/>",
         )
         response_parser.register_plugin_tag(
@@ -4762,6 +4774,11 @@ class HubPlugin(BasePlugin):
         raw_flag = request.get("raw", tool_data.get("raw", False))
         if not isinstance(raw_flag, bool):
             return failure("hub_capture raw must be a boolean")
+        allow_cross_device = request.get(
+            "allow_cross_device", tool_data.get("allow_cross_device", False)
+        )
+        if not isinstance(allow_cross_device, bool):
+            return failure("hub_capture allow_cross_device must be a boolean")
         if raw_flag or cap_format == "terminal":
             capture_format = "terminal"
         elif cap_format == "plain":
@@ -4773,6 +4790,7 @@ class HubPlugin(BasePlugin):
             cap_name,
             cap_lines,
             capture_format=capture_format,
+            allow_cross_device=allow_cross_device,
         )
         output = outcome.text
         if len(output) > 10_000:
@@ -12248,17 +12266,24 @@ class HubPlugin(BasePlugin):
         format: str = "terminal",
         max_chars: Any = None,
         cursor: Any = None,
+        socket_path_override: str | None = None,
     ) -> _CaptureOutcome:
-        """Capture output directly from a live hub peer via its socket."""
-        if not peer.socket_path:
+        """Capture output directly from a live hub peer via its socket.
+
+        ``socket_path_override`` is a socket the network attach opened to an
+        agent on another device; it is dialed as is.
+        """
+        if socket_path_override:
+            dial_target, dial_auth = socket_path_override, None
+        elif not peer.socket_path:
             if self._presence:
                 self._presence.cleanup_agent(peer)
             message = f"agent '{peer.identity}' has no socket path, cleaned up"
             return _CaptureOutcome(message, error=message)
-
-        dial_target, dial_auth = self._resolve_dial_target(
-            peer.identity, peer.socket_path
-        )
+        else:
+            dial_target, dial_auth = self._resolve_dial_target(
+                peer.identity, peer.socket_path
+            )
         if format != "terminal":
             payload, capture_error = await AgentMessenger.request_capture(
                 dial_target,
@@ -12309,7 +12334,7 @@ class HubPlugin(BasePlugin):
         older peers may still answer with bare lines, normalized here too.
         """
         if not isinstance(payload, dict):
-            return str(payload or f"no recent output from '{identity}'")
+            return redact_secrets(str(payload or f"no recent output from '{identity}'"))
         text = str(payload.get("text") or "")
         if not text.strip():
             lines = payload.get("lines")
@@ -12321,11 +12346,11 @@ class HubPlugin(BasePlugin):
             next_cursor = payload.get("next_cursor")
             suffix = f", next_cursor={next_cursor}" if next_cursor else ""
             text += f"\n... (truncated{suffix})"
-        return text
+        return redact_secrets(text)
 
     @staticmethod
     def _remote_target_refusal(target: Any) -> str | None:
-        """capture, spawn and stop stay local; a remote handle is refused with
+        """spawn, stop and wake stay local; a remote handle is refused with
         a hint to message that agent instead (constitution section 7)."""
         target = str(target or "").strip()
         if parse_handle(target) is None:
@@ -12638,11 +12663,17 @@ class HubPlugin(BasePlugin):
         lines: int,
         *,
         capture_format: str = "json",
+        allow_cross_device: bool = False,
     ) -> _CaptureOutcome:
-        """Capture one validated target/line request without textual argument parsing."""
-        refusal = self._remote_target_refusal(target)
-        if refusal:
-            return _CaptureOutcome(refusal, error=refusal)
+        """Capture one validated target/line request without textual argument parsing.
+
+        An agent@device target is captured only with ``allow_cross_device``,
+        through the network attach, which the other device's trust decides.
+        """
+        if parse_handle(target) is not None:
+            return await self._capture_remote(
+                target, lines, capture_format, allow_cross_device
+            )
         target_for_orchestrator = target
         if target.lower() != "all":
             own_identity = self._identity.identity if self._identity else ""
@@ -12687,7 +12718,9 @@ class HubPlugin(BasePlugin):
         if getattr(result, "success", True) is False:
             error = str(getattr(result, "error", None) or message)
             return _CaptureOutcome(message, error=error)
-        if capture_format == "json":
+        if capture_format == "plain":
+            message = redact_secrets(message)
+        elif capture_format == "json":
             message = render_transcript(
                 message,
                 identity=target,
@@ -12696,10 +12729,38 @@ class HubPlugin(BasePlugin):
             )
         return _CaptureOutcome(message)
 
+    async def _capture_remote(
+        self, target: str, lines: int, capture_format: str, allow_cross_device: bool
+    ) -> _CaptureOutcome:
+        """Capture agent@device over a network attach the other device allows."""
+        if not allow_cross_device:
+            message = (
+                f"capturing {target} reads another device's transcript: "
+                "pass --allow-cross-device (tool: allow_cross_device=true)"
+            )
+            return _CaptureOutcome(message, error=message)
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            message = "not on a network: cannot capture agents on other devices"
+            return _CaptureOutcome(message, error=message)
+        try:
+            socket_path = await relay.attach(target)
+        except Exception as exc:  # AttachRefused, RelayError, transport: the reason is the answer
+            message = f"capture of {target} refused: {exc}"
+            return _CaptureOutcome(message, error=message)
+        peer = SimpleNamespace(identity=target, socket_path=socket_path)
+        return await self._capture_peer_output(
+            peer,
+            lines,
+            format=capture_format,
+            max_chars=10_000 if capture_format == "json" else None,
+            socket_path_override=socket_path,
+        )
+
     async def _handle_capture_command(
         self, rest: str, *, capture_format: str = "json"
     ) -> str:
-        """Handle /hub capture <identity|name|all> [lines] [--raw].
+        """Handle /hub capture <identity|name|all> [lines] [--raw] [--allow-cross-device].
 
         Hub identities use the shared transcript renderer by default; --raw
         preserves the terminal capture path. Tool callers use `_capture_target`
@@ -12707,7 +12768,9 @@ class HubPlugin(BasePlugin):
         """
         args = rest.split() if rest.strip() else []
         if not args:
-            return "usage: /hub capture <identity|name|all> [lines] [--raw]"
+            return "usage: /hub capture <identity|name|all> [lines] [--raw] [--allow-cross-device]"
+        allow_cross_device = "--allow-cross-device" in args
+        args = [arg for arg in args if arg != "--allow-cross-device"]
         if "--raw" in args:
             capture_format = "terminal"
             args = [arg for arg in args if arg != "--raw"]
@@ -12723,6 +12786,7 @@ class HubPlugin(BasePlugin):
                 target,
                 lines,
                 capture_format=capture_format,
+                allow_cross_device=allow_cross_device,
             )
         ).text
 

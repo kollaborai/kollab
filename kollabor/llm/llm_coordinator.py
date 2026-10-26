@@ -1909,6 +1909,7 @@ class LLMService:
         voice: dict | None = None,
         origin_context: dict | None = None,
         may_answer: bool = False,
+        native_only: bool = False,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1923,6 +1924,8 @@ class LLMService:
             may_answer: True only when a person answering live said the words
                 (MessageHandler sets it for YES_SOURCES). Closed by default: a
                 generation prompt, a hub peer, a pipe is never the user's yes.
+            native_only: the caller needs the native tool loop (agent/skill
+                generation writes files); refused while ACP owns the chat.
 
         Returns:
             Status information about processing
@@ -1958,6 +1961,23 @@ class LLMService:
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
         if claims_voice_origin and not validate_voice_origin(origin_context):
             return {"status": "rejected", "reason": "Invalid or expired voice admission"}
+
+        # ACP owns the chat: never enqueue on the native queue behind its back.
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or acp is not None:
+            if native_only:
+                return {"status": "rejected", "reason": "native_provider_required"}
+            if acp is None:
+                return _acp_unavailable_result(self._acp_service())
+            if not isinstance(message, str):
+                return {"status": "rejected", "reason": "acp_text_only"}
+            return await self._admit_acp(
+                acp,
+                {"message": message, "voice": voice, "origin_context": origin_context},
+                UserInputSource.TUI.value,
+            )
+
         trusted_origin_context = (
             dict(origin_context) if claims_voice_origin else None
         )
@@ -2038,24 +2058,9 @@ class LLMService:
             return {"status": "rejected", "reason": "invalid_input_source"}
         source_value = "agent" if is_agent else source.value
 
-        try:
-            acp = self.event_bus.get_service("acp_orchestrator")
-        except Exception:
-            acp = None
+        acp = self._acp_service()
         acp_dispatch = acp is not None and getattr(acp, "active", False) is True
-        selected_acp = False
-        profile_unknown = False
-        profile_manager = getattr(self, "profile_manager", None)
-        if profile_manager is not None:
-            try:
-                profile = profile_manager.get_active_profile()
-                profile_unknown = profile is None
-                provider = profile.get_provider() if profile is not None else ""
-                selected_acp = provider == "acp"
-            except Exception:
-                profile_unknown = True
-        else:
-            profile_unknown = True
+        selected_acp, profile_unknown = self._profile_selects_acp()
         if (selected_acp or (is_agent and profile_unknown)) and not acp_dispatch:
             return _acp_unavailable_result(acp)
         if acp_dispatch and not isinstance(message, str):
@@ -2121,59 +2126,78 @@ class LLMService:
 
     async def _handle_user_input(self, data: Dict[str, Any], event) -> Dict[str, Any]:
         """Admit ACP input through its owner; otherwise delegate native handling."""
-        acp = self.event_bus.get_service("acp_orchestrator")
-        selected_acp = False
-        profile_manager = getattr(self, "profile_manager", None)
-        if profile_manager is not None:
-            try:
-                profile = profile_manager.get_active_profile()
-                provider = profile.get_provider() if profile is not None else ""
-                selected_acp = provider == "acp"
-            except Exception:
-                selected_acp = False
-        if selected_acp and not (acp is not None and getattr(acp, "active", False) is True):
-            return _acp_unavailable_result(acp)
-        if acp is not None and getattr(acp, "active", False) is True:
-            request_id = data.get("request_id") or uuid.uuid4().hex
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp and acp is None:
+            return _acp_unavailable_result(self._acp_service())
+        if acp is not None:
             source = getattr(event, "source", UserInputSource.STATE_RPC.value)
-            origin = dict(data.get("origin_context") or {})
-            origin.setdefault("operator", source != "agent")
-            message = str(data["message"])
-            voice = data.get("voice")
-            if voice:
-                # A mic turn carries the voice rules, as on the native path, and
-                # its reply is spoken when the turn ends (acp.voice_turns).
-                from kollabor_voice.voice_context import voice_preamble
-
-                epoch = voice.get("epoch")
-                message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
-                acp.voice_rules_epochs.add(epoch)
-            elif await acp.steer(message, origin=origin, thread_id=data.get("thread_id")):
-                return {"status": "injected", "request_id": request_id}
-            try:
-                admission = acp.admit(
-                    message, request_id=request_id, source=source,
-                    thread_id=data.get("thread_id"),
-                    origin=origin,
-                )
-            except (RuntimeError, ValueError) as exc:
-                if "full" in str(exc).lower():
-                    return {"status": "rejected", "reason": "acp_queue_full"}
-                return _acp_unavailable_result(acp)
-            except Exception as exc:
-                if "full" in str(exc).lower():
-                    return {"status": "rejected", "reason": "acp_queue_full"}
-                return {"status": "rejected", "reason": "acp_admission_failed"}
-            if voice:
-                acp.voice_turns[admission.request_id] = voice
-            return {
-                "status": "queued",
-                "request_id": admission.request_id,
-                "turn_id": admission.turn_id,
-            }
+            return await self._admit_acp(acp, data, source)
         return cast(
             Dict[str, Any], await self._message_handler.handle_user_input(data, event)
         )
+
+    def _acp_service(self):
+        try:
+            return self.event_bus.get_service("acp_orchestrator")
+        except Exception:
+            return None
+
+    def _active_acp(self):
+        acp = self._acp_service()
+        return acp if getattr(acp, "active", False) is True else None
+
+    def _profile_selects_acp(self) -> tuple[bool, bool]:
+        """(the active profile is ACP, the profile could not be read)."""
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is None:
+            return False, True
+        try:
+            profile = profile_manager.get_active_profile()
+            if profile is None:
+                return False, True
+            return str(profile.get_provider() or "").strip().lower() == "acp", False
+        except Exception:
+            return False, True
+
+    async def _admit_acp(self, acp, data: Dict[str, Any], source: str) -> Dict[str, Any]:
+        """The one ACP admission: steer a running turn or queue a new one."""
+        request_id = data.get("request_id") or uuid.uuid4().hex
+        origin = dict(data.get("origin_context") or {})
+        origin.setdefault("operator", source != "agent")
+        message = str(data["message"])
+        voice = data.get("voice")
+        if voice:
+            # A mic turn carries the voice rules, as on the native path, and
+            # its reply is spoken when the turn ends (acp.voice_turns).
+            from kollabor_voice.voice_context import voice_preamble
+
+            epoch = voice.get("epoch")
+            message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
+            acp.voice_rules_epochs.add(epoch)
+        elif await acp.steer(message, origin=origin, thread_id=data.get("thread_id")):
+            return {"status": "injected", "request_id": request_id}
+        try:
+            admission = acp.admit(
+                message, request_id=request_id, source=source,
+                thread_id=data.get("thread_id"),
+                origin=origin,
+            )
+        except (RuntimeError, ValueError) as exc:
+            if "full" in str(exc).lower():
+                return {"status": "rejected", "reason": "acp_queue_full"}
+            return _acp_unavailable_result(acp)
+        except Exception as exc:
+            if "full" in str(exc).lower():
+                return {"status": "rejected", "reason": "acp_queue_full"}
+            return {"status": "rejected", "reason": "acp_admission_failed"}
+        if voice:
+            acp.voice_turns[admission.request_id] = voice
+        return {
+            "status": "queued",
+            "request_id": admission.request_id,
+            "turn_id": admission.turn_id,
+        }
 
     async def _handle_cancel_request(
         self, data: Dict[str, Any], event
@@ -2217,18 +2241,7 @@ class LLMService:
 
     def _selected_active_acp_orchestrator(self):
         """Return the live ACP transport only for an explicitly selected ACP profile."""
-        try:
-            profile = (
-                self.profile_manager.get_active_profile()
-                if self.profile_manager is not None
-                else None
-            )
-            if profile is None or profile.get_provider() != "acp":
-                return None
-            acp = self.event_bus.get_service("acp_orchestrator")
-            return acp if getattr(acp, "active", False) is True else None
-        except Exception:
-            return None
+        return self._active_acp() if self._profile_selects_acp()[0] else None
 
     def cancel_current_request(
         self,
