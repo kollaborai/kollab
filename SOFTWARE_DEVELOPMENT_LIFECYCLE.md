@@ -1,17 +1,19 @@
 # Software Development Lifecycle
 
 This document is the standard for how work moves from idea to merged code in
-this repository. The short version: trunk-based development, one git worktree
-per task, Conventional Commits, draft PRs by default, and releases tagged only
-when Marco decides.
+this repository. The short version: trunk-based development in one shared
+`main` checkout with no worktrees, Conventional Commits, draft PRs by default,
+and releases tagged only when Marco decides.
 
 ## Standard
 
-We follow Trunk-Based Development: `main` is the single source of truth, work
-runs in short-lived feature branches, and each task gets its own git worktree.
-We follow Conventional Commits 1.0.0 for commit messages and SemVer 2.0.0 for
-versions. Release mechanics live in `docs/release-process.md`; the release
-manager playbook lives in `bundles/skills/release-manager/SKILL.md`.
+We follow Trunk-Based Development: `main` is the single source of truth, and
+every agent commits on it in the one shared checkout. A change reaches GitHub
+through a short-lived PR branch pushed from that checkout; nobody works in a
+worktree or a local feature branch. We follow Conventional Commits 1.0.0 for
+commit messages and SemVer 2.0.0 for versions. Release mechanics live in
+`docs/release-process.md`; the release manager playbook lives in
+`bundles/skills/release-manager/SKILL.md`.
 
 ## Roles
 
@@ -28,30 +30,40 @@ manager playbook lives in `bundles/skills/release-manager/SKILL.md`.
 
 Work enters through a GitHub issue and becomes a tracked task (via `/goal` or
 the work queue) before any code changes. No tracked task, no edits. Small
-fixes still get an issue so the worktree, branch, and commit can reference it.
+fixes still get an issue so the PR branch and commit can reference it.
 
-## Worktree convention
+## Work on main
 
-One git worktree per task, created outside the repo tree:
+Everyone works in the one shared checkout on `main`. Never create a git
+worktree (unless Marco asks for one), and never stash, reset, clean, restore,
+or switch branches in the checkout.
 
-```bash
-git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/main
-```
+- Several agents edit the tree at once. Run `git status --short` before you
+  touch a file, leave other agents' uncommitted edits alone, and check with
+  whoever is editing a file before you change it too.
+- Commit only your own files: `git commit -m "<message>" -- <paths>`. Never
+  `git add -A`, `git add .`, or a tree-wide `ruff --fix` or `black`.
+- `main` is protected, so a change lands through a draft PR pushed straight
+  from the checkout, with no local branch:
 
-- Branch name: `issue-<N>-<slug>` where N is the issue number. Docs tasks with
-  no issue use a descriptive slug without N (for example
+  ```bash
+  git log --oneline origin/main..HEAD          # every commit listed ships
+  git push origin HEAD:refs/heads/issue-<N>-<slug>
+  gh pr create --draft --head issue-<N>-<slug> --title "<type(scope): summary>" --body "Fixes #<N>"
+  ```
+
+- PR branch name: `issue-<N>-<slug>` where N is the issue number. Docs tasks
+  with no issue use a descriptive slug without N (for example
   `docs/software-development-lifecycle`).
-- Always branch off `origin/main`, never off another feature branch.
-- Edit, test, and commit inside the worktree. The shared checkout root is a
-  coordination surface, not an editing surface.
-- Never stash, reset, clean, restore, or switch branches in the shared
-  checkout, and never build a release from uncommitted files or a scratch
-  clone.
-- After the PR merges, remove the worktree and the branch:
-  `git worktree remove ../kollab-wt/issue-<N>-<slug> && git branch -d
-  issue-<N>-<slug>`.
-- Releases are the exception: they run from the shared `main` checkout per
-  `docs/release-process.md`.
+- Review fixes go out the same way: commit on `main`, push `HEAD` to the same
+  PR branch.
+- PRs merge with a merge commit, never a squash or rebase, so local `main`
+  stays a parent of the merge. Once yours merges,
+  `git pull --ff-only origin main`.
+- If that pull refuses, `main` has diverged from `origin/main`: stop and tell
+  Marco. Never reset, rebase, or force-push to fix it.
+- Never build a release from uncommitted files or a scratch clone. Releases
+  run in this same checkout per `docs/release-process.md`.
 
 ## Implement and test
 
@@ -81,7 +93,10 @@ git commit -m "feat(webui): copy a profile and pin its reasoning effort"
   default for every agent-opened PR, no exceptions.
 - Only Marco or the koordinator marks a PR ready or approves it. Once ready, auto-merge
   (`.github/workflows/auto-merge.yml`) merges it when checks pass.
-- Keep the branch updated from `main` while the PR is open.
+- Merging needs the PR branch up to date with `main`. When `main` moves,
+  `gh pr update-branch <n>` merges it in on GitHub (never a rebase). If your
+  next push to that branch is refused, run
+  `git pull --no-rebase origin issue-<N>-<slug>` first, never `--force`.
 - Note any overlapping PRs in the body so the operator can decide disposition.
 
 ## CI gates
@@ -117,7 +132,7 @@ Full mechanics: `docs/release-process.md`. Summary:
 
 ## Hotfixes
 
-Same flow, faster: issue, worktree, minimal fix with a regression test, DRAFT
+Same flow, faster: issue, minimal fix on `main` with a regression test, DRAFT
 PR, explicit merge authorization. Hotfix releases follow the normal release
 process with the fix merged (or cherry-picked) first.
 
@@ -126,5 +141,5 @@ process with the fix merged (or cherry-picked) first.
 - The PR body contains the complete product-ready checklist from `docs/product-ready-checklist.md`, with evidence for completed items and a specific reason for every N/A.
 - Tracked task complete, tests green on the required CI checks.
 - PR approved by Marco and merged (or explicitly closed).
-- Worktree and branch removed after merge.
+- Local `main` pulled level after merge: `git pull --ff-only origin main`.
 - Docs updated when behavior or process changed.
