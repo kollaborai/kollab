@@ -857,13 +857,16 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
 
 ### Git Workflow
 **Pre-commit:** Commits to `kollabor/`, `plugins/`, `tests/` MUST reference GitHub issue
-- Worktree per task (trunk-based development, see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
-  `git worktree add ../kollab-wt/issue-123-slug -b issue-123-slug origin/main`;
-  remove the worktree and branch after the PR merges
-- Branch: `issue-123-description`, one branch per worktree, branched off `origin/main`
+- One shared checkout on `main` for every agent (see SOFTWARE_DEVELOPMENT_LIFECYCLE.md):
+  never create a git worktree (unless Marco asks for one), and never stash, reset,
+  clean, restore or switch branches in it
+- Other agents edit the same tree at once: leave their uncommitted edits alone and
+  commit only your own files, `git commit -- <paths>` (never `git add -A` or `git add .`)
 - Commit: Conventional Commits format `type(scope): summary`, referencing the issue:
   `fixes #123`, `closes #123`, `resolves #123`, or `#123`
-- Main branch protected - no direct pushes
+- Main branch protected - no direct pushes. Push `HEAD` to a PR branch named
+  `issue-123-description`, with no local branch; check `git log origin/main..HEAD`
+  first, since every commit it lists ships
 - Agents ALWAYS open PRs as drafts: `gh pr create --draft`. Only Marco or the
   koordinator marks a PR ready or approves it; auto-merge then merges it once checks pass.
 - PRs merge themselves (`.github/workflows/auto-merge.yml`): a PR from a branch of this
@@ -871,13 +874,17 @@ Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox
   required checks pass. Forks, bots and drafts never do: open a draft to hold one, and
   `gh pr merge <n> --disable-auto` stops one already armed. Such a merge starts no
   push-to-main CI run.
+- Merging needs the PR branch up to date with `main`: `gh pr update-branch <n>` (a
+  merge, never a rebase). Once it merges, `git pull --ff-only origin main`; if that
+  refuses, `main` has diverged: stop and tell Marco, never reset, rebase or force-push
 
 ```bash
 gh issue create --title "Fix version display"
-git switch -c issue-8-version-display-fix
-git commit -m "Fix version display fixes #8"
-git push -u kollaborai issue-8-version-display-fix
-gh pr create --draft --title "Fix version display" --body "Fixes #8"
+git commit -m "fix(cli): version display, fixes #8" -- kollabor/cli.py
+git log --oneline origin/main..HEAD
+git push origin HEAD:refs/heads/issue-8-version-display-fix
+gh pr create --draft --head issue-8-version-display-fix --title "fix(cli): version display" --body "Fixes #8"
+git pull --ff-only origin main   # once the PR has merged
 ```
 
 ### Version Management

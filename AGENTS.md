@@ -18,21 +18,28 @@ state. Temporary rollback artifacts require an explicit retention/cleanup condit
 
 ## releases and the shared checkout
 
-We follow Trunk-Based Development (short-lived feature branches, one worktree
-per task) with Conventional Commits and SemVer; see
+We follow Trunk-Based Development with Conventional Commits and SemVer; see
 SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
 
-Feature work happens in git worktrees. For each task, create a worktree at
-`../kollab-wt/issue-<N>-<slug>` with branch `issue-<N>-<slug>` branched off
-`origin/main`:
+Every agent works in the one shared checkout, on `main`. Never create a git
+worktree (unless Marco asks for one), and never stash, reset, clean, restore,
+or switch branches in the checkout. Other agents edit the same tree at the
+same time: run `git status --short` first, leave their uncommitted edits
+alone, and commit only your own files with `git commit -- <paths>` (never
+`git add -A` or `git add .`).
 
-    git worktree add ../kollab-wt/issue-<N>-<slug> -b issue-<N>-<slug> origin/main
+`main` is protected, so work lands through a draft PR pushed straight from the
+checkout, with no local branch:
 
-Edit, test, and commit inside the worktree; remove the worktree and branch
-after the PR merges. The shared checkout on `main` is a coordination and
-release surface, not an editing surface: never stash, reset, clean, restore,
-or switch branches in it, and never build a release from uncommitted files or
-a scratch clone.
+    git log --oneline origin/main..HEAD               # every commit listed ships
+    git push origin HEAD:refs/heads/issue-<N>-<slug>
+    gh pr create --draft --head issue-<N>-<slug> --title "<type(scope): summary>" --body "Fixes #<N>"
+
+PRs merge with a merge commit, so once yours merges
+`git pull --ff-only origin main` brings `main` level. If that pull refuses,
+`main` has diverged from `origin/main`: stop and tell Marco, and never reset,
+rebase, or force-push to fix it. Never build a release from uncommitted files
+or a scratch clone.
 
 For every release, read `docs/release-process.md`. Releases are tagged
 whenever Marco decides, and agents may create a release tag ONLY when Marco
