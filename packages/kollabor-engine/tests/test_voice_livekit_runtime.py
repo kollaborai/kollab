@@ -47,6 +47,36 @@ http, ice = bind("--port", 7880), bind("--rtc.tcp_port", 7881)
 while True: time.sleep(1)
 """
 
+# RoomService.ListParticipants over the rooms in $FAKE_ROOM_PEOPLE ({room: [identity]}),
+# each call logged to $FAKE_ROOM_LOG with the room asked for and the token's grants.
+FAKE_ROOM_SERVER = """\
+#!{py}
+import base64, json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Rooms(BaseHTTPRequestHandler):
+    def do_POST(self):
+        room = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["room"]
+        claims = self.headers["Authorization"].split(".")[1]
+        video = json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4)))["video"]
+        with open(os.environ["FAKE_ROOM_LOG"], "a") as log:
+            log.write(json.dumps([self.path, room, video]) + "\\n")
+        with open(os.environ["FAKE_ROOM_PEOPLE"]) as people:
+            here = json.load(people).get(room, [])
+        body = json.dumps(dict(participants=[dict(identity=who) for who in here])).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        pass
+
+
+HTTPServer(("127.0.0.1", int(sys.argv[sys.argv.index("--port") + 1])), Rooms).serve_forever()
+"""
+
 FAKE_WORKER = """\
 import json, os, signal, sys, time
 cfg = json.loads(os.environ["KOLLAB_VOICE_WORKER_CONFIG"])
@@ -415,6 +445,78 @@ async def test_a_worker_that_exits_by_itself_ends_its_session(rig):
         await wait_for(lambda: rig.control.host._sessions[nid].state == "stopped")
         await asyncio.sleep(0.1)
         assert rig.control.host._sessions[nid].state == "stopped"
+    await rig.control.shutdown()
+
+
+@pytest.fixture
+def rooms(rig, tmp_path, monkeypatch):
+    """The rig on a server that says who is in each room; here(room, *identities) sets it."""
+    (tmp_path / "livekit-server").write_text(FAKE_ROOM_SERVER.format(py=sys.executable))
+    people, calls = tmp_path / "people.json", tmp_path / "rooms.log"
+    monkeypatch.setenv("FAKE_ROOM_PEOPLE", str(people))
+    monkeypatch.setenv("FAKE_ROOM_LOG", str(calls))
+    monkeypatch.setattr(voice_livekit, "PRESENCE_POLL_S", 0.05)
+    monkeypatch.setattr(voice_livekit, "USER_GONE_GRACE_S", 0.4)
+
+    def here(room, *identities):
+        staged = tmp_path / "people.next"
+        staged.write_text(json.dumps({room: list(identities)}))
+        staged.replace(people)
+
+    def asked():
+        return [json.loads(line) for line in calls.read_text().splitlines()]
+
+    here("none")
+    return SimpleNamespace(here=here, asked=asked)
+
+
+async def _state(http, sid):
+    return (await http.get(f"/voice/sessions/{sid}")).json()
+
+
+async def test_a_room_its_user_left_ends_once_they_stay_gone(rig, rooms):
+    """A closed or reloaded page sends no stop: the Engine ends the room after the grace."""
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid = view["voice_session_id"]
+        room, user = f"kollab-{sid}-g1", f"user-engine-{sid[:8]}"
+        rooms.here(room, f"worker-{sid}", user)
+        await asyncio.sleep(0.8)  # twice the grace, with the user in the room
+        assert (await _state(http, sid))["state"] == "ready"
+
+        rooms.here(room, f"worker-{sid}")  # the page reloads
+        await asyncio.sleep(0.2)
+        again = (await http.post("/sessions/s1/voice", json={})).json()
+        assert again["voice_session_id"] == sid  # its next start rejoins this room
+        rooms.here(room, f"worker-{sid}", user)
+        await asyncio.sleep(0.8)
+        assert (await _state(http, sid))["state"] == "ready"
+
+        rooms.here(room, f"worker-{sid}")  # the page closes
+        await wait_for(lambda: rig.control.host._sessions[sid].state == "stopped")
+        got = await _state(http, sid)
+        assert (got["state"], got["generation"]) == ("stopped", 2)
+        assert "sigterm" in rig.log.read_text() and not rig.runtime._workers
+        asked = rooms.asked()
+        assert {(path, name) for path, name, _ in asked} == {
+            ("/twirp/livekit.RoomService/ListParticipants", room)
+        }
+        assert all(video == {"room": room, "roomAdmin": True} for *_, video in asked)
+        fresh = (await http.post("/sessions/s1/voice", json={})).json()
+        assert fresh["voice_session_id"] != sid
+    await rig.control.shutdown()
+
+
+async def test_a_room_nobody_joins_ends_and_one_the_server_cannot_list_stays(rig, rooms, tmp_path):
+    async with client(rig.app) as http:
+        view = await ready_session(rig, http)
+        sid = view["voice_session_id"]
+        await wait_for(lambda: rig.control.host._sessions[sid].state == "stopped")
+
+        (tmp_path / "people.json").write_text("not json")  # every answer is an error
+        view = await ready_session(rig, http)
+        await asyncio.sleep(1.0)
+        assert (await _state(http, view["voice_session_id"]))["state"] == "ready"
     await rig.control.shutdown()
 
 

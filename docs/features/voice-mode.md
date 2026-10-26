@@ -25,8 +25,14 @@ Thinking, Speaking, Interrupted), model downloads and how long each step took
 
 The first start sets voice up, and the strip shows each step: it installs voice
 support (once, a few minutes), starts the voice service, then loads or downloads
-the models. Stop works at any point. A voice service left running by an older
-Kollab is replaced, unless a chat is using it. Web voice also needs
+the models. Stop works at any point. The voice service keeps the code of the
+Kollab that started it, so after an update voice replaces a service running
+other code the next time it starts with no chat using it (`/voice status` shows
+which code runs, as Service code). A page that goes away without stopping voice
+(a crashed browser, a sleeping laptop, a lost network) has its voice ended
+within a minute and a half; turning voice back on within a minute rejoins the
+same room.
+Web voice also needs
 `livekit-server` (`brew install livekit`) and, to install voice support, `uv`
 (`brew install uv`); a missing one is named at once. Kollab.app opened from the
 Dock finds them on your login shell's PATH, as a terminal does.
@@ -49,7 +55,7 @@ latest transcript. The web UI shows the same line above the message box while
 - `/voice` toggles voice for this chat.
 - `/voice on` makes this chat the responding conversation.
 - `/voice off` releases its microphone lease and cancels unplayed speech.
-- `/voice status` shows the service, owner, devices, transcript and queues.
+- `/voice status` shows the service and the code it runs, owner, devices, transcript and queues.
 - `/voice retry` retries now. Voice also retries on its own (see Recovery).
 - `/voice context` shows the transcript window sent with each request (default 10 lines).
 - `/voice context 20` changes it to 20 lines; the allowed range is 1–50.

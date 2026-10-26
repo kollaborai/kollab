@@ -5,7 +5,8 @@ per-run key and secret that live only in this process and the server's
 environment. One worker process joins each room and calls back into the engine
 (/turns, /events); the engine never pushes to it. Stop is SIGTERM to the
 worker's process group; a worker that exits by itself ends its session
-(EngineRuntimeHost waits on wait_exited).
+(EngineRuntimeHost waits on wait_exited), and so does a room its user left
+(wait_abandoned asks the server who is in it).
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ import shutil
 import signal
 import socket
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -39,6 +42,11 @@ WORKER_READY_TIMEOUT_S = 1260.0
 SERVER_READY_TIMEOUT_S = 15.0
 WORKER_TOKEN_TTL_S = 3600
 STALE_SERVICE_EXIT_S = 10.0  # an older Kollab's voice service gets this long after SIGTERM
+# A closed or reloaded page sends no stop. Its room waits this long for the user
+# to come back (a reload that starts voice again rejoins it), then ends.
+USER_GONE_GRACE_S = 60.0
+PRESENCE_POLL_S = 5.0
+USER_PREFIX = "user-"  # the browser's identity in a room (sign); the worker's is "worker-"
 LIVEKIT_MISSING = "livekit-server is not installed. Install it with brew install livekit."
 
 # Runs the server and a watchdog in one process group: if the engine dies
@@ -222,9 +230,9 @@ class LiveKitRuntime:
         """Start the shared voice service the worker speaks through.
 
         The first start installs its runtime, as /voice on does in the terminal;
-        progress gets each setup step. A service an older Kollab left running has
-        an older runtime than this worker needs, so it is replaced. An injected
-        worker or KOLLAB_VOICE_PYTHON means voice is run by hand.
+        progress gets each setup step. A service another Kollab left running runs
+        that Kollab's code, so an idle one is replaced. An injected worker or
+        KOLLAB_VOICE_PYTHON means voice is run by hand.
         """
         if self._binary() is None:
             # Say so before minutes of setup, not after.
@@ -235,8 +243,9 @@ class LiveKitRuntime:
         from kollabor_voice.client import VoiceClient
 
         client = VoiceClient()
-        if prepared_runtime_python() is None:
-            await self._retire_stale_service(client)
+        await self._retire_stale_service(
+            client, runtime_ready=prepared_runtime_python() is not None
+        )
         try:
             await client.ensure(lambda state: progress(state.get("detail") or "Starting voice"))
         except RuntimeError as exc:  # VoiceError, or a voice root too long for its socket
@@ -247,13 +256,26 @@ class LiveKitRuntime:
             ) from exc
 
     @staticmethod
-    async def _retire_stale_service(client: Any) -> None:
-        """Stop a voice service an older Kollab left running, unless a chat is using it."""
+    async def _retire_stale_service(client: Any, *, runtime_ready: bool) -> None:
+        """Stop a voice service that runs other code than this Kollab's, unless a chat is using it.
+
+        The service keeps the code of the Kollab that started it until it exits.
+        Without this Kollab's runtime prepared it must go before setup can install
+        that runtime, so a chat using it keeps voice off here. With the runtime
+        prepared, a chat using it keeps it: its worker and ours speak through it
+        as it is, and it is replaced at a start that finds it idle.
+        """
+        from kollabor_voice.control import install_identity
+
         try:
             status = await client.call("status")
         except (RuntimeError, OSError, ValueError):
             return  # none answering (VoiceError is a RuntimeError): ensure() starts this version's
+        if runtime_ready and (status.get("install") or {}).get("code") == install_identity()["code"]:
+            return
         if status.get("owner"):
+            if runtime_ready:
+                return
             raise RuntimeHostError(
                 "voice_service_busy",
                 409,
@@ -264,6 +286,12 @@ class LiveKitRuntime:
         pid = status.get("pid")
         if not isinstance(pid, int):
             return
+        logger.info(
+            "Replacing idle voice service pid %s: runtime %s, code from %s",
+            pid,
+            "prepared" if runtime_ready else "not prepared",
+            (status.get("install") or {}).get("path", "an install that does not say"),
+        )
         for sig, wait_s in ((signal.SIGTERM, STALE_SERVICE_EXIT_S), (signal.SIGKILL, 2.0)):
             try:
                 os.kill(pid, sig)
@@ -381,6 +409,52 @@ class LiveKitRuntime:
         assert isinstance(handle, WorkerHandle)
         await handle.process.wait()  # at exit, not at pipe close (gh-119710)
 
+    async def wait_abandoned(self, binding: VoiceSessionBinding, handle: object) -> bool:
+        """True once the worker's room has had no user for USER_GONE_GRACE_S.
+
+        False when the worker exits first. Counted from the worker joining, so a
+        browser that never joins ends it too. A server that cannot answer counts
+        as the user still there: only a room seen empty ends.
+        """
+        assert isinstance(handle, WorkerHandle)
+        room = room_name_for(binding)
+        seen = time.monotonic()
+        while handle.process.returncode is None:
+            await asyncio.sleep(PRESENCE_POLL_S)
+            if await self._user_in_room(room) is not False:
+                seen = time.monotonic()
+            elif time.monotonic() - seen >= USER_GONE_GRACE_S:
+                return handle.process.returncode is None
+        return False
+
+    async def _user_in_room(self, room: str) -> bool | None:
+        """Whether a browser is in the room, from the server's RoomService; None if it cannot say."""
+        token = mint_livekit_jwt(
+            self._api_key,
+            self._api_secret,
+            identity="engine",
+            video={"room": room, "roomAdmin": True},
+            expires_at_s=int(time.time()) + 60,
+        )
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/twirp/livekit.RoomService/ListParticipants",
+            json.dumps({"room": room}).encode(),
+            {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+
+        def ask() -> bool | None:
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    participants = json.loads(response.read()).get("participants") or []
+            except urllib.error.HTTPError as exc:
+                return False if exc.code == 404 else None  # no such room: nobody in it
+            except (OSError, ValueError):
+                return None
+            return any(str(p.get("identity", "")).startswith(USER_PREFIX) for p in participants)
+
+        return await asyncio.to_thread(ask)
+
     async def stop_session(
         self, binding: VoiceSessionBinding, handle: object, reason: StopReason
     ) -> None:
@@ -397,7 +471,7 @@ class LiveKitRuntime:
         return mint_livekit_jwt(
             self._api_key,
             self._api_secret,
-            identity=f"user-{binding.owner_id}-{binding.voice_session_id[:8]}",
+            identity=f"{USER_PREFIX}{binding.owner_id}-{binding.voice_session_id[:8]}",
             video={
                 "room": room_name,
                 "roomJoin": True,

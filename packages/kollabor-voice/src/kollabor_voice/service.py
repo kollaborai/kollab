@@ -24,6 +24,7 @@ from .control import (
     PROTOCOL,
     VoiceError,
     atomic_json,
+    install_identity,
     prepare_root,
     service_root,
     socket_path,
@@ -51,6 +52,7 @@ class VoiceService:
         self.root = root
         prepare_root(root)
         self.instance_id = str(uuid.uuid4())
+        self.install = install_identity()  # the code it started with, kept until it exits
         self.setup = {"state": "starting", "detail": "Preparing voice support"}
         self.models = None
         self.audio_warmup_seconds = None
@@ -253,6 +255,7 @@ class VoiceService:
             "protocol": PROTOCOL,
             "pid": os.getpid(),
             "instance_id": self.instance_id,
+            "install": self.install,
             "owner": self.owner["client_id"] if self.owner else None,
             "owner_epoch": self.owner["epoch"] if self.owner else None,
             "device": getattr(self.recorder, "device_name", None),

@@ -141,6 +141,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         from kollabor.panels.voice import voiceprint_text
 
         transcription = state.get("transcription") or {}
+        install = state.get("install") or {}  # the service runs this code until it exits
         speech_engine = state.get("speech", {}).get("engine")
         # No service running: the saved settings are what will apply.
         saved = load_speech_preferences()
@@ -152,7 +153,8 @@ class VoiceModeCommandHandler(BaseCommandHandler):
         lines = [
             f"Voice {state.get('state', 'off').replace('_', ' ').title()}",
             f"Service: {state.get('pid') or 'not running'} · owner: {state.get('owner') or 'none'}",
-            f"Transcription: {STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
+            *([f"Service code: {install.get('path')} · {install.get('code')}"] if install else []),
+            f"Transcription:{STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
             f" · {transcription.get('state', 'off')}",
             f"Speech: {TTS_ENGINES.get(speech_engine, speech_engine) or 'not loaded'} · "
             f"{state.get('speech', {}).get('voice') or 'no voice'} · "

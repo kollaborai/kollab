@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 import sys
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from kollabor_engine.voice_runtime_host import RuntimeHostError
 from kollabor_engine.voice_settings import DEFAULT_PROMPT, VoiceSettingsService
 from kollabor_engine.voice_types import SpeechReadiness
 from kollabor_voice.client import VoiceClient
-from kollabor_voice.control import VoiceError, manifest
+from kollabor_voice.control import VoiceError, install_identity, manifest
 from test_voice_livekit_runtime import FakeSession
 
 from kollabor_ai.prompt_overrides import PromptOverrideStore
@@ -193,7 +194,9 @@ class _Service:
 
 async def test_an_older_kollab_voice_service_is_replaced():
     service = await asyncio.create_subprocess_exec("sleep", "60")
-    await LiveKitRuntime._retire_stale_service(_Service({"owner": None, "pid": service.pid}))
+    await LiveKitRuntime._retire_stale_service(
+        _Service({"owner": None, "pid": service.pid}), runtime_ready=False
+    )
     assert await asyncio.wait_for(service.wait(), 5) == -signal.SIGTERM
 
 
@@ -202,12 +205,77 @@ async def test_an_older_kollab_voice_service_in_use_keeps_running():
     try:
         with pytest.raises(RuntimeHostError) as err:
             await LiveKitRuntime._retire_stale_service(
-                _Service({"owner": "cli:abc", "pid": service.pid})
+                _Service({"owner": "cli:abc", "pid": service.pid}), runtime_ready=False
             )
         assert err.value.code == "voice_service_busy" and service.returncode is None
     finally:
         service.kill()
         await service.wait()
+
+
+OTHER_CODE = {"path": "/older/kollab/kollabor_voice", "code": "0123456789abcdef"}
+
+
+@pytest.mark.parametrize("install", [OTHER_CODE, None], ids=["other code", "says no install"])
+async def test_an_idle_voice_service_running_other_code_is_replaced(install):
+    """This Kollab's runtime, but the code of the Kollab that started it (0.18.4 had to be stopped by hand)."""
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    status = {"owner": None, "pid": service.pid}
+    if install:
+        status["install"] = install
+    await LiveKitRuntime._retire_stale_service(_Service(status), runtime_ready=True)
+    assert await asyncio.wait_for(service.wait(), 5) == -signal.SIGTERM
+
+
+@pytest.mark.parametrize(
+    "owner, install",
+    [(None, "ours"), ("livekit:voice-in-another-chat", OTHER_CODE)],
+    ids=["this code", "in use"],
+)
+async def test_a_voice_service_with_this_code_or_in_use_keeps_running(owner, install):
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    try:
+        status = {
+            "owner": owner,
+            "pid": service.pid,
+            "install": install_identity() if install == "ours" else install,
+        }
+        await LiveKitRuntime._retire_stale_service(_Service(status), runtime_ready=True)
+        await asyncio.sleep(0.2)
+        assert service.returncode is None
+    finally:
+        service.kill()
+        await service.wait()
+
+
+async def test_a_voice_start_replaces_a_service_with_other_code_before_ensure(
+    rig, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KOLLAB_VOICE_ROOT", str(tmp_path))
+    monkeypatch.delenv("KOLLAB_VOICE_PYTHON", raising=False)
+    monkeypatch.setattr(rig.runtime, "_binary", lambda: "/usr/local/bin/livekit-server")
+    _prepare_runtime(tmp_path)
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    status = {"owner": None, "pid": service.pid, "install": OTHER_CODE}
+
+    async def call(client, op):
+        return status
+
+    ensured = []
+
+    async def ensure(client, progress):
+        try:
+            os.kill(service.pid, 0)
+            ensured.append("still running")
+        except ProcessLookupError:
+            ensured.append("gone")  # before ensure() starts this Kollab's
+        return {"state": "off"}
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+    monkeypatch.setattr(VoiceClient, "ensure", ensure)
+    await rig.runtime.ensure_runtime(lambda detail: None)
+    assert ensured == ["gone"]
+    assert await asyncio.wait_for(service.wait(), 5) == -signal.SIGTERM
 
 
 # --- thread validation ---

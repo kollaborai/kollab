@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -43,6 +44,19 @@ def atomic_json(path: Path, value: dict) -> None:
 
 def manifest() -> dict:
     return json.loads(Path(__file__).with_name("manifest.json").read_text())
+
+
+def install_identity() -> dict:
+    """Which kollabor_voice this process runs: its directory and a digest of its code.
+
+    The service imports this package from the Kollab that started it and keeps
+    that code until it exits, so a different digest means other code is installed.
+    """
+    package = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package.glob("*.py")) + [package / "manifest.json"]:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    return {"path": str(package), "code": digest.hexdigest()[:16]}
 
 
 class VoiceError(RuntimeError):

@@ -239,3 +239,25 @@ async def test_voice_command_has_no_classifier_surface(voice):
     assert not {p for p in paths if "classifier" in p}
     status = await handler.handle_voicemode(SimpleNamespace(args=["status"]))
     assert status.success and "lassifier" not in status.message
+
+
+@pytest.mark.asyncio
+async def test_voice_status_says_which_install_the_service_runs(voice, monkeypatch):
+    from kollabor_voice.client import VoiceClient
+
+    state, _, _ = voice
+    handler = VoiceModeCommandHandler(
+        SimpleNamespace(register_command=lambda _: None), state._event_bus
+    )
+    install = {"path": "/Applications/Kollab/kollabor_voice", "code": "0123456789abcdef"}
+
+    async def call(client, op):
+        return {"pid": 4242, "owner": None, "install": install}
+
+    monkeypatch.setattr(VoiceClient, "call", call)
+    status = await handler.handle_voicemode(SimpleNamespace(args=["status"]))
+    lines = status.message.splitlines()
+    assert lines[1:3] == [
+        "Service: 4242 · owner: none",
+        "Service code: /Applications/Kollab/kollabor_voice · 0123456789abcdef",
+    ]
