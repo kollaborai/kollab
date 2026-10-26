@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-10-26
+
+### Fixed
+- Voice in the Web UI connects after the chat's agent restarts. It stayed on
+  "Starting" until the Web UI was restarted: an earlier voice room still held
+  the voice service, which then reported itself as starting, so the new room
+  waited for 20 minutes and gave up (#333).
+
 ## [0.18.3] - 2026-10-26
 
 ### Fixed
