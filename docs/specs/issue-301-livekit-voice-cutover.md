@@ -40,6 +40,31 @@ them, and no voice screen shows classifier controls, status or decisions.
   stop counts. The browser leaves the room and frees the mic on that state, and
   the next start makes a fresh session. The Engine waits up to 1260 s for a
   worker to join, past the worker's own 1200 s wait for its models.
+- A room its user left ends as a stop does (`disconnect`). A page that goes away
+  without its stop (a crashed or killed browser, a sleeping laptop, a lost
+  network) left its worker running, holding the voice service's lease until the
+  Engine exited. The Engine asks the server who is in the room every
+  5 s (RoomService `ListParticipants`, `LiveKitRuntime.wait_abandoned`); once no
+  `user-` participant has been in it for 60 s, counted from the worker joining,
+  it stops the worker, which gives the lease back, and the session is stopped.
+  The server first has to notice a dead page gone: a killed browser's session
+  stopped 84 s after it closed in a live run. A server that cannot answer
+  counts as the user still there. The worker keeps
+  its AgentSession when the user leaves (`close_on_disconnect` off), so a page
+  that starts voice again within the 60 s gets the same session from create
+  and rejoins the room. Joining changes nothing in the room, so the worker says
+  its state again when a page joins after the greeting (`Worker._joined`);
+  without it the page shows Connecting until the user speaks.
+- The voice service runs the `kollabor_voice` of the Kollab that started it
+  (`VoiceClient.launch` puts that install on its `PYTHONPATH`) until it exits,
+  across app and Engine restarts. Its `status` says which: `install` is the
+  package's path and `code`, a digest of its `.py` files and manifest
+  (`control.install_identity`), which `/voice status` shows as Service code.
+  Before `ensure()`, a voice start replaces an idle service (no owner) whose
+  code is not this Kollab's, or whose runtime this Kollab has not prepared.
+  One a chat is using is left alone: with the runtime prepared the new room
+  speaks through it as it is, and without it the start says voice is on in
+  another chat.
 - A reply stream that breaks mid-turn ends the turn on both sides: the worker
   reports `turn_incomplete` (retryable), and a fault in the Engine's stream
   still cancels the session turn (only that turn, as a talk-over does) and

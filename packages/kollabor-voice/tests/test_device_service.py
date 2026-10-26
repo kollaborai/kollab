@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,7 @@ import pytest_asyncio
 from kollabor_voice import service as service_module
 from kollabor_voice.audio import AudioSegment, SpeechSegmenter
 from kollabor_voice.client import VoiceClient
-from kollabor_voice.control import VoiceError, manifest
+from kollabor_voice.control import VoiceError, install_identity, manifest
 from kollabor_voice.observer import AdmissionStore
 from kollabor_voice.output import SpeechQueue, sentences
 from kollabor_voice.service import VoiceService
@@ -126,6 +127,41 @@ def test_client_has_no_heavy_startup_imports():
         "assert not set(['numpy','faster_whisper','sounddevice','kokoro_onnx']) & set(sys.modules)"
     )
     subprocess.run([sys.executable, "-S", "-c", script], check=True)
+
+
+@pytest.mark.asyncio
+async def test_status_says_which_install_the_service_runs(service, root):
+    status = await VoiceClient(root).call("status")
+    package = Path(service_module.__file__).resolve().parent
+    assert status["install"] == service.install == install_identity()
+    assert status["install"]["path"] == str(package)
+    assert len(status["install"]["code"]) == 16
+
+
+def test_install_code_follows_the_code_not_the_path(tmp_path):
+    """The same code anywhere is one install; an edited file is another."""
+    package = Path(service_module.__file__).resolve().parent
+    copy = tmp_path / "kollabor_voice"
+    copy.mkdir()
+    for path in [*package.glob("*.py"), package / "manifest.json"]:
+        shutil.copy(path, copy / path.name)
+
+    def identity():
+        script = (
+            f"import sys,json;sys.path.insert(0,{str(tmp_path)!r});"
+            "from kollabor_voice.control import install_identity;"
+            "print(json.dumps(install_identity()))"
+        )
+        run = subprocess.run(
+            [sys.executable, "-S", "-c", script], check=True, capture_output=True, text=True
+        )
+        return json.loads(run.stdout)
+
+    copied = identity()
+    assert copied == {"path": str(copy.resolve()), "code": install_identity()["code"]}
+    with (copy / "service.py").open("a") as handle:
+        handle.write("\n# a newer Kollab\n")
+    assert identity()["code"] != copied["code"]
 
 
 def test_manifest_contains_complete_hashes():

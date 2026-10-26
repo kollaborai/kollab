@@ -291,6 +291,7 @@ class FakeRoom:
         self.connected = self.output = None
         self.is_closed = False
         self.order = []
+        self.joins = []
 
     async def connect(self, url, token):
         self.connected = (url, token)
@@ -304,6 +305,14 @@ class FakeRoom:
 
     async def wait_participant(self):
         await self.participant.wait()
+
+    def on_join(self, callback):
+        self.joins.append(callback)
+
+    def join(self):  # a page joins the room
+        self.participant.set()
+        for callback in self.joins:
+            callback()
 
     async def close(self):
         self.is_closed = True
@@ -816,6 +825,31 @@ def test_greeting_on_join():
     assert "stt" not in stages and {"first_audio", "llm_first_token"} <= stages
 
 
+def test_a_page_that_comes_back_hears_the_rooms_state():
+    """A reload rejoins a room whose state its joining does not change: it is said again."""
+    hello = "Hey there."
+
+    def said(rig):
+        return [e["payload"]["state"] for e in events(rig.poster, "voice.state")]
+
+    async def scenario():
+        async with Rig(scripts=[[hello, "done"]], tts_chunks=5) as rig:
+            await asyncio.sleep(0.1)
+            first = len(said(rig))
+            rig.room.join()
+            await until(lambda: rig.adapter.spoken == [hello])
+            await until(lambda: said(rig)[-1] == "listening")
+            greeting = said(rig)[first:]
+            back = len(said(rig))
+            rig.room.join()  # the page reloads
+            await until(lambda: len(said(rig)) > back)
+            return greeting, said(rig)[back:]
+
+    greeting, rejoined = run(scenario())
+    assert greeting[0] == "thinking"  # the first join is greeted, not told the state twice
+    assert rejoined == ["listening"]
+
+
 def test_the_production_turn_detector_runs_a_session_and_a_greeting():
     hello = "Hey there."
 
@@ -1001,3 +1035,18 @@ def test_config_loads_from_env_and_the_poster_never_raises():
     )
     unreachable = lw.WorkerConfig("ws://x", "j", "r", "s", 1, "http://127.0.0.1:9", "t")
     assert run(lw.EnginePoster(unreachable).post("events", {})) is False
+
+
+def test_a_room_keeps_its_session_when_its_user_leaves():
+    """A user who leaves may be reloading: the Engine ends a room they stay gone from."""
+    started = {}
+
+    class Session:
+        async def start(self, **kwargs):
+            started.update(kwargs)
+
+    async def attach():  # rtc.Room wants a running loop
+        await lw.LiveKitRoom().attach(Session(), agent=None)
+
+    run(attach())
+    assert started["room_options"].close_on_disconnect is False

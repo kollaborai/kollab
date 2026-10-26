@@ -455,6 +455,9 @@ class LiveKitRoom:
                     sample_rate=PLAY_RATE, num_channels=1
                 ),
                 text_input=False,
+                # A user who leaves may be reloading the page: the Engine ends a room
+                # its user has not come back to in time (wait_abandoned).
+                close_on_disconnect=False,
             ),
         )
 
@@ -463,6 +466,9 @@ class LiveKitRoom:
         self.room.on("participant_connected", lambda *_: arrived.set())
         if not self.room.remote_participants:
             await arrived.wait()
+
+    def on_join(self, callback) -> None:
+        self.room.on("participant_connected", lambda *_: callback())
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -643,6 +649,7 @@ class Worker:
             self.greeting_task = asyncio.create_task(
                 self.greet(), name="voice-greeting"
             )
+            self.room.on_join(self._joined)
             waits = [
                 asyncio.create_task(self.stopping.wait()),
                 asyncio.create_task(self.room.closed.wait()),
@@ -699,6 +706,13 @@ class Worker:
     def _agent_state(self, event) -> None:
         self.agent_state = event.new_state
         self._show()
+
+    def _joined(self) -> None:
+        # A page that comes back (a reload) shows "Connecting" until it hears the
+        # room's state, which its joining does not change; the first join's greeting does.
+        if self.greeting_task is not None and self.greeting_task.done():
+            self.shown = None
+            self._show()
 
     def _show(self) -> None:
         if self.user_speaking:

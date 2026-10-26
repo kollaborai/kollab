@@ -173,8 +173,9 @@ class EngineRuntimeHost:
         self._sessions: dict[VoiceSessionId, _SessionRecord] = {}
         self._active_by_key: dict[tuple[str, str, str, str | None, str], VoiceSessionId] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
-        # One per running worker; not background tasks, since they last as long as it does.
-        self._exit_watches: set[asyncio.Task[None]] = set()
+        # A running worker's exit and its room's user; not background tasks, since
+        # they last as long as it does.
+        self._worker_watches: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
     async def prepare(self) -> RuntimeStatus:
@@ -450,7 +451,7 @@ class EngineRuntimeHost:
                     self._fence_record_locked(current, reason="shutdown")
 
         await self.wait_for_background_tasks()
-        for task in tuple(self._exit_watches):
+        for task in tuple(self._worker_watches):
             task.cancel()  # only a worker whose stop failed is still running
         async with self._lock:
             failed_stops = tuple(
@@ -694,9 +695,10 @@ class EngineRuntimeHost:
                 record.retryable = False
                 wait_exited = getattr(self._runtime, "wait_exited", None)
                 if wait_exited is not None:
-                    task = asyncio.create_task(self._end_on_exit(binding, handle, wait_exited))
-                    self._exit_watches.add(task)
-                    task.add_done_callback(self._exit_watches.discard)
+                    self._watch_worker(self._end_on_exit(binding, handle, wait_exited))
+                wait_abandoned = getattr(self._runtime, "wait_abandoned", None)
+                if wait_abandoned is not None:
+                    self._watch_worker(self._end_when_abandoned(binding, handle, wait_abandoned))
                 return
             expected_generation = record.generation if record is not None else binding.generation + 1
             reason = record.stop_reason if record is not None else "shutdown"
@@ -739,6 +741,33 @@ class EngineRuntimeHost:
                     self._active_by_key.pop(record.idempotency_key, None)
         with contextlib.suppress(Exception):
             await self._runtime.stop_session(binding, handle, "error")  # the backend lets go of it
+
+    async def _end_when_abandoned(
+        self,
+        binding: VoiceSessionBinding,
+        handle: object,
+        wait_abandoned: Callable[[VoiceSessionBinding, object], Awaitable[bool]],
+    ) -> None:
+        """A room its user left, and did not come back to in time, ends as a stop does.
+
+        A closed or reloaded page sends no stop, and its worker would keep running
+        and keep the voice service's lease. Until then create hands this session
+        back, so a reload that starts voice again rejoins the room.
+        """
+        if not await wait_abandoned(binding, handle):
+            return  # the worker exited first: _end_on_exit has it
+        record = self._sessions.get(binding.voice_session_id)
+        if record is None:
+            return
+        async with record.operation_lock:
+            async with self._lock:
+                if record.handle is handle:  # else a stop, switch or exit took it first
+                    self._fence_record_locked(record, reason="disconnect")
+
+    def _watch_worker(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coroutine)
+        self._worker_watches.add(task)
+        task.add_done_callback(self._worker_watches.discard)
 
     async def _stop_handle(
         self,
