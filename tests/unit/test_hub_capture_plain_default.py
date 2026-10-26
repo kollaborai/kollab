@@ -158,7 +158,8 @@ class TestCaptureCommandTranscriptDefault(unittest.TestCase):
         plugin = _make_plugin()
         result = _run(plugin._handle_capture_command(""))
         self.assertEqual(
-            result, "usage: /hub capture <identity|name|all> [lines] [--raw]"
+            result,
+            "usage: /hub capture <identity|name|all> [lines] [--raw] [--allow-cross-device]",
         )
 
 
@@ -306,7 +307,9 @@ class TestHubCaptureToolTranscriptDefault(unittest.TestCase):
         plugin = _make_plugin()
         seen = {}
 
-        async def _fake_capture_target(target, lines, *, capture_format="json"):
+        async def _fake_capture_target(
+            target, lines, *, capture_format="json", allow_cross_device=False
+        ):
             seen["target"] = target
             seen["lines"] = lines
             seen["capture_format"] = capture_format

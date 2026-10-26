@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
+  redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
+  shows them. Capturing an agent on another device needs
+  `--allow-cross-device` and that device's trust, and the `hub_capture` tool
+  asks permission (#340).
+
+### Fixed
+- With an ACP profile, input from agent and skill generation and other
+  internal callers goes through ACP admission instead of the native queue; an
+  unavailable ACP is refused. Agent and skill generation, which need the
+  native tools, say so and keep the form open (#340).
+
 ## [0.18.5] - 2026-10-26
 
 ### Fixed

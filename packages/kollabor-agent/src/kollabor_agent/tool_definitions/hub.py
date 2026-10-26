@@ -324,13 +324,17 @@ hub_agents = ToolDefinition(
 
 hub_capture = ToolDefinition(
     name="hub-capture",
-    description="View an agent's recent activity as a readable transcript by default.",
+    description=(
+        "View an agent's recent activity as a readable transcript by default, "
+        "credentials redacted. An agent on another device (agent@device) needs "
+        "allow_cross_device=true and that device's trust."
+    ),
     category="hub",
-    risk_level="low",
-    requires_permission=False,
+    risk_level="high",
+    requires_permission=True,
     xml_tag="hub_capture",
     xml_form="attributes",
-    xml_attributes=["name", "lines", "format"],
+    xml_attributes=["name", "lines", "format", "raw", "allow_cross_device"],
     parameters=[
         ToolParameter(
             name="name",
@@ -351,6 +355,18 @@ hub_capture = ToolDefinition(
                 "Output format: 'transcript' (default), 'plain' (text without "
                 "transcript labels), or 'terminal' (raw terminal rendering)"
             ),
+            required=False,
+        ),
+        ToolParameter(
+            name="raw",
+            type="boolean",
+            description="Raw terminal capture, unredacted (same as format='terminal')",
+            required=False,
+        ),
+        ToolParameter(
+            name="allow_cross_device",
+            type="boolean",
+            description="Allow capturing an agent@device on another computer",
             required=False,
         ),
     ],

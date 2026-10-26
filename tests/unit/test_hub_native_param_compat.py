@@ -73,7 +73,9 @@ class TestHubNativeParamCompat(unittest.TestCase):
         plugin = _make_plugin()
         calls = []
 
-        async def _fake_capture_target(target, lines, *, capture_format="json"):
+        async def _fake_capture_target(
+            target, lines, *, capture_format="json", allow_cross_device=False
+        ):
             calls.append((target, lines, capture_format))
             return SimpleNamespace(text="captured", error=None, success=True)
 
@@ -96,7 +98,9 @@ class TestHubNativeParamCompat(unittest.TestCase):
         plugin = _make_plugin()
         calls = []
 
-        async def _fake_capture_target(target, lines, *, capture_format="json"):
+        async def _fake_capture_target(
+            target, lines, *, capture_format="json", allow_cross_device=False
+        ):
             calls.append((target, lines, capture_format))
             return SimpleNamespace(text="captured", error=None, success=True)
 

@@ -10,6 +10,28 @@ _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WRAPPER = re.compile(r"^\[(?:hub_capture|capture(?::[^\]]*)?)\]\s*")
+# A PEM block, or its tail when a bound cut it before the END line.
+_PEM = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+# NAME=value where the name says it holds a credential (.env lines, exports).
+_SECRET_ASSIGNMENT = re.compile(
+    r"\b([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Za-z0-9_]*"
+    r"\s*=\s*)(\"[^\"\n]*\"|'[^'\n]*'|[^\s'\"]+)",
+    re.IGNORECASE,
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Hide credentials a captured transcript may show: key files, NAME=secret
+    lines and the provider/header patterns the log redactor knows. Raw terminal
+    capture (``--raw``) is the one view that keeps them."""
+    from kollabor_ai.providers.security import LoggingRedactor
+
+    text = _PEM.sub("[REDACTED PRIVATE KEY]", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", text)
+    return LoggingRedactor.redact(text)
 
 
 def normalize_text(value: Any) -> str:
@@ -463,7 +485,13 @@ def _bounded_transcript(
     return "\n".join(visible)
 
 
-def render_transcript(
+def render_transcript(capture: Any, **bounds: Any) -> str:
+    """Render structured hub captures as a bounded, readable transcript with
+    credentials redacted (``redact_secrets``)."""
+    return redact_secrets(_render_transcript(capture, **bounds))
+
+
+def _render_transcript(
     capture: Any,
     *,
     identity: str | None = None,
