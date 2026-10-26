@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-10-26
+
+### Fixed
+- Voice in Trust All runs tools as a typed turn does. It asked for a spoken yes
+  before each command and refused anything off the voice list, though Trust All
+  means no approvals (#331).
+- Voice: a yes in your own words counts, such as "Yes, run it." or "Okay, you
+  don't have to ask, just do it". Only a bare "yes" did, so the agent kept asking.
+  "Thanks" is still no yes, and a yes with a new request is a normal turn (#331).
+- Voice: a recursive `grep` inside the project (`grep -rn`, `--include=`) runs
+  as a read-only command instead of being refused (#331).
+
 ## [0.18.2] - 2026-10-25
 
 ### Fixed

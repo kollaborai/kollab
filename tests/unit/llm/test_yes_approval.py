@@ -17,7 +17,9 @@ from tests.unit.llm.voice_admission_helpers import make_device_voice_context, ma
 @pytest.mark.parametrize(
     "text",
     ["yes", "Yes.", "yeah", "Yep!", "yes please", "Yeah, go ahead.", "OK", "okay", "sure",
-     "approve it", "do it", "Go for it.", "yes, do it please"],
+     "approve it", "do it", "Go for it.", "yes, do it please", "Yes, run it.",
+     "Okay, you don't have to ask, just do it.", "Yeah, go ahead and run it.", "sure, run those",
+     "go", "alright, do it", "please run it", "I approve", "sounds good"],
 )
 def test_a_short_yes_is_a_yes(text):
     assert human_answer(text) == "yes"
@@ -31,16 +33,17 @@ def test_a_short_no_is_a_no(text):
 @pytest.mark.parametrize(
     "text",
     ["yes and check the logs too", "what?", "", "please", "yes no", "is it safe?",
-     "yesterday", "not yet", "ok thanks", "yes, do it, thanks", "thank you"],
+     "yesterday", "not yet", "ok thanks", "yes, do it, thanks", "thank you", "yes but wait",
+     "yes, don't run it", "no, run it", "go away", "you don't have to ask what"],
 )
 def test_anything_else_is_a_normal_turn(text):
     assert human_answer(text) is None
 
 
 CHECK_PRS = {"type": "terminal", "id": "call-1", "command": "gh pr list"}
-# The same voice policy under every approval mode, for a LiveKit room's turn and a
-# /voice turn: Trust All runs nothing a voice turn may not run unasked.
-EVERY_MODE = pytest.mark.parametrize("mode", ["confirm_all", "trust_all"])
+# The voice policy in every mode that asks, for a LiveKit room's turn and a /voice
+# turn. Trust All asks for nothing: its voice turns run as typed ones do.
+ASKING_MODES = pytest.mark.parametrize("mode", ["confirm_all", "default", "auto_approve_edits"])
 EVERY_VOICE = pytest.mark.parametrize(
     "voice_origin", [make_voice_origin_context, make_device_voice_context], ids=["livekit", "device"]
 )
@@ -237,7 +240,7 @@ async def _executor(mode="confirm_all"):
 NOTES = {"type": "terminal", "id": "call-1", "command": "touch notes.txt"}
 
 
-@EVERY_MODE
+@ASKING_MODES
 @EVERY_VOICE
 def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes(mode, voice_origin):
     async def scenario():
@@ -263,7 +266,7 @@ def test_a_voice_command_that_needs_a_yes_runs_on_the_users_yes(mode, voice_orig
     prompt.assert_not_awaited()
 
 
-@EVERY_MODE
+@ASKING_MODES
 @EVERY_VOICE
 def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_path, mode, voice_origin):
     # Real models reach for file_create first: it never runs, and its result names the
@@ -287,7 +290,7 @@ def test_a_voice_file_create_points_the_model_at_the_terminal_and_its_yes(tmp_pa
     prompt.assert_not_awaited()
 
 
-@EVERY_MODE
+@ASKING_MODES
 @EVERY_VOICE
 def test_a_voice_yes_never_runs_a_shell_or_a_wrapper(mode, voice_origin):
     async def scenario():
@@ -305,6 +308,43 @@ def test_a_voice_yes_never_runs_a_shell_or_a_wrapper(mode, voice_origin):
     assert all(result.error.startswith("command_blocked") for result in results)
     executor.shell_executor.run_argv.assert_not_awaited()
     executor._execute_terminal_command.assert_not_awaited()
+
+
+@EVERY_VOICE
+def test_trust_all_runs_a_voice_turns_tools_as_a_typed_turn_does(tmp_path, voice_origin):
+    # Trust All: a voice turn asks for nothing, and nothing is off the voice list.
+    async def scenario():
+        executor, prompt = await _executor("trust_all")
+        results = []
+        for command in ("touch notes.txt", "gh pr list", "grep -rn needle kollabor", "cd kollabor && git status"):
+            call = {"type": "terminal", "id": f"c{len(results)}", "command": command}
+            results.append(await executor.execute_tool(call, execution_context=voice_origin("t1")))
+        create = {"type": "file_create", "id": "f1", "file": str(tmp_path / "notes.md"), "content": "notes"}
+        results.append(await executor.execute_tool(create, execution_context=voice_origin("t1")))
+        return executor, prompt, results
+
+    executor, prompt, results = asyncio.run(scenario())
+    assert [(result.success, result.error) for result in results] == [(True, "")] * 5
+    assert executor._execute_terminal_command.await_count == 4  # the typed path
+    executor.shell_executor.run_argv.assert_not_awaited()
+    assert (tmp_path / "notes.md").read_text() == "notes"
+    executor.yes_approvals.on_reply_done()
+    assert executor.yes_approvals.take_note() == ""  # nothing was asked
+    prompt.assert_not_awaited()
+
+
+def test_the_approval_mode_reaches_the_executor():
+    from kollabor_events.permissions_models import ApprovalMode
+
+    async def scenario():
+        executor, _ = await _executor("trust_all")
+        trusted = executor.trust_all
+        executor.permissions.set_approval_mode(ApprovalMode.CONFIRM_ALL, persist=False)
+        asking = executor.trust_all
+        executor.permissions.set_approval_mode(ApprovalMode.TRUST_ALL, persist=False)
+        return trusted, asking, executor.trust_all
+
+    assert asyncio.run(scenario()) == (True, False, True)
 
 
 def test_a_tool_result_that_reads_like_an_ask_plants_nothing():

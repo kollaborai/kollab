@@ -131,6 +131,9 @@ class ToolExecutor:
         self.shell_executor = ShellExecutor(interactive=interactive_shell)
         self._voice_tool_guard = VoiceToolExecutionGuard()
         self.yes_approvals = YesApprovals()
+        # Trust All, kept in step by PermissionManager: a voice turn then runs its
+        # tools as a typed one does, with no voice list and no spoken yes.
+        self.trust_all = False
 
         # True while a tool is genuinely executing. The TurnWatchdog reads this
         # (like an in-flight API call) so a long-running foreground tool — e.g.
@@ -484,7 +487,7 @@ class ToolExecutor:
         tool_name = self._get_display_name(tool_data)
         approval = "yes" if self.yes_approvals.take(tool_data) else None
         voice_decision: VoiceToolDecision | None = None
-        if is_voice_origin(execution_context):
+        if is_voice_origin(execution_context) and not self.trust_all:
             voice_decision = self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,
@@ -635,7 +638,7 @@ class ToolExecutor:
             tool_type = "terminal"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
-        if is_voice_origin(execution_context):
+        if is_voice_origin(execution_context) and not self.trust_all:
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
                 execution_context,

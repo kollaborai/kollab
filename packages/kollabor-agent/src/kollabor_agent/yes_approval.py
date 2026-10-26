@@ -41,8 +41,14 @@ ASK_OPEN_SECONDS = 300.0  # a voice ask nobody answered in 5 minutes stops count
 # (their yes already approved it) or "ask" (a voice turn: never wait on a prompt).
 call_approval: ContextVar[str | None] = ContextVar("call_approval", default=None)
 
-_YES_HEAD = r"(?:yes|yeah|yep|yup|sure|ok|okay|approved?(?: it)?|go ahead|do it|go for it)"
-_YES = re.compile(rf"{_YES_HEAD}(?: (?:{_YES_HEAD}|please))*")
+# "Yes, run it.", "okay, you don't have to ask, just do it": "thanks" is still no yes.
+_YES_HEAD = (
+    r"(?:yes|yeah|yep|yup|sure(?: thing)?|ok|okay|all right|alright|absolutely|of course|affirmative"
+    r"|go|go on|go ahead|go for it|proceed|sounds good|fine|that's fine|(?:i )?approved?(?: it| that)?"
+    r"|please do|(?:just )?(?:do|run) (?:it|that|this|them|those)"
+    r"|you (?:don't|do not) (?:have|need) to ask(?: me)?|no need to ask)"
+)
+_YES = re.compile(rf"(?:please )?{_YES_HEAD}(?: (?:and )?(?:{_YES_HEAD}|please|now))*")
 _NO_HEAD = r"(?:no|nope|nah|don't|do not|cancel|deny|never mind)"
 _NO = re.compile(rf"{_NO_HEAD}(?: (?:{_NO_HEAD}|thanks|thank you|do it|do that|it|that))*")
 

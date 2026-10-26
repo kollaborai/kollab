@@ -53,8 +53,11 @@ _READ_ONLY_SEARCH_FLAGS = frozenset(
         "--word-regexp",
         "--hidden",
         "--no-heading",
+        "-r",  # grep: recursive, never following a symlink it meets (rg: --replace, output only)
+        "--recursive",
     }
 )
+_READ_ONLY_SEARCH_FILTERS = ("--include=", "--exclude=", "--exclude-dir=", "--glob=")
 _HARD_BLOCKED_COMMANDS = frozenset(
     {
         "sudo",
@@ -491,8 +494,10 @@ def _is_read_only_action(argv: Sequence[str], cwd: Path, root: Path) -> bool:
     if executable in {"rg", "grep"}:
         positional: list[str] = []
         for token in argv[1:]:
-            if token in _READ_ONLY_SEARCH_FLAGS:
+            if token in _READ_ONLY_SEARCH_FLAGS or token.startswith(_READ_ONLY_SEARCH_FILTERS):
                 continue
+            if re.fullmatch(r"-[A-Za-z]{2,}", token) and all(f"-{c}" in _READ_ONLY_SEARCH_FLAGS for c in token[1:]):
+                continue  # "-rn": those short flags written together
             if token.startswith("-"):
                 return False
             positional.append(token)

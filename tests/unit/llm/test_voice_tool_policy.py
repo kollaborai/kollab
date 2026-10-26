@@ -107,6 +107,27 @@ def test_voice_policy_allows_only_repo_rooted_read_only_terminal_plan(tmp_path: 
     assert decision.plan.canonical_cwd == tmp_path.resolve()
 
 
+@pytest.mark.parametrize(
+    "command", ["grep -rn needle src", "grep -r -i needle src --include=*.py", "rg -n needle src --glob=*.md"]
+)
+def test_a_recursive_search_inside_the_project_is_read_only(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)}, _voice_context(), repository_root=tmp_path
+    )
+    if shutil.which(command.split()[0], path="/usr/bin:/bin") is None:
+        assert decision.reason_code == "confirmation_required"  # off the system path: asks
+    else:
+        assert decision.allowed is True and decision.plan.classification == "read_only"
+
+
+@pytest.mark.parametrize("command", ["grep -rn needle /etc", "grep -R needle src", "grep -rn --file=/etc/x src"])
+def test_a_search_that_leaves_the_project_or_follows_links_is_not_read_only(tmp_path: Path, command: str):
+    decision = VoiceToolExecutionGuard().evaluate(
+        {"type": "terminal", "command": command, "cwd": str(tmp_path)}, _voice_context(), repository_root=tmp_path
+    )
+    assert decision.allowed is False and decision.reason_code == "not_by_voice"
+
+
 def test_voice_policy_rejects_workspace_escape(tmp_path: Path):
     decision = VoiceToolExecutionGuard().evaluate(
         {"type": "terminal", "command": "pwd", "cwd": str(tmp_path.parent)},
