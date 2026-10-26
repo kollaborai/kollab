@@ -154,7 +154,7 @@ class VoiceModeCommandHandler(BaseCommandHandler):
             f"Voice {state.get('state', 'off').replace('_', ' ').title()}",
             f"Service: {state.get('pid') or 'not running'} · owner: {state.get('owner') or 'none'}",
             *([f"Service code: {install.get('path')} · {install.get('code')}"] if install else []),
-            f"Transcription:{STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
+            f"Transcription: {STT_ENGINES.get(transcription.get('engine'), 'not loaded')}"
             f" · {transcription.get('state', 'off')}",
             f"Speech: {TTS_ENGINES.get(speech_engine, speech_engine) or 'not loaded'} · "
             f"{state.get('speech', {}).get('voice') or 'no voice'} · "
