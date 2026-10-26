@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
   redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
-  shows them. Capturing an agent on another device needs
-  `--allow-cross-device` and that device's trust, and the `hub_capture` tool
-  asks permission (#340).
+  shows them. The `hub_capture` tool asks permission (#340).
+- Capture works across devices: `agent@device` on one of this network's
+  devices is captured through the network attach, as that device's trust
+  allows. A contact's agents (a knock) are never capturable.
+  `plugins.hub.disallow_cross_device_capture` (off by default) turns
+  cross-device capture off on this device (#340).
 
 ### Fixed
 - With an ACP profile, input from agent and skill generation and other
