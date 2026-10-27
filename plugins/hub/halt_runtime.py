@@ -685,7 +685,8 @@ class HaltListener:
             if op == "members":
                 return {"ok": True, "members": await link.hub_halt_members()}
             if op == "status":
-                return {"ok": True, "acked": link.acked(), "members": await link.hub_halt_members()}
+                return {"ok": True, "acked": link.acked(), "online": sorted(link.online()),
+                        "members": await link.hub_halt_members()}
             result = await link.hub_halt_act(str(request.get("action")), request.get("payload") or {})
             await self.tick()
             return {"ok": True, **result}
@@ -776,6 +777,12 @@ class HaltListener:
             if flush is not None:  # tell the members online the halt is lifted before leaving the relay
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(flush(), HAND_BACK_FLUSH_SECONDS)
+                book = (read_halt(self.root).get("networks") or {}).get(net)
+                if _book_active(net, book):
+                    # `resume --local`: a member still holds the halt and the flush brought it
+                    # back; stay halted with the link instead of lifting the scope (found in Docker)
+                    self.links[net] = link
+                    return
             await link.close()  # releases the relay-owner lock
         if mark:
             def lift(data: dict) -> None:
@@ -997,9 +1004,11 @@ def parse_flags(rest: list[str], flags: dict[str, bool]) -> dict[str, Any]:
     return out
 
 
-def member_lines(members: list[dict], acked: Iterable[str], own_folder: str, stopped: int) -> list[str]:
+def member_lines(
+    members: list[dict], acked: Iterable[str], own_folder: str, stopped: int, online: Iterable[str] = ()
+) -> list[str]:
     """One line per member; one that has not answered is never printed as done."""
-    acked = set(acked)
+    acked, online = set(acked), set(online)
     lines = []
     for m in members:
         name = m.get("name") or m.get("folder", "")[:8]
@@ -1007,6 +1016,8 @@ def member_lines(members: list[dict], acked: Iterable[str], own_folder: str, sto
             lines.append(f"{name}: halted, {stopped} agents stopped")
         elif m.get("folder") in acked:
             lines.append(f"{name}: halted")
+        elif m.get("folder") in online:
+            lines.append(f"{name}: halted, ack pending")
         else:
             lines.append(f"{name}: offline, halts on reconnect")
     return lines
@@ -1061,7 +1072,8 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
         print(f"Halt {str(act.get('hash', ''))[:8]} recorded.")
         status = await _await_acks(folder, root)
         for line in member_lines(status.get("members") or control.halt_members(), status.get("acked") or [],
-                                 control.client.public_key, int(reply.get("count") or 0)):
+                                 control.client.public_key, int(reply.get("count") or 0),
+                                 status.get("online") or []):
             print(line)
         return 0
     if opts.get("local"):
@@ -1097,14 +1109,21 @@ async def _act(folder: str, control, action: str, payload: dict, root: Path | No
     return control.halt_act(action, payload)
 
 
-async def _await_acks(folder: str, root: Path | None, seconds: float = 10.0) -> dict:
-    deadline = time.monotonic() + seconds
+async def _await_acks(folder: str, root: Path | None, seconds: float = 10.0, online_seconds: float = 40.0) -> dict:
+    """Wait ``seconds`` for acks; keep waiting up to ``online_seconds`` while a member that is online has not acked."""
+    start = time.monotonic()
     status: dict = {}
-    while time.monotonic() < deadline:
+    while True:
         with contextlib.suppress(OSError, ValueError, asyncio.TimeoutError):
             status = await sock_call({"op": "status", "folder": folder}, root, timeout=5.0)
         members = status.get("members") or []
-        if members and len(set(status.get("acked") or [])) >= len(members) - 1:
+        acked = set(status.get("acked") or [])
+        online = set(status.get("online") or [])
+        pending = [m for m in members if m.get("folder") in online and m.get("folder") not in acked]
+        elapsed = time.monotonic() - start
+        if members and len(acked) >= len(members) - 1:
+            break
+        if elapsed >= (online_seconds if pending else seconds):
             break
         await asyncio.sleep(1.0)
     return status

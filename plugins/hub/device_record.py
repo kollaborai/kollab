@@ -337,11 +337,10 @@ def migrate_legacy_network_state(
     target_dir = workspace_dir(workspace, root) / NETWORKS_DIR_NAME / (slug or "unjoined")
     if target_dir.exists():
         return False  # already migrated by an earlier run
-    _ensure_private_dir(target_dir)
-    if state_path.exists():
-        _write_private(target_dir / "state.json", _read_private(state_path, 65536))
-    _write_private(target_dir / "device.key", _read_private(key_path, 128))
-    _copy_private_records(legacy / "private", target_dir / "private")
+    _ensure_private_dir(target_dir.parent)
+    # Move the whole folder (sqlite stores, enrollment files, private records), never copy a
+    # part: a copy left two layouts that drifted apart (found in Docker, kill switch D3).
+    os.replace(legacy, target_dir)
     return True
 
 
@@ -352,15 +351,3 @@ def _legacy_owner_running(workspace: Path, legacy: Path) -> bool:
         return WorkspaceRelayOwner(workspace, legacy).owner() is not None
     except RelayOwnerError:
         return False
-
-
-def _copy_private_records(source: Path, target: Path) -> None:
-    """Carry the workspace's private records (e.g. the kill switch's network
-    control file) with the state; only plain files, nothing through a link."""
-    if not source.is_dir() or source.is_symlink():
-        return
-    _ensure_private_dir(target)
-    for entry in sorted(source.iterdir()):
-        if entry.is_symlink() or not entry.is_file():
-            continue
-        _write_private(target / entry.name, _read_private(entry, 4 << 20))

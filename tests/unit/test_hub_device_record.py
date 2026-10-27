@@ -112,6 +112,7 @@ def test_migration_moves_state_preserving_wire_key(home, tmp_path):
     workspace = tmp_path / "project"
     workspace.mkdir()
     legacy_key = _seed_legacy(workspace, home)
+    legacy_state = json.loads((_legacy_state_dir(workspace, home) / "state.json").read_text())
     assert migrate_legacy_network_state(workspace) is True
 
     # device record now knows the network, with the legacy key as membership key
@@ -123,8 +124,20 @@ def test_migration_moves_state_preserving_wire_key(home, tmp_path):
     # workspace record holds the same RelayState bytes
     state_file = workspace_dir(workspace) / "networks" / slug / "state.json"
     assert state_file.exists()
-    legacy_state = json.loads((_legacy_state_dir(workspace, home) / "state.json").read_text())
     assert json.loads(state_file.read_text()) == legacy_state
+
+
+def test_migration_leaves_one_layout_and_moves_every_file(home, tmp_path):
+    # a copy of two files left a stale v1 beside the v2 and dropped the sqlite stores
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    legacy = _legacy_state_dir(workspace, home)
+    (legacy / "peer-links.sqlite3").write_bytes(b"db")
+    assert migrate_legacy_network_state(workspace) is True
+    assert not legacy.exists()
+    slug = origin_slug("https://relay.example.com")
+    assert (workspace_dir(workspace) / "networks" / slug / "peer-links.sqlite3").read_bytes() == b"db"
 
 
 def test_migration_is_idempotent(home, tmp_path):

@@ -725,3 +725,100 @@ Not fixed / limits:
   that (`founder_candidates` is in the snapshot).
 - `network_members.py` / join request wire fields do not yet carry `bind_sig`
   from the join request (join request wiring is still step 1 above).
+
+## Join wiring F3
+
+Done (plugins/hub/network_control.py, enrollment_client.py; tests in test_network_control.py, test_network_members.py):
+
+- J1: the join request's proof envelope carries `NetworkControl.join_proof(offer_id, round_id)`:
+  `machine`, `machine_sig`, `bind_sig` (machine key and folder key both sign
+  `kollab-join-bind-v1\n` + offer + round + folder + machine). `join_decision_fields`
+  signs an admission only when `join_proof_ok` holds; otherwise the decision carries only
+  the founder record. A join never sets `bootstrap`: the founder's person uses `Make Bootstrap
+  Machine`, which now also refuses a key that is not a known member machine. `bootstrap_issued`
+  is gone.
+- J2: `bind_sig` rides the join request (folder consent to the machine, per round). The
+  network-bound `bind_sig` on the member row cannot exist at join time (the joiner does not
+  know the network id yet), so `own_row()` signs it as soon as the join lands and member lists
+  carry it as before.
+- J3: `take_join` returns the founder machine key ("" when refused); the approved join result
+  (`_finish_destination_enrollment`) carries it as `founder` so the person can compare it.
+  Records that do not verify, or whose network is neither `sha256(room)` nor
+  `network_id_for(room, founder)`, are refused.
+  OPEN: a compromised counting inviter C can still hand its new device a founder record for C
+  with network `network_id_for(room, C)`. The joiner knows only the room (the invite carries
+  origin, room, inviter; all of it comes from C), so nothing in the protocol anchors the real
+  network id. Closing it needs an out-of-band anchor, e.g. the join code the person types
+  carries the network id (relay_state.invite/parse_invite and the code format) and `take_join`
+  compares it. Impact today: the device sits on a one-machine split network C founded
+  (halts need two counting machines) and sees none of the real members; the fingerprint line
+  above shows the wrong founder.
+- J4: both the first proof and the recovery-rebuilt proof use `join_proof`. The issuer
+  recovery path reuses the saved decision, so nothing else needed.
+
+Not run: live two-device join (unit tests only).
+
+## D3: third Docker pass
+
+Nothing ran on the host. Image rebuilt from the checkout (`ks3-img:dev`, rebuilt
+again after the fixes below); containers `ks3-relay`, `ks3-m1..m4`, `ks3-m6` on
+`ks-net`, stopped at the end. m1 founder, m3 bootstrap (counting), m4 admitted by
+m1, m2 and m6 joiners from fresh HOMEs. No commits.
+
+### Proof table
+
+| Bullet | Result | Observed |
+|---|---|---|
+| deleted `halt.json` returns | PASS | m1 `rm private/halt.json`: within 45 s its listener exited (halt gone locally). `kollab --detached` on m1 then: new listener, `halt.json` back with scope `'machine'` and the m3 halt. Needs a started daemon to reach a member; a machine with no process stays lifted until one starts |
+| revocation of the primary / own key not applied from peers | PASS (own key and inviter; the managed-config `primary_key` branch is unit-tested, not driven here) | m3 then m1 (two machines) `halt --revoke m4-work`: m1 and m3 `revoked ['m4-work']`, m4 `revoked []`, `to_apply []` |
+| `resume --local` lifts locally, halt returns at next exchange with a member holding it | FAIL then PASS | before the fix: listener handed back, flush merged the halt back, scope removed anyway: book active, machine not halted, a started daemon did nothing. After fix 2: `resume --local` prints `Lifted on this machine only...`, scope stays `'machine'`, listener alive 20 s later |
+| agents/skills byte-identical after | PASS | hash `9e07c534cf9939f5` on m1, m3, m4 before the first halt and after every halt/resume/revoke round |
+| halted interactive launch lets a person confirm | PASS | m1 `kollab` in tmux: `Network halted by 4082c5d2...`, `Halt and Resume` view, `> Resume proposed by m3-work`, Enter, `press again to Confirm Resume`, Enter: `Resume confirmed: lifts 1 halt.`; m1 and m3 scopes `{}` |
+| halted `--web-ui` lets a person confirm | PASS | `kollab --web-ui` on m1 (engine 7433, ui 8080, container-only): `GET /network/halt/connect-halt?folder=/root/work` listed the proposal; `POST .../actions/confirm_resume` answered `Resume confirmed: lifts 1 halt.`; m1 and m3 scopes `{}` (a second call answered `Nothing runs this folder's network.`, expected) |
+| another install's engine survives | PASS | second venv `/opt/inst2` (a `.pth` to the first install's packages), `kollabor_engine serve --port 7440` plus a `python -c sleep` decoy: both alive after two halts; the first install's `--web-ui` engine also survived (`--web-ui` is exempt) |
+| typed `/connect halt` from a daemon stops that daemon | PASS | m1 TUI attached to the `--detached` daemon, typed `/connect halt --reason typed-daemon`: both `--detached` pids and the tmux server gone, only `--halt-listener` left; m3 scope `'machine'` |
+| old pre-release chains (F1/F2, `Chain unknown`) | PASS (function level, in the image) | hand-made signed records through `count_machines`: both ends agree (B) chain `['A','F']`, not unknown; claim without a join record (C) and ends that disagree (D) are `Chain unknown`; only the founder counts (founder-admitted A does not) |
+| listener keeps links when a waiter in a lifted folder execs while another halt stays | NOT RUN | needs two networks on one HOME with folder-scoped halts (a second founder + counting machine for network 2); not built before the cap |
+| CLI ack line truthful | unit only | `halted, ack pending` / `offline, halts on reconnect` tests; a live online-but-slow member was not produced |
+
+Also seen: a non-counting joiner (m2) may issue a halt once two counting
+machines exist (`halt_allowed` true, `counts` false); its resume proposal lifts 0
+halts, so a counting machine must propose. By design as read, worth a look.
+A revoked machine (m4) stays halted when the network resumes (it cannot hear the lift).
+
+### Fixed (each with a unit test)
+
+1. CLI ack window (D2 bug 7): `status` also returns `online`; `_await_acks`
+   waits up to 40 s while a member that is online has not acked (10 s otherwise);
+   lines are `halted`, `halted, ack pending`, or `offline, halts on reconnect`.
+   `plugins/hub/halt_runtime.py`, `tests/unit/test_halt_runtime.py`.
+2. `resume --local` was undone by its own hand-back: `hand_back` flushes one
+   exchange, the flush brought the halt back (local lift dropped), and the scope
+   was removed anyway. It now re-reads the book after the flush and keeps scope
+   and link when a halt is active. `halt_runtime.py`, same test file.
+3. Two state layouts (D2 bug 8): `migrate_legacy_network_state` copied
+   `state.json`, `device.key` and `private/` and left the v1 folder, which then
+   drifted; sqlite stores and enrollment files were never carried. It now moves
+   the whole folder (`os.replace`) once no relay owner holds it. Docker: fresh
+   HOME, join, stop daemon, `kollab --hub halt`: `~/.kollab/network` is empty,
+   `workspaces/<id>/networks/<slug>/` holds the sqlite stores, `state.json`,
+   `device.key`, `private/`. `plugins/hub/device_record.py`,
+   `tests/unit/test_hub_device_record.py`.
+   Not fixed, seen again: right after a daemon-less migration the joiner's
+   control view can lack the roster (`halt_allowed` false until membership sync
+   delivers it), so its first CLI halt may refuse with the one-machine line.
+
+### Leftovers
+
+- Slice D bugs 2 and 3 (TUI `/connect code` empty domain on a detached daemon;
+  guided join fixed to kollabor.ai) untouched.
+- The README bring-up uses the `kollab-killswitch:dev` name; this pass used
+  `ks3-img:dev` from the same Dockerfile.
+- Two-network waiter proof, live "ack pending", managed-config primary revocation
+  drive: not run.
+
+### Docker objects left
+
+Containers: all `ks3-*` stopped (they were started with `--rm`, so gone). Old
+stopped from D1 (need the remove subcommand): `ks-relay`, `ks-m1`, `ks-m2`,
+`ks-m3`. Images: `ks3-img:dev`, `kollab-killswitch:dev`. Network: `ks-net`.

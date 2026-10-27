@@ -228,6 +228,24 @@ def test_hand_back_tells_the_members_online_before_it_leaves_the_relay(tmp_path)
     assert log == ["flushed", "link closed"]
 
 
+def test_hand_back_keeps_the_halt_when_the_flush_brings_it_back(tmp_path, monkeypatch):
+    # `resume --local`, then the flush hears a member that still holds the halt (found in Docker)
+    log = []
+
+    class Flushing(FakeLink):
+        async def flush(self):
+            self.log.append("flushed")
+
+    nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {"net1": {}}})
+    listener = hr.HaltListener(tmp_path, grace=0)
+    link = Flushing(log)
+    listener.links["net1"] = link
+    monkeypatch.setattr(hr, "_book_active", lambda net, book: True)
+    asyncio.run(listener.hand_back("net1"))
+    assert log == ["flushed"] and listener.links["net1"] is link
+    assert hr.read_halt(tmp_path)["scopes"] == {"net1": [FOLDER]}
+
+
 def test_a_fresh_listener_waits_for_the_hand_off_that_started_it(tmp_path):
     # the CLI records the halt, then starts the listener, then hands off: with no
     # scope yet the listener must not exit on its first tick (found in Docker)
@@ -385,6 +403,34 @@ def test_cli_member_lines_never_print_an_unanswered_device_as_done():
         "prod: offline, halts on reconnect",
         "pi: halted",
     ]
+
+
+def test_cli_member_lines_online_but_unacked_is_ack_pending():
+    members = [{"name": "mac", "folder": "a"}, {"name": "prod", "folder": "b"}, {"name": "pi", "folder": "c"}]
+    assert hr.member_lines(members, acked=set(), own_folder="a", stopped=1, online={"b"}) == [
+        "mac: halted, 1 agents stopped",
+        "prod: halted, ack pending",
+        "pi: offline, halts on reconnect",
+    ]
+
+
+def test_await_acks_waits_longer_for_an_online_member(monkeypatch):
+    calls = []
+
+    async def fake_call(req, root, timeout=5.0):
+        calls.append(1)
+        acked = ["b"] if len(calls) >= 3 else []
+        return {"members": [{"folder": "a"}, {"folder": "b"}], "acked": acked, "online": ["b"]}
+
+    async def nosleep(_):
+        return None
+
+    clock = iter(range(0, 1000, 5))
+    monkeypatch.setattr(hr, "sock_call", fake_call)
+    monkeypatch.setattr(hr.asyncio, "sleep", nosleep)
+    monkeypatch.setattr(hr.time, "monotonic", lambda: next(clock))
+    status = asyncio.run(hr._await_acks("/f", None, seconds=10.0, online_seconds=40.0))
+    assert status["acked"] == ["b"] and len(calls) == 3
 
 
 def test_cli_resume_lines(monkeypatch, capsys):
