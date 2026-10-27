@@ -2598,7 +2598,7 @@ class LocalStateService(StateService):
             and isinstance(expires_at, str)
             and expires_at.isdigit()
             and isinstance(code, str)
-            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)
+            and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?", code)
         ):
             return {
                 "status": "offered",

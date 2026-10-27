@@ -1027,3 +1027,45 @@ Status: unit-tested, not live. Nothing was halted, swept or signalled on the hos
 Mutations (all KILLED by that file): session walk restored, recount removed, group expansion off, protected descend, listener `tree = None`, `_evict_picks` in learn, admitters include candidates, `in_scope` empty list, `HaltFile` empty list, anchor 40 bits, anchor shifted, malformed clear off.
 
 Left: Docker proof of a TUI agent in a login-shell session; macOS still relies on the live parent chain (its `sess` column is a pointer).
+
+## D4 proof (run id 56e14f8689af0cb29c10f7cbeaa87b9efed7c0fb)
+
+Everything ran in Docker (`ks4-*`, `docker run --rm`); nothing halted, swept or listened on the host. Image `ks4-img:dev`, id `604dc663a21c` (sha256:604dc663a21ce0169734badca7ab8eea596cae0f125dc4aeb175c66eac918f76), built from `git archive HEAD` plus two uncommitted fixes overlaid (below). The first two builds (HEAD only, then HEAD + fix 1) were replaced; the proof table is from the last one unless noted. Network `ks-net` was reused (D1 left it; it could not be removed).
+
+### Bugs found and fixed (uncommitted, each blocks the proof)
+
+1. A join code `XXXX-XXXX-AAAA-AAAA-AAAA` could not be made: five offer validators still accepted only `XXXX-XXXX`, so `connect_proxy offer` answered `connect offer could not be created` on every network. Fixed in `plugins/hub/plugin.py` (`_run_connect_enrollment_offer`), `kollabor/state/handlers.py`, `kollabor/state/local.py`, `kollabor/state/remote.py`, `plugins/altview/connect_altview.py` (`_SHORT_CODE_RE`), `plugins/altview/connect_style.py` (`CODE_RE`). Test: `tests/unit/test_join_code_shapes.py`.
+2. THE SWEEP FOUND NO PROCESS IN A VENV INSTALL: `_cli_args` (`plugins/hub/network_halt.py`) judged "is this our kollab" by `/proc/<pid>/exe`, which is the system python for a venv (symlink). Halt from m3 on the first image: `m3-work: halted, 0 agents stopped`, m1's daemon, TUI, second-HOME daemon all kept running for 3+ minutes. Fixed: also accept argv[0] when its directory resolves under the install prefix. Test: `tests/unit/test_halt_sweep_venv.py` (not mutation-checked). Note `plugins/hub/network_halt.py` was already dirty from another agent before this edit; only my hunk went into the image, and only my hunk is mine.
+
+### Proof table (last image unless marked)
+
+| Bullet | Result | Observed |
+|---|---|---|
+| A: new join code on the joiner | PASS | `DXHG-25YF-ESH3-54T0-3XVA` accepted by `state.hub_enroll`; result: `founder_fingerprint: 205574e234ad` (matches m1 machine key prefix), `warning: This network has one machine that counts; a halt needs a second one.` |
+| A: bootstrap before/after Make Bootstrap Machine | PASS | m3 `counts false, halt_allowed false` (m1 `bootstrap_open true`) -> after `make_bootstrap`: m3 `counts true, halt_allowed true`, m1 `bootstrap_open false`; a second pick: `this network already has a bootstrap machine` |
+| A: m4 admitted by m1 | PASS | `counts false`, `halt_allowed true` |
+| A: code with another network's anchor | PASS | `This code does not match the network that answered, so nothing was joined. Ask for a new code on a device you trust.` (m5 stays on its own network id) |
+| B1-B7 hostile member | PASS at unit level only | 41 tests of the repo's attack helpers run in the image (`docker run --rm`, tests mounted, pytest installed in the throwaway container): f4_2 f4_3 f4_4 f4_5 f4_6 (8 picks + 8 candidates + 16x32 junk, then halt, confirm, revoke, make_bootstrap), b2 (legacy founder), s4, rebind, forged supersedes, s2 opt-out/odd scope (8 shapes incl. None/empty/int), `halt_file_read`. NOT driven through a live daemon's gossip, and corrupt / chmod 644 `halt.json` not driven live. |
+| C: halt from secondary stops daemon, TUI, tmux, second-HOME daemon, not listener/issuer | PASS (after fix 2) | m3 `halt`: `m4-work: halted`, `m1-work: halted`, `m3-work: halted, 2 agents stopped`; m1 afterwards: only `--halt-listener`, decoy python and another install's `kollabor_engine serve --port 7440` alive |
+| C: decoy and other install's engine survive | PASS | pids alive after the halt |
+| C: agent tool child with no "kollab" in argv, own session | NOT PROVEN | `sleep 7771` started by the real `ShellExecutor` (own session via setsid, `KOLLAB_AGENT_PID` = the helper's pid, not the daemon) survived: the env tag only counts when it names a stopped agent (`select_sweep`), so this was a bad simulation, not a product failure. Needs a tool run by the daemon itself |
+| C: resume: proposer m3 | PASS | `Resume proposed...`; own confirm: `a resume is confirmed on a different machine than the one that proposed it` |
+| C: second counting machine's confirm lifts | PASS but murky | m4 and the first m1 confirm answered `no single open proposal matches that hash` while `af8e0535` sat in m1's halt.json; minutes later scopes were `{}` on m1, m3, m4 with `lifted` 1 each (cause of the first refusals not found) |
+| C: non-counting m4 confirm lifts nothing | PARTIAL | answered no-match, so "lifts 0" was not observed; scopes unchanged until m1 |
+| C: agents/skills hash before/after | PARTIAL | before: `995473fda28ab174` (91 files) on m1, m3, m4; after-hash NOT taken |
+| D: Connect screen, `h`, Esc (tmux in m1) | PASS | `network state Running`; `h` -> `Halt and Resume`, `Network State  Running`, `This Machine  Counts`; Esc -> Connect screen again, no stray `❯` prompt |
+| E: not run | NOT RUN | `--local` return at next exchange; deleted `halt.json`; revocation (2 machines / primary from peers); service-style agent; halted `--web-ui` and interactive launch; typed `/connect halt` from a daemon; `halt.sock` and engine-route refusals without `confirmed:true`; reopening `h` after a resume; second-network waiter. Reason: token cap, and the sweep bug ate the budget |
+
+### Other bugs (reported, not fixed)
+
+- Join result warning is stale: m4 joined AFTER the bootstrap pick (two machines counted) and still got `This network has one machine that counts...`; the decision carries no bootstrap pick, so `count_warning()` runs on a view with only the founder (`plugins/hub/enrollment_client.py:1424`, `plugins/hub/network_control.py:340`). Repro: A above, join a third device.
+- `make_bootstrap` is not in `CONFIRMED_ACTIONS` (`plugins/hub/network_halt.py:70`): over `halt_act` it answered `{"ok": true}` with no `confirmed:true` (the web row has `confirm: true`, the daemon does not enforce it).
+- Halt view on m1 labels `m4-work` with `← this machine` (the Unconfirmed Machines row); m4 is another machine.
+
+### Docker objects left
+
+Image `ks4-img:dev` (604dc663a21c) plus one dangling image from the first build; network `ks-net` (reused); all `ks4-*` containers stopped (`--rm`, gone). Older stopped `ks-*` containers from D1 still exist.
+
+### Verdict
+
+Not done. Proven live on a fresh image: the two-device join (fingerprint, warning, anchor mismatch), Make Bootstrap Machine, a secondary's halt sweeping a venv install (only after fix 2), decoy and foreign engine surviving, resume by a second counting machine, the Connect state line and halt view. Unproven: every hostile-member case live, the agent tool child, revocation, `--local`, deleted `halt.json`, service agent, web-ui/interactive confirm, halt.sock/engine route guards, second-network waiter. Fixes 1 and 2 are uncommitted and must be committed before this image's behavior exists in main.

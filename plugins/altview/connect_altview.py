@@ -54,7 +54,7 @@ _SHORT_CODE_START_RE = re.compile(
 _REDACTED = "<redacted>"
 _LABEL_WIDTH = 13
 _POLL_SECONDS = 2.0
-_SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}")
+_SHORT_CODE_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?")
 _OFFER_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 logger = logging.getLogger(__name__)
