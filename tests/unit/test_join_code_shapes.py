@@ -1,7 +1,6 @@
 """The join code is XXXX-XXXX-AAAA-AAAA-AAAA (F4-3): every offer validator must pass it."""
 
 import pathlib
-import re
 
 from plugins.altview.connect_altview import _SHORT_CODE_RE
 from plugins.altview.connect_style import CODE_RE
@@ -18,5 +17,6 @@ def test_screen_patterns_take_the_anchored_code():
 def test_no_offer_validator_is_eight_characters_only():
     root = pathlib.Path(__file__).resolve().parents[2]
     bad = r'fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", code)'
-    for rel in ("plugins/hub/plugin.py", "kollabor/state/handlers.py", "kollabor/state/local.py", "kollabor/state/remote.py"):
+    files = ("plugins/hub/plugin.py", "kollabor/state/handlers.py", "kollabor/state/local.py", "kollabor/state/remote.py")
+    for rel in files:
         assert bad not in (root / rel).read_text(), rel

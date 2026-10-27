@@ -14,7 +14,10 @@ from typing import Any
 from kollabor_tui.design_system import S, T, TagBox, solid, solid_fg
 
 # A join code as the screens show it (enrollment_codes' display alphabet).
-CODE_RE = re.compile(r"(?<![0-9A-Za-z-])[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?(?![0-9A-Za-z-])")
+CODE_RE = re.compile(
+    r"(?<![0-9A-Za-z-])[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}"
+    r"(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?(?![0-9A-Za-z-])"
+)
 
 # Value parts, first match wins: (pattern, style).
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
