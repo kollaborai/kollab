@@ -1078,3 +1078,44 @@ Not done. Proven live on a fresh image: the two-device join (fingerprint, warnin
 - R6-4: test for the listener's `[]` -> `"machine"` line.
 - Tests: `tests/unit/test_kill_switch_f9.py` (9). Mutations killed: group-leader rule removed (2 fail), multiplexer check removed (1), `[]`->machine removed (1), OSError guard removed (1).
 - Unproven: tmux/screen/session cases use synthetic process tables only, no live tmux, no Docker run. A pane tagged by a tool shell and reparented to init with no multiplexer ancestor is still swept. `strip_tool_env` is still not called where tool shells spawn (shell_executor.py, process_manager.py set the tag; not changed).
+
+## F8/D5 proof (fixes 99a42123, image `ks5-img:dev` e2d05db0564f built from `git archive 99a42123`)
+
+All destructive steps ran in Docker (`ks5-*`, `--rm` containers); nothing halted or swept on the host. The image does NOT include round 6 (34bbf345, lead-only group expansion and the tmux-tag change, committed by another agent while this ran), so a rerun on that commit is still due.
+
+### Bugs fixed (commit 99a42123, test `tests/unit/test_kill_switch_f8.py`, each mutation-checked)
+
+1. Stale join warning: the join decision now carries the inviter's `halt_allowed` and `count_warning(decision)` uses it (advisory only). Live: m4 joined after the bootstrap pick; its `hub_enroll_status` result has no `warning` key and m4's `halt_allowed` is true (D4 showed the stale line).
+2. `withdraw`, `confirm_machine`, `confirm_founder`, `make_bootstrap`, `count`, `no_count` joined `CONFIRMED_ACTIONS`. The panel's `Count Here` toolbar row now has `confirm: true` (the web client only sends `confirmed` for confirm rows; the TUI view always sends it). Updated `test_halt_confirmed.py` and one `test_panels_connect_halt.py` expectation.
+3. Halt view label: `_name_of_machine` answered `this machine` for the local machine, so m1's Unconfirmed Machines chain read `m4-work <- this machine`. It now returns the device name (`this machine` only for a nameless local row). Live: m1 `halt_members` chain for m3-work is `['m1-work']`.
+
+### Proof table
+
+| Bullet | Result | Observed |
+|---|---|---|
+| Bug 2 live: `make_bootstrap` over daemon `halt_act` | PASS | without `confirmed`: `halt_error: A person has to confirm this first...`; with it `{"ok": true}` |
+| Bug 1 live | PASS | m4 joined after the pick: `halt_allowed: true`, no `warning` |
+| halt from m3 (real tmux terminal) | PASS | `m3-work: halted, 1 agents stopped`, m1 and m4 `halted` |
+| Tool child with no "kollab" in argv, `KOLLAB_AGENT_PID` = daemon pid, own session (`setsid sleep 7771`, ppid 1) | PASS, tag set by hand | stopped (listed in halt.json `stopped` as `pid 1988`). NOT started by a model-driven shell tool (no model in the container) |
+| TUI agent run from a login-shell tmux session | PASS | `kollab --no-daemon` (pid 2444, parent `bash -l` 2429) stopped, with the detached daemon (25) and the other TUI (60); both `bash -l` shells (1815, 2429) alive, only `--halt-listener` left |
+| agents/skills hash BEFORE / AFTER halt+resume | PASS | before `8612bd5dda48143d` (91 files) on m1, m3, m4; during the halt `8612bd5dda48143d`; after resume `8612bd5dda48143d` on all three |
+| resume: proposer's own confirm refused; non-counting m4 confirm | PASS | `a resume is confirmed on a different machine than the one that proposed it`; m4: `Resume confirmed: lifts 0 halts`; m1 (counting): `lifts 1 halts`, scopes `{}`, no halt process left |
+| `resume --local` | PASS, thin | printed `Lifted on this machine only...`; `local_lifts` was `[]` and the scope still `machine` 8 s later (the listener's next exchange with m3 re-held the halt); a daemon started afterwards came up as a halted waiter (`no live agent`, pid in `private/waiters`). The window where an agent runs between the lift and the return was NOT observed |
+| deleted `halt.json` | PASS, thin | removed with the listener killed; halt.json was not recreated, but a new listener started and a new daemon did not become a live agent (halt held from the network). Cause of the restart (peer exchange vs boot check) not isolated |
+| `halt.sock` refuses unconfirmed | PASS | `act` for propose_resume, resume_local, confirm_revoke, make_bootstrap, count, halt: all `A person has to confirm this first...`; `describe` still answers |
+| engine route refuses unconfirmed | PASS for 5 of 6 | FastAPI `TestClient` on `network_router` (not a running engine): propose_resume, resume_local, confirm_revoke, count, no_count answer `ok: false` with the same line; `make_bootstrap` answered 404 `unknown action` (no row id sent, so the gate was not reached) |
+| revocation: one signature | PARTIAL | m3 `confirm_revoke m4` via halt.sock: m3's own view shows m4 `revoked` with one signer (07200f9c) pending; m1's view unchanged (`ok`, no pending) |
+| revocation never applies to the primary from peers | PARTIAL | m3 revoked m1 (primary): m1's own view unchanged (m1 `ok`, no pending); m3's own view marks m1 revoked locally (a revoke stays local until a second counting machine signs) |
+| revocation needs two machines | NOT PROVEN | m1 then signed m4 on its own side; the two machines' signatures never merged (halted machines exchange halt books only), so a completed quorum was not seen |
+
+### Unproven / left
+
+- Revocation quorum across two machines (needs both daemons live and gossiping, i.e. a revoke while the network runs, not during a halt).
+- A real model-driven shell tool child (needs a fake OpenAI endpoint in the container returning a tool call).
+- `resume --local` running window, deleted-`halt.json` cause, engine `make_bootstrap` through a real row id, a running engine process (not a TestClient), the web UI Count Here press.
+- Pre-existing failure at HEAD: `tests/unit/test_connect_lone_device.py::test_lone_device_join_replaces_its_network` (`network_mismatch`), unrelated to F8.
+- Round 6 (34bbf345) not in this image.
+
+### Docker objects left
+
+Images `ks5-img:dev` (e2d05db0564f), `ks4-img:dev` (604dc663a21c), `kollab-killswitch:dev`; network `ks-net` (reused, subnet fixed in `seed_home.sh`); stopped `ks-m1`, `ks-m2`, `ks-m3`, `ks-relay` from D1. All `ks5-*` containers were `--rm` and are gone. The Bash hook refuses container and image removal, so Marco removes the images and the old containers.
