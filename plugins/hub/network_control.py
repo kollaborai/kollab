@@ -581,6 +581,13 @@ class NetworkControl:
             orders=self.halt_book().halts.values(),
         )
 
+    def apply_revocations(self) -> None:
+        """Revoke every key two counting machines name (member lists and the halt exchange both end here)."""
+        client = self.client
+        for key in sorted(self.revocations_to_apply()):
+            if key != client.public_key and key not in client.state.links and key not in client.state.revoked:
+                client.revoke(key, announce=True)
+
     def _room_for(self, kind: str, label: str, signer: str) -> None:
         """Refuse clearly instead of dropping silently when one signer has used its slots."""
         net = self.network_id()
@@ -649,11 +656,15 @@ class NetworkControl:
         return key == self.client.public_key or key in self.client.members()
 
     def halt_payload(self) -> dict[str, Any]:
-        return self.halt_book().exchange_payload()
+        # D6: revocation records ride the halt exchange too. A halted machine trades no
+        # member lists, so without them a revocation could never reach two signatures.
+        records = self._fresh().get("revocations", [])
+        return {**self.halt_book().exchange_payload(), "revocations": records[:MAX_RECORDS]}
 
     def halt_merge(self, payload: Any) -> list[str]:
         if not isinstance(payload, dict):
             raise RelayError("invalid halt payload")
+        self.learn("", {"revocations": payload.get("revocations")})
         with self.halt_locked():
             book = self.halt_book()
             before = set(book.active())
@@ -661,6 +672,7 @@ class NetworkControl:
             lifted = book.merge(payload, view, is_member=self._is_member)
             book.drop_revoked(view)
             self.save_halt_book(book)
+        self.apply_revocations()
         if set(book.active()) != before:
             self._halt_changed()
         return lifted

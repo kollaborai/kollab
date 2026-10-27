@@ -738,3 +738,32 @@ def test_f4_5_a_stored_record_whose_signer_is_no_member_machine_is_dropped_on_th
     f.data["confirmations"] = [stranger]
     f.learn(b.client.public_key, {})
     assert f.data["confirmations"] == []
+
+
+def _trade_halt_books(*controls):
+    """Only the halt exchange (what a halted machine runs): no member lists."""
+    for _ in range(2):
+        for a in controls:
+            for b in controls:
+                if a is not b:
+                    b.halt_merge(a.halt_payload())
+
+
+def test_revocation_quorum_completes_over_the_halt_exchange(three, tmp_path):
+    """D6: a halted network trades halt books only, and a revocation still reaches two signatures."""
+    f, b, c = three
+    d = machine(tmp_path, "d")
+    join(f, d)
+    meet(f, b, c, d)
+    f.sign_revocation(d.client.public_key)
+    _trade_halt_books(f, b, c)
+    assert d.client.public_key not in c.client.state.revoked  # one machine's word
+    b.sign_revocation(d.client.public_key)
+    _trade_halt_books(f, b, c)
+    assert d.client.public_key in c.client.state.revoked and d.client.public_key in f.client.state.revoked
+    # a primary is never revoked on peers' word, over this path either
+    b.sign_revocation(f.client.public_key)
+    c.sign_revocation(f.client.public_key)
+    c.client.state.inviter = f.client.public_key
+    _trade_halt_books(b, c)
+    assert f.client.public_key not in c.client.state.revoked

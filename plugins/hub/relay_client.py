@@ -539,13 +539,7 @@ class RelayClient:
             self.control.learn(voucher, control)
         if revoked and self.state.inviter in revoked:
             _LOGGER.warning("Refused a member's revocation of this device's primary")
-        for key in sorted(self.control.revocations_to_apply()):
-            if (
-                key != self.public_key
-                and key not in self.state.links
-                and key not in self.state.revoked
-            ):
-                self.revoke(key, announce=True)
+        self.control.apply_revocations()
         named = set()
         for key, name in members:
             named.add(key)
