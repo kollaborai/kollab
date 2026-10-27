@@ -16,6 +16,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from nacl.signing import SigningKey
@@ -335,3 +336,63 @@ def test_receive_membership_validates_against_its_own_state(tmp_path, home):
     # peer unknown to b's state: refused at the membership's own approval gate
     with pytest.raises(RelayError, match="peer is not approved"):
         asyncio.run(scenario("stranger"))
+
+
+def test_secondary_membership_polls_its_own_enrollment_issuer(home, tmp_path):
+    """A secondary command facade must expose its membership's pending joins."""
+    from types import SimpleNamespace
+
+    import plugins.hub.relay_agent as relay_agent
+    from plugins.hub.relay_commands import RelayCommands
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    primary_slug = origin_slug("https://a.example.com")
+    secondary_slug = origin_slug("https://b.example.com")
+    _seed_state(_membership_dir(workspace, home, primary_slug), "https://a.example.com")
+    secondary_dir = _membership_dir(workspace, home, secondary_slug)
+    _seed_state(secondary_dir, "https://b.example.com")
+    membership = Memberships(workspace).get(secondary_slug)
+    assert membership is not None
+
+    parent = SimpleNamespace(
+        workspace=workspace,
+        plugin=SimpleNamespace(),
+        identity=SimpleNamespace(agent_id="secondary-agent"),
+        _require_human_network_context=lambda _message: None,
+    )
+    commands = SimpleNamespace()
+    bridge = relay_agent._MembershipEnrollmentBridge(parent, membership, commands)
+    pending = [SimpleNamespace(enrollment_id="secondary-request")]
+    bridge._enrollment_issuer = SimpleNamespace(pending_requests=lambda: pending)
+
+    facade = RelayCommands.__new__(RelayCommands)
+    facade.agent_bridge = bridge
+    assert facade._try_pending_rows() == pending
+
+
+@pytest.mark.asyncio
+async def test_membership_context_starts_and_closes_enrollment_issuer(home, tmp_path):
+    from types import SimpleNamespace
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    slug = origin_slug("https://issuer.example.com")
+    _seed_state(_membership_dir(workspace, home, slug), "https://issuer.example.com")
+    membership = Memberships(workspace).primary()
+    commands = _RecordingCommands()
+    issuer = SimpleNamespace(start_recovery=lambda: setattr(issuer, "started", True))
+    issuer.started = False
+    issuer.close = AsyncMock()
+    context = MembershipContext(
+        membership,
+        commands,
+        _RecordingTransport(),
+        inbound=lambda *_args: None,
+        enrollment_issuer=issuer,
+    )
+
+    await context.start()
+    assert issuer.started is True
+    await context.close()
+    issuer.close.assert_awaited_once()
