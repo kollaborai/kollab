@@ -225,7 +225,10 @@ def founder_of(roster: Roster) -> str:
     if not _signed_ok(FOUNDER_DOMAIN, rec, "founder") or rec.get("network") != roster.network:
         return ""
     key = rec["founder"]
-    bound = bool(roster.room) and network_id_for(roster.room, key) == roster.network
+    try:
+        bound = bool(roster.room) and network_id_for(roster.room, key) == roster.network
+    except ValueError:  # a room that is not hex binds nothing
+        bound = False
     return key if bound or roster.founder_confirmed == key else ""
 
 

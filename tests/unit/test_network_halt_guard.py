@@ -30,6 +30,12 @@ def test_terminal_sessions_strip_the_markers():
 def test_network_controls_are_high_risk():
     patterns = RiskAssessmentRules().high_risk_patterns
     risky = ("kollab --hub halt", "kollab --hub resume --local", "/connect revoke p", "rm ~/.kollab/private/halt.json")
+    risky += (
+        ">~/.kollab/private/halt.json",
+        "sed -i '' s/x/y/ ~/.kollab/private/halt.json",
+        "dd if=/dev/zero of=~/.kollab/private/halt.json",
+    )
     for cmd in risky:
         assert any(p.search(cmd) for p in patterns), cmd
     assert not any(p.search("kollab --hub status") for p in patterns)
+    assert not any(p.search("cat ~/.kollab/private/halt.json") for p in patterns)

@@ -586,3 +586,8 @@ def test_a_halts_revoke_entry_counts_as_its_issuers_revocation(net):
     assert nh.revocations_to_apply([rev(c, net, target.fk())], net.view(), orders=[forged]) == set()
     as_resume = resume(net.prod, net, [], revoke=[target.fk()])
     assert nh.revocations_to_apply([rev(c, net, target.fk())], net.view(), orders=[as_resume]) == set()
+
+
+def test_non_hex_room_binds_no_founder(net):
+    net.roster.room = "not-hex"
+    assert net.view().founder == ""

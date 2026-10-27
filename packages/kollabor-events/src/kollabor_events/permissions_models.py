@@ -103,7 +103,9 @@ class RiskAssessmentRules:
             re.compile(r":\(\)\s*\{"),  # fork bomb
             re.compile(r"kollab\b.*--hub\s+(halt|resume)\b"),  # network kill switch
             re.compile(r"/connect\s+(revoke|halt|resume)\b"),  # network controls
-            re.compile(r"(rm|mv|cp|tee|>)\s.*\.kollab/private/"),  # halt.json and friends
+            re.compile(
+                r"(\brm|\bmv|\bcp|\btee|\bln|\bsed\s+-i|\bdd\b[^|;&]*of=|\btruncate|>)[^|;&]*\.kollab/private/"
+            ),  # halt.json and friends
         ]
     )
 
