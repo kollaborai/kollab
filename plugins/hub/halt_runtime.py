@@ -562,6 +562,30 @@ def process_table() -> dict[int, int]:
     return table
 
 
+def process_tree() -> dict[int, tuple[int, int, int]]:
+    """pid -> (ppid, pgid, sid) for every process of this user (F6: the sweep walks parents, not env tags).
+
+    macOS prints a session pointer for ``sess``, not an id; ``_tree_members`` only trusts it on Linux.
+    """
+    tree: dict[int, tuple[int, int, int]] = {}
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,pgid=,sess="],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
+                sid = int(parts[3]) if parts[3].isdigit() else 0
+                tree[int(parts[0])] = (int(parts[1]), int(parts[2]), sid)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if not tree:  # no ps: parents only, from /proc
+        tree = {pid: (ppid, 0, 0) for pid, ppid in process_table().items()}
+    tree.pop(os.getpid(), None)
+    return tree
+
+
 def candidate_pids() -> list[int]:
     """Every same-user process: a tool child (a CLI, a dev server, a nohup job) rarely names kollab."""
     return sorted(process_table())
@@ -590,6 +614,7 @@ async def sweep(
     protect: Iterable[int],
     install=None,
     waiters: Iterable[int] = (),
+    tree: dict[int, tuple[int, int, int]] | None = None,
 ) -> list[tuple[dict, bool, str]]:
     """Stop what a halt stops here (``select_sweep``), each with ``stop``.
 
@@ -616,6 +641,7 @@ async def sweep(
         scopes=scopes,
         agent_pids=[int(a["pid"]) for a in in_scope_agents if a.get("pid")],
         protect=protect,
+        tree=tree,
     )
     by_pid = {int(a.get("pid") or 0): a for a in in_scope_agents}
     records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
@@ -850,8 +876,10 @@ class HaltListener:
         stop = self._stop or _default_stop(protect, self.root)
         procs = self._processes() if self._processes else _read_candidates()
         scopes = active_scopes(read_halt(self.root))
+        # injected process lists (tests) get no live tree: a real ps would name real processes
+        tree = None if self._processes else process_tree()
         results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
-                              waiters=waiter_pids(self.root))
+                              waiters=waiter_pids(self.root), tree=tree)
         stopped = [
             {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
             for r, ok, _ in results if ok

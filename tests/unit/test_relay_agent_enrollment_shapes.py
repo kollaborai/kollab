@@ -3,8 +3,8 @@ from plugins.hub import relay_agent as ra
 
 def test_short_code_shape_takes_the_anchor_tail():
     ok = ra._SHORT_CODE_SHAPE.fullmatch
-    assert ok("ABCD-2345") and ok("ABCD-2345-6789-ABCD")
-    assert not ok("ABCD-2345-6789") and not ok("ABCD-2345-6789-ABC")
+    assert ok("ABCD-2345") and ok("ABCD-2345-6789-ABCD-2345")
+    assert not ok("ABCD-2345-6789") and not ok("ABCD-2345-6789-ABCD") and not ok("ABCD-2345-6789-ABC")
 
 
 def test_network_mismatch_is_a_known_error():

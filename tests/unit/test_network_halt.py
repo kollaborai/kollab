@@ -185,8 +185,10 @@ def test_unsigned_folder_binding_is_nobodys(net):
 
 
 def test_revoked_and_opted_out_machines_stop_counting(net):
-    net.roster.opt_outs.append(nh.no_count_record(net.prod.key, net.id))
-    assert not net.view().counts(net.prod.mk)
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)  # a third machine, so its opt-out leaves two (F6)
+    net.roster.opt_outs.append(nh.no_count_record(c.key, net.id))
+    assert not net.view().counts(c.mk)
     net.roster.opt_outs.clear()
     net.roster.revoked_machines.add(net.prod.mk)
     assert not net.view().counts(net.prod.mk)
@@ -653,11 +655,12 @@ def test_a_halt_is_refused_where_fewer_than_two_machines_count():
     assert not res.taken and "two" in res.reason and not book.halts
 
 
-def test_an_opted_out_machine_confirms_nobody(net):
+def test_an_opt_out_that_would_leave_one_counting_machine_is_ignored(net):
     c = net.admit(net.founder, "c")
     net.confirm(net.prod, c)
     net.roster.opt_outs.append(nh.no_count_record(net.prod.key, net.id))
-    assert not net.view().counts(c.mk)  # prod's lone confirmation no longer counts
+    # prod's opt-out would leave the founder alone, so the count ignores it (F6, S2)
+    assert net.view().counts(net.prod.mk) and net.view().counts(c.mk)
     net.roster.opt_outs.clear()
     assert net.view().counts(c.mk)
 

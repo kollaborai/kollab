@@ -50,6 +50,8 @@ MAX_STORED = 512
 MAX_PER_SIGNER = 32
 RECORDS_FULL = "This device already signed {n} {kind}; no more fit on this network."
 MAX_PICKS = 8
+MAX_PICKS_PER_ADMITTER = 2  # F6 (S4): one machine's picks cannot fill every slot
+NO_COUNT_REFUSAL = "This network needs a second machine that counts before this one can stop counting."
 HALT_RETRY_START = 10.0
 HALT_RETRY_MAX = 300.0
 REQUEST_SECONDS = 15.0
@@ -166,6 +168,28 @@ class NetworkControl:
             logger.warning("network control: unreadable (%s); starting empty", type(error).__name__)
             data = {}
         self.data = data if data.get("room") == self.client.state.room else {"room": self.client.state.room}
+        self._pin_network_id()
+
+    def _pin_network_id(self) -> None:
+        """F6: an old control file without ``net`` keeps the id it used, and stores it.
+
+        The id is the founder record's own network when that record verifies for this room,
+        else ``sha256(room)``. A file with nothing but the room is not pinned: founding picks.
+        """
+        data = self.data
+        if _is_key(data.get("net")) or set(data) <= {"room"}:
+            return
+        legacy = hashlib.sha256(bytes.fromhex(self.client.state.room)).hexdigest()
+        net = legacy
+        founder = data.get("founder")
+        if nh._signed_ok(nh.FOUNDER_DOMAIN, founder, "founder"):
+            if founder.get("network") in (nh.network_id_for(self.client.state.room, founder["founder"]), legacy):
+                net = founder["network"]
+        data["net"] = net
+        try:
+            self.save()
+        except (nh.HaltError, OSError):
+            logger.warning("network control: could not store the network id")
 
     def _fresh(self) -> dict[str, Any]:
         """The data for the current room: a join that changed rooms starts over."""
@@ -369,13 +393,24 @@ class NetworkControl:
     def _candidate(self, rec: Any) -> None:
         """Remember a founder record heard from a member; a person or the inviter accepts one."""
         data = self._fresh()
-        if data.get("founder") or not nh._signed_ok(nh.FOUNDER_DOMAIN, rec, "founder"):
+        if not self._founder_open() or not nh._signed_ok(nh.FOUNDER_DOMAIN, rec, "founder"):
             return
         if rec.get("network") != self.network_id() or rec["founder"] not in self._member_machines():
             return  # F4-4: only a machine in the member list can be a candidate
         cands = data.setdefault("founder_candidates", [])
         if all(c["founder"] != rec["founder"] for c in cands) and len(cands) < MAX_PICKS:
             cands.append(rec)
+
+    def _founder_open(self) -> bool:
+        """True while no founder is accepted here: none held, or a held one nobody confirmed (F6, B2).
+
+        A held but unconfirmed record (a join decision on a pre-release network) must not stop a
+        later real founder from being heard: the person chooses among all of them.
+        """
+        held = self._fresh().get("founder")
+        if not held:
+            return True
+        return not (self._fresh().get("room_bound") or self._fresh().get("founder_confirmed") == held["founder"])
 
     def _member_machines(self) -> set[str]:
         """Machine keys of the rows whose folder is an approved relay member (F4-5)."""
@@ -384,6 +419,14 @@ class NetworkControl:
 
     def _adopt(self, rec: dict) -> None:
         self._fresh().update(founder=rec, room_bound=False, founder_confirmed=rec["founder"])
+        self._evict_picks()
+
+    def _evict_picks(self) -> None:
+        """Once a founder is accepted, only its own picks are kept (F6, S4)."""
+        founder = self.view().founder
+        if founder:
+            data = self._fresh()
+            data["bootstrap_picks"] = [p for p in data.get("bootstrap_picks", []) if p.get("admitter") == founder]
 
     # ------------------------------------------------------------ member lists
 
@@ -474,9 +517,15 @@ class NetworkControl:
         # This machine's own opt-out state comes only from its person.
         # Picks are candidates: the rules count only one the founder signed, so
         # only a pick whose admitter is the held founder or a candidate is kept (F4-4).
+        self._evict_picks()
         picks = data.setdefault("bootstrap_picks", [])
         heard = control.get("bootstrap_picks")
-        admitters = {self.view().founder} | {c["founder"] for c in data.get("founder_candidates", [])}
+        founder = self.view().founder
+        held = data.get("founder")
+        admitters = {founder} if founder else {
+            *(c["founder"] for c in data.get("founder_candidates", [])),
+            *([held["founder"]] if isinstance(held, dict) else []),
+        }
         for pick in heard[:MAX_PICKS] if isinstance(heard, list) else []:
             if (
                 isinstance(pick, dict)
@@ -485,6 +534,7 @@ class NetworkControl:
                 and nh._signed_ok(nh.ADMISSION_DOMAIN, pick, "admitter")
                 and all(p.get("sig") != pick.get("sig") for p in picks)
                 and len(picks) < MAX_PICKS
+                and sum(1 for p in picks if p.get("admitter") == pick["admitter"]) < MAX_PICKS_PER_ADMITTER
             ):
                 picks.append(pick)
         self.save()
@@ -780,20 +830,19 @@ class NetworkControl:
             self._room_for("confirmations", "confirmations", me)
             data.setdefault("confirmations", []).append(nh.machine_confirmation(self.machine, net, machine))
         elif action == "confirm_founder":
+            # F6 (B2): the held record is one choice among the candidates; the person names the fingerprint
             held = data.get("founder")
-            named = str(payload.get("founder") or "")
+            pool = [c for c in data.get("founder_candidates", []) if not held or c["founder"] != held["founder"]]
             if held:
-                if named and not held["founder"].startswith(named):
-                    raise nh.HaltError("that is not the founder this machine holds")
-                data["founder_confirmed"] = held["founder"]
-            else:
-                cands = [c for c in data.get("founder_candidates", []) if c["founder"].startswith(named)]
-                if len(cands) != 1:
-                    keys = ", ".join(c["founder"][:12] for c in data.get("founder_candidates", []))
-                    raise nh.HaltError(
-                        "no founder record yet" if not keys else f"name the founder (one of: {keys})"
-                    )
-                self._adopt(cands[0])
+                pool.insert(0, held)
+            named = str(payload.get("founder") or "")
+            cands = [c for c in pool if named and c["founder"].startswith(named)] or (
+                pool if not named and len(pool) == 1 else []
+            )
+            if len(cands) != 1:
+                keys = ", ".join(c["founder"][:12] for c in pool)
+                raise nh.HaltError("no founder record yet" if not keys else f"name the founder (one of: {keys})")
+            self._adopt(cands[0])
         elif action == "make_bootstrap":
             machine = payload.get("machine")
             if view.founder != me:
@@ -806,6 +855,8 @@ class NetworkControl:
         elif action == "no_count":
             if book.held():
                 raise nh.HaltError("a machine cannot stop counting while a halt is active")
+            if view.counts(me) and len(view.counting) >= 2 and len(view.counting - {me}) < 2:
+                raise nh.HaltError(NO_COUNT_REFUSAL)  # F6 (S2): the count would ignore it anyway
             self._sign_opt_out(opted_out=True)
         elif action == "count":
             self._sign_opt_out(opted_out=False)

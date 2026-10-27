@@ -90,7 +90,7 @@ CONTROL_ACTIONS = frozenset(
     {"halt", "propose_resume", "confirm_resume", "resume_local", "withdraw", "confirm_revoke"}
 )
 _CODE_GROUP = "[0-9A-HJKMNP-TV-Z]{4}"
-_SHORT_CODE_SHAPE = re.compile(rf"{_CODE_GROUP}-{_CODE_GROUP}(?:-{_CODE_GROUP}-{_CODE_GROUP})?\Z")
+_SHORT_CODE_SHAPE = re.compile(rf"{_CODE_GROUP}-{_CODE_GROUP}(?:-{_CODE_GROUP}-{_CODE_GROUP}-{_CODE_GROUP})?\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",

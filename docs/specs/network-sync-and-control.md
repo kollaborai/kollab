@@ -258,13 +258,34 @@ counting machines:
     names one with `Confirm Founder`, and the network id never changes after;
   - a halt is refused on receipt where fewer than two machines count;
   - a halt's `supersedes` retires only the same issuer's own earlier order.
+- Review fixes F6 (a hostile inviter or member, overnight):
+  - A held founder record nobody confirmed (a join decision on a pre-release
+    network) never blocks a later real candidate. `Confirm Founder` chooses among the
+    held record and every candidate by the fingerprint the person names; with
+    more than one it asks for a name. Accepting a founder drops every stored
+    bootstrap pick whose admitter is not that founder, and one admitter keeps at
+    most two picks.
+  - An opt-out that would take the network from two counting machines to one
+    is ignored by the count (opt-outs are applied in machine-key order, so every
+    machine agrees), and `Do Not Count Here` refuses with `This network needs a
+    second machine that counts before this one can stop counting.`
+  - A `halt.json` scope that is not `"machine"` or a list of folder strings
+    holds the whole machine (the file reads as unreadable).
+  - The sweep also walks the process tree from the stopped agents (parent pid, then
+    process group; on Linux the session too) and stops those groups, because
+    macOS hides the environment of system binaries. It leaves the listener,
+    the issuing CLI and its ancestors, waiters, and another install's kollab.
+  - A `--detached` child whose exec failed holds (exit 75) when the halt check
+    cannot run at all.
+  - An old control file without `net` stores the id it used on first load (the
+    founder record's network when it verifies, else `sha256(room)`).
 - Review fixes F4 (who may write control records, and how many):
   - The network id is stored when a machine founds or joins (`net` in its
     control file); it is never recomputed from the founder record held later,
     so swapping that record moves nothing (F4-1).
-  - Join code anchor (F4-3): a join code is `XXXX-XXXX-AAAA-AAAA`. The last two
-    groups are `join_anchor(network id)`, 40 bits of `sha256` over the network
-    id, made by the machine that issued the code. The joiner refuses a join
+  - Join code anchor (F4-3): a join code is `XXXX-XXXX-AAAA-AAAA-AAAA`. The last
+    three groups are `join_anchor(network id)`, 60 bits of `sha256` over the
+    network id (F6: 40 bits could be ground by a founder key chosen to collide), made by the machine that issued the code. The joiner refuses a join
     decision whose founder record (or, with none, whose `network`) does not
     belong to its room and hash to the typed anchor, with `This code does not
     match the network that answered, so nothing was joined. Ask for a new code

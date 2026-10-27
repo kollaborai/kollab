@@ -321,12 +321,14 @@ async def test_a_non_member_gets_no_halt_book(three):
 
 def test_no_count_is_refused_while_a_halt_is_active(three):
     f, b, c = three
-    b.halt_act("no_count")
+    b.halt_act("confirm_machine", {"machine": c.machine_hex})  # a third machine, so an opt-out still leaves two (F6)
     meet(f, b, c)
-    assert not f.view().counts(b.machine_hex)
-    b.halt_act("count")
+    c.halt_act("no_count")
     meet(f, b, c)
-    assert f.view().counts(b.machine_hex) and c.view().counts(b.machine_hex)
+    assert not f.view().counts(c.machine_hex)
+    c.halt_act("count")
+    meet(f, b, c)
+    assert f.view().counts(c.machine_hex) and b.view().counts(c.machine_hex)
     f.halt_act("halt", {"reason": "x"})
     with pytest.raises(nh.HaltError, match="while a halt is active"):
         f.halt_act("no_count")

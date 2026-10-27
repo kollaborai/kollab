@@ -190,14 +190,15 @@ _ANCHOR_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 def join_anchor(network: str) -> str:
-    """The 40-bit network tag a join code carries (``XXXX-XXXX``, F4-3).
+    """The 60-bit network tag a join code carries (``XXXX-XXXX-XXXX``, F4-3, F6).
 
     The person types it with the code, so the device that joins learns the
-    network id from a source the inviter's own answer cannot overwrite.
+    network id from a source the inviter's own answer cannot overwrite. 60 bits
+    keeps a founder key ground to collide with it out of reach (40 bits was not).
     """
-    n = int.from_bytes(hashlib.sha256(b"kollab-join-anchor-v1\n" + network.encode()).digest()[:5], "big")
-    text = "".join(_ANCHOR_ALPHABET[(n >> (5 * (7 - i))) & 31] for i in range(8))
-    return f"{text[:4]}-{text[4:]}"
+    n = int.from_bytes(hashlib.sha256(b"kollab-join-anchor-v1\n" + network.encode()).digest()[:8], "big") >> 4
+    text = "".join(_ANCHOR_ALPHABET[(n >> (5 * (11 - i))) & 31] for i in range(12))
+    return f"{text[:4]}-{text[4:8]}-{text[8:]}"
 
 
 def inviter_claim(machine: SigningKey, network: str, inviter_machine: str) -> dict[str, Any]:
@@ -369,24 +370,34 @@ def count_machines(roster: Roster) -> Counting:
         if _signed_ok(NO_COUNT_DOMAIN, r, "machine") and r.get("network") == net:
             if r["machine"] not in newest or _stamp(r) >= _stamp(newest[r["machine"]]):
                 newest[r["machine"]] = r
-    opted_out = {m for m, r in newest.items() if r.get("opted_out", True)}
+    wanted_out = {m for m, r in newest.items() if r.get("opted_out", True)}
     revoked = set(roster.revoked_machines)
     confirms: dict[str, set[str]] = {}
     for r in roster.confirmations:
         if machine_confirmation_ok(r, net):
             confirms.setdefault(r["machine"], set()).add(r["by"])
 
-    # Opt-outs and revocations apply before the loop: their confirmations count for nothing.
-    counting = {m for m in (founder, bootstrap) if m and m in machines | {founder}}
-    counting -= revoked | opted_out
-    changed = True
-    while changed:  # confirmations by counting machines can make more count
-        changed = False
-        for m in machines - counting - revoked - opted_out:
-            valid = {c for c in confirms.get(m, ()) if c in counting and c not in outside[m]}
-            if len(valid) >= (2 if m in unknown else 1):
-                counting.add(m)
-                changed = True
+    def count(opted_out: set[str]) -> set[str]:
+        # Opt-outs and revocations apply before the loop: their confirmations count for nothing.
+        counting = {m for m in (founder, bootstrap) if m and m in machines | {founder}}
+        counting -= revoked | opted_out
+        changed = True
+        while changed:  # confirmations by counting machines can make more count
+            changed = False
+            for m in machines - counting - revoked - opted_out:
+                valid = {c for c in confirms.get(m, ()) if c in counting and c not in outside[m]}
+                if len(valid) >= (2 if m in unknown else 1):
+                    counting.add(m)
+                    changed = True
+        return counting
+
+    # F6 (S2): one member's signed opt-out cannot take a network from two counting machines to one,
+    # or the others could never halt. Applied in key order so every machine reaches the same answer.
+    opted_out: set[str] = set()
+    for m in sorted(wanted_out):
+        if len(count(opted_out | {m})) >= 2 or len(count(opted_out)) < 2:
+            opted_out.add(m)
+    counting = count(opted_out)
     if founder and founder not in machines:
         chains.setdefault(founder, [])
     return Counting(founder, counting, chains, unknown, bindings, net, revoked)
@@ -822,6 +833,8 @@ def in_scope(folder: str, scopes: Iterable[str | list[str]]) -> bool:
     for scope in scopes:
         if scope == "machine":
             return True
+        if not (isinstance(scope, list) and all(isinstance(root, str) for root in scope)):
+            return True  # F6: a scope that is not "machine" or a list of folders holds the whole machine
         for root in scope:
             r = Path(root).resolve()
             if path == r or r in path.parents:
@@ -858,6 +871,9 @@ class HaltFile:
             isinstance(data.get(k, {}), dict) for k in ("scopes", "networks", "folders")
         ):
             raise HaltError(f"{self.path.name} is not a halt file")
+        for scope in data.get("scopes", {}).values():
+            if scope != "machine" and not (isinstance(scope, list) and all(isinstance(r, str) for r in scope)):
+                raise HaltError(f"{self.path.name} has a scope this version does not know")  # F6: holds the machine
         return data
 
     def write(self, data: dict[str, Any]) -> None:
@@ -1006,6 +1022,7 @@ def select_sweep(
     scopes: list[str | list[str]],
     agent_pids: Iterable[int] = (),
     protect: Iterable[int] = (),
+    tree: dict[int, tuple[int, int, int]] | None = None,
 ) -> list[Proc]:
     """Processes a halt stops on this machine (section 1, step 3).
 
@@ -1037,7 +1054,46 @@ def select_sweep(
         tag = p.env.get("KOLLAB_AGENT_PID", "") or p.env.get("KOLLAB_OWNER_PID", "")
         if tag and tag in stopped_agents:
             chosen[p.pid] = p
+    if tree:
+        known = {p.pid: p for p in procs}
+        for pid in _tree_members(set(chosen), tree, protected):
+            if pid in chosen:
+                continue
+            p = known.get(pid) or Proc(pid, tree[pid][0], [], {}, "")
+            args = _cli_args(p, install)
+            if args is not None and _never_swept(args, p):
+                continue
+            if args is None and any(Path(a).name == "kollab" or "kollabor_cli_main" in a for a in p.argv[:3]):
+                continue  # another install's kollab is never ours to stop
+            chosen[pid] = p
     return list(chosen.values())
+
+
+def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protected: set[int]) -> set[int]:
+    """F6 (B3): the stopped agents' children at any depth, found by parent pid, then their process groups.
+
+    macOS hides the environment of system binaries (zsh, sleep, curl), so the env tag misses a tool shell
+    that runs one; its parent chain does not lie while the agent is still alive. ``tree`` is
+    pid -> (ppid, pgid, sid). A group or Linux session that holds a protected pid is left whole.
+    """
+    members = set(roots)
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, _pg, _sid) in tree.items():
+            if ppid in members and pid not in members and pid not in protected:
+                members.add(pid)
+                grew = True
+    unsafe_pg = {tree[p][1] for p in protected if p in tree}
+    unsafe_sid = {tree[p][2] for p in protected if p in tree}
+    pgs = {tree[p][1] for p in members if p in tree and tree[p][1] > 1} - unsafe_pg
+    sids: set[int] = set()
+    if sys.platform.startswith("linux"):
+        sids = {tree[p][2] for p in members if p in tree and tree[p][2] > 1} - unsafe_sid
+    for pid, (_pp, pg, sid) in tree.items():
+        if pg in pgs or sid in sids:
+            members.add(pid)
+    return members - protected
 
 
 def ancestors(pid: int) -> set[int]:

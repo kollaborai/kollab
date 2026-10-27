@@ -993,3 +993,23 @@ shared manager: the main UI is restored only when the stack is empty
 `tests/unit/test_altview_stack_reuse.py`, mutation killed; 273 altview, stack,
 fullscreen and modal tests pass). The Connect-screen repaint from F5 stays as a
 second layer. Not yet checked live in tmux.
+
+## Review fixes F6
+
+Why it matters: Marco asked for this network-wide stop so his agents can run unattended overnight, so every item below is "unit-tested, not live" until the Docker proof run id exists. Nothing was halted, swept, listened or killed on the host (the real-child test starts and kills its own python processes).
+
+Tests: `tests/unit/test_kill_switch_f6.py` (24, new; each written and run failing first: 20 failed, 4 passed), plus edits to `test_network_halt.py`, `test_network_control.py`, `test_enrollment_codes.py`, `test_relay_agent_enrollment_shapes.py`. Spec: "Review fixes F6" in section 1. Not touched: `config_hooks.py`, the events executor, `PanelHost.tsx`, the Prompts files.
+
+- B2 legacy founder takeover: `NetworkControl._founder_open` lets a candidate be heard while the held founder is unconfirmed; `confirm_founder` chooses among the held record and all candidates by the fingerprint named (asks when there are several). Anchor is 60 bits and three groups: code `XXXX-XXXX-AAAA-AAAA-AAAA` (`join_anchor`, `split_join_code`, `_SHORT_CODE_IN_TEXT`, `relay_agent._SHORT_CODE_SHAPE`; the issuer shows it via `join_anchor`, no other producer).
+- S4: `_evict_picks` (at `_adopt` and every `learn`) drops picks not signed by the accepted founder; `MAX_PICKS_PER_ADMITTER = 2`; before a founder is accepted the admitters are the candidates and the held record.
+- S2: `count_machines` applies opt-outs in key order and skips one that would leave fewer than two counting; `no_count` refuses with `NO_COUNT_REFUSAL` in that case. Odd scopes: `in_scope` returns True for anything but `"machine"` or a list of str, and `HaltFile.read` rejects such a file so `read_halt_held` holds. An empty list stays valid (covers no folder).
+- B3: `halt_runtime.process_tree()` (`/bin/ps -U uid -o pid=,ppid=,pgid=,sess=`) feeds `select_sweep(tree=...)`/`sweep(tree=...)`; `_tree_members` walks children by ppid, then their process groups (sessions too on Linux only: macOS `sess` is a pointer). Protected pids' groups are left whole; another install's kollab is skipped. The listener passes the live tree only when it reads real processes (an injected process list gets none). `descendants()` is still unused.
+- `fork_daemon`: `_halt_holds_after_exec_failure` returns True on any exception, so the child exits 75. The only other boot-check import (`kollabor_cli_main`) is not in a try.
+- Network id: `_pin_network_id` on load stores `net` for an old control file (founder record's network when it verifies, else `sha256(room)`); a file with only the room is not pinned.
+- `MAX_PER_SIGNER` test added.
+
+Changed old expectations (rules changed on purpose): opt-out tests now use a third counting machine; `test_an_opted_out_machine_confirms_nobody` became "an opt-out that would leave one is ignored" (the founder and the bootstrap are the only independent counters in that fixture, so the old confirmation case cannot be built there).
+
+Known failing, not mine: `test_network_halt_guard.py::test_terminal_sessions_strip_the_markers` (`strip_tool_env` leaves `KOLLAB_OWNER_PID`, from F5 L7).
+
+Left: a member with many machines can still fill `founder_candidates` (cap 8) before the real founder is heard; macOS grouping relies on the live parent chain, so a tool that double-forked and reparented to init before the halt is found only by the env tag; Docker proof.

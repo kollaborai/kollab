@@ -24,7 +24,8 @@ def test_tool_children_are_marked_with_or_without_caller_env():
 
 def test_terminal_sessions_strip_the_markers():
     env = _filter_env({"KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": "9", "PATH": "/bin"})
-    assert env == {"PATH": "/bin"}
+    # A person's pane may run network controls, but a halt can find the pane by its owner.
+    assert env == {"PATH": "/bin", "KOLLAB_OWNER_PID": str(os.getpid())}
 
 
 def test_network_controls_are_high_risk():

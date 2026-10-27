@@ -123,16 +123,22 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         exec_detached_child(argv)
 
         # Exec failed: this image never went through the boot check, so check the halt now
-        try:
-            from plugins.hub.halt_runtime import halted_after_exec_failure
-
-            if halted_after_exec_failure(argv):
-                os._exit(75)
-        except ImportError:
-            pass
+        if _halt_holds_after_exec_failure(argv):
+            os._exit(75)
         # run the full app headless in this forked image
         _run_daemon(argv, write_fd)
         sys.exit(0)
+
+
+def _halt_holds_after_exec_failure(argv: list[str]) -> bool:
+    """True when this image must not run: a halt is in force, or the check itself cannot run (fail closed)."""
+    try:
+        from plugins.hub.halt_runtime import halted_after_exec_failure
+
+        return bool(halted_after_exec_failure(argv))
+    except Exception:  # ImportError included: a kill switch that cannot look holds
+        logger.exception("daemon: halt check failed after exec failure; holding")
+        return True
 
 
 # A launch that names an agent, a project or a first message asks for a new

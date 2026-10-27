@@ -181,22 +181,22 @@ def generate_enrollment_code(offer_id: str) -> EnrollmentCode:
 
 
 _SHORT_CODE_IN_TEXT = re.compile(
-    r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4})?"
+    r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}(?:(?:-[0-9A-HJKMNP-TV-Z]{4}){3})?"
 )
 
 
 def split_join_code(value: str) -> tuple[str, str]:
-    """(``XXXX-XXXX`` code, ``AAAA-AAAA`` network anchor or ``""``) from what a person typed.
+    """(``XXXX-XXXX`` code, ``AAAA-AAAA-AAAA`` network anchor or ``""``) from what a person typed.
 
-    The anchor is the last two groups of ``XXXX-XXXX-AAAA-AAAA`` (F4-3): the tag of the
+    The anchor is the last three groups of ``XXXX-XXXX-AAAA-AAAA-AAAA`` (F4-3): the tag of the
     network the code was made on, checked against the join decision.
     """
     if not isinstance(value, str):
         raise ValueError("invalid enrollment code")
     text = value.strip()
-    if len(text) == 19 and text[4] == "-" and text[9] == "-" and text[14] == "-":
+    if len(text) == 24 and text[4] == "-" and text[9] == "-" and text[14] == "-" and text[19] == "-":
         anchor = text[10:].upper()
-        if not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", anchor):
+        if not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", anchor):
             raise ValueError("invalid enrollment code")
         return text[:9], anchor
     return text, ""
