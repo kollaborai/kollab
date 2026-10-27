@@ -63,7 +63,7 @@ async def test_not_halted():
 
 @pytest.mark.asyncio
 async def test_halted_offers_propose_and_names_the_issuer():
-    p = await HALTP.describe(Ctx(snap(active=[HALT])), {})
+    p = await HALTP.describe(Ctx(snap(active=[HALT], others_online_since_halt=True)), {})
     state = summary(p)["Network State"]
     assert state.startswith("Halted by mac at ") and state.endswith("(their clock): runaway agent")
     assert ids(p["toolbar_actions"]) == ["halt_new", "propose_resume"]  # mac counts and is online
@@ -100,6 +100,9 @@ async def test_alone_while_halted_offers_resume_here_only_and_rows():
              revocation_signers={F_PROD: [MAC]}, unconfirmed_machines=[PROD])
     p = await HALTP.describe(Ctx(s), {})
     assert "resume_local" in ids(p["toolbar_actions"])
+    # another counting machine was online since the halt (gone now): no Resume Here Only
+    seen = await HALTP.describe(Ctx({**s, "others_online_since_halt": True}), {})
+    assert "resume_local" not in ids(seen["toolbar_actions"])
     labels = [r["label"] for r in p["rows"]]
     assert "prod revoked by mac, waiting for a second machine" in labels
     machine = next(r for r in p["rows"] if r["id"] == f"machine:{PROD}")

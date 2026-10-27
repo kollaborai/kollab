@@ -98,6 +98,9 @@ async def open_named_session(request: Request) -> None:
             ),
             None,
         )
+        if found is not None and found.get("halted"):
+            # A halt waiter runs no turn: nothing to attach, the web shows its line.
+            raise HTTPException(status_code=409, detail=found["halted"])
         if found is not None:
             try:
                 store = getattr(request.app.state, "handover_store", None)

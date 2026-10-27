@@ -17,3 +17,9 @@ export function haltedLine(panel: PanelDescription | null): { text: string; link
         : "Halt and Resume";
   return { text, link };
 }
+
+/** A waiter's line split so "Settings → Network" can open the halt screen: [text, link] ("" when absent). Pure, for tests. */
+export function splitWaiterLine(line: string): [string, string] {
+  const match = /^(.*: )(Settings → Network)\.?$/.exec(line);
+  return match ? [match[1], match[2]] : [line, ""];
+}

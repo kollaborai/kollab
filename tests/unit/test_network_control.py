@@ -341,3 +341,21 @@ def test_the_digest_changes_with_a_halt(three):
     before = f.digest()
     f.halt_act("halt", {"reason": "x"})
     assert f.digest() != before
+
+
+@pytest.mark.asyncio
+async def test_another_counting_machine_seen_since_the_halt_is_remembered(three):
+    """`Resume Here Only` hides once a second counting machine was online after the halt."""
+    f, b, c = three
+    assert f.halt_snapshot(set())["others_online_since_halt"] is False  # no halt
+    f.halt_act("halt", {"reason": "stop"})
+    assert f.halt_snapshot(set())["others_online_since_halt"] is False
+    assert f.halt_snapshot({c.client.public_key})["others_online_since_halt"] is False  # c does not count
+    assert f.halt_snapshot({f.client.public_key})["others_online_since_halt"] is False  # itself
+    assert f.halt_snapshot({b.client.public_key})["others_online_since_halt"] is True
+    assert f.halt_snapshot(set())["others_online_since_halt"] is True  # b went away: still seen
+    # The sync loop records it too, with no panel open.
+    link = syncs(f, b)
+    await link.syncs[f.client.public_key].tick()  # b gets the halt
+    await link.syncs[b.client.public_key].tick()  # b sees f online since it
+    assert b.halt_snapshot(set())["others_online_since_halt"] is True

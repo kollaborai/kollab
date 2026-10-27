@@ -8,6 +8,8 @@ export type PhoneLinkState = {
 export type PhoneLinkOffer = { id: string; name: string; expires_at: number; fingerprint: string; link: string; qr_svg: string };
 
 export type Session = {
+  /** A halt waiter's line ("Network halted by mac. Resume needs ..."): the chat runs no turn. */
+  halted?: string;
   harness?: string;
   provider?: string;
   acp_waiting?: boolean;

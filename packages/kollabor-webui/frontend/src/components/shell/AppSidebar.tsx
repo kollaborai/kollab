@@ -152,6 +152,7 @@ export function AppSidebar({
   onApps,
   onAgents,
   onSettings,
+  onHalt,
   onLearn,
   learnActive,
   onWhatsNew,
@@ -205,6 +206,8 @@ export function AppSidebar({
   /** Opens the Agents view: every roster and team this folder can start. */
   onAgents: () => void;
   onSettings: () => void;
+  /** Open Settings on the Halt and Resume screen (works with no chat open). */
+  onHalt: () => void;
   onLearn: () => void;
   learnActive: boolean;
   onWhatsNew: () => void;
@@ -650,7 +653,8 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
-              <HaltedLine api={api} folder={workspacePath.trim()} onOpen={onSettings} />
+              {/* No folder picked yet: ask about the first listed folder (a halt holds the whole network). */}
+              <HaltedLine api={api} folder={workspacePath.trim() || folderGroups[0]?.folder || ""} onOpen={onHalt} />
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
                   <div className="text-muted-foreground flex h-7 items-center gap-2 px-2.5 text-xs" title={group.folder}>

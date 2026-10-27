@@ -700,14 +700,7 @@ class ConnectHaltPanel:
             toolbar.append({"id": "no_count", "label": "Do Not Count Here", "confirm": True})
         if not halted and snap.get("opted_out"):
             toolbar.append({"id": "count", "label": "Count Here"})
-        # ponytail: "online now" stands in for "online since the halt"; nothing records the latter yet
-        others_online = any(
-            names.by_folder.get(k) is not None
-            and any(m.get("folder") == k and m.get("machine") in counting and m.get("machine") != me
-                    for m in names.members)
-            for k in snap.get("members_online") or []
-        )
-        if halted and not others_online:
+        if halted and not snap.get("others_online_since_halt"):
             toolbar.append({"id": "resume_local", "label": "Resume Here Only", "confirm": True})
         panel["toolbar_actions"] = toolbar
         if not rows and not halted:

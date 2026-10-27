@@ -391,3 +391,82 @@ session scratchpad `slice-c-own-hunks.patch` (`git apply --cached --check` passe
 - `WorkspaceRelayOwner(folder)` creates that folder's private state dir when
   the engine route asks about a folder that never ran a network.
 - `api.haltFolder` is set during PanelHost render (shared mutable field).
+
+## Slice C2: slice C leftovers
+
+Uncommitted on `main`; the coordinating session commits. Session scratchpad
+(`<session scratchpad>/`):
+`slice-c2-own-hunks.patch` (own hunks in `PanelHost.tsx` and `panel-model.ts`,
+which another agent had modified; `git apply --cached --check` passes). It
+leaves out ONE hunk on purpose: the `SETTINGS_TABS.filter(...)` /
+`{sessionId ? <SessionSettings/> : null}` / `{sessionId ? <PromptsPage/> : null}`
+block, because its context is the other agent's uncommitted Prompts tab; it
+must be committed together with that work. Originals: `slice-c2-before/`.
+
+### Files
+
+- `plugins/hub/network_control.py`: `note_online(online)` records, per active
+  halt hash, that another counting machine was online since it
+  (`others_online_since` in the control file); called by `HaltSync.tick` and
+  every `halt_snapshot`, which now returns `others_online_since_halt`.
+- `kollabor/panels/connect.py`: `Resume Here Only` only while
+  `others_online_since_halt` is false (the "online now" ponytail is gone).
+- Engine: `hub_bridge.py` lists halt waiters (state `halted` skips the
+  heartbeat check; pid is liveness) with `halted` = the line asked of the
+  waiter socket (`waiter_line`, fallback `WAITER_FALLBACK`); `server.py`
+  `open_named_session` answers 409 with that line instead of adopting, so no
+  turn runs.
+- Web: `api.ts` `Session.halted`; `App.tsx` shows `WaiterChat` (new
+  `components/shell/WaiterChat.tsx`, line + "Settings → Network" link, no
+  composer, mobile header) for a waiter, skips its history load, and mounts
+  `PanelHost` session-less (`session_id: ""`, folder from `api.haltFolder`)
+  with no chat open or on a waiter chat; `PanelHost.tsx` intent `halt` pushes
+  `connect-halt` (no session: Network is the only tab and its root is
+  `connect-halt`); `panel-model.ts` `PanelIntent` + `"halt"`;
+  `AppSidebar.tsx` `onHalt` prop, halted line asks about the first listed
+  folder when none is picked; `halted-line.ts` `splitWaiterLine`.
+- Spec `docs/specs/network-sync-and-control.md`: refusal line now `Only your
+  main device can add new devices. Make the code on <machine>.` (+ #355
+  reason), waiter presence liveness, `others_online_since`, `Counts` /
+  `Does not count yet`, notice (not summary) says why, unavailable notice,
+  read-only note, sidebar link label `Halt and Resume` fallback + 15 s poll,
+  no-chat Settings, waiter chat engine/web behavior.
+- Tests: `tests/unit/test_network_control.py` (+1), `test_panels_connect_halt.py`
+  (+1 assertion, 1 expectation), engine `tests/test_halt_waiter_session.py`
+  (new, 3), frontend `tests/halt-panels.test.ts` (+2).
+
+### Verified
+
+- `KOLLAB_NO_KEYRING=1 uv run pytest -q` on network_control, panels_connect_halt,
+  panels_connect, halt_runtime + engine halt_waiter_session, session_discovery,
+  hub_bridge_presence, panels_routes: 140 passed (then waiter file 3 passed
+  after a lint fix). `ruff check` clean on every touched Python file.
+- `node --test tests/halt-panels.test.ts tests/panel-summary.test.ts`: 14 pass;
+  `npx tsc --noEmit` clean; `npm run build` built (dist rebuilt).
+- Live, isolated stack (throwaway HOME `/tmp/kc2`, engine 7434, web UI 8081
+  serving the built dist, fake LLM): a test double held `halt.lock` and served
+  `halt.sock` with a canned halted snapshot + open proposal, and wrote one
+  waiter presence (`peridot`) with a status socket. No halt or sweep ran.
+  `GET /sessions` listed `peridot` with `halted`; the sidebar showed
+  `Network halted by mac at Oct 26 21:39 (their clock). Confirm Resume`;
+  the waiter chat showed its line; its link opened Settings with only the
+  Network tab on Halt and Resume (proposal row, unconfirmed machine row);
+  `Halt Network…` opened the form. Found and fixed live: the waiter chat first
+  opened Settings on its own session (409); now session-less.
+  All processes stopped by pid, ports free, HOME removed with shutil.rmtree.
+- Shots (desktop 1280x800 only): scratchpad `slice-c2-shots/desktop-waiter-chat-and-sidebar-line.jpg`,
+  `desktop-connect-halt-no-chat.jpg`, `desktop-connect-halt-new.jpg`.
+
+### Not done (token cap)
+
+- Shots at 390 and 820, Settings → Network root (`Network State` row and the
+  `Halt and Resume` action only show when the folder is on a network; the
+  throwaway HOME was not, and joining needs a relay), TUI Connect screen and
+  `h` view via tmux.
+- `ui-slop-review` not run. Own read of the shots: `connect-halt-new` uses
+  the generic FormPanel (search box and a "Halt Network" section header
+  repeating the title, count `2`) for a two-field form; the sidebar shows two
+  `ws` groups in the test because `/tmp` vs `/private/tmp` (test artifact,
+  not code).
+- Still from slice C: `connect-halt-new`'s `notice` is not rendered by
+  `FormPanel`; `Not restarted: ...` after resume not shown.

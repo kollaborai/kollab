@@ -61,3 +61,18 @@ test("the sidebar line shows only while halted, names the issuer and the next st
   assert.equal(haltedLine(halted([{ actions: ["withdraw"] }]))?.link, "Waiting for a second machine");
   assert.equal(haltedLine(halted([{ actions: ["confirm_resume"] }]))?.link, "Confirm Resume");
 });
+
+test("a waiter's line links its Settings → Network part", async () => {
+  const { splitWaiterLine } = await import("../src/components/shell/halted-line.ts");
+  assert.deepEqual(
+    splitWaiterLine("Network halted by mac. Resume needs a person on two machines: Settings → Network."),
+    ["Network halted by mac. Resume needs a person on two machines: ", "Settings → Network"],
+  );
+  assert.deepEqual(splitWaiterLine("Network halted."), ["Network halted.", ""]);
+});
+
+test("with no chat open the halt panels still reach the engine (session-less)", () => {
+  const api = new EngineApi("http://engine");
+  api.haltFolder = "/f";
+  assert.equal(api.panelPath("", "connect-halt"), "/network/halt/connect-halt?folder=%2Ff");
+});

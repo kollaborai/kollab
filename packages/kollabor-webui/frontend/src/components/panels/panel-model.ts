@@ -13,7 +13,7 @@ export type SettingsTab =
 export type PanelTab = Exclude<SettingsTab, "session" | "phonelink">;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
-export type PanelIntent = "new_code" | "knocks";
+export type PanelIntent = "new_code" | "knocks" | "halt";
 export type PanelOpenRequest = { tab: SettingsTab; intent?: PanelIntent };
 
 /** Tab order, labels and the scope line shown under the title. */

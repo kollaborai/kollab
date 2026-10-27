@@ -223,8 +223,10 @@ counting machines:
   join code or accept a join request: `connect.py`'s `new_code` action
   (`:212` to `:214`), `create_enrollment_offer` (`relay_agent.py:1128`, behind
   `/connect code` and the TUI Connect screen) and `decide_enrollment_request`
-  (`relay_agent.py:1220`) refuse there with `Only a machine that counts on <network> can add a
-  device. Ask on <counting machine>.` Every admission names its admitter's
+  (`relay_agent.py:1220`) refuse there with `Only your main device can add new
+  devices. Make the code on <machine>.` (`network_control.ADMIT_REFUSAL`;
+  `<machine>` is a counting machine's device name). The TUI join code row and
+  Settings → Network show that line as the offer's `reason` (#355). Every admission names its admitter's
   machine key, so a machine's admission chain is its admitter, that machine's
   admitter, and so on up to the founder.
 - Why both (R5-1): without them a counting machine C could admit a fake F1
@@ -412,7 +414,9 @@ keys, the managed-config record or MCP settings.
 - A waiter loads no model and no plugins. It writes a presence record with
   state `halted` and opens an attach socket that answers `status` with the
   halt and refuses turns, so the engine's session create finds it and shows
-  the halted line instead of timing out (R18).
+  the halted line instead of timing out (R18). The record is written once and
+  never beats, so the engine takes the waiter's pid as its liveness, not a
+  heartbeat.
 - Waiters never take `halt.lock` (R4-N5); a waiter that finds no listener
   starts one.
 - Waiters poll `halt.json` every 5 s and exec when their folder is marked
@@ -456,7 +460,9 @@ keys, the managed-config record or MCP settings.
   lifted by it.
 - Local resume (R3-F3): `kollab --hub resume --local` (terminal and accident
   guard; the TUI and web offer it as `Resume Here Only` when no other counting
-  machine has been online since the halt) lifts every active halt on this
+  machine has been online since the halt: each machine records, per active
+  halt hash, that it saw one (`others_online_since` in its control file, set by
+  the `network_halt` sync loop and by every halt snapshot)) lifts every active halt on this
   machine only. It is not an order and does not travel. The machine records
   the halts as locally lifted; the next `network_halt` exchange with a member
   that still holds one of them brings it back, and the machine halts again. It
@@ -641,7 +647,7 @@ owner or, while halted, by the listener (`halt.sock`), using only the three
 
 - `connect-halt` (kind `picker`), the halt screen. Summary: `Network State`
   (`Running` or `Halted by <device> at <time> (their clock): <reason>`),
-  `This Machine` (`counts` or `does not count yet`), `Online Now`. Rows, each
+  `This Machine` (`Counts` or `Does not count yet`), `Online Now`. Rows, each
   with row actions that carry `confirm: true` (`PickerList` honors it,
   `PickerList.tsx:72`):
   - each open resume proposal, one row each (R4-N2): proposer, halts it lifts
@@ -662,8 +668,10 @@ owner or, while halted, by the listener (`halt.sock`), using only the three
   `Resume Here Only`
   only when no other counting machine has been online since the halt. An
   action that cannot apply is left out rather than disabled (`PanelAction` has
-  no `disabled`, `api.ts:656`); the summary says why, for example on a
+  no `disabled`, `api.ts:656`); the panel's `notice` says why, for example on a
   one-machine network `Halt needs a second machine that can confirm a resume.`
+  With neither a listener nor a network owner the panel is empty with the
+  notice `The halt screen is unavailable right now.`
 - `connect-halt-new` (kind `form`, with a `context` so its button is live
   without edits, `FormPanel.tsx:152`): fields `Reason` (text) and
   `Also Revoke` (dropdown: None or a member device); action `Halt Network`
@@ -693,7 +701,8 @@ Where they show:
 - Web Settings → Network: `ConnectPanel` gains a `Network State` summary row
   and a toolbar action `Halt and Resume` that opens `connect-halt`; this
   toolbar action is added before the read-only return
-  (`connect.py:160` to `:163`), so read-only chats have it too (R3-F8).
+  (`connect.py:160` to `:163`), so read-only chats have it too (R3-F8); their
+  note reads `This view shows what is known; only Halt and Resume works here.`
 - Web route (R3-F7, R4-N7): a session-less engine route,
   `GET /network/halt/{panel}` and `POST /network/halt/{panel}/actions/{action}`
   (`panel` is `connect-halt` or `connect-halt-new`), takes the folder as a
@@ -708,10 +717,17 @@ Where they show:
   those names and `/sessions/{id}/panels/{name}...` for the rest. A panel
   action result whose `open` names one of them (the `ConnectPanel` toolbar
   action, the sidebar link) is pushed onto `PanelHost`'s stack like any other
-  `open`, and that tab's calls go through the same switch. The sidebar, with
-  no chat open, opens it with the selected folder.
+  `open`, and that tab's calls go through the same switch. The sidebar link
+  opens Settings on Network with `connect-halt` pushed (intent `halt`); with
+  no chat open, Settings shows only the Network tab and its root is
+  `connect-halt` for the sidebar's folder.
 - A chat on a waiter shows `Network halted by <device>. Resume needs a person
-  on two machines: Settings → Network.` and runs no turn.
+  on two machines: Settings → Network.` and runs no turn. The engine lists the
+  waiter with that line (`halted`, asked of its socket with `get_status`;
+  `Network halted by another machine...` when it does not answer), and a
+  session route that names it answers 409 with the line instead of attaching.
+  The web shows the line in place of the thread and composer; `Settings →
+  Network` in it opens the Halt and Resume screen.
 - While a proposal waits: the proposer's screens show `Waiting for a second
   machine to confirm` and who is online (`Online: none` when alone). Other
   counting machines' Connect screen, Settings → Network and the sidebar line
@@ -722,7 +738,7 @@ Where they show:
   above the agent list, `Network halted by <device> at <time> (their clock)`,
   with a link that opens `connect-halt` through the session-less route:
   `Propose Resume`, `Waiting for a second machine`, or `Confirm Resume` when
-  another machine proposed one. Rows are never greyed out. Plain text and
+  another machine proposed one, else `Halt and Resume`. It polls every 15 s. Rows are never greyed out. Plain text and
   icon, no chips.
 
 ## 2. Stay Open By Default

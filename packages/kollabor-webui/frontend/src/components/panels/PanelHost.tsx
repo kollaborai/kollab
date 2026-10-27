@@ -240,7 +240,8 @@ export function PanelHost({
       const mine = epoch.current;
       patchTab(target, (state) => ({ ...state, status: "loading", error: null }));
       const job: Promise<void> = api
-        .getPanel(sessionId, PANEL_NAME[target])
+        // No chat open (the sidebar's halted line): Network opens on Halt and Resume.
+        .getPanel(sessionId, sessionId ? PANEL_NAME[target] : "connect-halt")
         .then(
           (panel) => {
             if (mine !== epoch.current) return;
@@ -423,6 +424,8 @@ export function PanelHost({
     if (!open || !intent || consumed.current === intent.nonce) return;
     if (tab !== "network" || !networkReady) return;
     consumed.current = intent.nonce;
+    const pushed = intent.action === "halt" ? "connect-halt" : "connect-knocks";
+    if (pushed === "connect-halt" && !sessionId) return; // already the root
     if (intent.action === "new_code") {
       setNetworkSection("access");
       setReveal(null);
@@ -436,12 +439,12 @@ export function PanelHost({
     } else {
       setReveal(null);
       const mine = epoch.current;
-      void api.getPanel(sessionId, "connect-knocks").then(
+      void api.getPanel(sessionId, pushed).then(
         (panel) => {
           if (mine !== epoch.current) return;
           patchTab("network", (state) => ({
             ...state,
-            views: state.views[state.views.length - 1]?.panel.panel === "connect-knocks"
+            views: state.views[state.views.length - 1]?.panel.panel === pushed
               ? [...state.views.slice(0, -1), newView(panel)]
               : [...state.views, newView(panel)],
           }));

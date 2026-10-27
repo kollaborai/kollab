@@ -28,6 +28,7 @@ import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, targetsOn } from "@/components/shell/agent-network";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
+import { WaiterChat } from "@/components/shell/WaiterChat";
 import type {
   PanelIntent,
   PanelOpenRequest,
@@ -603,6 +604,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const loadState = useCallback(
     async (sessionId: string, nextSessions: Session[], quiet = false) => {
+      // A halt waiter has no history and runs no turn: the chat shows its line only.
+      if (nextSessions.find((item) => item.session_id === sessionId)?.halted) {
+        setHistoryStatus(null);
+        return buildInitialState(sessionId, nextSessions, [], [], null, 0);
+      }
       // A refresh of an open chat shows no banner: the thread is already there.
       if (!quiet) setHistoryStatus({ sessionId, kind: "loading", message: "Loading conversation history…" });
       try {
@@ -1242,6 +1248,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onApps={() => setAppsOpen(true)}
           onAgents={() => setAgentsOpen(true)}
           onSettings={() => openSettings()}
+          onHalt={() => openSettings({ tab: "network", intent: "halt" })}
           onLearn={() => navigateToLearn()}
           onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
@@ -1305,12 +1312,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {activeSession ? (
+        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
           <PanelHost
-            key={activeSession.session_id}
+            key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
             api={api}
-            session={activeSession}
-            displayName={agents.find((agent) => agent.name === activeSession.identity)?.display_name}
+            // No chat open, or a halt waiter's: the session-less Halt and Resume screen for that folder.
+            session={activeSession && !activeSession.halted ? activeSession : { session_id: "", workspace: api.haltFolder }}
+            displayName={agents.find((agent) => agent.name === activeSession?.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
             onOpenChange={setSettingsOpen}
@@ -1367,7 +1375,18 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               ) : null}
             </div>
           ) : null}
-          {activeSession && initialState ? (
+          {activeSession?.halted ? (
+            <>
+              <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">
+                <SidebarTrigger className="-ml-1" />
+                <span className="min-w-0 truncate text-sm font-semibold">{activeSession.name || activeSession.identity}</span>
+              </ShellHeader>
+              <WaiterChat line={activeSession.halted} onOpen={() => {
+                api.haltFolder = activeSession.workspace ?? "";
+                openSettings({ tab: "network", intent: "halt" });
+              }} />
+            </>
+          ) : activeSession && initialState ? (
             // Outside the epoch key: a thread reload (resetThread) must not
             // stop the voice room, as a talk-over that cuts a reply reloads it.
             <VoiceRoomProvider api={api} sessionId={activeSession.session_id}>

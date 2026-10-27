@@ -420,7 +420,30 @@ class NetworkControl:
 
     # ------------------------------------------------------------ panels
 
+    def note_online(self, online: Any) -> bool:
+        """Record, per active halt, that another counting machine was online since it.
+
+        ``Resume Here Only`` is offered only while this stays false. Returns the flag.
+        """
+        active = set(self.halt_book().active())
+        data = self._fresh()
+        seen = set(data.get("others_online_since", [])) & active
+        if active - seen:
+            view = self.view()
+            rows = self.rows()
+            if any(
+                (rows.get(k) or {}).get("machine") in view.counting
+                and (rows.get(k) or {}).get("machine") != self.machine_hex
+                for k in online or ()
+            ):
+                seen = active
+        if sorted(seen) != data.get("others_online_since", []):
+            data["others_online_since"] = sorted(seen)
+            self.save()
+        return bool(active) and seen == active
+
     def halt_snapshot(self, online: set[str] | None = None) -> dict[str, Any]:
+        others_online_since_halt = self.note_online(online)
         view = self.view()
         book = self.halt_book()
         data = self._fresh()
@@ -461,6 +484,8 @@ class NetworkControl:
             + sorted(k for k, ms in good.items() if len(ms) < 2 and k in applied),
             "unconfirmed_machines": sorted(machines - view.counting - view.revoked),
             "members_online": sorted(online or ()),
+            # another counting machine was online at some point since every active halt
+            "others_online_since_halt": others_online_since_halt,
         }
 
     def halt_members(self) -> list[dict[str, Any]]:
@@ -642,6 +667,7 @@ class HaltSync:
     async def tick(self) -> None:
         control = self._client.control
         online = self._online()
+        control.note_online(online)
         for key in self._client.members():
             session = online.get(key)
             digest = hashlib.sha256(nh.canonical(control.halt_payload())).hexdigest()
