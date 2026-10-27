@@ -183,6 +183,17 @@ def test_a_revoke_that_breaks_quorum_needs_revoke_here_only(three):
     assert f.check_revoke(b.client.public_key, here_only=False) is True  # F and C remain
 
 
+def test_a_halt_that_revokes_asks_for_revoke_here_only_like_connect_revoke(three):
+    # found in Docker: `halt --revoke <founder>` severed a secondary's link with no question
+    f, b, c = three
+    with pytest.raises(RelayError, match="Revoke here only"):
+        b.halt_act("halt", {"reason": "x", "revoke": [f.client.public_key]})
+    assert f.client.public_key in b.client.state.approvals and not b.halt_book().active()
+    b.halt_act("halt", {"reason": "x", "revoke": [f.client.public_key], "revoke_here_only": True})
+    assert f.client.public_key not in b.client.state.approvals
+    assert not b.client.state.revoked  # local only: nothing is announced network-wide
+
+
 def test_a_device_that_joined_never_founds(tmp_path):
     m = machine(tmp_path, "m", inviter="ee" * 32)
     m.found()

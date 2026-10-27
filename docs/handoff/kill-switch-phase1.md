@@ -587,3 +587,96 @@ Not checked: light theme (all shots dark), a read-only window (needs a second wi
 ### Files changed this slice
 
 `packages/kollabor-webui/frontend/src/components/panels/FormPanel.tsx`, `.../PickerList.tsx`, `.../src/App.tsx` (1 line), `plugins/hub/plugin.py` (1 line), `plugins/altview/connect_altview.py` (1 line). Checked: `git diff --stat` showed only these hunks in the last three.
+
+### D2: second Docker pass (partial: token cap)
+
+Nothing ran on the host except the non-destructive tmux spec. Image rebuilt from
+the checkout after bug 1's fix; containers `ks2-relay`, `ks2-m1..m4` on the
+existing `ks-net` (the old `ks-*` containers were stopped and could not be
+removed here). Topology: m1 founder (plus a second HOME `h2`, folder `hwork`,
+admitted by m1's code), m3 bootstrap (two folders `work`, `work2`), m4 admitted
+by m1, m2 a lone network. Fixes 1-6 below were copied into the running
+containers with `docker cp` between rounds; the image itself is NOT rebuilt
+with them.
+
+| Bullet | Result | Observed |
+|---|---|---|
+| halt from a secondary stops every in-scope kollab process on the founder, not listener/issuing CLI | PASS | `halt --reason proof-halt` on m3: m1 daemon and attached TUI gone, only `--halt-listener` left on m1; m3 `m3-work: halted, 1 agents stopped`. Typed `/connect halt` from a daemon not run |
+| dev-install halt leaves other python processes alone | PASS | a `python -c time.sleep` decoy on m1 and m3 survived every halt |
+| second HOME on the machine is swept | PASS | round 2: m1 shows two listeners (one per HOME); founder daemon and `hwork` daemon both gone |
+| offline device stops on reconnect | PASS | m4 left `ks-net`, daemon started, network reconnected: daemon gone, listener up, scope `['/root/work']` |
+| resume from one machine lifts nothing | PASS | m3 `resume`: scopes unchanged on m1, m3, m4 |
+| proposer's own confirm / second folder of the proposer machine | PASS | `a resume is confirmed on a different machine than the one that proposed it` (m3 `work` and `work2`) |
+| confirm from a folder-scoped, non-counting machine (m4) | PASS | `Resume confirmed: lifts 0 halts`, scopes unchanged |
+| second-HOME machine admitted by the founder confirms | PASS | `m1h2` confirm: `lifts 0 halts` |
+| a second counting machine's confirm lifts it | PASS | m1 `resume --confirm 5068508e`: `lifts 1 halts`; scopes `{}` on m1, m3, m4, h2 within 30 s |
+| service-style agent returns once, owner retakes the relay lock | PASS | supervisor loop `KOLLAB_SERVICE=1 kollab --detached`: the waiter (pid 2265) exec'd into the daemon, no duplicate, `relay-owner.json` pid 2265, relay online |
+| terminal-tool halt refused | PASS | `Network controls run only from a person's terminal or Settings → Network.` (Docker and the tmux spec) |
+| one-machine refusal | PASS | tmux spec on a fresh isolated HOME: `This network has one machine that can confirm a resume. A halt needs a second one to lift it; ...` |
+| chained admission: non-counting New Join Code | PASS (D1) | `Only your main device can add new devices...` |
+| one machine's revocation applies only there; two folder keys of one machine count as one | PASS | `halt --revoke m4-work` from m3 `work` then `work2`: m3 shows m4 revoked, m1 does not, `revocation_signers` lists one machine |
+| a second counting machine signs it: network-wide | PASS | m1 `halt --revoke m4-work`, resume, m1 daemon back: m4 `revoked` on m1 and m3 |
+| agents/skills dirs byte-identical | PARTIAL | hash `51e3f27326bd044f` on all four machines before; the after hash was not taken |
+| `resume --local` lifts locally | PARTIAL | printed `Lifted on this machine only...`, scopes `{}`; the return at the next exchange was NOT seen (m3 had cut m1 off, bug 6) |
+| deleted `halt.json` returns | NOT RUN | |
+| revocation of the primary not applied from peers | NOT RUN | only the local-signer path was hit (bug 6) |
+| halted machine's `--web-ui` / interactive launch lets a person confirm | NOT RUN | |
+| listener keeps links when a waiter in a lifted folder execs while another halt stays | NOT RUN | |
+| old pre-release chain cases (F1/F2, `Chain unknown`) | NOT RUN | need hand-made old records |
+| another install's engine survives | NOT RUN | one install per container |
+
+### D2 bugs
+
+Fixed (each with a unit test):
+
+1. `HaltListener.tick` set done on its first pass (no scope yet, the hand-off had
+   not arrived), so a listener started by the CLI exited at once and the CLI
+   died with a traceback (`the halt listener did not start`). Now a 30 s grace
+   (`LISTENER_GRACE_SECONDS`); the CLI prints a plain line on `OSError`.
+   `plugins/hub/halt_runtime.py`.
+2. `_state_dir_for` returned None on a machine with no membership rows (a fresh
+   HOME), so the listener never opened a link and no halt left the machine. It
+   falls back to `default_workspace_state_dir`. `halt_runtime.py`.
+3. `open_relay_link` built `RelayCommands` without config, so a relay on a
+   private CA or private-origin scope never connected, silently. It loads the
+   global config (`_global_config`). `halt_runtime.py`.
+4. `network_halt` was missing from `_SECURE_APP_METHODS`
+   (`plugins/hub/secure_conversation.py:48`): the transport refused every halt
+   exchange, so no halt ever reached another machine.
+5. The confirming machine's listener handed the relay back the moment the halt
+   lifted, leaving the proposer halted until the confirmer's daemon came back.
+   `hand_back` now flushes one exchange first (`HaltLink.flush`).
+6. `halt --revoke <device>` skipped `check_revoke`: a secondary could sign and
+   apply a revocation of its founder with no `Revoke here only` question, which
+   cut its own link (m3 revoked m1 in its v2 state, then reached nobody). The
+   halt now calls `check_revoke` (new flag `--here-only`) and signs a
+   network-wide record only when it is one. `plugins/hub/network_control.py`.
+
+Reported, not fixed:
+
+7. The CLI's 10 s ack window prints `offline, halts on reconnect` for a member
+   that is online but has not acked yet (every run above).
+8. After a daemon-less migration a folder ends with BOTH layouts
+   (`~/.kollab/network/<digest>` and `~/.kollab/workspaces/<id>/networks/<slug>`)
+   holding different `approvals`/`revoked` (m3: v1 kept the pre-halt approvals,
+   v2 had none). `default_workspace_state_dir` / `migrate_legacy_network_state`
+   (`plugins/hub/device_record.py`, `plugins/hub/relay_state.py:247`). Repro:
+   join on a fresh HOME, stop the daemon, run any `kollab --hub halt`.
+9. Slice D bugs 2 and 3 (TUI `/connect code` empty domain on a detached daemon;
+   guided join always kollabor.ai) are untouched.
+10. A resumed plain daemon is not restarted (by design): a lifted machine with
+    only a plain daemon stays offline until a person starts it.
+
+### D2 tmux
+
+`tests/tmux/specs/kill_switch_phase1.json`: PASS (terminal-tool refusal and the
+one-machine refusal on an isolated HOME). NOT covered: the Connect screen
+`Network State` row and the `h` halt view; the `--no-daemon` app launched from
+the spec's shell exited at once in the pane (not diagnosed).
+
+### D2 Docker objects left
+
+Image `kollab-killswitch:dev` (rebuilt, without fixes 1-6); network `ks-net`.
+Running, started with `--rm` (stop them with `docker stop`): `ks2-relay`,
+`ks2-m1`, `ks2-m2`, `ks2-m3`, `ks2-m4`. Stopped from D1, need the container
+remove subcommand: `ks-relay`, `ks-m1`, `ks-m2`, `ks-m3`.

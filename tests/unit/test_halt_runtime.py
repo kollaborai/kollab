@@ -195,7 +195,7 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path):
 def test_hand_back_releases_the_link_before_marking_lifted(tmp_path):
     log = []
     nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {}})
-    listener = hr.HaltListener(tmp_path)
+    listener = hr.HaltListener(tmp_path, grace=0)
     listener.links["net1"] = FakeLink(log)
     orig = hr.update_halt
 
@@ -211,6 +211,64 @@ def test_hand_back_releases_the_link_before_marking_lifted(tmp_path):
     assert log == ["link closed", "marked lifted"]
     assert hr.read_halt(tmp_path)["scopes"] == {}
     assert listener._done.is_set()  # no halt left: the listener exits
+
+
+def test_hand_back_tells_the_members_online_before_it_leaves_the_relay(tmp_path):
+    # the confirmer's listener used to exit at once, leaving the proposer halted (found in Docker)
+    log = []
+
+    class Flushing(FakeLink):
+        async def flush(self):
+            self.log.append("flushed")
+
+    nh.HaltFile(tmp_path).write({"scopes": {"net1": [FOLDER]}, "networks": {}})
+    listener = hr.HaltListener(tmp_path, grace=0)
+    listener.links["net1"] = Flushing(log)
+    asyncio.run(listener.hand_back("net1"))
+    assert log == ["flushed", "link closed"]
+
+
+def test_a_fresh_listener_waits_for_the_hand_off_that_started_it(tmp_path):
+    # the CLI records the halt, then starts the listener, then hands off: with no
+    # scope yet the listener must not exit on its first tick (found in Docker)
+    nh.HaltFile(tmp_path).write({"scopes": {}, "networks": {}})
+    listener = hr.HaltListener(tmp_path)
+    asyncio.run(listener.tick())
+    assert not listener._done.is_set()
+    listener._hold_until = 0
+    asyncio.run(listener.tick())
+    assert listener._done.is_set()
+
+
+def test_state_dir_for_falls_back_to_the_folders_default_dir(tmp_path, monkeypatch):
+    # a machine that never registered a membership has no Memberships row (found in Docker)
+    from plugins.hub import membership_runtime, relay_state
+
+    class Empty:
+        def __init__(self, folder):
+            pass
+
+        def list(self):
+            return []
+
+    monkeypatch.setattr(membership_runtime, "Memberships", Empty)
+    monkeypatch.setattr(relay_state, "default_workspace_state_dir", lambda folder: tmp_path)
+    monkeypatch.setattr(hr, "_network_of", lambda folder, state_dir: "net1")
+    assert hr._state_dir_for(FOLDER, "net1") == tmp_path
+    assert hr._state_dir_for(FOLDER, "other") is None
+
+
+def test_global_config_gives_the_listener_the_relay_ca_setting(tmp_path, monkeypatch):
+    # without it the listener's link never connected to a relay on a private CA (found in Docker)
+    import json
+
+    (tmp_path / ".kollab").mkdir()
+    (tmp_path / ".kollab" / "config.json").write_text(
+        json.dumps({"plugins": {"hub": {"endpoint_tls_ca": "/x/ca.pem"}}})
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = hr._global_config()
+    assert config is not None and config.get("plugins.hub.endpoint_tls_ca", "") == "/x/ca.pem"
 
 
 def test_listener_socket_serves_only_halt_calls(tmp_path):

@@ -40,6 +40,8 @@ SOCK = "halt.sock"
 HALT_JSON = "halt.json"
 POLL_SECONDS = 5.0
 LISTENER_IDLE_SECONDS = 2.0
+HAND_BACK_FLUSH_SECONDS = 15.0
+LISTENER_GRACE_SECONDS = 30.0  # a fresh listener waits this long for the hand-off that started it
 LISTENER_FLAG = "--halt-listener"
 WAITER_ENV = "KOLLAB_HALT_WAITER"
 HALTED_LINE = "Network halted by {device}. Resume needs a person on two machines: Settings → Network."
@@ -575,6 +577,7 @@ class HaltListener:
         agents: Callable[[], list[dict]] | None = None,
         open_link: Callable[[str, Path], Awaitable[Any]] | None = None,
         idle: float = LISTENER_IDLE_SECONDS,
+        grace: float = LISTENER_GRACE_SECONDS,
     ):
         self.root = root
         self._stop = stop
@@ -582,6 +585,7 @@ class HaltListener:
         self._agents = agents
         self._open_link = open_link or open_relay_link
         self.idle = idle
+        self._hold_until = time.monotonic() + grace
         self.links: dict[str, Any] = {}  # network id -> HaltLink
         self.folders: dict[str, set[str]] = {}  # network id -> folders seen here
         self._lock_fd: int | None = None
@@ -640,7 +644,7 @@ class HaltListener:
             book = (data.get("networks") or {}).get(net)
             if not _book_active(net, book):
                 await self.hand_back(net)
-        if not (read_halt(self.root).get("scopes") or {}):
+        if not (read_halt(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
             self._done.set()
 
     async def _reopen_links(self) -> None:
@@ -768,6 +772,10 @@ class HaltListener:
         """R3-F9: close the link and release the owner lock, then mark the folders lifted."""
         link = self.links.pop(net, None)
         if link is not None:
+            flush = getattr(link, "flush", None) if mark else None
+            if flush is not None:  # tell the members online the halt is lifted before leaving the relay
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(flush(), HAND_BACK_FLUSH_SECONDS)
             await link.close()  # releases the relay-owner lock
         if mark:
             def lift(data: dict) -> None:
@@ -827,7 +835,14 @@ def _state_dir_for(folder: str, net: str) -> Path | None:
                 return m.state_dir
         except Exception:
             continue
-    return None
+    # a machine that never registered a membership keeps the folder's default state dir
+    from .relay_state import default_workspace_state_dir
+
+    try:
+        state_dir = default_workspace_state_dir(Path(folder))
+        return state_dir if _network_of(folder, state_dir) == net else None
+    except Exception:
+        return None
 
 
 class HaltLink:
@@ -881,6 +896,12 @@ class HaltLink:
 
         return await self.transport.handle_packet(peer, payload, inner)
 
+    async def flush(self) -> None:
+        """One more exchange with every member online (the halt book changed: a resume)."""
+        self.sync._delivered.clear()
+        self.sync._retry_at.clear()
+        await self.sync.tick()
+
     def acked(self) -> list[str]:
         return sorted(self.sync._delivered)
 
@@ -914,6 +935,18 @@ class HaltLink:
         self.owner.release()
 
 
+def _global_config():
+    """The user's config, for the relay's CA and private-origin settings (None if unreadable)."""
+    try:
+        from kollabor_config import ConfigService
+        from kollabor_config.config_utils import get_config_directory
+
+        return ConfigService(get_config_directory() / "config.json", None, fast_mode=True)
+    except Exception:
+        logger.warning("halt listener: config unreadable, relay settings default")
+        return None
+
+
 async def open_relay_link(folder: str, state_dir: Path) -> HaltLink | None:
     """Assumption 1: a membership's link with no plugins and no model."""
     from .relay_commands import RelayCommands
@@ -924,7 +957,7 @@ async def open_relay_link(folder: str, state_dir: Path) -> HaltLink | None:
     if not owner.acquire(str(sock_path()), "halt-listener"):
         return None  # its owner still runs: the sweep did not stop it
     try:
-        commands = RelayCommands(Path(folder), state_dir=state_dir, agent_bridge=None)
+        commands = RelayCommands(Path(folder), config=_global_config(), state_dir=state_dir, agent_bridge=None)
         transport = SecureConversationTransport(commands.client, commands.client._store.key.encode())
         link = HaltLink(Path(folder), state_dir, owner, commands, transport)
         await link.start()
@@ -990,11 +1023,11 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
     folder = folder or os.getcwd()
     try:
         if subcmd == "halt":
-            opts = parse_flags(rest, {"--reason": True, "--revoke": True})
+            opts = parse_flags(rest, {"--reason": True, "--revoke": True, "--here-only": False})
         else:
             opts = parse_flags(rest, {"--confirm": True, "--local": False})
     except ValueError as error:
-        print(f"{error}\nusage: kollab --hub halt [--reason <text>] [--revoke <device>]\n"
+        print(f"{error}\nusage: kollab --hub halt [--reason <text>] [--revoke <device> [--here-only]]\n"
               "       kollab --hub resume [--confirm <8-hex> | --local]")
         return 2
     control = _folder_control(folder)
@@ -1007,16 +1040,24 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
             print(f"no member device named {opts['revoke']}")
             return 1
         try:
-            act = control.halt_act("halt", {"reason": opts.get("reason", ""), "revoke": revoke})
+            act = control.halt_act(
+                "halt",
+                {"reason": opts.get("reason", ""), "revoke": revoke, "revoke_here_only": bool(opts.get("here-only"))},
+            )
         except Exception as error:
             print(str(error))
             return 1
         scope = _scope_for(control, folder)
-        reply = await hand_off(
-            {"network": control.network_id(), "scope": scope, "folder": folder,
-             "hash": act.get("hash"), "protect": sorted(ancestors(os.getpid()))},
-            root,
-        )
+        try:
+            reply = await hand_off(
+                {"network": control.network_id(), "scope": scope, "folder": folder,
+                 "hash": act.get("hash"), "protect": sorted(ancestors(os.getpid()))},
+                root,
+            )
+        except (OSError, asyncio.TimeoutError) as error:
+            print(f"Halt {str(act.get('hash', ''))[:8]} recorded, but the halt listener did not answer: "
+                  f"{str(error) or type(error).__name__}")
+            return 1
         print(f"Halt {str(act.get('hash', ''))[:8]} recorded.")
         status = await _await_acks(folder, root)
         for line in member_lines(status.get("members") or control.halt_members(), status.get("acked") or [],

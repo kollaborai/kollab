@@ -521,6 +521,8 @@ class NetworkControl:
             if not nh.halt_allowed(view):
                 raise nh.HaltError(nh.ONE_MACHINE_REFUSAL)
             revoke = [k for k in payload.get("revoke", []) if _is_key(k)]
+            # the same "Revoke here only" rule as /connect revoke (R3-F3): refused before the halt is taken
+            wide = {k: self.check_revoke(k, here_only=bool(payload.get("revoke_here_only"))) for k in revoke}
             order = nh.make_order(
                 folder, self.machine, net, "halt",
                 supersedes=book.next_supersedes(self.client.public_key, payload.get("peer_heads", [])),
@@ -532,8 +534,9 @@ class NetworkControl:
                 raise nh.HaltError(taken.reason)
             self.save_halt_book(book)
             for key in revoke:
-                self.sign_revocation(key)
-                self.client.revoke(key, announce=True)  # the issuing machine refuses it at once
+                if wide[key]:
+                    self.sign_revocation(key)
+                self.client.revoke(key, announce=wide[key])  # the issuing machine refuses it at once
             self._halt_changed()
             result["hash"] = nh.order_hash(order)
         elif action == "propose_resume":
