@@ -1,4 +1,4 @@
-"""L2: halt, resume and revoke acts need `confirmed: true`, checked on the server side."""
+"""L2: halt, resume, revoke and roster acts need `confirmed: true`, checked on the server side."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ from plugins.hub.relay_state import RelayError
 
 from .test_panels_connect_halt import MEMBERS, Ctx, snap
 
-ACTS = ["halt", "propose_resume", "confirm_resume", "resume_local", "confirm_revoke"]
+ACTS = [
+    "halt", "propose_resume", "confirm_resume", "resume_local", "confirm_revoke",
+    "withdraw", "confirm_machine", "confirm_founder", "make_bootstrap", "count", "no_count",
+]
 
 
 @pytest.mark.parametrize("action", ACTS)
@@ -26,8 +29,7 @@ def test_the_core_check_refuses_an_unconfirmed_act(action):
         with pytest.raises(nh.HaltError):
             nh.require_confirmed(action, bad)
     nh.require_confirmed(action, {"confirmed": True})
-    nh.require_confirmed("count", {})  # not a halt, resume or revoke
-    nh.require_confirmed("confirm_machine", {})
+    nh.require_confirmed("members", {})  # a read, not an act
 
 
 @pytest.mark.parametrize("action", ACTS)

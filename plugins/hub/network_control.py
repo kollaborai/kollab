@@ -281,10 +281,10 @@ class NetworkControl:
         return nh.count_machines(self.roster())
 
     def _name_of_machine(self, machine: str) -> str:
-        if machine == self.machine_hex:
-            return "this machine"
         names = [r.get("name") for r in self.rows().values() if r.get("machine") == machine and r.get("name")]
-        return names[0] if names else machine[:8]
+        if names:
+            return names[0]
+        return "this machine" if machine == self.machine_hex else machine[:8]
 
     def _network_label(self) -> str:
         bridge = getattr(self.client, "agent_bridge", None)
@@ -333,13 +333,20 @@ class NetworkControl:
             "network_control": {
                 "founder": data.get("founder"),
                 "network": self.network_id(),
+                "halt_allowed": nh.halt_allowed(self.view()),  # F8: the real count at join time
                 "admission": nh.admission(self.machine, self.network_id(), machine),
             }
         }
 
-    def count_warning(self) -> str:
-        """The plain line for a network where a halt could not be lifted, else ""."""
-        return "" if nh.halt_allowed(self.view()) else ONE_COUNTING_LINE
+    def count_warning(self, decision: Any = None) -> str:
+        """The plain line for a network where a halt could not be lifted, else "".
+
+        A join decision states the inviter's count (the joiner's own view has not heard the
+        bootstrap pick yet); advisory only, the rules never read it.
+        """
+        stated = decision.get("halt_allowed") if isinstance(decision, dict) else None
+        allowed = stated if isinstance(stated, bool) else nh.halt_allowed(self.view())
+        return "" if allowed else ONE_COUNTING_LINE
 
     def take_join(self, fields: Any, *, anchor: str) -> str:
         """A joiner keeps the founder record and its own admission from the decision.

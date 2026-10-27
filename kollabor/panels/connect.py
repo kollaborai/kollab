@@ -707,7 +707,7 @@ class ConnectHaltPanel:
         if not halted and counts and not snap.get("opted_out"):
             toolbar.append({"id": "no_count", "label": "Do Not Count Here", "confirm": True})
         if not halted and snap.get("opted_out"):
-            toolbar.append({"id": "count", "label": "Count Here"})
+            toolbar.append({"id": "count", "label": "Count Here", "confirm": True})
         if halted and not snap.get("others_online_since_halt"):
             toolbar.append({"id": "resume_local", "label": "Resume Here Only", "confirm": True})
         panel["toolbar_actions"] = toolbar

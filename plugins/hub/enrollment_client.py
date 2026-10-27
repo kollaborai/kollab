@@ -1421,7 +1421,7 @@ async def _finish_destination_enrollment(
             )
         except JoinRefused as exc:
             raise EnrollmentProtocolError("network_mismatch") from exc
-        warning = client.control.count_warning()
+        warning = client.control.count_warning(decision.get("network_control"))
         from .config_sync import record_join_floor
 
         record_join_floor(

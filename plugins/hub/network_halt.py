@@ -65,9 +65,12 @@ class HaltError(ValueError):
     """A record that fails its signature or shape check, or a refused act."""
 
 
-# A halt, a resume (proposal, confirmation, local lift) and a revocation each need a person's
+# A halt, a resume (proposal, confirmation, local lift), a revocation and every roster act each need a person's
 # confirmation, which the caller states with ``confirmed: true`` after asking.
-CONFIRMED_ACTIONS = frozenset({"halt", "propose_resume", "confirm_resume", "resume_local", "confirm_revoke"})
+CONFIRMED_ACTIONS = frozenset({
+    "halt", "propose_resume", "confirm_resume", "resume_local", "confirm_revoke",
+    "withdraw", "confirm_machine", "confirm_founder", "make_bootstrap", "count", "no_count",
+})
 CONFIRM_REFUSAL = "A person has to confirm this first: use the Halt and Resume view, or kollab --hub halt."
 
 

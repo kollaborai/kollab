@@ -285,7 +285,7 @@ async def test_two_founder_candidates_get_one_row_each_with_its_own_key():
     assert all(r["actions"] == ["confirm_founder"] for r in rows)
     assert rows[0]["detail"].endswith(a[:16]) and rows[1]["detail"].endswith(b[:16])
     out = await HALTP.act(ctx, "confirm_founder", {"id": f"founder:{b}", "confirmed": True})
-    assert out["ok"] and ("confirm_founder", {"founder": b}) in ctx.acts
+    assert out["ok"] and ("confirm_founder", {"founder": b, "confirmed": True}) in ctx.acts
 
 
 @pytest.mark.asyncio
