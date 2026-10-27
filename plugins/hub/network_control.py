@@ -48,6 +48,7 @@ MAX_PICKS = 8
 HALT_RETRY_START = 10.0
 HALT_RETRY_MAX = 300.0
 REQUEST_SECONDS = 15.0
+JOIN_BIND_DOMAIN = b"kollab-join-bind-v1\n"
 ROW_FIELDS = ("folder", "name", "machine", "folder_sig", "admission", "bind_sig")
 
 
@@ -76,6 +77,26 @@ def _record_check(kind: str, r: dict, net: str) -> tuple[str, tuple[str, ...]] |
     if r.get("network") != net or not nh._signed_ok(domain, r, who):
         return None
     return r[who], (r[who], str(r.get("machine")))
+
+
+def _join_message(offer_id: str, round_id: str, folder: str, machine: str) -> bytes:
+    return JOIN_BIND_DOMAIN + "\n".join((offer_id, round_id, folder, machine)).encode()
+
+
+def join_proof_ok(proof: Any, offer_id: str, round_id: str, folder: str) -> str:
+    """The machine key a join request proves it holds, "" when it proves nothing.
+
+    Both the machine key and the folder key sign this offer round naming the
+    machine, so a joiner cannot name a key it does not hold, nor replay
+    another round's proof (J1, J2).
+    """
+    if not isinstance(proof, dict) or not _is_key(proof.get("machine")) or not _is_key(folder):
+        return ""
+    message = _join_message(offer_id, round_id, folder, proof["machine"])
+    ok = nh._verify(proof["machine"], message, proof.get("machine_sig")) and nh._verify(
+        folder, message, proof.get("bind_sig")
+    )
+    return proof["machine"] if ok else ""
 
 
 def _is_key(value: Any) -> bool:
@@ -221,35 +242,56 @@ class NetworkControl:
         machine = self._name_of_machine(counting[0]) if counting else "the machine that started it"
         return ADMIT_REFUSAL.format(network=self._network_label(), machine=machine)
 
-    def join_decision_fields(self, machine: Any) -> dict[str, Any]:
-        """``network_control`` for a join decision naming the joiner's machine key."""
+    def join_proof(self, offer_id: str, round_id: str) -> dict[str, str]:
+        """The joiner's proof it holds this machine key and this folder key (J1, J2)."""
+        folder = self.client.public_key
+        message = _join_message(offer_id, round_id, folder, self.machine_hex)
+        return {
+            "machine": self.machine_hex,
+            "machine_sig": nh._sign(self.machine, message),
+            "bind_sig": nh._sign(self.client._store.key, message),
+        }
+
+    def join_decision_fields(self, proof: Any, *, offer_id: str, round_id: str, folder: str) -> dict[str, Any]:
+        """``network_control`` for a join decision answering the joiner's proof.
+
+        No admission is signed unless the joiner proved both keys. The
+        bootstrap machine is never named here: the founder's person picks it
+        with ``Make Bootstrap Machine`` (J1).
+        """
         self.found()
         data = self._fresh()
-        if not _is_key(machine) or machine == self.machine_hex:
+        machine = join_proof_ok(proof, offer_id, round_id, folder)
+        if not machine or machine == self.machine_hex:
             return {"network_control": {"founder": data.get("founder")}}
-        founder = (data.get("founder") or {}).get("founder")
-        bootstrap = founder == self.machine_hex and not data.get("bootstrap_issued")
-        if bootstrap:
-            data["bootstrap_issued"] = machine
-            self.save()
         return {
             "network_control": {
                 "founder": data.get("founder"),
-                "admission": nh.admission(self.machine, self.network_id(), machine, bootstrap=bootstrap),
+                "admission": nh.admission(self.machine, self.network_id(), machine),
             }
         }
 
-    def take_join(self, fields: Any) -> None:
-        """A joiner keeps the founder record and its own admission from the decision."""
+    def take_join(self, fields: Any) -> str:
+        """A joiner keeps the founder record and its own admission from the decision.
+
+        Returns the founder's machine key, "" when the decision's founder record
+        does not verify for this room (the join code is the trust root, so the
+        person sees this key in the join result).
+        """
         if not isinstance(fields, dict):
-            return
+            return ""
         data = self._fresh()
         founder = fields.get("founder")
-        if self._take_founder(founder) and isinstance(fields.get("admission"), dict):
+        taken = self._take_founder(founder)
+        if taken and isinstance(fields.get("admission"), dict):
             adm = fields["admission"]
             if adm.get("machine") == self.machine_hex and adm.get("network") == self.network_id():
                 data["admission"] = adm
+        if not taken:
+            logger.warning("network control: join decision founder record refused")
         self.save()
+        held = data.get("founder")
+        return held["founder"] if taken and isinstance(held, dict) else ""
 
     def _take_founder(self, founder: Any) -> bool:
         """Hold a founder record. Only a join decision or ``found`` sets it (never a member list).
@@ -577,7 +619,7 @@ class NetworkControl:
             "founder_candidates": [c["founder"] for c in data.get("founder_candidates", [])],
             "revocation_signers": {k: sorted(ms) for k, ms in good.items() if len(ms) < 2},
             "bootstrap_open": view.founder == self.machine_hex
-            and not (data.get("bootstrap_pick") or data.get("bootstrap_issued")),
+            and not data.get("bootstrap_pick"),
             "opted_out": bool(data.get("own_opt_outs")),
             "pending_revocations": sorted(k for k, ms in good.items() if len(ms) < 2 and k not in applied)
             + sorted(k for k, ms in good.items() if len(ms) < 2 and k in applied),
@@ -697,9 +739,9 @@ class NetworkControl:
             machine = payload.get("machine")
             if view.founder != me:
                 raise nh.HaltError("only the founder picks the bootstrap machine")
-            if data.get("bootstrap_pick") or data.get("bootstrap_issued"):
+            if data.get("bootstrap_pick"):
                 raise nh.HaltError("this network already has a bootstrap machine")
-            if not _is_key(machine) or machine == me:
+            if not _is_key(machine) or machine == me or machine not in {r["machine"] for r in self.rows().values()}:
                 raise nh.HaltError("pick another member machine")
             data["bootstrap_pick"] = nh.admission(self.machine, net, machine, bootstrap=True)
         elif action == "no_count":

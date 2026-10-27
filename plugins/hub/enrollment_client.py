@@ -1398,6 +1398,7 @@ async def _finish_destination_enrollment(
     if _DESTINATION_RECOVERY_STATUSES[record["status"]] < _DESTINATION_RECOVERY_STATUSES["credential_imported"]:
         directory.import_device_credential(decision["credential"])
         _store_destination_recovery(journal, record, "credential_imported")
+    founder_key = ""
     if _DESTINATION_RECOVERY_STATUSES[record["status"]] < _DESTINATION_RECOVERY_STATUSES["invite_joined"]:
         if _destination_state_empty(client):
             client.join_invite(decision["invite"])
@@ -1407,7 +1408,7 @@ async def _finish_destination_enrollment(
             raise EnrollmentProtocolError("invalid_response")
         _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
         _bind_network_name(commands, decision.get("network_name"))
-        client.control.take_join(decision.get("network_control"))
+        founder_key = client.control.take_join(decision.get("network_control"))
         from .config_sync import record_join_floor
 
         record_join_floor(
@@ -1444,7 +1445,8 @@ async def _finish_destination_enrollment(
         raise EnrollmentProtocolError("unavailable")
     _store_destination_recovery(journal, record, "attached")
     journal.delete(record["offer_id"])
-    return {"status": "approved"}
+    # The founder's machine key, so the person can compare it with the inviter's screen.
+    return {"status": "approved", **({"founder": founder_key} if founder_key else {})}
 
 
 async def _drive_destination_enrollment(
@@ -1568,8 +1570,9 @@ async def _drive_destination_enrollment(
                         "phase": "proof",
                         "destination_key": record["destination_key"],
                         "proof_token": pairing_proof.token,
-                        # Kill switch: the issuer signs an admission naming it.
-                        "machine": _own_machine_hex(),
+                        # Kill switch: the issuer signs an admission naming the
+                        # machine key only after this proof of holding it.
+                        **client.control.join_proof(offer_id, record["round_id"]),
                     },
                 )
                 _store_destination_recovery(
@@ -1694,7 +1697,7 @@ async def _drive_destination_enrollment(
                                 "phase": "proof",
                                 "destination_key": record["destination_key"],
                                 "proof_token": pairing_proof.token,
-                                "machine": _own_machine_hex(),
+                                **client.control.join_proof(offer_id, record["round_id"]),
                             },
                         )
                         _store_destination_recovery(
@@ -1873,13 +1876,6 @@ async def enroll_device(
         for secret in (envelope_key, verifier, code):
             if secret is not None:
                 secret.wipe()
-
-
-def _own_machine_hex() -> str:
-    """This machine's public key (``~/.kollab/device/root.key``), for the join proof."""
-    from .network_control import machine_key
-
-    return bytes(machine_key().verify_key).hex()
 
 
 def _require_shape(value: dict[str, Any], fields: set[str]) -> None:
@@ -3453,7 +3449,7 @@ class EnrollmentIssuer:
                     if not isinstance(proof["proof_token"], str) or len(proof["proof_token"]) > 8192:
                         return
                     proof_token = proof["proof_token"]
-                    destination_machine = proof.get("machine")
+                    destination_proof = {k: proof.get(k) for k in ("machine", "machine_sig", "bind_sig")}
                     if offer.recovery_mode:
                         verified_proof = verify_pairing_proof(
                             challenge_token,
@@ -3719,7 +3715,12 @@ class EnrollmentIssuer:
                                 **self._issuer_device_name_field(),
                                 **self._network_name_field(),
                                 **self._config_floor_field(),
-                                **client.control.join_decision_fields(destination_machine),
+                                **client.control.join_decision_fields(
+                                    destination_proof,
+                                    offer_id=offer.offer_id,
+                                    round_id=round_id,
+                                    folder=destination_key,
+                                ),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

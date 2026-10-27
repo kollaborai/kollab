@@ -671,8 +671,15 @@ async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_
     for joiner in (b, c, d):
         joined(a, joiner)
         joiner.client.control.take_join(
-            a.client.control.join_decision_fields(joiner.client.control.machine_hex)["network_control"]
+            a.client.control.join_decision_fields(
+                joiner.client.control.join_proof("offer", joiner.key),
+                offer_id="offer",
+                round_id=joiner.key,
+                folder=joiner.client.public_key,
+            )["network_control"]
         )
+    await sync(nodes, rounds=5)
+    a.client.control.halt_act("make_bootstrap", {"machine": b.client.control.machine_hex})
     await sync(nodes, rounds=5)
     b.client.control.halt_act("confirm_machine", {"machine": c.client.control.machine_hex})
     await sync(nodes, rounds=5)

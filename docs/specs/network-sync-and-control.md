@@ -193,6 +193,11 @@ counting machines:
   half now goes on the wire in join requests, member lists, orders and
   revocations; the private half never leaves the machine. Its docstring in
   `device_record.py` changes to say so.
+- Join proof (F3): the join request also carries `machine_sig` and `bind_sig`,
+  the machine key's and the folder key's signatures over
+  `kollab-join-bind-v1\n` + offer id + round id + folder key + machine key.
+  The issuer signs no admission unless both verify, so a joiner cannot name a
+  key it does not hold or replay another round's proof.
 - Folder to machine (R4-N8): a join request carries the folder key, the
   machine key, and the machine key's signature over
   `kollab-folder-machine-v1\n` + network id + folder key. The admission covers
@@ -210,10 +215,10 @@ counting machines:
 - A machine counts when one of these holds, and its member-list entry carries
   the signed proof (the admission):
   1. it is the founder;
-  2. bootstrap (R4-N1): it is the first machine the founder admitted, by a
-     code the founder issued, with the founder's signature on the join
-     decision naming its machine key. Only one machine is ever admitted this
-     way;
+  2. bootstrap (R4-N1): the one machine a person on the founder chose with
+     `Make Bootstrap Machine` (never picked automatically by a join), with the
+     founder's signature on an admission naming its machine key. Only one
+     machine is ever admitted this way;
   3. every other machine: a person on a counting machine that appears nowhere
      in its admission chain, and is not itself, confirmed it
      (`Confirm Machine`) (R5-1). The confirmation is signed by the

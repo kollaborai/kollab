@@ -75,11 +75,19 @@ def meet(*controls):
                     b.learn(a.client.public_key, a.wire())
 
 
+def decide(issuer, joiner, offer="offer", round_id="round", proof=None):
+    """The issuer's decision fields for a joiner that proves its keys (or sends ``proof``)."""
+    proof = proof if proof is not None else joiner.join_proof(offer, round_id)
+    return issuer.join_decision_fields(
+        proof, offer_id=offer, round_id=round_id, folder=joiner.client.public_key
+    )["network_control"]
+
+
 def join(issuer, joiner):
     joiner.client.state.inviter = issuer.client.public_key
-    fields = issuer.join_decision_fields(joiner.machine_hex)
-    joiner.take_join(fields["network_control"])
-    return fields["network_control"]
+    fields = decide(issuer, joiner)
+    joiner.take_join(fields)
+    return fields
 
 
 @pytest.fixture
@@ -91,7 +99,9 @@ def three(tmp_path):
     c = machine(tmp_path, "c")
     first = join(f, b)
     second = join(f, c)
-    assert first["admission"]["bootstrap"] is True and second["admission"]["bootstrap"] is False
+    assert first["admission"]["bootstrap"] is False and second["admission"]["bootstrap"] is False
+    meet(f, b, c)
+    f.halt_act("make_bootstrap", {"machine": b.machine_hex})  # a person on F picks it
     meet(f, b, c)
     return f, b, c
 
@@ -124,7 +134,7 @@ def test_a_forged_admission_from_a_joiner_is_not_kept(tmp_path):
     f = machine(tmp_path, "f")
     f.found()
     b = machine(tmp_path, "b")
-    fields = f.join_decision_fields(b.machine_hex)["network_control"]
+    fields = decide(f, b)
     fields["admission"] = {**fields["admission"], "machine": "cd" * 32}
     b.client.state.inviter = f.client.public_key
     b.take_join(fields)
@@ -479,3 +489,46 @@ def test_no_count_after_a_local_lift_is_still_refused(three):
     assert not b.halt_book().active() and b.halt_book().held()
     with pytest.raises(nh.HaltError, match="while a halt is active"):
         b.halt_act("no_count")
+
+
+def test_a_garbage_machine_key_or_a_replayed_proof_gets_no_admission(tmp_path):
+    f = machine(tmp_path, "f")
+    f.found()
+    b = machine(tmp_path, "b")
+    garbage = {"machine": "cd" * 32, "machine_sig": "00" * 64, "bind_sig": "00" * 64}
+    assert "admission" not in decide(f, b, proof=garbage)
+    real = b.join_proof("offer", "round-1")
+    assert "admission" in decide(f, b, round_id="round-1", proof=real)
+    assert "admission" not in decide(f, b, round_id="round-2", proof=real)  # another round
+    assert "admission" not in decide(f, b, round_id="round-1", proof={**real, "bind_sig": "00" * 64})
+    other = b.join_proof("offer", "round")
+    assert "admission" not in decide(f, b, proof={**other, "machine": _hex(SigningKey.generate())})
+    assert "admission" not in decide(f, b, proof={k: v for k, v in other.items() if k != "machine_sig"})
+
+
+def test_a_join_never_picks_the_bootstrap_machine_by_itself(tmp_path):
+    f = machine(tmp_path, "f")
+    f.found()
+    b = machine(tmp_path, "b")
+    assert join(f, b)["admission"]["bootstrap"] is False
+    meet(f, b)
+    assert f.view().counting == {f.machine_hex}
+    assert f.halt_snapshot()["bootstrap_open"] is True
+    with pytest.raises(nh.HaltError):
+        f.halt_act("make_bootstrap", {"machine": "cd" * 32})  # not a member machine
+    f.halt_act("make_bootstrap", {"machine": b.machine_hex})
+    meet(f, b)
+    assert f.view().counting == {f.machine_hex, b.machine_hex}
+
+
+def test_a_joiner_only_keeps_a_founder_record_that_verifies_for_its_room(tmp_path):
+    f = machine(tmp_path, "f")
+    f.found()
+    good = f.data["founder"]
+    b = machine(tmp_path, "b")
+    assert b.take_join({"founder": good}) == f.machine_hex
+    x = machine(tmp_path, "x")
+    forged = {**good, "founder": _hex(SigningKey.generate())}  # signature no longer matches
+    assert x.take_join({"founder": forged}) == "" and not x.data.get("founder")
+    wrong = nh.founder_record(SigningKey.generate(), "ee" * 32)  # signed, but not this room's id
+    assert x.take_join({"founder": wrong}) == "" and not x.data.get("founder")
