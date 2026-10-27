@@ -117,9 +117,11 @@ def read_halt_held(root: Path | None = None) -> dict[str, Any]:
 
 
 def clear_malformed_halt(root: Path | None = None) -> str:
-    """F7: ``resume --local`` on a halt.json that cannot be read: keep it as ``halt.json.bad``, start an empty one.
+    """F7/R6-3: ``resume --local`` on a halt.json that cannot be read.
 
-    Returns "" when there was nothing wrong, else a line for the person. The caller has the person's typed confirmation.
+    A transient OSError touches nothing. A book whose only defect is an odd scope keeps everything else (the odd
+    scope entries are dropped). Anything else unparseable is kept as ``halt.json.bad`` and an empty one started.
+    Returns "" when there was nothing to fix, else a line for the person.
     """
     from .network_halt import HaltFile
 
@@ -128,7 +130,24 @@ def clear_malformed_halt(root: Path | None = None) -> str:
         try:
             hf.read()
             return ""
-        except (OSError, ValueError, AttributeError, TypeError):
+        except OSError:
+            return ""
+        except (ValueError, AttributeError, TypeError):
+            pass
+        try:
+            data = json.loads(hf.path.read_bytes() or b"{}")
+            scopes = data["scopes"]
+            if not all(isinstance(data.get(k, {}), dict) for k in ("scopes", "networks", "folders")):
+                raise ValueError
+            good = {n: v for n, v in scopes.items()
+                    if v == "machine" or (isinstance(v, list) and v and all(isinstance(r, str) for r in v))}
+            data["scopes"] = good
+            hf.write(data)
+            hf.read()
+            return f"halt.json had {len(scopes) - len(good)} odd scope entries; dropped them, kept the rest."
+        except OSError:
+            return ""
+        except (ValueError, KeyError, AttributeError, TypeError):
             pass
         bad = hf.path.with_name(hf.path.name + ".bad")
         os.replace(hf.path, bad)
@@ -1303,13 +1322,17 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
     else:
         payload, action = {}, "propose_resume"
     payload["confirmed"] = True  # the typed command is the person's confirmation
-    if action == "resume_local":
-        with contextlib.suppress(OSError):
-            note = clear_malformed_halt(root)
-            if note:
-                print(note)
     try:
-        result = await _act(folder, control, action, payload, root)
+        try:
+            result = await _act(folder, control, action, payload, root)
+        except Exception:
+            if action != "resume_local":
+                raise
+            note = clear_malformed_halt(root)  # R6-3: only after the act failed, only a malformed file
+            if not note:
+                raise
+            print(note)
+            result = await _act(folder, control, action, payload, root)
     except Exception as error:
         print(str(error))
         return 1

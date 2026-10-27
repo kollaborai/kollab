@@ -422,9 +422,12 @@ def test_f7_an_empty_folder_list_is_malformed_and_resume_local_clears_a_malforme
     nh.HaltFile(tmp_path).write({"scopes": {"n": []}, "networks": {"n": {"halts": {}}}})
     with pytest.raises(nh.HaltError):
         hr.update_halt(lambda d: None, tmp_path)  # the old text could only say chmod
+    assert "odd scope" in hr.clear_malformed_halt(tmp_path)  # R6-3: the book is kept, only the odd scope goes
+    assert not (tmp_path / "private" / "halt.json.bad").exists()
+    assert "n" in hr.read_halt(tmp_path)["networks"] and not hr.read_halt(tmp_path).get("scopes")
+    (tmp_path / "private" / "halt.json").write_text("{not json")
     assert "could not be read" in hr.clear_malformed_halt(tmp_path)
     assert (tmp_path / "private" / "halt.json.bad").exists()
-    assert not hr.read_halt(tmp_path).get("scopes")
     assert hr.clear_malformed_halt(tmp_path) == ""  # a good file is left alone
     assert "chmod" not in hr.UNREADABLE_LINE and "resume --local" in hr.UNREADABLE_LINE
 

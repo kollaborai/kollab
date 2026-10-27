@@ -1069,3 +1069,12 @@ Image `ks4-img:dev` (604dc663a21c) plus one dangling image from the first build;
 ### Verdict
 
 Not done. Proven live on a fresh image: the two-device join (fingerprint, warning, anchor mismatch), Make Bootstrap Machine, a secondary's halt sweeping a venv install (only after fix 2), decoy and foreign engine surviving, resume by a second counting machine, the Connect state line and halt view. Unproven: every hostile-member case live, the agent tool child, revocation, `--local`, deleted `halt.json`, service agent, web-ui/interactive confirm, halt.sock/engine route guards, second-network waiter. Fixes 1 and 2 are uncommitted and must be committed before this image's behavior exists in main.
+
+## Review fixes F9 (round 6)
+
+- R6-1: `_tree_members` expands a process group only when a member leads it (`pgid == pid`), same rule as sessions. An agent sharing the login shell's group, or started by a launcher that makes no group, no longer drags its siblings in.
+- R6-2: the env-tag pass skips a tagged process that sits under a tmux/screen ancestor unless it is also a ppid descendant of a stopped agent (a default tmux server started from a tool shell hands the tag to every later pane). `_is_tmux` also covers screen. Orphaned daemons not under a multiplexer are still swept by tag.
+- R6-3: `resume --local` runs the act first and clears a malformed book only if that failed, then retries once. `clear_malformed_halt` never touches a readable book, does nothing on a transient OSError, drops only odd scope entries when that is the sole defect, and moves aside only unparseable text.
+- R6-4: test for the listener's `[]` -> `"machine"` line.
+- Tests: `tests/unit/test_kill_switch_f9.py` (9). Mutations killed: group-leader rule removed (2 fail), multiplexer check removed (1), `[]`->machine removed (1), OSError guard removed (1).
+- Unproven: tmux/screen/session cases use synthetic process tables only, no live tmux, no Docker run. A pane tagged by a tool shell and reparented to init with no multiplexer ancestor is still swept. `strip_tool_env` is still not called where tool shells spawn (shell_executor.py, process_manager.py set the tag; not changed).

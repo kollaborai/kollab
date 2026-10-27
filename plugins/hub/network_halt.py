@@ -1022,7 +1022,19 @@ def _never_swept(args: list[str], proc: Proc) -> bool:
 
 
 def _is_tmux(proc: Proc) -> bool:
-    return bool(proc.argv) and Path(proc.argv[0]).name.startswith("tmux")
+    return bool(proc.argv) and Path(proc.argv[0]).name.lower().startswith(("tmux", "screen"))
+
+
+def _under_multiplexer(pid: int, known: dict[int, Proc], tree: dict[int, tuple[int, int, int]]) -> bool:
+    """R6-2: a tmux/screen server is an ancestor, so this is a pane Marco opened, whatever env tag it inherited."""
+    cur = tree.get(pid, (0, 0, 0))[0]
+    for _ in range(64):
+        if cur <= 1 or cur not in tree:
+            return False
+        if cur in known and _is_tmux(known[cur]):
+            return True
+        cur = tree[cur][0]
+    return False
 
 
 def select_sweep(
@@ -1056,6 +1068,7 @@ def select_sweep(
         if machine_wide or in_scope(p.cwd, scopes):
             chosen[p.pid] = p
     stopped_agents |= {str(pid) for pid in chosen}
+    known_procs = {p.pid: p for p in procs}
 
     for p in procs:
         if p.pid in chosen or p.pid in protected or _is_tmux(p):
@@ -1063,6 +1076,12 @@ def select_sweep(
         # KOLLAB_AGENT_PID: a tool shell's children; KOLLAB_OWNER_PID: a /terminal pane (it keeps no tool-shell tag)
         tag = p.env.get("KOLLAB_AGENT_PID", "") or p.env.get("KOLLAB_OWNER_PID", "")
         if tag and tag in stopped_agents:
+            # R6-2: the tag is inherited by whatever a tool shell starts (a default tmux server's later panes);
+            # a pane under a multiplexer is trusted only when it is also the agent's own ppid descendant
+            if tree and _under_multiplexer(p.pid, known_procs, tree) and p.pid not in _ppid_closure(
+                set(chosen), tree, protected
+            ):
+                continue
             chosen[p.pid] = p
     if tree:
         known = {p.pid: p for p in procs}
@@ -1079,14 +1098,7 @@ def select_sweep(
     return list(chosen.values())
 
 
-def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protected: set[int]) -> set[int]:
-    """F6 (B3): the stopped agents' children at any depth, found by parent pid, then their process groups.
-
-    macOS hides the environment of system binaries (zsh, sleep, curl), so the env tag misses a tool shell
-    that runs one; its parent chain does not lie while the agent is still alive. ``tree`` is
-    pid -> (ppid, pgid, sid). A group or Linux session that holds a protected pid is left whole.
-    A session is walked only when a member leads it.
-    """
+def _ppid_closure(roots: set[int], tree: dict[int, tuple[int, int, int]], protected: set[int]) -> set[int]:
     members = set(roots)
     grew = True
     while grew:
@@ -1095,9 +1107,22 @@ def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protec
             if ppid in members and pid not in members and pid not in protected:
                 members.add(pid)
                 grew = True
+    return members
+
+
+def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protected: set[int]) -> set[int]:
+    """F6 (B3): the stopped agents' children at any depth, found by parent pid, then their process groups.
+
+    macOS hides the environment of system binaries (zsh, sleep, curl), so the env tag misses a tool shell
+    that runs one; its parent chain does not lie while the agent is still alive. ``tree`` is
+    pid -> (ppid, pgid, sid). A group or Linux session that holds a protected pid is left whole.
+    A session is walked only when a member leads it.
+    """
+    members = _ppid_closure(roots, tree, protected)
     unsafe_pg = {tree[p][1] for p in protected if p in tree}
     unsafe_sid = {tree[p][2] for p in protected if p in tree}
-    pgs = {tree[p][1] for p in members if p in tree and tree[p][1] > 1} - unsafe_pg
+    # R6-2/R6-1: a group is ours only when a member leads it (a shared login-shell or launcher group is not)
+    pgs = {tree[p][1] for p in members if p in tree and tree[p][1] > 1 and tree[p][1] == p} - unsafe_pg
     sids: set[int] = set()
     if sys.platform.startswith("linux"):
         # F7: a login shell leading the session means it is the user's terminal; only a session a member leads is ours
