@@ -822,3 +822,77 @@ A revoked machine (m4) stays halted when the network resumes (it cannot hear the
 Containers: all `ks3-*` stopped (they were started with `--rm`, so gone). Old
 stopped from D1 (need the remove subcommand): `ks-relay`, `ks-m1`, `ks-m2`,
 `ks-m3`. Images: `ks3-img:dev`, `kollab-killswitch:dev`. Network: `ks-net`.
+
+## Review fixes F2
+
+Runtime half of the two reviews. Unit tests only; nothing was halted, swept or killed on the host (the real-child test starts and kills its own python sleepers).
+
+### Fixed (test first, each mutation-checked: all KILLED)
+
+- B3: the sweep lists every same-user process (`/bin/ps -U`, `/proc` fallback), reads argv and environment cheaply, keeps kollab of this install and anything tagged `KOLLAB_AGENT_PID`, and `select_sweep` takes every tagged process of a stopped agent (no parent test: a tool child reparents). Each is stopped through `group_kill`, i.e. its own group. `read_process(pid, with_cwd=False)` skips the per-pid `lsof` on macOS. The test starts a real tool child the way `shell_executor` does (new session, tagged env, no "kollab" in its command line).
+- S1: a `halt.json` that exists but is unreadable, bad JSON, `null`/`[]`, wrong shape, or mode 644 holds every folder (`read_halt_held`, the line says why). Boot check, waiter, status socket and interactive view use it; the listener tick logs and keeps going. Read limit 64 MB (was a silent 4 MB cut); a write over the limit is refused.
+- S2: `take_halt` records the hand-off folders per network in `halt.json["folders"]`; `_reopen_links` reopens a machine-scope link from them after a reboot.
+- S5: the `halt` op on `halt.sock` sweeps only for a halt recorded in that network's book (a given hash must be in it). `act` on `halt.sock` is refused when the peer process (peer pid, its environment) runs in a tool shell. `/connect halt|resume|revoke` and `hub_halt_act` refuse under `KOLLAB_TOOL_SHELL`, which covers `kollab -p "/connect revoke X"` from an agent's shell (the env is inherited into pipe mode).
+- M1: HIGH patterns for a recursive remove of the private folder with no trailing slash, `cd <private> && rm`, `find ... -delete`, `python -c` on it, chmod/chown/shred/unlink, quoted `--hub 'halt'`, `python -m kollabor_cli_main --hub halt`. `cat`, `ls`, `kollab --hub status|capture` stay unflagged.
+- M4: only leading flags (before the first prompt, `--` ends them, value flags skipped) exempt a launch.
+- M5: CLI `halt` and the resume actions go through the running network owner (`HaltContext._owner`, new `NoOwner`) and write directly only when none runs.
+- M6: `group_kill` no longer raises when a protected pid dies mid-check.
+- M7: `fork_daemon` re-checks the halt (`halted_after_exec_failure`) after a failed exec and exits 75.
+- Extras: (a) waiters register a pid file in `private/waiters/` and the sweep protects them (an env marker cannot be seen from outside); (b) a presence pid is stopped only while it is still a kollab of this install; (c) a list-scope halt is widened to every folder of the network on this machine (seen via presence, recorded); (d) `kollab "query"` with no tty exits 75 on stderr; (f) `listener_running` no longer takes `halt.lock` (the listener writes its pid there; liveness = live pid whose argv has `--halt-listener`).
+- Coordinator ask (F4): `_SHORT_CODE_SHAPE` takes the optional `-XXXX-XXXX` tail (old 8-char shape still passes), `network_mismatch` is in `_ENROLLMENT_ERRORS`, `_safe_enrollment_result` passes `founder` and `warning` strings of an approved result only. `NETWORK_MISMATCH_LINE` does not exist in `network_control.py` yet, so no import was added; the plain-line mapping is F4's. Tests: `tests/unit/test_relay_agent_enrollment_shapes.py`.
+
+### Tests
+
+New: `tests/unit/test_halt_runtime_review_f2.py` (44), `tests/unit/test_relay_agent_enrollment_shapes.py` (3). Changed: `test_halt_runtime.py` (the hand-off test records a halt in the book first). Halt set (halt_runtime, review_f2, network_halt, network_halt_guard, hub_device_record, panels_connect_halt, hub_enrollment_commands, relay_agent shapes): 221 passed. Stop/attach/daemon/permission/relay_enrollment set: 224 passed.
+
+### Not done
+
+- S5 `confirmed: true` is not enforced server-side. The TUI halt screen and the web panels (`kollabor/panels/connect.py`, engine `routes/panels.py`) call `hub_halt_act` without it. Needs the web client to send `confirmed: true` in the action payload and the engine route to reject halt/resume/revoke actions without it. Not edited (other owners).
+- `HaltBook.to_json` (F4's file) should prune `seen`/`parents`/`resumes` to a cap; the write limit only refuses an oversize file.
+- (e) an older proposal replacing a newer one in `HaltBook.take`: F4's area, untouched.
+- (g) voice/LiveKit workers and `/terminal` sessions are not swept unless tagged by a stopped agent; needs a decision on what identifies them.
+- Pre-existing ruff F841 in `network_halt.py` (`machine`, in `HaltBook.take`): F4's code.
+- A daemon started from an agent's tool shell inherits `KOLLAB_TOOL_SHELL`, so a person attached to it is refused `/connect halt`; use `kollab --hub halt` in a terminal.
+
+## Review fixes F4
+
+Done (plugins/hub/network_control.py, network_halt.py, enrollment_client.py, enrollment_codes.py;
+kollabor/panels/connect.py for the state line; tests in test_network_control.py, test_network_halt.py,
+test_network_members.py, test_enrollment_client.py, test_enrollment_codes.py, test_panels_connect_halt.py).
+Rules are in the spec, section 1 "Counting Machines", bullet "Review fixes F4".
+
+- F4-1: `NetworkControl` stores the network id (`net`) at found / join and returns it; it is no longer
+  recomputed from the held founder record, so swapping that record moves nothing.
+- F4-2: the auto-adopt of a founder whose key equals the inviter's machine is gone. A founder is trusted
+  without a person only when its record verifies against the stored network id (bound networks).
+  Unbound (pre-release) networks always need `Confirm Founder`.
+- F4-3: the join code is `XXXX-XXXX-AAAA-AAAA`; `AAAA-AAAA` = `network_halt.join_anchor(network id)`
+  (40 bits). `enroll_device` requires it, saves it in the destination recovery record
+  (`network_anchor`), refuses with error `network_mismatch` before joining anything when the decision's
+  founder record / `network` does not hash to it (`network_control.join_network_ok`,
+  `NETWORK_MISMATCH_LINE`). `take_join(fields, anchor=...)` raises `JoinRefused`. The issuer appends the
+  anchor to the code it shows (`enrollment_client`, after `control.found()`). Join result carries
+  `founder`, `founder_fingerprint` (12 hex) and, while fewer than two machines count, `warning`
+  (`ONE_COUNTING_LINE`). Connect `Network State` shows `Running. <ONE_COUNTING_LINE>` in that case
+  (`kollabor/panels/connect.py:halt_state_line`; the TUI Connect screen uses the same function).
+- F4-4: bootstrap picks are stored only when their admitter is the held founder or a stored candidate;
+  a founder candidate only when its key is the machine of an approved member row.
+- F4-5: records are stored only when signed by the machine of an approved member row; stored records of
+  a signer no longer in the rows are dropped on the next merge.
+- F4-6: one end-to-end test (8 picks, 8 founder records, 16 fresh keys x 32 confirmations and
+  revocations) then an honest halt, confirmation and revocation, plus make_bootstrap.
+- F4-7: opt-out records carry `issued_at` and `opted_out`; the newest per machine wins. `Count Here`
+  is now a signed record. "Speaker replaces" is removed; opt-outs are sign-checked and capped like the rest.
+- F4-8: a resume inside a payload goes through `HaltBook.issuer_refusal` like `take`.
+- F4-9: `HaltBook.claims` maps a named parent to every issuer that named it (old string values load).
+
+Needs relay_agent.py (F2's file; not edited here), sent to the coordinator:
+1. `_SHORT_CODE_SHAPE` must accept the optional `-XXXX-XXXX` tail, or the issuer's offer result is rejected
+   ("invalid local enrollment offer result").
+2. `network_mismatch` must be in `_ENROLLMENT_ERRORS`, with the line `NETWORK_MISMATCH_LINE` shown for it.
+3. `_safe_enrollment_result` keeps only `status`: it must pass `founder`, `founder_fingerprint` and
+   `warning` through, and the join result text must print them.
+Limits: the anchor is made by the machine that issued the code, so a compromised counting machine whose
+code the person types still names its own network; the person compares the founder fingerprint.
+A 40-bit anchor can be ground by an attacker who picks a founder key (about 2^40 key generations).
+Not run: a live two-device join.

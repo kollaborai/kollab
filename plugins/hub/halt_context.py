@@ -22,6 +22,10 @@ class HaltUnavailable(RuntimeError):
     """Neither the listener nor a network owner answers for this folder."""
 
 
+class NoOwner(HaltUnavailable):
+    """No process runs this folder's network (so the folder's own record is the only copy)."""
+
+
 class HaltContext:
     def __init__(self, folder: str, root: Path | None = None):
         self.folder = folder
@@ -48,7 +52,7 @@ class HaltContext:
             owner = None
         path = (owner or {}).get("socket_path")
         if not path:
-            raise HaltUnavailable("nothing runs this folder's network")
+            raise NoOwner("nothing runs this folder's network")
         result = await AgentMessenger.request_connect_proxy(str(path), op, args)
         if isinstance(result, dict) and result.get("halt_error"):
             raise HaltUnavailable(str(result["halt_error"]))

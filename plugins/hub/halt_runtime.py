@@ -45,6 +45,10 @@ LISTENER_GRACE_SECONDS = 30.0  # a fresh listener waits this long for the hand-o
 LISTENER_FLAG = "--halt-listener"
 WAITER_ENV = "KOLLAB_HALT_WAITER"
 HALTED_LINE = "Network halted by {device}. Resume needs a person on two machines: Settings → Network."
+UNREADABLE_LINE = (
+    "halt.json is unreadable ({why}), so every folder is held as halted. "
+    "Restore it or fix its permissions (chmod 600) in the private folder."
+)
 RESUME_PROPOSED = (
     "Resume proposed. A person on another machine confirms it: /connect resume there, "
     "or Settings → Network → Confirm Resume."
@@ -103,6 +107,22 @@ def read_halt(root: Path | None = None) -> dict[str, Any]:
     return HaltFile(kollab_root(root)).read()
 
 
+def read_halt_held(root: Path | None = None) -> dict[str, Any]:
+    """``read_halt``, but a halt.json that exists and cannot be read holds every folder."""
+    try:
+        return read_halt(root)
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        logger.warning("halt check: halt.json unreadable (%s)", type(error).__name__)
+        return {"scopes": {"unreadable": "machine"}, "networks": {}, "unreadable": type(error).__name__}
+
+
+def tool_shell_refusal() -> str:
+    """The refusal line when this process runs inside an agent's tool shell, else ""."""
+    from .network_halt import GUARD_REFUSAL
+
+    return GUARD_REFUSAL if os.environ.get("KOLLAB_TOOL_SHELL") else ""
+
+
 def update_halt(fn: Callable[[dict[str, Any]], Any], root: Path | None = None) -> Any:
     """Read, change and write ``halt.json`` under the write lock."""
     from .network_halt import HaltFile
@@ -128,6 +148,8 @@ def folder_halted(folder: str, data: dict[str, Any]) -> bool:
 
 def halted_line(data: dict[str, Any]) -> str:
     """The waiter/launch line, naming the issuer of the newest active halt."""
+    if data.get("unreadable"):
+        return UNREADABLE_LINE.format(why=data["unreadable"])
     newest: dict = {}
     for net in (data.get("scopes") or {}):
         book = (data.get("networks") or {}).get(net) or {}
@@ -142,15 +164,22 @@ def halted_line(data: dict[str, Any]) -> str:
 
 
 def listener_running(root: Path | None = None) -> bool:
-    """Whether a listener holds ``halt.lock`` (never takes it for long)."""
-    fd = _lock_fd(private_dir(root) / LOCK)
+    """Whether a listener runs: the pid it wrote in ``halt.lock`` is a live listener.
+
+    Never takes the lock, so a listener starting at the same moment cannot lose it.
+    """
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        pid = int((private_dir(root) / LOCK).read_text().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    if pid <= 0 or not _alive(pid):
+        return False
+    if pid == os.getpid():
         return True
-    finally:
-        os.close(fd)  # closing drops a lock we just took
-    return False
+    from .network_halt import read_process
+
+    proc = read_process(pid, with_cwd=False)
+    return proc is not None and LISTENER_FLAG in proc.argv
 
 
 def start_listener(root: Path | None = None, *, spawn: Callable[[list[str]], Any] | None = None) -> bool:
@@ -220,6 +249,20 @@ EXEMPT_COMMANDS = frozenset({"service", "relay", "mcp"})
 EXIT_FLAGS = frozenset({"-p", "--pipe"})
 
 
+def _leading_flags(args: list[str]) -> list[str]:
+    """Flags before the first prompt/positional argument (a value flag's value is skipped)."""
+    from kollabor.daemon import _NEW_DAEMON_FLAGS, _VALUE_FLAGS
+
+    value_flags = _VALUE_FLAGS | (_NEW_DAEMON_FLAGS - {"--daemon"})
+    out, i = [], 0
+    while i < len(args) and args[i].startswith("-") and args[i] not in ("-", "--"):
+        out.append(args[i])
+        if args[i] in value_flags:
+            i += 1
+        i += 1
+    return out
+
+
 def boot_decision(argv: list[str], env: dict[str, str], folder: str, data: dict[str, Any]) -> str:
     """What a launch does under a halt: ``run``, ``exit`` (75), ``waiter`` or ``interactive``.
 
@@ -231,7 +274,7 @@ def boot_decision(argv: list[str], env: dict[str, str], folder: str, data: dict[
     args = argv[1:]
     if args[:1] and args[0] in EXEMPT_COMMANDS:
         return "run"
-    if any(a in EXEMPT_FLAGS or a.split("=", 1)[0] in EXEMPT_FLAGS for a in args):
+    if any(a in EXEMPT_FLAGS or a.split("=", 1)[0] in EXEMPT_FLAGS for a in _leading_flags(args)):
         return "run"
     detached = "--detached" in args or "-d" in args
     service = env.get(SERVICE_ENV) == "1"
@@ -247,22 +290,38 @@ def boot_decision(argv: list[str], env: dict[str, str], folder: str, data: dict[
     return "interactive"
 
 
+def _on_a_terminal() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def halted_after_exec_failure(argv: list[str], *, root: Path | None = None) -> bool:
+    """A detached child whose exec failed re-checks the halt before it runs in-process."""
+    from kollabor.daemon import DETACHED_CHILD_ENV
+
+    if not os.path.lexists(kollab_root(root) / "private" / HALT_JSON):
+        return False
+    data = read_halt_held(root)
+    return boot_decision(argv, {**os.environ, DETACHED_CHILD_ENV: "1"}, os.getcwd(), data) != "run"
+
+
 def boot_check(argv: list[str] | None = None, env: dict[str, str] | None = None, *, root: Path | None = None) -> None:
     """Run at process entry: cheap when no halt is in force (one stat)."""
     entry = capture_entry(argv, env)
     path = kollab_root(root) / "private" / HALT_JSON
-    if not path.exists():
+    if not os.path.lexists(path):
         return
-    try:
-        data = read_halt(root)
-    except (OSError, ValueError) as error:
-        logger.warning("halt check: halt.json unreadable (%s)", type(error).__name__)
-        return
+    data = read_halt_held(root)
     folder = os.getcwd()
     decision = boot_decision(entry["argv"], entry["env"], folder, data)
     if decision == "run":
         return
     from .network_halt import EX_TEMPFAIL
+
+    if decision == "interactive" and not _on_a_terminal():
+        decision = "exit"  # `kollab "query"` piped or captured: nobody can confirm a resume
 
     if decision == "exit":
         print(halted_line(data), file=sys.stderr)
@@ -302,15 +361,12 @@ def run_waiter(
 ) -> None:
     """Hold the launch until its folder is marked lifted, then exec it again."""
     os.environ[WAITER_ENV] = "1"
+    register_waiter(root)
     presence, server = _waiter_presence(argv, folder, root)
     polls = 0
     try:
         while True:
-            try:
-                data = read_halt(root)
-            except (OSError, ValueError):
-                data = {}
-            if not folder_halted(folder, data):
+            if not folder_halted(folder, read_halt_held(root)):
                 break
             if not listener_running(root):
                 start_listener(root)
@@ -319,12 +375,37 @@ def run_waiter(
                 return
             sleep(POLL_SECONDS)
     finally:
+        unregister_waiter(root)
         if server is not None:
             server.stop()
         if presence is not None:
             presence.unlink(missing_ok=True)
     new_argv = restart_argv(argv)
     execve(new_argv[0], new_argv, {k: v for k, v in env.items() if k != WAITER_ENV})
+
+
+def _waiters_dir(root: Path | None) -> Path:
+    d = private_dir(root) / "waiters"
+    d.mkdir(mode=0o700, exist_ok=True)
+    return d
+
+
+def register_waiter(root: Path | None = None) -> None:
+    """A waiter's pid file: the sweep reads it, since a process cannot change the environment it was read with."""
+    with contextlib.suppress(OSError):
+        (_waiters_dir(root) / str(os.getpid())).write_text("")
+
+
+def unregister_waiter(root: Path | None = None) -> None:
+    with contextlib.suppress(OSError):
+        (_waiters_dir(root) / str(os.getpid())).unlink(missing_ok=True)
+
+
+def waiter_pids(root: Path | None = None) -> set[int]:
+    try:
+        return {int(f.name) for f in _waiters_dir(root).iterdir() if f.name.isdigit() and _alive(int(f.name))}
+    except OSError:
+        return set()
 
 
 class _StatusSocket:
@@ -346,10 +427,7 @@ class _StatusSocket:
         threading.Thread(target=self._serve, daemon=True, name="kollab-halt-waiter").start()
 
     def answer(self, request: dict) -> dict:
-        try:
-            line = halted_line(read_halt(self.root))
-        except (OSError, ValueError):
-            line = HALTED_LINE.format(device="another machine")
+        line = halted_line(read_halt_held(self.root))
         if request.get("action") == "get_status":
             return {"type": "status", "identity": self.identity, "state": "halted", "halted": line}
         return {"type": "error", "error": line}
@@ -416,11 +494,7 @@ def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable
 
     from .halt_context import HaltContext
 
-    try:
-        data = read_halt(root)
-    except (OSError, ValueError):
-        data = {}
-    print(halted_line(data))
+    print(halted_line(read_halt_held(root)))
     read_key = read_key or _read_key
     start_listener(root)
     screen = HaltScreen(HaltContext(folder, root))
@@ -464,17 +538,33 @@ def _read_key() -> str:
 # ----------------------------------------------------------------- sweep
 
 
-def candidate_pids() -> list[int]:
-    """Cheap first pass: processes whose command line names kollab.
+def process_table() -> dict[int, int]:
+    """pid -> ppid for every process of this user (one ``ps``, or ``/proc`` where there is no ps)."""
+    table: dict[int, int] = {}
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10
+        )
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                table[int(parts[0])] = int(parts[1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if not table and Path("/proc").is_dir():
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    table[int(entry.name)] = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+                except (OSError, ValueError, IndexError):
+                    continue
+    table.pop(os.getpid(), None)
+    return table
 
-    A binary install's processes run the pex venv's python with the kollab
-    console script in argv, so the name still matches; ``select_sweep`` then
-    decides by ``SCIE`` or ``sys.prefix`` (``SCIE`` never shows in a command line).
-    """
-    out = subprocess.run(["pgrep", "-f", "kollab"], capture_output=True, text=True, timeout=10)
-    pids = {int(p) for p in out.stdout.split() if p.isdigit()}
-    pids.discard(os.getpid())
-    return sorted(pids)
+
+def candidate_pids() -> list[int]:
+    """Every same-user process: a tool child (a CLI, a dev server, a nohup job) rarely names kollab."""
+    return sorted(process_table())
 
 
 def descendants(pids: Iterable[int], all_procs: Iterable) -> set[int]:
@@ -499,6 +589,7 @@ async def sweep(
     stop: Callable[[dict], Awaitable[tuple[bool, str]]],
     protect: Iterable[int],
     install=None,
+    waiters: Iterable[int] = (),
 ) -> list[tuple[dict, bool, str]]:
     """Stop what a halt stops here (``select_sweep``), each with ``stop``.
 
@@ -506,26 +597,28 @@ async def sweep(
     ``procs`` are ``Proc`` rows already read; ``protect`` holds the listener,
     the issuing CLI and its ancestors.
     """
-    from .network_halt import Install, in_scope, select_sweep
+    from .network_halt import Install, _cli_args, in_scope, select_sweep
 
-    protect = set(protect)
+    install = install or Install.current()
+    protect = set(protect) | {int(w) for w in waiters}
+    protect |= {int(a.get("pid") or 0) for a in agents if a.get("state") == "halted"}
+    # a presence pid is only stopped while it is still a kollab of this install (a pid is reused after a crash)
+    kollab_pids = {p.pid for p in procs if _cli_args(p, install) is not None}
     in_scope_agents = [
         a for a in agents
         if a.get("state") != "halted" and int(a.get("pid") or 0) not in protect
+        and int(a.get("pid") or 0) in kollab_pids
         and in_scope(str(a.get("project") or "/nonexistent-folder"), scopes)
     ]
     chosen = select_sweep(
         procs,
-        install=install or Install.current(),
+        install=install,
         scopes=scopes,
         agent_pids=[int(a["pid"]) for a in in_scope_agents if a.get("pid")],
         protect=protect,
     )
     by_pid = {int(a.get("pid") or 0): a for a in in_scope_agents}
     records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
-    for a in in_scope_agents:  # an agent presence lists that is not in the process rows
-        if int(a.get("pid") or 0) not in {p.pid for p in chosen}:
-            records.append(a)
     results = await asyncio.gather(*(stop(r) for r in records))
     return [(r, ok, msg) for r, (ok, msg) in zip(records, results)]
 
@@ -540,7 +633,12 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
         except OSError:
             pgid = 0
         mine = os.getpgid(0)
-        guarded = {os.getpgid(p) for p in protect if _alive(p)}
+        guarded = set()
+        for p in protect:
+            try:
+                guarded.add(os.getpgid(p))
+            except OSError:  # it died since the check
+                continue
         if pgid > 1 and pgid != mine and pgid not in guarded:
             os.killpg(pgid, sig)
         else:
@@ -602,6 +700,8 @@ class HaltListener:
             os.close(fd)
             return False
         self._lock_fd = fd
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, str(os.getpid()).encode(), 0)
         return True
 
     def drop_lock(self) -> None:
@@ -639,20 +739,28 @@ class HaltListener:
 
     async def tick(self) -> None:
         """Hand back networks whose halts are all lifted; exit when none is left."""
-        data = read_halt(self.root)
+        try:
+            data = read_halt(self.root)
+        except (OSError, ValueError, AttributeError, TypeError) as error:
+            logger.warning("halt listener: halt.json unreadable (%s); nothing is lifted", type(error).__name__)
+            return  # the halt holds; the file may come back
         for net in list((data.get("scopes") or {})):
             book = (data.get("networks") or {}).get(net)
             if not _book_active(net, book):
                 await self.hand_back(net)
-        if not (read_halt(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
+        if not (read_halt_held(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
             self._done.set()
 
     async def _reopen_links(self) -> None:
         """A listener started by a waiter after a reboot takes the links again."""
-        data = read_halt(self.root)
+        data = read_halt_held(self.root)
         for net, scope in (data.get("scopes") or {}).items():
             if isinstance(scope, list) and scope:
                 self.folders.setdefault(net, set()).update(scope)
+            # a machine-wide scope names no folder: reopen from the hand-off folders recorded with it
+            self.folders.setdefault(net, set()).update(
+                f for f in ((data.get("folders") or {}).get(net) or []) if isinstance(f, str)
+            )
             await self.open_links(net)
 
     # socket ------------------------------------------------------------
@@ -661,7 +769,13 @@ class HaltListener:
         try:
             line = await asyncio.wait_for(reader.readline(), 30)
             request = json.loads(line or b"{}")
-            reply = await self.handle(request if isinstance(request, dict) else {})
+            request = request if isinstance(request, dict) else {}
+            if request.get("op") == "act" and _peer_is_tool_shell(writer):
+                from .network_halt import GUARD_REFUSAL
+
+                reply = {"ok": False, "error": GUARD_REFUSAL}
+            else:
+                reply = await self.handle(request)
         except Exception as error:  # never let one caller take the listener down
             reply = {"ok": False, "error": str(error) or type(error).__name__}
         writer.write(json.dumps(reply).encode() + b"\n")
@@ -698,7 +812,7 @@ class HaltListener:
         if isinstance(network, str) and network in self.links:
             return self.links[network]
         if isinstance(folder, str):
-            data = read_halt(self.root)
+            data = read_halt_held(self.root)
             for net, scope in (data.get("scopes") or {}).items():
                 if net in self.links and in_scope(folder, [scope]):
                     return self.links[net]
@@ -711,22 +825,33 @@ class HaltListener:
         net, scope, folder = order.get("network"), order.get("scope"), order.get("folder")
         if not isinstance(net, str) or not (scope == "machine" or isinstance(scope, list)):
             return {"ok": False, "error": "invalid hand-off"}
+        # a sweep needs a halt recorded in this network's book (halt_act or a merged peer order)
+        book = ((read_halt_held(self.root).get("networks") or {}).get(net))
+        active = _book_active_hashes(net, book)
+        if not active or (order.get("hash") and order["hash"] not in active):
+            return {"ok": False, "error": "no recorded halt for that network"}
         if isinstance(folder, str):
             self.folders.setdefault(net, set()).add(folder)
         agents = self._agents() if self._agents else _live_agents()
         for a in agents:
             if a.get("project"):
                 self._remember_folder(a["project"])
+        if isinstance(scope, list):  # every folder of this network on this machine, not only the first
+            scope = sorted({*scope, *(f for f in self.folders.get(net, ()))})
 
         def record(data: dict) -> None:
             data.setdefault("scopes", {})[net] = scope
+            seen = set(data.setdefault("folders", {}).get(net, []))
+            data["folders"][net] = sorted(seen | self.folders.get(net, set()))
 
         update_halt(record, self.root)
-        protect = {os.getpid(), *(int(p) for p in order.get("protect") or [] if str(p).isdigit())}
+        protect = {os.getpid(), *(int(p) for p in order.get("protect") or [] if str(p).isdigit()),
+                   *waiter_pids(self.root)}
         stop = self._stop or _default_stop(protect, self.root)
         procs = self._processes() if self._processes else _read_candidates()
         scopes = active_scopes(read_halt(self.root))
-        results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect)
+        results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
+                              waiters=waiter_pids(self.root))
         stopped = [
             {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
             for r, ok, _ in results if ok
@@ -791,6 +916,38 @@ class HaltListener:
             update_halt(lift, self.root)
 
 
+def _peer_is_tool_shell(writer: Any) -> bool:
+    """Whether the process on the other end of a halt.sock connection runs in an agent's tool shell."""
+    import socket
+    import struct
+
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return False
+    try:
+        if sys.platform == "darwin":
+            pid = sock.getsockopt(0, 0x002)  # SOL_LOCAL, LOCAL_PEERPID
+        else:
+            pid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+        from .network_halt import read_process
+
+        proc = read_process(int(pid), with_cwd=False)
+    except (OSError, ValueError, struct.error):
+        return False
+    return bool(proc and proc.env.get("KOLLAB_TOOL_SHELL"))
+
+
+def _book_active_hashes(net: str, book: Any) -> set[str]:
+    if not isinstance(book, dict):
+        return set()
+    from .network_halt import HaltBook
+
+    try:
+        return set(HaltBook(net, book).active())
+    except Exception:
+        return set()
+
+
 def _book_active(net: str, book: Any) -> bool:
     if not isinstance(book, dict):
         return False
@@ -805,14 +962,23 @@ def _live_agents() -> list[dict]:
     return [data for _hub, data in live_agents_on_machine()]
 
 
-def _read_candidates() -> list:
-    from .network_halt import read_process
+def _read_candidates(install=None) -> list:
+    """The processes a sweep can choose from: kollab of this install, and anything tagged by an agent.
 
+    Reads argv and environment of each (cheap), then the folder of the ones kept.
+    """
+    from .network_halt import Install, _cli_args, read_process
+
+    install = install or Install.current()
     out = []
-    for pid in candidate_pids():
-        p = read_process(pid)
-        if p is not None:
-            out.append(p)
+    for pid, ppid in process_table().items():
+        p = read_process(pid, with_cwd=False)
+        if p is None or not (p.env.get("KOLLAB_AGENT_PID") or _cli_args(p, install) is not None):
+            continue
+        full = read_process(pid)
+        if full is not None:
+            full.ppid = full.ppid or ppid
+            out.append(full)
     return out
 
 
@@ -1051,8 +1217,8 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
             print(f"no member device named {opts['revoke']}")
             return 1
         try:
-            act = control.halt_act(
-                "halt",
+            act = await _via_owner(
+                folder, control, "halt", root,
                 {"reason": opts.get("reason", ""), "revoke": revoke, "revoke_here_only": bool(opts.get("here-only"))},
             )
         except Exception as error:
@@ -1106,7 +1272,17 @@ async def _act(folder: str, control, action: str, payload: dict, root: Path | No
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error") or "the halt listener refused")
         return reply
-    return control.halt_act(action, payload)
+    return await _via_owner(folder, control, action, root, payload)
+
+
+async def _via_owner(folder: str, control, action: str, root: Path | None, payload: dict) -> dict:
+    """Through the process that runs this folder's network (it holds the live copy of the control file), else direct."""
+    from .halt_context import HaltContext, NoOwner
+
+    try:
+        return await HaltContext(folder, root)._owner("halt_act", {"action": action, "payload": payload})
+    except (NoOwner, OSError, asyncio.TimeoutError):
+        return control.halt_act(action, payload)
 
 
 async def _await_acks(folder: str, root: Path | None, seconds: float = 10.0, online_seconds: float = 40.0) -> dict:

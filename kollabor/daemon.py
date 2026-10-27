@@ -122,7 +122,15 @@ def fork_daemon(argv: list[str]) -> tuple[int, str]:
         # Exec a fresh kollab (see exec_detached_child); never returns on success.
         exec_detached_child(argv)
 
-        # Exec failed: run the full app headless in this forked image
+        # Exec failed: this image never went through the boot check, so check the halt now
+        try:
+            from plugins.hub.halt_runtime import halted_after_exec_failure
+
+            if halted_after_exec_failure(argv):
+                os._exit(75)
+        except ImportError:
+            pass
+        # run the full app headless in this forked image
         _run_daemon(argv, write_fd)
         sys.exit(0)
 

@@ -704,3 +704,45 @@ def test_a_binding_the_folder_key_did_not_sign_is_ignored(net):
     )
     net.roster.members = [x for x in net.roster.members if x.folder != net.prod.fk()] + [row]
     assert net.view().machine_of(net.prod.fk()) == ""
+
+
+# ------------------------------------------------ review fixes F4
+
+
+def test_f4_8_a_resume_in_a_payload_goes_through_the_issuer_checks(net):
+    h = halt(net.prod, net)
+    r = resume(net.founder, net, [nh.order_hash(h)])
+    r["confirmations"] = [nh.resume_confirmation(net.prod.folders[0], net.prod.key, nh.order_hash(r))]
+    book = nh.HaltBook(net.id)
+    book.take(h, net.view(), is_member=net.member)
+    payload = {"resumes": [r], "halts": [], "proposals": []}
+    book.merge(payload, net.view(), is_member=lambda k: k != net.founder.fk())  # issuer is no approved member
+    assert nh.order_hash(h) in book.active() and not book.resumes
+    book.merge(payload, net.view(), is_member=net.member)
+    assert nh.order_hash(h) not in book.active()
+
+
+def test_f4_9_two_issuers_naming_the_same_parent_do_not_resurrect_it(net):
+    h1 = halt(net.prod, net, reason="1")
+    h2 = halt(net.prod, net, supersedes=nh.order_hash(h1), reason="2")
+    other = halt(net.founder, net, supersedes=nh.order_hash(h1), reason="3")  # names prod's parent
+    book = nh.HaltBook(net.id)
+    for o in (h2, other):
+        assert book.take(o, net.view(), is_member=net.member).taken
+    assert book.take(h1, net.view(), is_member=net.member).reason == "already seen"
+    assert nh.order_hash(h1) not in book.halts
+    again = nh.HaltBook(net.id, book.to_json())  # claims survive the file
+    assert again.take(h1, net.view(), is_member=net.member).reason == "already seen"
+
+
+def test_f4_7_the_newest_opt_out_record_decides_whatever_the_order(net):
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)
+    old = nh.no_count_record(c.key, net.id, issued_at=10)
+    newer = nh.no_count_record(c.key, net.id, issued_at=20, opted_out=False)
+    net.roster.opt_outs = [newer, old]  # the replayed old record comes last
+    assert net.view().counts(c.mk)
+    net.roster.opt_outs = [old, newer]
+    assert net.view().counts(c.mk)
+    net.roster.opt_outs = [old]
+    assert not net.view().counts(c.mk)

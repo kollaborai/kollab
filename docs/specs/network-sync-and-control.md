@@ -258,6 +258,43 @@ counting machines:
     names one with `Confirm Founder`, and the network id never changes after;
   - a halt is refused on receipt where fewer than two machines count;
   - a halt's `supersedes` retires only the same issuer's own earlier order.
+- Review fixes F4 (who may write control records, and how many):
+  - The network id is stored when a machine founds or joins (`net` in its
+    control file); it is never recomputed from the founder record held later,
+    so swapping that record moves nothing (F4-1).
+  - Join code anchor (F4-3): a join code is `XXXX-XXXX-AAAA-AAAA`. The last two
+    groups are `join_anchor(network id)`, 40 bits of `sha256` over the network
+    id, made by the machine that issued the code. The joiner refuses a join
+    decision whose founder record (or, with none, whose `network`) does not
+    belong to its room and hash to the typed anchor, with `This code does not
+    match the network that answered, so nothing was joined. Ask for a new code
+    on a device you trust.` A code without an anchor is refused the same way.
+    The anchor is persisted in the destination recovery record, so a resumed
+    join checks it too. Limit: the anchor comes from the machine that made the
+    code; it stops an inviter that did not make the code, and a record
+    swapped in after it, from answering with a network of its own. A person
+    who types a code a compromised counting machine made is still on that
+    machine's word, so compare the founder fingerprint shown in the join
+    result with the founder's screen.
+  - Join result: it shows the founder fingerprint (first 12 hex of the founder
+    machine key) and, while fewer than two machines count, `This network has one
+    machine that counts; a halt needs a second one.` The Connect screen's
+    Network State line shows the same sentence after `Running`.
+  - Only member machines write (F4-5, F4-7): a record is stored only when its
+    signer machine is the machine of a row whose folder is an approved relay
+    member; others take no slot, and records of a signer that left are dropped
+    first. A founder candidate is stored only when its founder key is a row
+    machine, and a bootstrap pick only when its admitter is the held founder or
+    such a candidate (F4-4).
+  - Opt-outs carry `issued_at` and `opted_out` inside the signed body. The
+    newest record per machine wins, so `Count Here` is a signed record that
+    beats an older `Do Not Count Here` and a third party cannot replay the old
+    one. A member list's opt-outs are checked and capped like every other kind;
+    a speaker no longer replaces another machine's records.
+  - A resume inside a received payload passes the same issuer checks as any
+    order (approved member, folder bound to the machine, not revoked) (F4-8).
+    `claims` keeps every issuer that named a parent, so a second namer cannot
+    erase the first (F4-9).
 - Opting out: a machine's person can withdraw this machine from counting on a
   network (`Do Not Count Here`, a record signed by its machine key). It takes
   effect only while no halt from that network is active, so it cannot be used
@@ -267,8 +304,10 @@ counting machines:
     (`relay_state.py:149`) and the network id is `sha256(room)`, so the founder
     record cannot be checked from the id. After the upgrade the founder signs
     its founder record and sends it; a person on each other machine confirms
-    the founder's fingerprint once (`Confirm Founder`). A machine whose
-    inviter's machine key is the founder's accepts it without asking.
+    the founder's fingerprint once (`Confirm Founder`). No machine accepts a
+    founder unasked, not even the founder's own invitee (F4-2): only a founder
+    record that verifies against the network id the machine stored when it
+    joined or founded counts without a person.
   - Bootstrap: the founder's person picks one pre-release member as the
     bootstrap machine (`Make Bootstrap Machine`), once.
   - Every other pre-release member counts after `Confirm Machine` from a

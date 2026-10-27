@@ -266,3 +266,10 @@ def test_plugin_offer_failure_uses_the_admit_refusal():
     hub._relay_agent = SimpleNamespace(commands=None)
     assert hub._offer_failed() == {"error": "connect offer could not be created"}
 
+
+
+@pytest.mark.asyncio
+async def test_f4_a_network_with_one_counting_machine_says_so_in_the_state_line():
+    p = await HALTP.describe(Ctx(snap(halt_allowed=False)), {})
+    state = summary(p)["Network State"]
+    assert state == "Running. This network has one machine that counts; a halt needs a second one."

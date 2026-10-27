@@ -86,7 +86,11 @@ KNOCK_ACTIONS = frozenset(
     }
 )
 LINK_RETRY_SECONDS = 60
-_SHORT_CODE_SHAPE = re.compile(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\Z")
+CONTROL_ACTIONS = frozenset(
+    {"halt", "propose_resume", "confirm_resume", "resume_local", "withdraw", "confirm_revoke"}
+)
+_CODE_GROUP = "[0-9A-HJKMNP-TV-Z]{4}"
+_SHORT_CODE_SHAPE = re.compile(rf"{_CODE_GROUP}-{_CODE_GROUP}(?:-{_CODE_GROUP}-{_CODE_GROUP})?\Z")
 _ENROLLMENT_ERRORS = {
     "invalid_request",
     "invalid_contact",
@@ -104,6 +108,7 @@ _ENROLLMENT_ERRORS = {
     "invalid_response",
     "internal",
     "update_required",
+    "network_mismatch",
 }
 
 
@@ -112,7 +117,11 @@ def _safe_enrollment_result(value) -> dict[str, str]:
     if not isinstance(value, dict):
         return {"error": "transport"}
     if value.get("status") in {"approved", "rejected"}:
-        return {"status": value["status"]}
+        out = {"status": value["status"]}
+        for extra in ("founder", "founder_fingerprint", "warning"):  # an approved result's plain strings, nothing else
+            if value["status"] == "approved" and isinstance(value.get(extra), str):
+                out[extra] = value[extra]
+        return out
     if value.get("error") in _ENROLLMENT_ERRORS:
         return {"error": value["error"]}
     return {"error": "transport"}
@@ -2907,8 +2916,11 @@ class RelayAgentBridge:
         return self._network_control().halt_snapshot(set(self._members_online()))
 
     async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
+        from .halt_runtime import tool_shell_refusal
         from .network_halt import HaltError
 
+        if action in CONTROL_ACTIONS and tool_shell_refusal():  # an agent's shell never drives the controls
+            raise RelayError(tool_shell_refusal())
         payload = dict(payload or {})
         if action in ("halt", "propose_resume"):
             payload["peer_heads"] = await self._peer_heads()

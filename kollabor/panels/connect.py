@@ -27,6 +27,7 @@ from plugins.hub.device_names import (
     validate_device_name,
     validate_trust,
 )
+from plugins.hub.network_control import ONE_COUNTING_LINE
 from plugins.hub.relay_commands import NO_NETWORK, network_label
 
 from .base import (
@@ -551,7 +552,8 @@ def halt_state_line(snap: dict, names: _Names) -> str:
     """``Running`` or ``Halted by <device> at <time> (their clock): <reason>``."""
     active = sorted(snap.get("active") or [], key=lambda o: o.get("issued_at", 0))
     if not active:
-        return "Running"
+        # F4-3: a network that cannot lift a halt says so, never shows nothing
+        return "Running" if snap.get("halt_allowed", True) else f"Running. {ONE_COUNTING_LINE}"
     newest = active[-1]
     line = f"Halted by {names.machine(newest.get('machine', ''))} at {_when(newest.get('issued_at'))} (their clock)"
     reason = _quote(newest.get("reason") or "")

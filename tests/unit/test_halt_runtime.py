@@ -158,6 +158,9 @@ def test_hand_off_records_scope_sweeps_and_opens_the_link(tmp_path):
         nh.Proc(cli, 1, ["/x/python", "-m", "kollabor_cli_main", "--hub", "stop", "x"], {}, FOLDER),
     ]
     install = nh.Install(prefix="/x")
+    h = "ab" * 32  # the halt_act record the hand-off must find in the book
+    nh.HaltFile(tmp_path).write({"scopes": {}, "stopped": [], "networks": {"net1": {"halts": {
+        h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}}})
 
     async def stop(agent):
         stopped.append(agent.get("pid"))

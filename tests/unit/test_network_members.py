@@ -658,6 +658,7 @@ async def test_a_busy_device_is_read_again_and_the_others_stay_listed(tmp_path, 
 @pytest.mark.asyncio
 async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_path):
     """Kill switch slice A: v3 lists carry the records; two counting machines revoke."""
+    from plugins.hub import network_halt as nh
     from plugins.hub.network_control import NetworkControl
 
     wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c", "srv-d")
@@ -676,7 +677,8 @@ async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_
                 offer_id="offer",
                 round_id=joiner.key,
                 folder=joiner.client.public_key,
-            )["network_control"]
+            )["network_control"],
+            anchor=nh.join_anchor(a.client.control.network_id()),
         )
     await sync(nodes, rounds=5)
     a.client.control.halt_act("make_bootstrap", {"machine": b.client.control.machine_hex})

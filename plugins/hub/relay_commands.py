@@ -827,8 +827,10 @@ class RelayCommands:
         """``/connect halt [--reason ...] [--revoke <device>]`` and ``/connect resume [--confirm h|--local]``."""
         import shlex
 
-        from .halt_runtime import RESUME_PROPOSED, parse_flags
+        from .halt_runtime import RESUME_PROPOSED, parse_flags, tool_shell_refusal
 
+        if tool_shell_refusal():  # `kollab -p "/connect halt"` from an agent's shell
+            return tool_shell_refusal()
         if self.agent_bridge is None:
             return "connect: halting requires a running Kollab Hub session"
         try:
@@ -1045,6 +1047,10 @@ class RelayCommands:
             # risk pattern on `/connect (revoke|halt|resume)`.
             return await self._halt_command(head, rest)
         if head == "revoke":
+            from .halt_runtime import tool_shell_refusal
+
+            if tool_shell_refusal():
+                return tool_shell_refusal()
             here_only = rest.endswith(" --here-only")
             rest = rest.removesuffix(" --here-only").strip()
             if not rest:

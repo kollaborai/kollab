@@ -163,8 +163,29 @@ def machine_confirmation_ok(record: Any, network: str) -> bool:
     )
 
 
-def no_count_record(machine: SigningKey, network: str) -> dict[str, Any]:
-    return _signed(NO_COUNT_DOMAIN, machine, {"network": network, "machine": _hex(machine)})
+def no_count_record(
+    machine: SigningKey, network: str, *, issued_at: int = 0, opted_out: bool = True
+) -> dict[str, Any]:
+    """``Do Not Count Here`` (``opted_out``) or ``Count Here`` again; the newest ``issued_at`` wins (F4-7)."""
+    return _signed(
+        NO_COUNT_DOMAIN,
+        machine,
+        {"network": network, "machine": _hex(machine), "issued_at": int(issued_at), "opted_out": bool(opted_out)},
+    )
+
+
+_ANCHOR_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def join_anchor(network: str) -> str:
+    """The 40-bit network tag a join code carries (``XXXX-XXXX``, F4-3).
+
+    The person types it with the code, so the device that joins learns the
+    network id from a source the inviter's own answer cannot overwrite.
+    """
+    n = int.from_bytes(hashlib.sha256(b"kollab-join-anchor-v1\n" + network.encode()).digest()[:5], "big")
+    text = "".join(_ANCHOR_ALPHABET[(n >> (5 * (7 - i))) & 31] for i in range(8))
+    return f"{text[:4]}-{text[4:]}"
 
 
 def inviter_claim(machine: SigningKey, network: str, inviter_machine: str) -> dict[str, Any]:
@@ -331,11 +352,12 @@ def count_machines(roster: Roster) -> Counting:
             excluded |= {alt_admitter[m], *chain(m, alt_admitter)}
         outside[m] = excluded
 
-    opted_out = {
-        r["machine"]
-        for r in roster.opt_outs
-        if _signed_ok(NO_COUNT_DOMAIN, r, "machine") and r.get("network") == net
-    }
+    newest: dict[str, dict[str, Any]] = {}
+    for r in roster.opt_outs:
+        if _signed_ok(NO_COUNT_DOMAIN, r, "machine") and r.get("network") == net:
+            if r["machine"] not in newest or _stamp(r) >= _stamp(newest[r["machine"]]):
+                newest[r["machine"]] = r
+    opted_out = {m for m, r in newest.items() if r.get("opted_out", True)}
     revoked = set(roster.revoked_machines)
     confirms: dict[str, set[str]] = {}
     for r in roster.confirmations:
@@ -356,6 +378,11 @@ def count_machines(roster: Roster) -> Counting:
     if founder and founder not in machines:
         chains.setdefault(founder, [])
     return Counting(founder, counting, chains, unknown, bindings, net, revoked)
+
+
+def _stamp(record: dict[str, Any]) -> int:
+    value = record.get("issued_at", 0)
+    return value if type(value) is int else 0
 
 
 def may_admit(view: Counting, machine: str) -> bool:
@@ -483,7 +510,10 @@ class HaltBook:
         self.lifted: set[str] = set(data.get("lifted", []))  # by an effective resume
         self.local_lifts: set[str] = set(data.get("local_lifts", []))
         self.owners: dict[str, str] = dict(data.get("owners", {}))  # order hash -> issuer folder
-        self.claims: dict[str, str] = dict(data.get("claims", {}))  # named parent -> issuer that named it
+        # named parent -> every issuer that named it (F4-9: a later namer must not erase an earlier one)
+        self.claims: dict[str, list[str]] = {
+            k: sorted({v} if isinstance(v, str) else set(v)) for k, v in dict(data.get("claims", {})).items()
+        }
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -496,7 +526,7 @@ class HaltBook:
             "lifted": sorted(self.lifted),
             "local_lifts": sorted(self.local_lifts),
             "owners": self.owners,
-            "claims": self.claims,
+            "claims": {k: sorted(v) for k, v in self.claims.items()},
         }
 
     def active(self) -> dict[str, dict]:
@@ -527,16 +557,13 @@ class HaltBook:
         if not order_ok(order, self.network):
             return TakeResult(False, "bad signature or shape")
         h = order_hash(order)
-        issuer, machine = order["issuer"], order["machine"]
-        if not is_member(issuer):
-            return TakeResult(False, "issuer is not an approved member")
-        if view.machine_of(issuer) != machine:
-            return TakeResult(False, "issuer folder is not bound to that machine")
-        if machine in view.revoked:
-            return TakeResult(False, "issuer is revoked")
+        issuer = order["issuer"]
+        refusal = self.issuer_refusal(order, view, is_member)
+        if refusal:
+            return TakeResult(False, refusal)
         if order["action"] == "resume" and h in self.proposals:
             return self._merge_confirmations(h, order, view)
-        if h in self.seen or self.claims.get(h) == issuer:
+        if h in self.seen or issuer in self.claims.get(h, ()):
             return TakeResult(False, "already seen")
         if order["action"] == "halt" and not halt_allowed(view):
             return TakeResult(False, "fewer than two counting machines here")
@@ -546,7 +573,9 @@ class HaltBook:
             if self.owners.get(sup) == issuer:
                 self.seen.add(sup)  # a late copy of the issuer's own superseded order is refused
             else:
-                self.claims[sup] = issuer  # only bites if sup turns out to be this issuer's own
+                named = self.claims.setdefault(sup, [])  # only bites if sup turns out to be this issuer's own
+                if issuer not in named:
+                    named.append(issuer)
         self.owners[h] = issuer
         self._note_head(issuer, h, sup)
         if order["action"] == "halt":
@@ -565,6 +594,18 @@ class HaltBook:
             del self.proposals[other_h]
         self.proposals[h] = stored
         return self._settle(h, view)
+
+    @staticmethod
+    def issuer_refusal(order: dict[str, Any], view: Counting, is_member: Callable[[str], bool]) -> str:
+        """Why an order's issuer may not speak here, "" when it may (shared by take and merge)."""
+        issuer, machine = order["issuer"], order["machine"]
+        if not is_member(issuer):
+            return "issuer is not an approved member"
+        if view.machine_of(issuer) != machine:
+            return "issuer folder is not bound to that machine"
+        if machine in view.revoked:
+            return "issuer is revoked"
+        return ""
 
     def _merge_confirmations(self, h: str, order: dict, view: Counting) -> TakeResult:
         have = self.proposals[h].setdefault("confirmations", [])
@@ -636,7 +677,11 @@ class HaltBook:
         """Take a member's ``network_halt`` payload. Returns halts lifted."""
         lifted: list[str] = []
         for order in payload.get("resumes", []):
-            if order_ok(order, self.network) and resume_effective(order, view):
+            if (
+                order_ok(order, self.network)
+                and not self.issuer_refusal(order, view, is_member)
+                and resume_effective(order, view)
+            ):
                 h = order_hash(order)
                 if h not in self.resumes:
                     self.proposals[h] = dict(order)
@@ -748,6 +793,9 @@ def in_scope(folder: str, scopes: Iterable[str | list[str]]) -> bool:
 # ------------------------------------------------------------ halt.json
 
 
+HALT_FILE_LIMIT = 64 << 20  # a read this big is never cut short; a write over it is refused
+
+
 class HaltFile:
     """``~/.kollab/private/halt.json``: 0600, never written through a link."""
 
@@ -763,17 +811,28 @@ class HaltFile:
         with os.fdopen(fd, "rb") as fh:
             if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) & 0o077:
                 raise HaltError(f"{self.path.name} is readable by others")
-            return json.loads(fh.read(4 << 20) or b"{}")
+            raw = fh.read(HALT_FILE_LIMIT + 1)
+        if len(raw) > HALT_FILE_LIMIT:
+            raise HaltError(f"{self.path.name} is too large")
+        data = json.loads(raw or b"{}")
+        if not isinstance(data, dict) or not all(
+            isinstance(data.get(k, {}), dict) for k in ("scopes", "networks", "folders")
+        ):
+            raise HaltError(f"{self.path.name} is not a halt file")
+        return data
 
     def write(self, data: dict[str, Any]) -> None:
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.dir.is_symlink():
             raise HaltError("private dir is a link")
+        body = canonical(data)
+        if len(body) > HALT_FILE_LIMIT:  # ponytail: no pruning of old records yet (HaltBook.to_json)
+            raise HaltError(f"{self.path.name} would be too large to read back")
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".halt.")
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as fh:
-                fh.write(canonical(data))
+                fh.write(body)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self.path)
@@ -915,7 +974,6 @@ def select_sweep(
     the listener, the caller and its ancestors.
     """
     procs = list(procs)
-    by_pid = {p.pid: p for p in procs}
     machine_wide = "machine" in scopes
     protected = set(protect)
     chosen: dict[int, Proc] = {}
@@ -933,22 +991,11 @@ def select_sweep(
             chosen[p.pid] = p
     stopped_agents |= {str(pid) for pid in chosen}
 
-    def descends(p: Proc, ancestors: set[int]) -> bool:
-        seen: set[int] = set()
-        cur = p.ppid
-        while cur and cur not in seen:
-            if cur in ancestors:
-                return True
-            seen.add(cur)
-            cur = by_pid[cur].ppid if cur in by_pid else 0
-        return False
-
-    roots = set(chosen)
     for p in procs:
         if p.pid in chosen or p.pid in protected or _is_tmux(p):
             continue
         tag = p.env.get("KOLLAB_AGENT_PID", "")
-        if tag and tag in stopped_agents and (descends(p, roots) or p.ppid == 1):
+        if tag and tag in stopped_agents:
             chosen[p.pid] = p
     return list(chosen.values())
 
@@ -975,7 +1022,7 @@ def _ppid(pid: int) -> int:
         return 0
 
 
-def read_process(pid: int) -> Proc | None:
+def read_process(pid: int, with_cwd: bool = True) -> Proc | None:
     """argv, environment and cwd of a same-user process (assumption 3)."""
     try:
         if sys.platform.startswith("linux"):
@@ -985,7 +1032,7 @@ def read_process(pid: int) -> Proc | None:
             ppid = int((base / "stat").read_text().rsplit(")", 1)[1].split()[1])
             return Proc(pid, ppid, argv, env, os.readlink(base / "cwd"), os.readlink(base / "exe"))
         if sys.platform == "darwin":
-            return _read_darwin(pid)
+            return _read_darwin(pid, with_cwd)
     except (OSError, ValueError, IndexError):
         return None
     return None
@@ -1000,7 +1047,7 @@ def _env_pairs(items: Iterable[bytes]) -> dict[str, str]:
     return env
 
 
-def _read_darwin(pid: int) -> Proc | None:
+def _read_darwin(pid: int, with_cwd: bool = True) -> Proc | None:
     libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
     size = ctypes.c_size_t(1 << 20)
@@ -1016,6 +1063,8 @@ def _read_darwin(pid: int) -> Proc | None:
     argv = [a.decode(errors="replace") for a in parts[:argc]]
     env = _env_pairs(p for p in parts[argc:] if p)
     ppid, cwd = 0, ""
+    if not with_cwd:  # the cheap pass of a sweep: argv and environment only
+        return Proc(pid, 0, argv, env, "", exe.decode(errors="replace"))
     out = subprocess.run(
         ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=5
     )

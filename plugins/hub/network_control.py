@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 CONTROL_FILE = "network_control.json"
 HALT_METHOD = "network_halt"
 ADMIT_REFUSAL = "Only your main device can add new devices. Make the code on {machine}."
+NETWORK_MISMATCH_LINE = (
+    "This code does not match the network that answered, so nothing was joined. "
+    "Ask for a new code on a device you trust."
+)
+ONE_COUNTING_LINE = "This network has one machine that counts; a halt needs a second one."
 REVOKE_HERE_ONLY = (
     "Revoke here only: {device} stays a member on the other machines, and this "
     "network can no longer lift a halt with two machines."
@@ -103,6 +108,40 @@ def _is_key(value: Any) -> bool:
     return isinstance(value, str) and bool(KEY.fullmatch(value))
 
 
+class JoinRefused(RelayError):
+    """The join decision does not match the network the join code named (F4-3)."""
+
+    def __init__(self) -> None:
+        super().__init__(NETWORK_MISMATCH_LINE)
+
+
+def join_network_ok(fields: Any, room: str, anchor: Any) -> bool:
+    """True when a join decision names the network the typed join code named.
+
+    The decision's founder record (or, with none, its ``network``) must belong to
+    this room and hash to the code's anchor. The anchor comes from the code the
+    person typed, so an inviter cannot answer with a network of its own (F4-3).
+    """
+    if not isinstance(fields, dict) or not isinstance(anchor, str) or not anchor:
+        return False
+    try:
+        legacy = hashlib.sha256(bytes.fromhex(room)).hexdigest()
+        founder = fields.get("founder")
+        if founder is not None:
+            if not nh._signed_ok(nh.FOUNDER_DOMAIN, founder, "founder"):
+                return False
+            net = founder.get("network")
+            if net not in (nh.network_id_for(room, founder["founder"]), legacy):
+                return False
+        else:
+            net = fields.get("network")
+            if net != legacy:
+                return False
+    except (ValueError, TypeError):
+        return False
+    return isinstance(net, str) and nh.join_anchor(net) == anchor.upper()
+
+
 class NetworkControl:
     """One folder's view of who counts on its network, and its halt book."""
 
@@ -150,12 +189,12 @@ class NetworkControl:
     # ------------------------------------------------------------ identity
 
     def network_id(self) -> str:
-        data = self._fresh()
-        room = self.client.state.room
-        founder = data.get("founder")
-        if data.get("room_bound") and isinstance(founder, dict) and _is_key(founder.get("founder")):
-            return nh.network_id_for(room, founder["founder"])
-        return hashlib.sha256(bytes.fromhex(room)).hexdigest()
+        # The id is stored when the network is founded or joined (F4-1), never
+        # recomputed from whichever founder record is held later.
+        net = self._fresh().get("net")
+        if _is_key(net):
+            return net
+        return hashlib.sha256(bytes.fromhex(self.client.state.room)).hexdigest()
 
     def found(self) -> None:
         """Sign the founder record on the machine that started this network.
@@ -170,7 +209,9 @@ class NetworkControl:
         bound = not self.client.state.approvals
         room = self.client.state.room
         net = nh.network_id_for(room, self.machine_hex) if bound else hashlib.sha256(bytes.fromhex(room)).hexdigest()
-        data.update(founder=nh.founder_record(self.machine, net), room_bound=bound, founder_confirmed=self.machine_hex)
+        data.update(
+            founder=nh.founder_record(self.machine, net), room_bound=bound, founder_confirmed=self.machine_hex, net=net
+        )
         self.save()
 
     def own_row(self) -> dict[str, Any]:
@@ -263,25 +304,36 @@ class NetworkControl:
         data = self._fresh()
         machine = join_proof_ok(proof, offer_id, round_id, folder)
         if not machine or machine == self.machine_hex:
-            return {"network_control": {"founder": data.get("founder")}}
+            return {"network_control": {"founder": data.get("founder"), "network": self.network_id()}}
         return {
             "network_control": {
                 "founder": data.get("founder"),
+                "network": self.network_id(),
                 "admission": nh.admission(self.machine, self.network_id(), machine),
             }
         }
 
-    def take_join(self, fields: Any) -> str:
+    def count_warning(self) -> str:
+        """The plain line for a network where a halt could not be lifted, else ""."""
+        return "" if nh.halt_allowed(self.view()) else ONE_COUNTING_LINE
+
+    def take_join(self, fields: Any, *, anchor: str) -> str:
         """A joiner keeps the founder record and its own admission from the decision.
 
-        Returns the founder's machine key, "" when the decision's founder record
-        does not verify for this room (the join code is the trust root, so the
-        person sees this key in the join result).
+        Raises ``JoinRefused`` when the decision does not match the network the
+        typed join code named (``anchor``), or its founder record does not
+        verify for this room. Returns the founder's machine key ("" when the
+        decision names none); the person sees it in the join result.
         """
-        if not isinstance(fields, dict):
-            return ""
+        room = self.client.state.room
+        if not join_network_ok(fields, room, anchor):
+            raise JoinRefused
         data = self._fresh()
         founder = fields.get("founder")
+        if founder is None:
+            data["net"] = hashlib.sha256(bytes.fromhex(room)).hexdigest()
+            self.save()
+            return ""
         taken = self._take_founder(founder)
         if taken and isinstance(fields.get("admission"), dict):
             adm = fields["admission"]
@@ -289,9 +341,10 @@ class NetworkControl:
                 data["admission"] = adm
         if not taken:
             logger.warning("network control: join decision founder record refused")
+            raise JoinRefused
         self.save()
         held = data.get("founder")
-        return held["founder"] if taken and isinstance(held, dict) else ""
+        return held["founder"] if isinstance(held, dict) else ""
 
     def _take_founder(self, founder: Any) -> bool:
         """Hold a founder record. Only a join decision or ``found`` sets it (never a member list).
@@ -306,10 +359,10 @@ class NetworkControl:
             return False
         room = self.client.state.room
         if founder.get("network") == nh.network_id_for(room, founder["founder"]):
-            data.update(founder=founder, room_bound=True)
+            data.update(founder=founder, room_bound=True, net=founder["network"])
             return True
         if founder.get("network") == hashlib.sha256(bytes.fromhex(room)).hexdigest():
-            data.update(founder=founder, room_bound=False)
+            data.update(founder=founder, room_bound=False, net=founder["network"])
             return True
         return False
 
@@ -318,11 +371,16 @@ class NetworkControl:
         data = self._fresh()
         if data.get("founder") or not nh._signed_ok(nh.FOUNDER_DOMAIN, rec, "founder"):
             return
-        if rec.get("network") != self.network_id():
-            return
+        if rec.get("network") != self.network_id() or rec["founder"] not in self._member_machines():
+            return  # F4-4: only a machine in the member list can be a candidate
         cands = data.setdefault("founder_candidates", [])
         if all(c["founder"] != rec["founder"] for c in cands) and len(cands) < MAX_PICKS:
             cands.append(rec)
+
+    def _member_machines(self) -> set[str]:
+        """Machine keys of the rows whose folder is an approved relay member (F4-5)."""
+        approved = set(self.client.members()) | {self.client.public_key}
+        return {r["machine"] for f, r in self.rows().items() if f in approved and _is_key(r.get("machine"))}
 
     def _adopt(self, rec: dict) -> None:
         self._fresh().update(founder=rec, room_bound=False, founder_confirmed=rec["founder"])
@@ -367,7 +425,6 @@ class NetworkControl:
         if not isinstance(control, dict):
             return
         data = self._fresh()
-        self._candidate(control.get("founder"))
         net = self.network_id()
         own = self.client.public_key
         members = data.setdefault("members", {})
@@ -383,66 +440,68 @@ class NetworkControl:
                 if row["admission"] is not None and not isinstance(row["admission"], dict):
                     row["admission"] = None
                 members[row["folder"]] = row
+        self._candidate(control.get("founder"))
+        machines = self._member_machines()
         for name in RECORD_LISTS:
-            have = data.setdefault(name, [])
             incoming = control.get(name)
-            checked = {id(r): _record_check(name, r, net) for r in have}
-            known = {c[1] for c in checked.values() if c}
+            # Only records a member machine signed are kept (F4-5): anyone else's
+            # take no slot, and what a departed signer left is dropped first.
+            checked = [(r, _record_check(name, r, net)) for r in data.setdefault(name, [])]
+            checked = [(r, c) for r, c in checked if c and c[0] in machines]
+            have = data[name] = [r for r, _c in checked]
+            known = {c[1] for _r, c in checked}
             per_signer: dict[str, int] = {}
-            for c in checked.values():
-                if c:
-                    per_signer[c[0]] = per_signer.get(c[0], 0) + 1
+            for _r, c in checked:
+                per_signer[c[0]] = per_signer.get(c[0], 0) + 1
             for r in incoming[:MAX_RECORDS] if isinstance(incoming, list) else []:
                 try:
                     c = _record_check(name, r, net) if isinstance(r, dict) else None
                 except (KeyError, TypeError):
                     c = None
-                if c is None or c[1] in known:
-                    continue  # unsigned junk and repeats are dropped before they take a slot
+                if c is None or c[0] not in machines:
+                    continue  # unsigned junk and strangers are dropped before they take a slot
+                if name == "opt_outs":
+                    self._keep_newest_opt_out(have, r)
+                    continue
+                if c[1] in known:
+                    continue
                 if per_signer.get(c[0], 0) >= MAX_PER_SIGNER or len(have) >= MAX_STORED:
                     logger.warning("network control: %s from one signer over the cap; refused", name)
                     continue
                 have.append(r)
                 known.add(c[1])
                 per_signer[c[0]] = per_signer.get(c[0], 0) + 1
-        # A machine speaks for its own opt-out: what it sends now replaces what
-        # was heard about it, so `Count Here` again reaches every member it meets.
-        speaker = members.get(voucher, {}).get("machine")
-        mine = self.machine_hex  # this machine's own opt-out comes only from its person
-        data["opt_outs"] = [
-            r for r in data["opt_outs"] if r.get("machine") != mine or r in self._own_opt_outs()
-        ]
-        if speaker and speaker != mine:
-            sent = control.get("opt_outs") if isinstance(control.get("opt_outs"), list) else []
-            data["opt_outs"] = [r for r in data["opt_outs"] if r.get("machine") != speaker] + [
-                r for r in sent if isinstance(r, dict) and r.get("machine") == speaker
-            ]
-        # Picks are candidates: the rules count only one the founder signed.
+        # This machine's own opt-out state comes only from its person.
+        # Picks are candidates: the rules count only one the founder signed, so
+        # only a pick whose admitter is the held founder or a candidate is kept (F4-4).
         picks = data.setdefault("bootstrap_picks", [])
         heard = control.get("bootstrap_picks")
+        admitters = {self.view().founder} | {c["founder"] for c in data.get("founder_candidates", [])}
         for pick in heard[:MAX_PICKS] if isinstance(heard, list) else []:
             if (
                 isinstance(pick, dict)
                 and pick.get("network") == net
+                and pick.get("admitter") in admitters
                 and nh._signed_ok(nh.ADMISSION_DOMAIN, pick, "admitter")
                 and all(p.get("sig") != pick.get("sig") for p in picks)
                 and len(picks) < MAX_PICKS
             ):
                 picks.append(pick)
-        # A machine whose inviter's machine key is the founder's accepts it unasked.
-        inviter_machine = (members.get(self.client.state.inviter) or {}).get("machine")
-        if inviter_machine and not data.get("founder_confirmed"):
-            held = data.get("founder")
-            if held and held.get("founder") == inviter_machine:
-                data["founder_confirmed"] = inviter_machine
-            elif not held:
-                for cand in data.get("founder_candidates", []):
-                    if cand["founder"] == inviter_machine:
-                        self._adopt(cand)
         self.save()
 
-    def _own_opt_outs(self) -> list[dict]:
-        return list(self._fresh().get("own_opt_outs", []))
+    @staticmethod
+    def _keep_newest_opt_out(have: list[dict], rec: dict) -> None:
+        """One record per machine: the newest ``issued_at`` wins, so a replay of an older one changes nothing."""
+        for i, old in enumerate(have):
+            if old.get("machine") == rec.get("machine"):
+                if nh._stamp(rec) > nh._stamp(old):
+                    have[i] = rec
+                return
+        have.append(rec)
+
+    def _opted_out(self) -> bool:
+        mine = [r for r in self._fresh().get("opt_outs", []) if r.get("machine") == self.machine_hex]
+        return bool(mine) and bool(mine[0].get("opted_out", True))
 
     def _protected(self) -> set[str]:
         """Never revoked on a peer's word: the inviter, this folder, and the device's primary."""
@@ -620,7 +679,7 @@ class NetworkControl:
             "revocation_signers": {k: sorted(ms) for k, ms in good.items() if len(ms) < 2},
             "bootstrap_open": view.founder == self.machine_hex
             and not data.get("bootstrap_pick"),
-            "opted_out": bool(data.get("own_opt_outs")),
+            "opted_out": self._opted_out(),
             "pending_revocations": sorted(k for k, ms in good.items() if len(ms) < 2 and k not in applied)
             + sorted(k for k, ms in good.items() if len(ms) < 2 and k in applied),
             "unconfirmed_machines": sorted(machines - view.counting - view.revoked),
@@ -747,16 +806,22 @@ class NetworkControl:
         elif action == "no_count":
             if book.held():
                 raise nh.HaltError("a machine cannot stop counting while a halt is active")
-            rec = nh.no_count_record(self.machine, net)
-            data.setdefault("opt_outs", []).append(rec)
-            data.setdefault("own_opt_outs", []).append(rec)
+            self._sign_opt_out(opted_out=True)
         elif action == "count":
-            data["opt_outs"] = [r for r in data.get("opt_outs", []) if r.get("machine") != me]
-            data["own_opt_outs"] = []
+            self._sign_opt_out(opted_out=False)
         else:
             raise nh.HaltError("unknown halt action")
         self.save()
         return result
+
+    def _sign_opt_out(self, *, opted_out: bool) -> None:
+        """A signed ``Do Not Count Here`` or ``Count Here`` record, newer than any this machine made."""
+        have = self._fresh().setdefault("opt_outs", [])
+        previous = max((nh._stamp(r) for r in have if r.get("machine") == self.machine_hex), default=0)
+        rec = nh.no_count_record(
+            self.machine, self.network_id(), issued_at=max(int(time.time()), previous + 1), opted_out=opted_out
+        )
+        self._keep_newest_opt_out(have, rec)
 
     @staticmethod
     def _full_hash(hashes: dict, prefix: Any) -> str:
