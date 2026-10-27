@@ -55,6 +55,8 @@ def _filter_env(env: dict) -> dict:
     )
     filtered = {}
     for key, value in env.items():
+        if key in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID"):
+            continue  # a person's /terminal pane may run network controls
         upper = key.upper()
         if any(pat in upper for pat in sensitive_patterns):
             continue

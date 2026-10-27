@@ -101,6 +101,9 @@ class RiskAssessmentRules:
             re.compile(r"wget.*\|\s*(ba)?sh"),  # wget | bash
             re.compile(r"sudo\s+rm"),  # sudo rm
             re.compile(r":\(\)\s*\{"),  # fork bomb
+            re.compile(r"kollab\b.*--hub\s+(halt|resume)\b"),  # network kill switch
+            re.compile(r"/connect\s+(revoke|halt|resume)\b"),  # network controls
+            re.compile(r"(rm|mv|cp|tee|>)\s.*\.kollab/private/"),  # halt.json and friends
         ]
     )
 
