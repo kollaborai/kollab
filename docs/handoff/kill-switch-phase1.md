@@ -946,3 +946,50 @@ proof). Each item: failing test first, fix, mutation check on the fixed line (al
 Tests added: `test_join_result_display.py` (8), `test_halt_confirmed.py` (16), `test_connect_offer_domain.py`
 (4), plus new cases in `test_network_halt.py` (+4), `test_panels_connect_halt.py` (+4), engine
 `test_panels_routes.py`, `halt-panels.test.ts` (+1).
+
+## Done Gate status (lead, after the F5 commit 390c8ba4)
+
+Live proof column. Nothing below is "proven live" until the fresh-image Docker
+run (prefix `ks4-`, `docker run --rm` only) and a two-device join have run;
+the proof run id is recorded here once it exists: **run id: none yet**.
+
+| Item | Unit tests | tmux | Docker / two devices |
+|---|---|---|---|
+| Rules core, counting, orders, revocation | yes, mutation-checked | n/a | D2/D3 ran an earlier build (patched with docker cp); fresh image not yet |
+| Halt from a secondary stops in-scope processes | yes (injected process lists, one real child) | n/a | D2/D3 earlier build only |
+| Resume (two machines), `--local`, deleted halt.json | yes | n/a | D2/D3 earlier build only |
+| Join proves both keys, anchor in the join code | yes | no | NOT RUN (no two-device join yet) |
+| Join result shows founder fingerprint and warning (TUI and web) | yes | no | NOT RUN |
+| TUI halt view: no stray prompt, fresh snapshot, nested pop | yes (stack manager test added) | spec covers refusals only; Connect row and `h` view NOT in the spec | NOT RUN |
+| Web halt panels and sidebar line | yes + frontend tests | n/a | screenshots from an isolated stack (slice C3); no Docker run |
+| Accident guard (`--hub` CLI) | yes | yes (kill_switch_phase1.json PASS) | D2 PASS (earlier build) |
+| Accident guard on halt.sock, daemon-side, engine route | yes | no | NOT RUN |
+
+Why it matters (for whoever reads this next): this is the network-wide stop
+Marco asked for so that his agents can run unattended while he sleeps. It has to
+hold when an inviter or a member is hostile, which is why nothing here counts as
+done on unit tests alone.
+
+## PanelHost.tsx: uncommitted hunks (do not stage blindly)
+
+Path: `packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx`.
+Committed from it: only the F5 confirmation hunks (the `SESSIONLESS_PANELS`
+import, `sure(...)`, `confirmedPayload`). Still uncommitted and NOT mine to
+commit alone: the settings tab filter (`SETTINGS_TABS.filter((item) => sessionId || item.id === "network")`),
+the `sessionId ? <SessionSettings .../> : null` and `sessionId ? <PromptsPage/> : null`
+guards (my slice C2, needed so the Halt and Resume tab opens with no chat open),
+and layout classes (`max-w-3xl`, dialog sizing, hidden scrollbar) that belong to
+the Prompts-tab redesign by another agent (`PromptsPage.tsx`, `prompts-model.ts`,
+`panel-model.ts` scope text are in the same dirty set). Owner of the Prompts-tab
+edits: not confirmed; ask before staging that file. F6 does not touch it.
+
+## TUI nested-pop bug (stack manager)
+
+`AltViewStackManager._pop_current` restored the main UI on every pop, repainting
+the input line and emitting MODAL_HIDE under an outer view that was still open
+(the stray `❯` on the Connect screen after closing the halt view). Fixed in the
+shared manager: the main UI is restored only when the stack is empty
+(`packages/kollabor-tui/.../stack_manager.py`, test in
+`tests/unit/test_altview_stack_reuse.py`, mutation killed; 273 altview, stack,
+fullscreen and modal tests pass). The Connect-screen repaint from F5 stays as a
+second layer. Not yet checked live in tmux.
