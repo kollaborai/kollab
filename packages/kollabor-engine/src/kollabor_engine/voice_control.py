@@ -63,17 +63,17 @@ def _now_ms() -> int:
 
 # --- speech output policy ---------------------------------------------------
 
-_FENCE = re.compile(r"```.*?(?:```|$)", re.S)
 
 
 def format_for_speech(text: str) -> str:
-    """Deterministic speakable form of visible text; display_text is untouched."""
-    out = _FENCE.sub(" ", text)
-    out = re.sub(r"`([^`]*)`", r"\1", out)
-    out = re.sub(r"https?://\S+", " link ", out)
-    out = re.sub(r"^\s*[-+*]\s+", "", out, flags=re.M)
-    out = re.sub(r"[*_#>|~\[\]]+", " ", out)
-    out = " ".join(out.split())
+    """Deterministic speakable form of visible text; display_text is untouched.
+
+    The voice service applies the same spoken_form before any engine speaks,
+    so the transcript's spoken_text is exactly what is heard.
+    """
+    from kollabor_voice.spoken_form import spoken_form
+
+    out = spoken_form(text)
     if len(out) > MAX_SPOKEN_CHARS:
         cut = out[:MAX_SPOKEN_CHARS]
         end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))

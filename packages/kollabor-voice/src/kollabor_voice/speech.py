@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .control import manifest
 from .speech_settings import speech_errors, speech_key
+from .spoken_form import spoken_form
 
 
 class VibeVoiceWorker:
@@ -214,7 +215,14 @@ class SpeechEngine:
                 raise
 
     def stream(self, text):
-        """Yield (samples, rate) chunks; VibeVoice yields while it generates."""
+        """Yield (samples, rate) chunks; VibeVoice yields while it generates.
+
+        Every TTS path (the web UI room, /voice) ends here, so this is where a
+        reply becomes speakable: nothing else reaches an engine.
+        """
+        text = spoken_form(text)
+        if not text:
+            return
         with self.lock:
             # A failed engine (timed out, worker died) starts again here, on the
             # next sentence, instead of failing every sentence after it.
