@@ -19,7 +19,7 @@ import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
 import { buildLocalOrderRows, groupByFolder, orderedDevices, reorderDevicesWithinNetwork, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
-import { LearnMoreLink } from "@/components/learn/LearnMoreLink";
+import { HoverHelp } from "@/components/ui/hover-help";
 import { lastRanLabel, since } from "@/last-ran";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -609,7 +609,7 @@ export function AppSidebar({
                 </div>
               ) : null}
               <div className="bg-foreground/[0.04] flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
-                <div className="flex min-w-0 flex-col items-start">
+                <HoverHelp side="bottom" align="start" text="Opens your saved profiles. A profile picks the provider, model and endpoint a new session talks to.">
                   <Button
                     type="button"
                     variant="ghost"
@@ -621,16 +621,7 @@ export function AppSidebar({
                   >
                     Manage Profiles
                   </Button>
-                  <LearnMoreLink
-                    topicId="profiles"
-                    label="Learn about profiles"
-                    className="min-h-7 px-2 text-xs"
-                    onNavigate={() => {
-                      setOptionsOpen(false);
-                      setOpenMobile(false);
-                    }}
-                  />
-                </div>
+                </HoverHelp>
                 <Button type="button" size="sm" disabled={busy} onClick={create}>
                   <Plus className="size-4" />
                   Start Session

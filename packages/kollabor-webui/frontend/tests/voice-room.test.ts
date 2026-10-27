@@ -252,3 +252,10 @@ test("only a page served from this computer can reach the voice room", async () 
   assert.ok(["localhost", "127.0.0.1", "[::1]"].every(roomReachable));
   assert.ok(!["10.0.0.7", "kollabor.ai", "192.168.1.20"].some(roomReachable));
 });
+
+test("the speech model setup state, and only it, offers the Install button", async () => {
+  const { needsSpeechModel } = await import("../src/voice/room-state.ts");
+  assert.ok(needsSpeechModel("Voice needs a speech model on this computer."));
+  assert.ok(!needsSpeechModel("Voice needs an Apple silicon Mac to hear you."));
+  assert.ok(!needsSpeechModel(null));
+});

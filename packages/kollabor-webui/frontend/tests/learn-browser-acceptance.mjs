@@ -282,11 +282,12 @@ async function main() {
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
     await shell.page.getByTestId("new-session-options").click();
-    await shell.page.getByRole("link", { name: "Learn about profiles", exact: true }).click();
-    await shell.page.waitForFunction(() => location.search === "?topic=profiles");
-    await waitForLesson(shell.page, "Provider profiles");
-    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
+    // Help is a hover card on the control, never an inline link.
+    assert.equal(await shell.page.getByRole("link", { name: /Learn about|Learn more/ }).count(), 0);
+    await shell.page.getByRole("button", { name: "Manage Profiles", exact: true }).hover();
+    await shell.page.getByRole("tooltip").filter({ hasText: "A profile picks the provider" }).first().waitFor({ state: "visible" });
+    await shell.page.keyboard.press("Escape"); // the card
+    await shell.page.keyboard.press("Escape"); // the options popover
 
     await shell.page.getByRole("button", { name: "Agents", exact: true }).first().click();
     const agentLibrary = shell.page.getByRole("dialog", { name: "Agents", exact: true });
