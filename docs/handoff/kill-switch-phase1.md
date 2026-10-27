@@ -470,3 +470,80 @@ must be committed together with that work. Originals: `slice-c2-before/`.
   not code).
 - Still from slice C: `connect-halt-new`'s `notice` is not rendered by
   `FormPanel`; `Not restarted: ...` after resume not shown.
+
+## Slice D: live proof in Docker (partial: blocked by bug 1, then token cap)
+
+Nothing here ran on the host. No commits.
+
+### Harness
+
+`tests/docker/kill_switch/` (README has the exact bring-up): `Dockerfile` (this
+checkout as a dev install in `/opt/kollab`), `tls_proxy.py` (throwaway CA + TLS
+:443 in front of `kollab relay serve --domain relay.ks.test`), `seed_home.sh`,
+`ks.sh`, `proxy.py` (`connect_proxy` ops and handshake-phase state RPC on the
+folder's hub socket). Real path end to end: signed discovery over TLS, private
+CIDR `10.231.77.0/24`, relay websocket, join code, `state.hub_enroll`,
+`decide accept`, sealed settings.
+
+Network formed: m1 founder (`/connect relay.ks.test` typed in a tmux TUI
+attached to its `--detached` daemon); m3 joined with m1's code (bootstrap:
+m3 `halt_snapshot` `counts: true, halt_allowed: true`); m4 joined with m1's code
+(`counts: false`, in `unconfirmed_machines`); m2 a lone network.
+
+### Proof table
+
+| Bullet | Result | Observed |
+|---|---|---|
+| one-machine network refuses halt (m2, TTY via `script`) | PASS | `This network has one machine that can confirm a resume. A halt needs a second one to lift it; add one first, or use kollab --hub stop all on this machine.` |
+| terminal-tool `kollab --hub halt` refused (no TTY) | PASS | `Network controls run only from a person's terminal or Settings → Network.` |
+| same with `KOLLAB_TOOL_SHELL=1` under a TTY | PASS | same line |
+| chained admission: non-counting m4's New Join Code refused | PASS | `{"error": "connect offer could not be created", "reason": "Only your main device can add new devices. Make the code on m1-work."}` |
+| founder-admitted machine does not count until confirmed | PASS (state only, no resume tried) | m4 `halt_snapshot`: `counts: False`, `unconfirmed_machines: ['fdf2…3972']` |
+| halt from a secondary stops the founder's in-scope processes, not listener/engine/issuing CLI | FAIL (blocked) | `kollab --hub halt --reason proof-halt` on m3 (counting bootstrap) printed the one-machine refusal; m1 unchanged (daemon pid 60, TUI 95, decoy python 3726). Bug 1 |
+| every other phase 1 Proof bullet (offline device on reconnect, resume from one / two machines, second folder, `resume --local`, deleted `halt.json`, revocations, service agent once, second HOME, dev-install decoy survives, agents/skills unchanged) | NOT RUN | all need a working CLI halt (or a `halt_act` through the daemon, not tried before the cap). m1 agents dir hash recorded before (`/root/agents.before`, 91 files); no halt happened |
+
+tmux spec: NOT written (token cap). Seen in containers instead: both refusals
+above; the Connect screen footer reads `c new code  h halt and resume  esc close`,
+but shows NO `Network State` row (m2, lone network: rows were network, this
+device, join code, requests, online). C/C2: check if that is intended.
+
+### Bugs (reported, not fixed: the root cause is outside slice D's files)
+
+1. CLI halt reads a different network state than the daemon.
+   `halt_runtime._folder_control` (`plugins/hub/halt_runtime.py:1072`) builds
+   `RelayCommands(Path(folder))` with no `state_dir`, so `RelayStateStore` calls
+   `default_workspace_state_dir` (`plugins/hub/relay_state.py:247`), which runs
+   `migrate_legacy_network_state` (`plugins/hub/device_record.py:~282`). A daemon
+   started on a fresh HOME uses the v1 dir `~/.kollab/network/<sha256(folder)>`
+   (`relay_agent.py:846` falls back to `owner.state_dir` when
+   `memberships.resolve(None)` raises). The CLI process then migrates while the
+   daemon owns v1, copying only `state.json` and `device.key` into
+   `~/.kollab/workspaces/<hash>/networks/<slug>/`, not `private/network_control.json`
+   or the sqlite stores. The CLI's control is empty (`founder=''`, one row,
+   network id `315a…` vs the daemon's `5bd7…`), so `halt_allowed` is false and
+   every CLI halt/resume on such a machine refuses with the one-machine line.
+   Worse: a daemon restart now resolves the v2 dir and loses its control records.
+   Repro (in the harness, on a joined machine):
+   `python -c "from pathlib import Path; from plugins.hub.relay_commands import RelayCommands; print(RelayCommands(Path('/root/work')).client.control.view())"`.
+   Fix direction: never migrate under a live relay owner (check the owner lock
+   first) and move `private/` with the rest; the CLI should use the state dir of
+   the folder's running owner (the `connect_proxy` `halt_*` ops already go there)
+   instead of resolving its own. Test with the fix: a v1 dir holding
+   `private/network_control.json` plus a held owner lock ->
+   `default_workspace_state_dir` returns the v1 dir and creates nothing.
+2. TUI `/connect code` in a window attached to a `--detached` daemon shows
+   `could not create a code`. `connect_proxy offer` with `domain: ""` answers
+   `invalid connect offer request`; with `domain: "relay.ks.test"` it works. The
+   attached window sends an empty domain (plugin.py code_only path /
+   connect_altview).
+3. The guided "Join with a code" form always discovers `kollabor.ai`
+   (`connect_guide.DEFAULT_DOMAIN`): a fresh device cannot join a self-hosted
+   directory from the TUI without connecting first, which founds a lone network.
+
+### Docker objects
+
+Created: image `kollab-killswitch:dev`; network `ks-net` (10.231.77.0/24);
+containers `ks-relay`, `ks-m1`, `ks-m2`, `ks-m3` (no `--rm`), `ks-m4` (`--rm`).
+A Bash hook in this session refuses container removal, so the remaining
+objects are listed in the slice D final report; the README now starts every
+container with `--rm`.

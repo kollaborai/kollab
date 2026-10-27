@@ -300,6 +300,10 @@ def migrate_legacy_network_state(
     legacy = base / LEGACY_NETWORK_DIR_NAME / digest
     if not legacy.is_dir():
         return False
+    if _legacy_owner_running(workspace, legacy):
+        # A live relay owner (a daemon) still keeps its state here. Moving it
+        # would split the daemon and every other process into two states.
+        return False
 
     state_path = legacy / "state.json"
     payload: dict = {}
@@ -337,4 +341,26 @@ def migrate_legacy_network_state(
     if state_path.exists():
         _write_private(target_dir / "state.json", _read_private(state_path, 65536))
     _write_private(target_dir / "device.key", _read_private(key_path, 128))
+    _copy_private_records(legacy / "private", target_dir / "private")
     return True
+
+
+def _legacy_owner_running(workspace: Path, legacy: Path) -> bool:
+    from .relay_owner import RelayOwnerError, WorkspaceRelayOwner
+
+    try:
+        return WorkspaceRelayOwner(workspace, legacy).owner() is not None
+    except RelayOwnerError:
+        return False
+
+
+def _copy_private_records(source: Path, target: Path) -> None:
+    """Carry the workspace's private records (e.g. the kill switch's network
+    control file) with the state; only plain files, nothing through a link."""
+    if not source.is_dir() or source.is_symlink():
+        return
+    _ensure_private_dir(target)
+    for entry in sorted(source.iterdir()):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        _write_private(target / entry.name, _read_private(entry, 4 << 20))

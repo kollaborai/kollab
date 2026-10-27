@@ -266,3 +266,37 @@ def test_slug_spelling_wins_over_flat_when_both_present(home):
 
     reloaded = DeviceRecord()
     assert reloaded.primary == slug_alpha
+
+
+def test_migration_carries_private_records(home, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    private = _legacy_state_dir(workspace, home) / "private"
+    private.mkdir(mode=0o700)
+    control = private / "network_control.json"
+    control.write_text('{"founder": "x"}')
+    os.chmod(control, 0o600)
+    assert migrate_legacy_network_state(workspace) is True
+    slug = origin_slug("https://relay.example.com")
+    moved = workspace_dir(workspace) / "networks" / slug / "private" / "network_control.json"
+    assert moved.read_text() == '{"founder": "x"}'
+
+
+def test_migration_waits_while_a_relay_owner_holds_the_legacy_folder(home, tmp_path):
+    from plugins.hub.relay_owner import WorkspaceRelayOwner
+    from plugins.hub.relay_state import default_workspace_state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _seed_legacy(workspace, home)
+    legacy = _legacy_state_dir(workspace, home)
+    owner = WorkspaceRelayOwner(workspace, legacy)
+    assert owner.acquire(f"/tmp/ks-own-{os.getpid()}.sock", "daemon")
+    try:
+        assert migrate_legacy_network_state(workspace) is False
+        assert not workspace_dir(workspace).exists()
+        assert default_workspace_state_dir(workspace) == legacy
+    finally:
+        owner.release()
+    assert migrate_legacy_network_state(workspace) is True
