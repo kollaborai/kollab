@@ -806,8 +806,15 @@ async def sweep(
     )
     by_pid = {a["pid"]: a for a in in_scope_agents}
     records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
-    results = await asyncio.gather(*(stop(r) for r in records))
-    return [(r, ok, msg) for r, (ok, msg) in zip(records, results)]
+    # F13/NEW-4c: one stop that raises is reported for that agent; the others still stop
+    results = await asyncio.gather(*(stop(r) for r in records), return_exceptions=True)
+    out = []
+    for r, res in zip(records, results):
+        if isinstance(res, BaseException):
+            out.append((r, False, f"stop {r.get('identity', '?')} failed: {type(res).__name__}: {res}"[:200]))
+        else:
+            out.append((r, *res))
+    return out
 
 
 def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
@@ -838,54 +845,85 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
     return kill
 
 
+def kollab_start(pid: int, install=None) -> float | None:
+    """F13: ``pid``'s start time while it is a kollab of this install, else None (gone, reused, unreadable)."""
+    from .network_halt import Install, _cli_args, read_process
+
+    try:
+        proc = read_process(pid, with_cwd=False)
+        if proc is None or _cli_args(proc, install or Install.current()) is None:
+            return None
+        row = process_info().get(pid)
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def fallback_stop(
-    scopes: list, agents: list, procs: list, protect: Iterable[int], *, install=None, grace: float = 3.0
+    scopes: list, agents: list, procs: list, protect: Iterable[int], *, install=None, grace: float = 3.0,
+    identify: Callable[[int], float | None] | None = None,
 ) -> list[tuple[dict, bool, str]]:
     """F12/NEW-4: the sweep threw, so stop the in-scope agents by pid: SIGTERM, then SIGKILL after ``grace``.
 
-    The agents come from presence and from the kollab command lines already read; nothing they started
-    is chased here (that is what failed). Every step is guarded on its own.
+    F13/NEW-4b: only pids the sweep itself would take: a kollab of this install among the processes
+    already read, in scope by its own folder (or the presence record's, for the same pid). A presence pid
+    that is not such a process is left alone (stale presence, a reused pid, a forged row). Each target's
+    start time is read before SIGTERM and again before SIGKILL; a pid that is no longer the same kollab
+    is not killed. Nothing the agents started is chased here (that is what failed). Never raises.
     """
     from .network_halt import Install, _cli_args, _never_swept, in_scope, pid_ok
 
-    install = install or Install.current()
-    protect = set(protect) | {os.getpid()}
-    machine = "machine" in scopes
-    targets: dict[int, dict] = {}
-    for a in agents:
-        try:
-            pid = a.get("pid")
-            if not pid_ok(pid) or pid in protect or a.get("state") == "halted":
-                continue
-            if machine or in_scope(str(a.get("project") or "/nonexistent-folder"), scopes):
-                targets[pid] = a
-        except Exception:  # noqa: BLE001
-            continue
-    for p in procs:
-        try:
-            args = _cli_args(p, install)
-            if p.pid in protect or p.pid in targets or args is None or _never_swept(args, p):
-                continue
-            if machine or in_scope(p.cwd, scopes):
-                targets[p.pid] = {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd}
-        except Exception:  # noqa: BLE001
-            continue
-    for pid in targets:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline and any(_alive(p) for p in targets):
-        await asyncio.sleep(0.05)
-    for pid in targets:
-        if _alive(pid):
+    identify = identify or (lambda pid: kollab_start(pid, install))
+    out: list[tuple[dict, bool, str]] = []
+    try:
+        install = install or Install.current()
+        protect = set(protect) | {os.getpid()}
+        machine = "machine" in scopes
+        by_pid: dict[int, dict] = {}
+        for a in agents:
             try:
-                os.kill(pid, signal.SIGKILL)
+                if isinstance(a, dict) and pid_ok(a.get("pid")) and a.get("state") != "halted":
+                    by_pid.setdefault(a["pid"], a)
+            except Exception:  # noqa: BLE001
+                continue
+        targets: dict[int, dict] = {}
+        for p in procs:
+            try:
+                args = _cli_args(p, install)
+                if not pid_ok(p.pid) or p.pid in protect or args is None or _never_swept(args, p):
+                    continue
+                rec = by_pid.get(p.pid)
+                folder = str((rec or {}).get("project") or p.cwd or "/nonexistent-folder")
+                if machine or in_scope(folder, scopes) or in_scope(p.cwd or "/nonexistent-folder", scopes):
+                    targets[p.pid] = rec or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd}
+            except Exception:  # noqa: BLE001
+                continue
+        starts = {pid: identify(pid) for pid in targets}
+        for pid in targets:
+            try:
+                os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-    await asyncio.sleep(0.05)
-    return [(rec, True, f"stopped {rec.get('identity', pid)} (by pid)") for pid, rec in targets.items()]
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline and any(_running(p) for p in targets):
+            await asyncio.sleep(0.1)
+        for pid, rec in targets.items():
+            name = rec.get("identity", pid)
+            if not _running(pid):
+                out.append((rec, True, f"stopped {name} (by pid)"))
+            elif starts[pid] is not None and identify(pid) == starts[pid]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    out.append((rec, True, f"stopped {name} (by pid, SIGKILL)"))
+                except OSError:
+                    out.append((rec, True, f"stopped {name} (by pid)"))
+            else:
+                out.append((rec, False, f"{name} still running and not verified as the same kollab: not killed"))
+        await asyncio.sleep(0.05)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("halt listener: fallback stop failed")
+        out.append(({"identity": "fallback"}, False, f"fallback stop failed: {type(error).__name__}"))
+    return out
 
 
 def _alive(pid: int) -> bool:
@@ -894,6 +932,18 @@ def _alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _running(pid: int) -> bool:
+    """Alive and not a zombie (an exited process its parent has not reaped yet is stopped)."""
+    if not _alive(pid):
+        return False
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    stat = out.stdout.strip()
+    return not stat.startswith("Z") if stat else _alive(pid)
 
 
 # -------------------------------------------------------------- listener
@@ -954,9 +1004,33 @@ class HaltListener:
 
     # run ---------------------------------------------------------------
 
-    async def run(self) -> int:
-        if not self.take_lock():
-            return 0  # another listener runs
+    def _lock_is_ours(self) -> bool:
+        try:
+            on_disk = os.stat(private_dir(self.root) / LOCK, follow_symlinks=False)
+            mine = os.fstat(self._lock_fd)
+        except (OSError, TypeError):
+            return False
+        return (on_disk.st_dev, on_disk.st_ino) == (mine.st_dev, mine.st_ino)
+
+    async def _keep_lock(self) -> None:
+        """F13: ``private/`` (with halt.lock and halt.sock) deleted under a running listener: take a new lock
+        at once so a second listener cannot start beside this one, and serve the socket again."""
+        if self._lock_fd is None or self._lock_is_ours():
+            return
+        old, self._lock_fd = self._lock_fd, None
+        if self.take_lock():
+            logger.warning("halt listener: halt.lock was removed; taken again")
+            with contextlib.suppress(OSError):
+                os.close(old)
+        else:
+            self._lock_fd = old  # another listener started in the gap: both hold the halt until it lifts
+            logger.warning("halt listener: halt.lock was removed and another listener took it")
+            return
+        if self._server is not None and not sock_path(self.root).exists():
+            self._server.close()
+            await self._serve()
+
+    async def _serve(self) -> None:
         path = sock_path(self.root)
         path.unlink(missing_ok=True)
         old = os.umask(0o177)
@@ -965,6 +1039,12 @@ class HaltListener:
         finally:
             os.umask(old)
         os.chmod(path, 0o600)
+
+    async def run(self) -> int:
+        if not self.take_lock():
+            return 0  # another listener runs
+        path = sock_path(self.root)
+        await self._serve()
         try:
             await self._reopen_links()
             while not self._done.is_set():
@@ -981,6 +1061,10 @@ class HaltListener:
 
     async def tick(self) -> None:
         """Hand back networks whose halts are all lifted; exit when none is left."""
+        try:
+            await self._keep_lock()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("halt listener: lock check failed (%s)", type(error).__name__)
         try:
             data = read_halt(self.root)
         except (OSError, ValueError, AttributeError, TypeError) as error:
@@ -1106,12 +1190,27 @@ class HaltListener:
         active = _book_active_hashes(net, book)
         if not active or (order.get("hash") and order["hash"] not in active):
             return {"ok": False, "error": "no recorded halt for that network"}
+        # F13/NEW-4c: from here on every step is guarded on its own: the halt is always recorded (on disk,
+        # or in memory for the next tick to write), everything that can be stopped is, and the reply
+        # carries every error. Nothing below raises.
+        from .network_halt import pid_ok, read_process
+
+        errors: list[str] = []
+
+        def guarded(what: str, fn: Callable[[], Any], default: Any) -> Any:
+            try:
+                return fn()
+            except Exception as error:  # noqa: BLE001
+                logger.exception("halt listener: %s failed", what)
+                errors.append(f"{what}: {type(error).__name__}: {error}"[:200])
+                return default
+
         if isinstance(folder, str):
             self.folders.setdefault(net, set()).add(folder)
-        agents = self._agents() if self._agents else _live_agents()
+        agents = guarded("presence", lambda: list(self._agents() if self._agents else _live_agents()), [])
         for a in agents:
-            if a.get("project"):
-                self._remember_folder(a["project"])
+            if isinstance(a, dict) and a.get("project"):
+                guarded("presence", lambda a=a: self._remember_folder(a["project"]), None)
         if isinstance(scope, list):  # every folder of this network on this machine, not only the first
             scope = sorted({*scope, *(f for f in self.folders.get(net, ()))})
 
@@ -1125,24 +1224,35 @@ class HaltListener:
             seen = set(data.setdefault("folders", {}).get(net, []))
             data["folders"][net] = sorted(seen | self.folders.get(net, set()))
 
-        update_halt(record, self.root)
-        protect = {os.getpid(), *(int(p) for p in order.get("protect") or [] if str(p).isdigit()),
-                   *waiter_pids(self.root)}
-        stop = self._stop or _default_stop(protect, self.root)
-        scopes = active_scopes(read_halt(self.root))
+        guarded("record", lambda: update_halt(record, self.root), None)
+        waiters = guarded("waiters", lambda: set(waiter_pids(self.root)), set())
+        protect = guarded("protect", lambda: {os.getpid(), *waiters, *(
+            int(p) for p in order.get("protect") or [] if str(p).isdigit())}, {os.getpid(), *waiters})
+        stop = self._stop or guarded("stop", lambda: _default_stop(protect, self.root), None)
+        scopes = guarded("scopes", lambda: active_scopes(read_halt_held(self.root)), []) or [scope]
+        if scope not in scopes:
+            scopes = [*scopes, scope]  # the halt being taken holds even if the file could not be written
         procs: list = []
         sweep_error = ""
         try:
+            if stop is None:
+                raise RuntimeError("no way to stop an agent")
             procs = self._processes() if self._processes else _read_candidates()
             # injected process lists (tests) get no live tree: a real ps would name real processes
             tree = None if self._processes else process_tree()
             info = None if self._processes else process_info()
             results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
-                                  waiters=waiter_pids(self.root), tree=tree, info=info)
+                                  waiters=waiters, tree=tree, info=info)
         except Exception as error:  # noqa: BLE001 - F12/NEW-4: the agents still stop
             sweep_error = f"{type(error).__name__}: {error}"[:200]
+            errors.append(f"sweep: {sweep_error}")
             logger.exception("halt listener: sweep failed; stopping agents by pid")
-            results = await fallback_stop(scopes, agents, procs, protect | waiter_pids(self.root))
+            if not procs and not self._processes:  # the read itself failed: judge the presence pids alone
+                procs = guarded("processes", lambda: [
+                    p for p in (read_process(a["pid"]) for a in agents if isinstance(a, dict) and pid_ok(a.get("pid")))
+                    if p is not None], [])
+            results = await fallback_stop(scopes, agents, procs, protect)  # never raises
+        errors += [m for _, ok, m in results if not ok]
         stopped = [
             {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
             for r, ok, _ in results if ok
@@ -1152,11 +1262,17 @@ class HaltListener:
             known = {(s.get("identity"), s.get("folder")) for s in data.get("stopped", [])}
             data.setdefault("stopped", []).extend(s for s in stopped if (s["identity"], s["folder"]) not in known)
 
-        update_halt(note, self.root)
-        await self.open_links(net)
-        reply = {"ok": True, "stopped": [m for _, _, m in results], "count": len(stopped)}
+        guarded("record stopped", lambda: update_halt(note, self.root), None)
+        try:
+            await self.open_links(net)
+        except Exception as error:  # noqa: BLE001
+            logger.exception("halt listener: opening links failed")
+            errors.append(f"links: {type(error).__name__}: {error}"[:200])
+        reply = {"ok": True, "stopped": [m for _, ok, m in results if ok], "count": len(stopped)}
         if sweep_error:
             reply["sweep_error"] = sweep_error
+        if errors:
+            reply["errors"] = errors
         return reply
 
     def _remember_folder(self, folder: str) -> None:

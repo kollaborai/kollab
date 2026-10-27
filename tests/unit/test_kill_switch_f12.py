@@ -55,15 +55,16 @@ def _wait(cond, seconds: float = 5.0) -> None:
 
 
 def test_shell_rows_keep_only_real_rows():
-    good = [[300, 1000.0], [301, 1001, 100]]
+    good = [[300, 1000.0, 100], [301, 1001, 100]]  # F13: the agent pid is required
     rows = nh.shell_rows([*GARBAGE, *good], 100)
     assert rows == [(300, 1000.0, 100), (301, 1001.0, 100)]
     assert nh.shell_rows([[120, 1.0, 101]], 100) == []  # recorded under another parent
     assert nh.shell_rows({"x": 1}, 100) == [] and nh.shell_rows(good, float("nan")) == []
     # json reads NaN and Infinity: a presence file can carry them
-    loaded = json.loads('{"tool_shells": [[120, NaN], [121, Infinity], [122, -Infinity], [300, 5]]}')
+    loaded = json.loads('{"tool_shells": [[120, NaN, 100], [121, Infinity, 100], [122, -Infinity, 100], '
+                        '[300, 5, 100]]}')
     assert nh.shell_rows(loaded["tool_shells"], 100) == [(300, 5.0, 100)]
-    assert len(nh.shell_rows([[300, 1.0]] * 10_000, 100)) == nh.MAX_SHELL_ROWS
+    assert len(nh.shell_rows([[300, 1.0, 100]] * 10_000, 100)) == nh.MAX_SHELL_ROWS
 
 
 def _agent_case(shells, **extra):
@@ -80,16 +81,18 @@ async def _ok(r):
 
 def test_new_4_garbage_tool_shells_never_stop_the_sweep():
     """NaN, Infinity, huge, negative, strings and nested junk: the agent still stops, the good row still counts."""
-    agent, rec, tree, info = _agent_case([*GARBAGE, [120, 1000.0]])
+    agent, rec, tree, info = _agent_case([*GARBAGE, [120, 1000.0, 100]])
+    left = nh.Proc(121, 1, ["sleep"], {"KOLLAB_AGENT_PID": "100"}, "/work")
     bad_agents = [{"pid": float("nan")}, {"pid": "x", "project": "/w"}, {"pid": 4242, "project": "a\x00b"},
                   "not a dict", {"pid": 10**30, "tool_shells": [[1, float("nan")]]}]
-    got = asyncio.run(hr.sweep(["machine"], agents=[*bad_agents, rec], procs=[agent], stop=_ok, protect=set(),
+    got = asyncio.run(hr.sweep(["machine"], agents=[*bad_agents, rec], procs=[agent, left], stop=_ok, protect=set(),
                                install=INSTALL, tree=tree, info=info))
     assert {r["pid"] for r, _ok_, _m in got} == {100, 121}
 
 
 def test_new_4_a_one_megabyte_presence_row_is_bounded(tmp_path):
-    junk = [[i % 50000 + 2, float("nan")] for i in range(80_000)] + [[120, 1000.0]]  # the good row is past the cap
+    junk = [[i % 50000 + 2, float("nan"), 100] for i in range(80_000)]
+    junk += [[120, 1000.0, 100]]  # the good row is past the cap
     raw = json.dumps({"tool_shells": junk})
     assert len(raw) > 1_000_000
     agent, rec, tree, info = _agent_case(json.loads(raw)["tool_shells"])
@@ -122,7 +125,8 @@ def test_new_4_a_failing_sweep_still_stops_the_agents(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hr, "sweep", boom)
     monkeypatch.setattr(hr, "_state_dir_for", lambda folder, net: None)
-    listener = hr.HaltListener(tmp_path, processes=lambda: [], open_link=open_link,
+    me = nh.Proc(agent.pid, os.getpid(), [f"{sys.prefix}/bin/python", "-m", "kollabor_cli_main"], {}, "/work")
+    listener = hr.HaltListener(tmp_path, processes=lambda: [me], open_link=open_link,
                                agents=lambda: [{"identity": "lapis", "pid": agent.pid, "project": "/work",
                                                 "tool_shells": [[agent.pid, float("nan")]]}])
     try:
@@ -172,11 +176,13 @@ def test_forged_row_naming_a_live_victim_group_is_ignored(agent_proc):
 
 def test_rows_recorded_before_the_agent_or_with_a_terminal_are_not_swept():
     agent = nh.Proc(100, 50, ["/opt/this-install/bin/kollab"], {}, "/work")
-    tree = {50: (1, 50, 50), 100: (50, 100, 50), 201: (1, 200, 200), 301: (1, 300, 300)}
+    tree = {50: (1, 50, 50), 100: (50, 100, 50), 201: (77, 200, 200), 301: (77, 300, 300)}  # not orphans
     info = {100: (1000.0, "kollab", "??"), 201: (1002.0, "sleep", "??"), 301: (1002.0, "zsh", "ttys003")}
+    tag = {"KOLLAB_AGENT_PID": "100"}  # F13: a dead shell's member needs the agent's tag
+    left = [nh.Proc(201, 77, ["sleep"], tag, "/w"), nh.Proc(301, 77, ["zsh"], tag, "/w")]
 
     def pick(rows):
-        return {p.pid for p in nh.select_sweep([agent], install=INSTALL, scopes=["machine"], agent_pids=[100],
+        return {p.pid for p in nh.select_sweep([agent, *left], install=INSTALL, scopes=["machine"], agent_pids=[100],
                                                protect=set(), tree=tree, tool_shells=rows, info=info)}
 
     assert pick([(200, 1001.0, 100)]) == {100, 201}  # sanity: a real dead shell's leftover
@@ -204,7 +210,8 @@ def test_a_process_named_tmux_by_argv0_is_still_swept(agent_proc):
         (fake,) = left
         assert hr.process_info()[fake][1].endswith("tmux")  # ps names it tmux
         assert nh.exe_path(fake).endswith("/sleep")
-        assert fake in _select(agent_proc, [(shell.pid, t0, agent_proc.pid)])
+        tagged = nh.Proc(fake, 1, ["tmux"], {"KOLLAB_AGENT_PID": str(agent_proc.pid)}, "/")  # F13: tag needed
+        assert fake in _select(agent_proc, [(shell.pid, t0, agent_proc.pid)], [tagged])
     finally:
         for pid in left:
             os.kill(pid, signal.SIGKILL)
@@ -255,18 +262,18 @@ def test_new_2_crossing_revocations_converge_in_every_order_and_batch():
     recount = _recount(net)
     view = recount(set())
 
-    def apply(have, now):
-        return nh.revocations_to_apply(have, view, recount=recount, now=now)
+    def apply(have, now, seen):
+        return nh.revocations_to_apply(have, view, recount=recount, now=now, seen=seen)
 
-    final = apply(recs, t0 + 10_000)
+    final = apply(recs, t0 + 10_000, None)
     assert len({view.machine_of(k) for k in final}) == 1
     outcomes = set()
     for order in itertools.permutations(recs):
         for cut in range(len(order) + 1):
-            applied = set()
-            applied |= apply(list(order[:cut]), t0 + 5)  # batch one, inside the settle window
-            applied |= apply(list(order), t0 + 6)  # batch two arrives
-            applied |= apply(list(order), t0 + nh.REVOKE_SETTLE + 10)
+            applied, seen = set(), {}  # F13: this machine's own first-seen clock
+            applied |= apply(list(order[:cut]), t0 + 5, seen)  # batch one, inside the settle window
+            applied |= apply(list(order), t0 + 6, seen)  # batch two arrives
+            applied |= apply(list(order), t0 + nh.REVOKE_SETTLE + 10, seen)
             outcomes.add(frozenset(applied))
             gone = {view.machine_of(k) or k for k in applied}
             assert len(recount(gone).counting) >= 2
@@ -342,8 +349,13 @@ def test_new_2_a_revocation_waits_for_the_settle_window():
     recs = [nh.revocation(b.folders[0], b.key, net.id, d.fk(), 5000),
             nh.revocation(c.folders[0], c.key, net.id, d.fk(), 5001)]
     recount = _recount(net)
-    assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=5001 + nh.REVOKE_SETTLE - 1) == set()
-    assert d.fk() in nh.revocations_to_apply(recs, recount(set()), recount=recount, now=5001 + nh.REVOKE_SETTLE)
+    seen: dict = {}  # F13: counted from when this machine first held both signatures, not from issued_at
+    assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000, seen=seen) == set()
+    assert seen == {d.fk(): 7000}
+    assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE - 1,
+                                   seen=seen) == set()
+    assert d.fk() in nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE,
+                                             seen=seen)
 
 
 # ------------------------------------------------------------------ NEW-3: no ps

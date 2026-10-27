@@ -63,9 +63,14 @@ member that holds a halt stays running. Processes of other OS users and
 renamed processes are not reached. See the spec's "Limits We Accept".
 
 What a halt stops: the kollab agents on every member machine, their tool
-shells, and the plain background jobs those shells left behind (`nohup`,
-`( ... ) &`, `disown`, `npm run dev &`). One odd presence file (NaN, junk, a
-forged row) never stops the halt: the agents are still stopped by pid.
+shells while they run, and the background jobs a finished tool shell left
+behind (`nohup`, `( ... ) &`, `disown`, `npm run dev &`) when the job carries
+the agent's tag in an environment this user can read, or descends from one
+that does. One odd presence file (NaN, junk, a forged row) never stops the
+halt: if the sweep itself fails, the agents are still stopped, but only pids
+that are a kollab of this install, in scope, and SIGKILL only goes to a pid
+whose start time still matches the one read before SIGTERM. Every step of a
+halt is guarded on its own; the reply lists each error.
 
 What survives a halt (stop these by hand):
 
@@ -78,13 +83,31 @@ What survives a halt (stop these by hand):
 - leftovers of an agent that already exited or restarted before the halt;
 - jobs handed to launchd, cron, at, osascript or a service manager;
 - on Linux, background jobs reparented to `systemd --user` are stopped only
-  when they carry the agent's tag; untagged ones survive.
+  when they carry the agent's tag; untagged ones survive;
+- on macOS, a system program (`/bin/sleep`, `/usr/bin/curl`, `zsh`) left
+  behind by a finished tool shell, with no tagged parent: macOS hides its
+  environment, and a group whose leader exited cannot be told apart from a
+  forged presence row naming someone else's group;
+- a program in a directory you own named like a multiplexer
+  (`/opt/homebrew/bin/tmux` and the Homebrew Cellar are writable by you), and
+  everything under it.
 
-A revocation that two counting machines sign applies on every machine two
-minutes after its second signature, so crossing revocations reach one answer
-everywhere; one delivered later than that can still split.
+Revocations are judged from the signed records alone, in the order of the
+revoked key; no signer's clock (`issued_at`) changes who is revoked. A
+machine applies a revocation two minutes after it first holds two signatures
+for it, by its own clock, and a revocation still waiting holds back every one
+after it, so crossing revocations that reach a machine within two minutes of
+each other give one answer everywhere. A record that reaches a machine more
+than two minutes after another one it crosses (a partition, a machine that
+was off) can still split them: what a machine applied stays applied. Two
+counting machines acting together can delay other revocations by signing
+new ones, two minutes at a time, up to their record limit.
 
 Lifting a halt from an agent's terminal tool is refused. That refusal guards
 against an agent's own shell by accident; it is not a wall against another
-program running as you, which can edit the halt files directly. Containing
-that needs a sandbox.
+program running as you. Such a program can lift a halt on this machine by
+rewriting `~/.kollab/private/halt.json` with an empty book for that network,
+or by killing the halt listener and deleting the file. An empty or truncated
+`halt.json` holds every folder, as unreadable files do, and a listener whose
+`private/` folder was deleted takes its lock and socket again within one
+tick (2 s). Containing a hostile program that runs as you needs a sandbox.

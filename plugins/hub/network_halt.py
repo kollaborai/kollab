@@ -778,7 +778,7 @@ def revocation_ok(record: Any, network: str) -> bool:
     )
 
 
-REVOKE_SETTLE = 120  # seconds a revocation waits after its second signature before any machine applies it
+REVOKE_SETTLE = 120  # seconds after THIS machine first held two signatures for a key before it applies it
 
 
 def revocations_to_apply(
@@ -788,29 +788,33 @@ def revocations_to_apply(
     protected: Iterable[str] = (),
     orders: Iterable[dict] = (),
     recount: Callable[[set[str]], Counting] | None = None,
+    seen: dict[str, float] | None = None,
     now: float | None = None,
 ) -> set[str]:
     """Keys whose revocation this machine applies on other machines' word.
 
-    F12/NEW-2: the answer is a pure function of the signed records (and the clock): ``view`` is the
-    roster before any revocation, never what this machine already applied, and keys are taken in one
-    order every machine computes alike, by the time their second signer signed (``issued_at``), then
-    key. Each key needs two counting machines other than its target, counted after the keys before it
-    are gone (``recount(removed)`` recounts the roster without them), and is skipped when it would
-    leave fewer than two counting machines. A key applies only ``REVOKE_SETTLE`` seconds after its
-    second signature, so crossing revocations (B+C -> A, A+B -> C) that reach machines in different
-    orders are all in hand before either is applied. ``protected`` (this device's primary and the
-    folder key that admitted it) only stops this machine applying a key; the order is unchanged.
-    A key naming a machine key revokes every folder key bound to it. ``orders`` are halts this
-    machine took: each ``revoke`` entry counts as a revocation record from the order's issuer.
+    F12/NEW-2: ``view`` is the roster before any revocation, never what this machine already applied.
+    F13/NEW-2a: no signer's clock decides anything. ``issued_at`` is ignored; keys are taken in the
+    order of the revoked key itself (a key id no signer can choose for someone else), so the answer is a
+    pure function of the set of signed records. Each key needs two counting machines other than its
+    target, counted after the keys before it are gone (``recount(removed)``), and is skipped when it
+    would leave fewer than two counting machines.
+
+    ``seen`` (optional, kept by the caller) maps a key to when THIS machine first held two signatures
+    for it, by its own clock; a key applies only ``REVOKE_SETTLE`` seconds after that, and a key that
+    has not settled holds back every key after it, so crossing revocations that reach a machine within
+    the window in any order or batch give one answer. Without ``seen`` nothing waits.
+    ``protected`` (this device's primary and the folder key that admitted it) only stops this machine
+    applying a key; the order is unchanged. A key naming a machine key revokes every folder key bound
+    to it. ``orders`` are halts this machine took: each ``revoke`` entry counts as a revocation record
+    from the order's issuer.
     """
     now = time.time() if now is None else now
-    signed: dict[str, dict[str, int]] = {}  # key -> signing machine -> earliest issued_at
+    signed: dict[str, set[str]] = {}  # key -> signing machines
     for r in records:
         if not revocation_ok(r, view.network) or view.machine_of(r["by"]) != r["machine"]:
             continue
-        mine = signed.setdefault(r["revoked"], {})
-        mine[r["machine"]] = min(_stamp(r), mine.get(r["machine"], _stamp(r)))
+        signed.setdefault(r["revoked"], set()).add(r["machine"])
     for order in orders:
         if not order_ok(order, view.network) or order.get("action") != "halt":
             continue
@@ -818,18 +822,20 @@ def revocations_to_apply(
             continue
         for key in order["revoke"]:
             if isinstance(key, str) and KEY.fullmatch(key):
-                mine = signed.setdefault(key, {})
-                mine[order["machine"]] = min(_stamp(order), mine.get(order["machine"], _stamp(order)))
+                signed.setdefault(key, set()).add(order["machine"])
 
     def counting(removed: set[str]) -> set[str]:
         return set(recount(removed).counting) if recount else view.counting - removed
 
-    ready = sorted((sorted(t.values())[1], key) for key, t in signed.items() if len(t) >= 2)
+    ready = sorted(key for key, t in signed.items() if len(t) >= 2)
+    if seen is not None:
+        for key in ready:
+            seen.setdefault(key, now)
     out: set[str] = set()
     removed: set[str] = set()
-    for second, key in ready:
-        if second + REVOKE_SETTLE > now:
-            break  # not settled: neither it nor anything signed later applies yet
+    for key in ready:
+        if seen is not None and seen[key] + REVOKE_SETTLE > now:
+            break  # not settled here: neither it nor any key after it applies yet
         target = view.machine_of(key) or key
         if target in removed:
             out.add(key)
@@ -900,7 +906,9 @@ class HaltFile:
             raw = fh.read(HALT_FILE_LIMIT + 1)
         if len(raw) > HALT_FILE_LIMIT:
             raise HaltError(f"{self.path.name} is too large")
-        data = json.loads(raw or b"{}")
+        if not raw.strip():  # F13: a truncated (0-byte) or blank file is unreadable, never "not halted"
+            raise HaltError(f"{self.path.name} is empty")
+        data = json.loads(raw)
         if not isinstance(data, dict) or not all(
             isinstance(data.get(k, {}), dict) for k in ("scopes", "networks", "folders")
         ):
@@ -1152,9 +1160,10 @@ def shell_rows(entries: Any, owner: Any) -> list[tuple[int, float, int]]:
     if not isinstance(entries, list) or not pid_ok(owner):
         return out
     for e in entries[:MAX_SHELL_ROWS]:
-        if not isinstance(e, list) or len(e) not in (2, 3) or not pid_ok(e[0]) or not _time_ok(e[1]):
+        # F13: the agent pid is required; a 2-field row (written before F12, or forged) is dropped
+        if not isinstance(e, list) or len(e) != 3 or not pid_ok(e[0]) or not _time_ok(e[1]):
             continue
-        if len(e) == 3 and not (pid_ok(e[2]) and e[2] == owner):
+        if not (pid_ok(e[2]) and e[2] == owner):
             continue
         out.append((e[0], float(e[1]), owner))
     return out
@@ -1238,6 +1247,8 @@ def _backgrounded(
         return exes[pid]
 
     shells: dict[int, float] = {}
+    dead_owner: dict[int, int] = {}  # F13: a recorded shell that has exited -> the agent that recorded it
+    live_shells: dict[int, set[int]] = {}  # agent -> its recorded shells still alive as its children
     for row in tool_shells:
         try:
             pid, start, owner = row
@@ -1250,6 +1261,11 @@ def _backgrounded(
                     continue  # that pid is alive again as a later process: the shell's group is gone
                 if tree.get(pid, (0, 0, 0))[0] != owner:
                     continue  # a live tool shell is its agent's child; anything else was named by a forged row
+                live_shells.setdefault(owner, set()).add(pid)
+            elif pid in shells and pid in dead_owner and dead_owner[pid] != owner:
+                continue  # two agents claim one dead shell: at least one row is forged, the first stays
+            else:
+                dead_owner[pid] = owner
             shells[pid] = min(start, shells.get(pid, start))
         except (TypeError, ValueError, OverflowError, KeyError):
             continue
@@ -1273,7 +1289,12 @@ def _backgrounded(
         # Linux systemd --user is a subreaper: orphans land on it, not on pid 1
         return ppid in tree and tree[ppid][0] <= 1 and _system_program(exe(ppid), frozenset({"systemd"}))
 
+    def tag_of(pid: int) -> int:
+        tag = known[pid].env.get("KOLLAB_AGENT_PID", "") if pid in known else ""
+        return int(tag) if tag.isdigit() and len(tag) < 9 else 0
+
     out: set[int] = set()
+    pending: dict[int, int] = {}  # F13: in a dead shell's group or session -> the agent that recorded it
     for pid, (ppid, pg, _sid_) in tree.items():
         try:
             if pid in guard or pid in unsafe or pid not in info:
@@ -1283,15 +1304,43 @@ def _backgrounded(
             if shells:
                 for key in (pg, _sid(pid, tree)):
                     if key in shells and key not in unsafe and int(started) >= int(shells[key]):
-                        hit = True
+                        if key in dead_owner:
+                            pending.setdefault(pid, dead_owner[key])
+                        else:
+                            hit = True
             if not hit and pid in known and orphan(ppid):
-                tag = known[pid].env.get("KOLLAB_AGENT_PID", "")
-                owner = int(tag) if tag.isdigit() and len(tag) < 9 else 0
+                owner = tag_of(pid)
                 hit = owner in agents and owner in info and started >= info[owner][0]
             if hit and not spared(pid):
                 out.add(pid)
         except Exception as e:  # noqa: BLE001 - one odd process never stops the sweep
             logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
+    # F13: a row naming a group or session whose leader already exited cannot be checked against the
+    # agent's children, so a forged one could name anyone's leftovers. Such a member is taken only when
+    # its readable env tag names that agent, or its parent chain reaches a pid known to be that agent's
+    # (the agent, its live tool shells, or a member already taken this way).
+    mine = {owner: {owner, *live_shells.get(owner, ())} for owner in set(pending.values())}
+    grew = True
+    while grew:
+        grew = False
+        for pid, owner in list(pending.items()):
+            try:
+                ok = tag_of(pid) == owner
+                cur, seen = tree[pid][0], {pid}
+                while not ok and cur > 1 and cur not in seen:
+                    ok = cur in mine[owner]
+                    seen.add(cur)
+                    cur = tree.get(cur, (0, 0, 0))[0]
+                if not ok:
+                    continue
+                del pending[pid]
+                mine[owner].add(pid)
+                grew = True
+                if not spared(pid):
+                    out.add(pid)
+            except Exception as e:  # noqa: BLE001
+                pending.pop(pid, None)
+                logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
     return out
 
 

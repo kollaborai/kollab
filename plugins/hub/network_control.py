@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -583,13 +584,26 @@ class NetworkControl:
         def recount(removed: set[str]) -> nh.Counting:
             return nh.count_machines(dataclasses.replace(roster, revoked_machines=set(removed)))
 
-        return nh.revocations_to_apply(
+        # F13/NEW-2a: the settle window runs on this machine's clock from when it first held two
+        # signatures for a key, never on a signer's issued_at
+        seen = self._fresh().setdefault("revoke_seen", {})
+        if not isinstance(seen, dict) or not all(type(v) in (int, float) and math.isfinite(v) for v in seen.values()):
+            seen = self._fresh()["revoke_seen"] = {}
+        before = dict(seen)
+        out = nh.revocations_to_apply(
             self._fresh().get("revocations", []),
             recount(set()),
             protected=self._protected(),
             orders=self.halt_book().halts.values(),
             recount=recount,
+            seen=seen,
         )
+        if seen != before:
+            try:
+                self.save()
+            except (nh.HaltError, OSError):
+                logger.warning("network control: could not store when revocations were first seen")
+        return out
 
     def apply_revocations(self) -> None:
         """Revoke every key two counting machines name (member lists and the halt exchange both end here)."""

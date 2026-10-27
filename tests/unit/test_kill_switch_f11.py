@@ -101,6 +101,13 @@ def real(tmp_path):
         unrelated.wait()
 
 
+def _tagged(real) -> tuple[list, set[int]]:
+    """F13: a dead tool shell's leftovers are taken only by a readable env tag naming the agent (or a parent chain
+    through one); macOS hides the environment of system binaries such as /bin/sleep, so there that set is empty."""
+    procs = [p for p in (nh.read_process(x, with_cwd=False) for x in real["left"]) if p is not None]
+    return procs, {p.pid for p in procs if p.env.get("KOLLAB_AGENT_PID") == str(real["agent"].pid)}
+
+
 def _tmux_pids(tmux: str, sock: str) -> set[int]:
     out = subprocess.run([tmux, "-L", sock, "list-panes", "-a", "-F", "#{pane_pid}"], capture_output=True, text=True)
     panes = {int(x) for x in out.stdout.split()}
@@ -117,13 +124,14 @@ def test_backgrounded_jobs_of_an_exited_tool_shell_are_swept(real):
         assert hr.process_tree()[pid][0] == 1 or sys.platform.startswith("linux")  # orphaned to launchd/init
     py = nh.read_process(real["py"], with_cwd=False)
     assert py is not None and py.env.get("KOLLAB_AGENT_PID") == str(real["agent"].pid)
-    chosen = _select(real["agent"], [(shell_pid, t0)], [py])
-    assert real["left"] <= chosen  # rule 2: the dead tool shell's group
+    left_procs, tagged = _tagged(real)
+    chosen = _select(real["agent"], [(shell_pid, t0)], [py, *left_procs])
+    assert tagged <= chosen and not (real["left"] - tagged) & chosen  # rule 2 (F13: tag or chain required)
     assert real["py"] in chosen  # rule 3: a tagged orphan in its own session, started after the agent
-    # end to end: stopping what was chosen leaves none of the agent's leftovers running
+    # end to end: stopping what was chosen leaves none of the agent's taken leftovers running
     for pid in chosen - {real["agent"].pid}:
         os.kill(pid, signal.SIGTERM)
-    _wait(lambda: not any(_alive(p) for p in real["left"] | {real["py"]}))
+    _wait(lambda: not any(_alive(p) for p in tagged | {real["py"]}))
 
 
 @posix_only
@@ -134,7 +142,9 @@ def test_unrelated_groups_sessions_and_a_private_tmux_server_are_not_swept(real)
     procs = [p for p in (nh.read_process(x, with_cwd=False) for x in muxed) if p is not None]
     for p in procs:
         p.ppid = hr.process_tree().get(p.pid, (0, 0, 0))[0]
-    chosen = _select(real["agent"], [(shell_pid, t0)], [nh.read_process(real["py"], with_cwd=False), *procs])
+    left_procs, tagged = _tagged(real)
+    chosen = _select(real["agent"], [(shell_pid, t0)],
+                     [nh.read_process(real["py"], with_cwd=False), *procs, *left_procs])
     assert real["unrelated"].pid not in chosen
     assert not chosen & nh.ancestors(os.getpid())  # this test's own shell chain
     # a record naming the halting caller's own session (as if its pid were reused) takes nothing of it, not even
@@ -149,7 +159,7 @@ def test_unrelated_groups_sessions_and_a_private_tmux_server_are_not_swept(real)
         job.wait()
     if tmux:
         assert muxed and not chosen & muxed  # the tagged tmux server and its pane are a person's
-    assert real["left"] <= chosen  # sanity: the same call still takes the real leftovers
+    assert tagged <= chosen and real["py"] in chosen  # sanity: the same call still takes the agent's leftovers
 
 
 @posix_only
@@ -195,14 +205,15 @@ def test_tagged_orphan_needs_a_start_after_the_agent_and_no_multiplexer():
 def test_sweep_forwards_the_agents_recorded_tool_shells(tmp_path):
     """hr.sweep hands presence's tool_shells to select_sweep, so a live halt sees them."""
     agent = nh.Proc(100, 50, ["/opt/this-install/bin/python", "-m", "kollabor_cli_main"], {}, "/work")
-    rec = {"identity": "lapis", "pid": 100, "project": "/work", "state": "idle", "tool_shells": [[120, 1000.0]]}
-    tree = {50: (1, 50, 50), 100: (50, 100, 50), 121: (1, 120, 120)}
+    rec = {"identity": "lapis", "pid": 100, "project": "/work", "state": "idle", "tool_shells": [[120, 1000.0, 100]]}
+    tree = {50: (1, 50, 50), 100: (50, 100, 50), 121: (77, 120, 120)}  # not an orphan: only the row takes it
     info = {100: (900.0, "kollab"), 121: (1001.0, "sleep")}
+    tagged = nh.Proc(121, 77, ["sleep"], {"KOLLAB_AGENT_PID": "100"}, "/work")  # F13: a dead shell's leftover
 
     async def stop(r):
         return True, str(r["pid"])
 
-    got = asyncio.run(hr.sweep(["machine"], agents=[rec], procs=[agent], stop=stop, protect=set(),
+    got = asyncio.run(hr.sweep(["machine"], agents=[rec], procs=[agent, tagged], stop=stop, protect=set(),
                                install=INSTALL, tree=tree, info=info))
     assert {r["pid"] for r, _ok, _m in got} == {100, 121}
 
