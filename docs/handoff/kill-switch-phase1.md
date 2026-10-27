@@ -866,8 +866,8 @@ Rules are in the spec, section 1 "Counting Machines", bullet "Review fixes F4".
 - F4-2: the auto-adopt of a founder whose key equals the inviter's machine is gone. A founder is trusted
   without a person only when its record verifies against the stored network id (bound networks).
   Unbound (pre-release) networks always need `Confirm Founder`.
-- F4-3: the join code is `XXXX-XXXX-AAAA-AAAA`; `AAAA-AAAA` = `network_halt.join_anchor(network id)`
-  (40 bits). `enroll_device` requires it, saves it in the destination recovery record
+- F4-3: the join code is `XXXX-XXXX-AAAA-AAAA-AAAA`; `AAAA-AAAA-AAAA` = `network_halt.join_anchor(network id)`
+  (60 bits since F6; it was 40). `enroll_device` requires it, saves it in the destination recovery record
   (`network_anchor`), refuses with error `network_mismatch` before joining anything when the decision's
   founder record / `network` does not hash to it (`network_control.join_network_ok`,
   `NETWORK_MISMATCH_LINE`). `take_join(fields, anchor=...)` raises `JoinRefused`. The issuer appends the
@@ -1013,3 +1013,17 @@ Changed old expectations (rules changed on purpose): opt-out tests now use a thi
 Known failing, not mine: `test_network_halt_guard.py::test_terminal_sessions_strip_the_markers` (`strip_tool_env` leaves `KOLLAB_OWNER_PID`, from F5 L7).
 
 Left: a member with many machines can still fill `founder_candidates` (cap 8) before the real founder is heard; macOS grouping relies on the live parent chain, so a tool that double-forked and reparented to init before the halt is found only by the env tag; Docker proof.
+
+## Review fixes F7
+
+Status: unit-tested, not live. Nothing was halted, swept or signalled on the host.
+
+- Sweep and sessions (worst): `_tree_members` no longer takes a Linux session just because a stopped agent sits in it. An interactive TUI agent's session is the user's terminal (login shell, vim, ssh), so a remote halt used to kill all of it. A session is walked only when a swept member leads it (daemons started with setsid). Process groups and parent-child trees still expand.
+- `no_count`: after signing the opt-out the machine recounts; if it still counts (e.g. B confirmed C, so dropping B drops C and leaves one), the record is rolled back and `NO_COUNT_REFUSAL` is raised. Nothing is stored.
+- Odd scopes: an empty folder list `[]` is malformed like any other odd scope (`in_scope` holds the machine, `HaltFile.read` raises); the listener turns an empty list into `"machine"`. `resume --local` on an unreadable or malformed halt.json moves it to `halt.json.bad` and starts an empty one (`halt_runtime.clear_malformed_halt`, run by the typed command, which is the confirmation). The on-screen text now says so instead of pointing at chmod 600. This replaces the F6 note "an empty list stays valid".
+- Anchor: the join code anchor is `XXXX-XXXX-AAAA-AAAA-AAAA` (60 bits); F4-3 above corrected. The test now decodes the anchor and compares it to the first 60 bits of the digest.
+- New tests in `tests/unit/test_kill_switch_f6.py` (13): login-shell session, session the agent leads, group sweep, protected parent not walked through, listener passes the live tree, `_evict_picks` in `learn`, candidate pick refused after founder confirmed, empty scope, malformed clear, entropy, recount.
+
+Mutations (all KILLED by that file): session walk restored, recount removed, group expansion off, protected descend, listener `tree = None`, `_evict_picks` in learn, admitters include candidates, `in_scope` empty list, `HaltFile` empty list, anchor 40 bits, anchor shifted, malformed clear off.
+
+Left: Docker proof of a TUI agent in a login-shell session; macOS still relies on the live parent chain (its `sess` column is a pointer).

@@ -47,7 +47,7 @@ WAITER_ENV = "KOLLAB_HALT_WAITER"
 HALTED_LINE = "Network halted by {device}. Resume needs a person on two machines: Settings → Network."
 UNREADABLE_LINE = (
     "halt.json is unreadable ({why}), so every folder is held as halted. "
-    "Restore it or fix its permissions (chmod 600) in the private folder."
+    "Restore it, or clear it with: kollab --hub resume --local"
 )
 RESUME_PROPOSED = (
     "Resume proposed. A person on another machine confirms it: /connect resume there, "
@@ -114,6 +114,27 @@ def read_halt_held(root: Path | None = None) -> dict[str, Any]:
     except (OSError, ValueError, AttributeError, TypeError) as error:
         logger.warning("halt check: halt.json unreadable (%s)", type(error).__name__)
         return {"scopes": {"unreadable": "machine"}, "networks": {}, "unreadable": type(error).__name__}
+
+
+def clear_malformed_halt(root: Path | None = None) -> str:
+    """F7: ``resume --local`` on a halt.json that cannot be read: keep it as ``halt.json.bad``, start an empty one.
+
+    Returns "" when there was nothing wrong, else a line for the person. The caller has the person's typed confirmation.
+    """
+    from .network_halt import HaltFile
+
+    with write_lock(root):
+        hf = HaltFile(kollab_root(root))
+        try:
+            hf.read()
+            return ""
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+        bad = hf.path.with_name(hf.path.name + ".bad")
+        os.replace(hf.path, bad)
+        os.chmod(bad, 0o600)
+        hf.write({"networks": {}, "stopped": []})
+    return f"halt.json could not be read; kept as {bad.name} and started an empty one."
 
 
 def tool_shell_refusal() -> str:
@@ -865,6 +886,9 @@ class HaltListener:
         if isinstance(scope, list):  # every folder of this network on this machine, not only the first
             scope = sorted({*scope, *(f for f in self.folders.get(net, ()))})
 
+        if isinstance(scope, list) and not scope:
+            scope = "machine"  # F7: an empty folder list is malformed, so it holds the machine
+
         def record(data: dict) -> None:
             data.setdefault("scopes", {})[net] = scope
             seen = set(data.setdefault("folders", {}).get(net, []))
@@ -1279,6 +1303,11 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
     else:
         payload, action = {}, "propose_resume"
     payload["confirmed"] = True  # the typed command is the person's confirmation
+    if action == "resume_local":
+        with contextlib.suppress(OSError):
+            note = clear_malformed_halt(root)
+            if note:
+                print(note)
     try:
         result = await _act(folder, control, action, payload, root)
     except Exception as error:

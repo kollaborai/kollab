@@ -857,7 +857,11 @@ class NetworkControl:
                 raise nh.HaltError("a machine cannot stop counting while a halt is active")
             if view.counts(me) and len(view.counting) >= 2 and len(view.counting - {me}) < 2:
                 raise nh.HaltError(NO_COUNT_REFUSAL)  # F6 (S2): the count would ignore it anyway
+            before = list(self._fresh().get("opt_outs", []))
             self._sign_opt_out(opted_out=True)
+            if self.view().counts(me):  # F7: recounted with the record applied; still counting = it changed nothing
+                self._fresh()["opt_outs"] = before
+                raise nh.HaltError(NO_COUNT_REFUSAL)
         elif action == "count":
             self._sign_opt_out(opted_out=False)
         else:

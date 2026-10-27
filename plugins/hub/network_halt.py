@@ -833,8 +833,8 @@ def in_scope(folder: str, scopes: Iterable[str | list[str]]) -> bool:
     for scope in scopes:
         if scope == "machine":
             return True
-        if not (isinstance(scope, list) and all(isinstance(root, str) for root in scope)):
-            return True  # F6: a scope that is not "machine" or a list of folders holds the whole machine
+        if not (isinstance(scope, list) and scope and all(isinstance(root, str) for root in scope)):
+            return True  # F6/F7: a scope that is not "machine" or a list of folders holds the whole machine
         for root in scope:
             r = Path(root).resolve()
             if path == r or r in path.parents:
@@ -872,7 +872,9 @@ class HaltFile:
         ):
             raise HaltError(f"{self.path.name} is not a halt file")
         for scope in data.get("scopes", {}).values():
-            if scope != "machine" and not (isinstance(scope, list) and all(isinstance(r, str) for r in scope)):
+            if scope != "machine" and not (
+                isinstance(scope, list) and scope and all(isinstance(r, str) for r in scope)
+            ):
                 raise HaltError(f"{self.path.name} has a scope this version does not know")  # F6: holds the machine
         return data
 
@@ -982,6 +984,11 @@ def _cli_args(proc: Proc, install: Install) -> list[str] | None:
     exe = Path(proc.exe or argv[0])
     try:
         under = prefix in exe.resolve().parents
+        if not under and os.path.isabs(argv[0]):
+            # a venv's python is a symlink to the system interpreter, so /proc/<pid>/exe names the
+            # system binary: judge the path it was started by, resolving its directory only
+            started = Path(os.path.realpath(os.path.dirname(argv[0]))) / os.path.basename(argv[0])
+            under = prefix in started.parents
     except OSError:
         under = False
     if not under:
@@ -1075,6 +1082,7 @@ def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protec
     macOS hides the environment of system binaries (zsh, sleep, curl), so the env tag misses a tool shell
     that runs one; its parent chain does not lie while the agent is still alive. ``tree`` is
     pid -> (ppid, pgid, sid). A group or Linux session that holds a protected pid is left whole.
+    A session is walked only when a member leads it.
     """
     members = set(roots)
     grew = True
@@ -1089,7 +1097,9 @@ def _tree_members(roots: set[int], tree: dict[int, tuple[int, int, int]], protec
     pgs = {tree[p][1] for p in members if p in tree and tree[p][1] > 1} - unsafe_pg
     sids: set[int] = set()
     if sys.platform.startswith("linux"):
-        sids = {tree[p][2] for p in members if p in tree and tree[p][2] > 1} - unsafe_sid
+        # F7: a login shell leading the session means it is the user's terminal; only a session a member leads is ours
+        sids = {tree[p][2] for p in members if p in tree and tree[p][2] > 1 and tree[p][2] == p}
+        sids -= unsafe_sid
     for pid, (_pp, pg, sid) in tree.items():
         if pg in pgs or sid in sids:
             members.add(pid)

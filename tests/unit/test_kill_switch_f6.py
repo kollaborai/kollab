@@ -150,7 +150,7 @@ def test_s2_two_opt_outs_of_three_keep_two_counting(three):  # noqa: F811
     assert len(f.view().counting) >= 2
 
 
-@pytest.mark.parametrize("scope", ["Machine", "machines", "", 5, [5], {"a": 1}, None, ["/ok", 7]])
+@pytest.mark.parametrize("scope", ["Machine", "machines", "", 5, [5], [], {"a": 1}, None, ["/ok", 7]])
 def test_s2_an_odd_scope_holds_the_whole_machine(tmp_path, monkeypatch, scope):
     monkeypatch.chdir(tmp_path)
     assert nh.in_scope(str(tmp_path), [scope])  # never "run", never a TypeError
@@ -304,7 +304,7 @@ def test_one_signer_holds_at_most_max_per_signer_records(three):  # noqa: F811
 
 
 def test_halt_file_read_rejects_an_odd_scope_itself(tmp_path):
-    for scope in ("Machine", 5, [5], {"a": 1}):
+    for scope in ("Machine", 5, [5], [], {"a": 1}):
         nh.HaltFile(tmp_path).write({"scopes": {"n": scope}, "networks": {}})
         with pytest.raises(nh.HaltError):
             nh.HaltFile(tmp_path).read()
@@ -327,3 +327,125 @@ def test_b3_the_tree_walk_reaches_grandchildren_and_spares_a_protected_group():
     )}
     assert {100, 200, 600} <= got
     assert 410 not in got and 450 not in got
+
+
+# ---------------------------------------------------------------- F7
+
+
+def test_f7_an_opt_out_the_recount_ignores_is_refused_and_not_kept(three):  # noqa: F811
+    f, b, c = three
+    b.halt_act("confirm_machine", {"machine": c.machine_hex})  # C counts only because B confirmed it
+    meet(f, b, c)
+    assert len(f.view().counting) == 3
+    with pytest.raises(nh.HaltError):
+        b.halt_act("no_count")  # B stopping would drop C and leave one machine, so the count ignores it
+    assert not b.data.get("opt_outs")
+    meet(f, b, c)
+    assert b.view().counts(b.machine_hex)
+
+
+def _sweep(tree, protect=(), agents=(100,), procs=None):
+    install = nh.Install(prefix="/opt/this-install")
+    agent = nh.Proc(100, 50, ["/opt/this-install/bin/kollab"], {}, "/work")
+    return {p.pid for p in nh.select_sweep(
+        procs or [agent], install=install, scopes=["machine"], agent_pids=list(agents), protect=set(protect), tree=tree,
+    )}
+
+
+def test_f7_a_tui_agent_never_takes_the_users_terminal_session(monkeypatch):
+    monkeypatch.setattr(nh.sys, "platform", "linux")
+    # login shell 50 leads the session; vim 60 and the TUI agent 100 (own group) run in it
+    tree = {50: (1, 50, 50), 60: (50, 60, 50), 100: (50, 100, 50), 110: (100, 100, 50)}
+    got = _sweep(tree)
+    assert got == {100, 110}  # not the login shell or vim
+
+
+def test_f7_a_session_the_agent_leads_is_still_swept(monkeypatch):
+    monkeypatch.setattr(nh.sys, "platform", "linux")
+    tree = {100: (1, 100, 100), 120: (1, 120, 100)}  # a daemon (setsid) and an orphan left in its session
+    assert _sweep(tree) == {100, 120}
+
+
+def test_f7_the_group_of_a_stopped_agent_is_swept():
+    tree = {100: (1, 100, 100), 130: (1, 100, 700)}  # reparented, still in the agent's group
+    assert 130 in _sweep(tree)
+
+
+def test_f7_a_protected_parent_is_not_walked_through():
+    tree = {100: (1, 100, 100), 400: (100, 400, 400), 410: (400, 410, 410)}
+    got = _sweep(tree, protect={400})
+    assert 400 not in got and 410 not in got  # the issuing CLI's own child is not the agent's
+
+
+def test_f7_the_listener_gives_the_sweep_the_live_tree(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_sweep(scopes, **kw):
+        seen["tree"] = kw.get("tree")
+        return []
+
+    async def no_links(self, net):
+        return None
+
+    h = "ab" * 32
+    nh.HaltFile(tmp_path).write({"scopes": {}, "stopped": [], "networks": {"net1": {"halts": {
+        h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}}})
+    monkeypatch.setattr(hr, "sweep", fake_sweep)
+    monkeypatch.setattr(hr, "process_tree", lambda: {1: (0, 1, 1)})
+    monkeypatch.setattr(hr, "_read_candidates", lambda: [])
+    monkeypatch.setattr(hr.HaltListener, "open_links", no_links)
+    listener = hr.HaltListener(tmp_path, agents=lambda: [], stop=None)
+    reply = asyncio.run(listener.handle(
+        {"op": "halt", "network": "net1", "scope": "machine", "folder": str(tmp_path), "protect": []}
+    ))
+    assert reply["ok"]
+    assert seen["tree"] == {1: (0, 1, 1)}  # a live listener walks the real tree
+
+
+def test_f7_the_anchor_carries_sixty_bits_of_the_digest():
+    alphabet = nh._ANCHOR_ALPHABET
+    seen_top = set()
+    for i in range(300):
+        net = hashlib.sha256(str(i).encode()).hexdigest()
+        text = nh.join_anchor(net).replace("-", "")
+        value = 0
+        for ch in text:
+            value = value * 32 + alphabet.index(ch)
+        digest = hashlib.sha256(b"kollab-join-anchor-v1\n" + net.encode()).digest()
+        assert value == int.from_bytes(digest[:8], "big") >> 4  # all 60 bits, from the front of the digest
+        seen_top.add(alphabet.index(text[0]))
+    assert max(seen_top) >= 16  # the first character uses its whole 5 bits
+
+
+def test_f7_an_empty_folder_list_is_malformed_and_resume_local_clears_a_malformed_file(tmp_path):
+    assert nh.in_scope(str(tmp_path), [[]])
+    nh.HaltFile(tmp_path).write({"scopes": {"n": []}, "networks": {"n": {"halts": {}}}})
+    with pytest.raises(nh.HaltError):
+        hr.update_halt(lambda d: None, tmp_path)  # the old text could only say chmod
+    assert "could not be read" in hr.clear_malformed_halt(tmp_path)
+    assert (tmp_path / "private" / "halt.json.bad").exists()
+    assert not hr.read_halt(tmp_path).get("scopes")
+    assert hr.clear_malformed_halt(tmp_path) == ""  # a good file is left alone
+    assert "chmod" not in hr.UNREADABLE_LINE and "resume --local" in hr.UNREADABLE_LINE
+
+
+def test_f7_learn_evicts_picks_that_the_founder_did_not_sign(three):  # noqa: F811
+    f, b, c = three
+    stray = nh.admission(c.machine, c.network_id(), b.machine_hex, bootstrap=True)  # not the founder's
+    b.data.setdefault("bootstrap_picks", []).append(stray)
+    b.save()
+    b.learn(f.client.public_key, f.wire())  # an ordinary gossip round
+    assert all(p["admitter"] == f.machine_hex for p in b.data.get("bootstrap_picks", []))
+
+
+def test_f7_once_a_founder_is_confirmed_a_candidates_pick_is_not_taken(tmp_path):
+    f, legacy = _legacy_network(tmp_path)
+    r = machine(tmp_path, "r", inviter="ee" * 32)
+    m = machine(tmp_path, "m", inviter="ee" * 32)
+    meet(f, r, m)
+    m.learn(r.client.public_key, {"founder": nh.founder_record(r.machine, legacy)})
+    m.halt_act("confirm_founder", {"founder": f.machine_hex})
+    assert m.view().founder == f.machine_hex
+    pick = nh.admission(r.machine, legacy, m.machine_hex, bootstrap=True)  # r was a candidate, f is the founder
+    m.learn(r.client.public_key, {"bootstrap_picks": [pick]})
+    assert all(p["admitter"] != r.machine_hex for p in m.data.get("bootstrap_picks", []))
