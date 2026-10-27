@@ -86,3 +86,106 @@ first) and `network-sync-and-control.review.md`. Phase 1 only.
   Filter by `pgrep -f kollab` / `SCIE` first in the sweep wiring.
 - Two bootstrap claims fail closed: code on the founder can demote the
   bootstrap by signing a second one. Same trust level as "Limits We Accept".
+
+## Slice A (handoff steps 1-3): wire fields, revocation records, `network_halt`
+
+Uncommitted, on `main`'s working tree; the coordinating session commits.
+
+### Files changed
+
+- `plugins/hub/network_control.py` (new): `NetworkControl` (one per
+  `RelayClient`, `client.control`): `<relay state dir>/private/network_control.json`
+  (0600 via `HaltFile`; founder record, `room_bound`, `founder_confirmed`, own
+  admission, learned member rows, confirmations, opt-outs, revocation records,
+  bootstrap pick, pre-release claims/records; public records only). `network_id`,
+  `found`, `roster`/`view`, `admit_refusal` (spec line), `join_decision_fields` /
+  `take_join`, `wire`/`learn`/`digest`, `revocations_to_apply`,
+  `sign_revocation`, `check_revoke` (`Revoke here only` line), halt book in
+  `~/.kollab/private/halt.json` keyed by network id, `halt_merge`,
+  `halt_snapshot` / `halt_act` / `halt_members`, sweep hook `on_halt_change(network)`
+  (slice B plugs the listener/sweep in here). `HaltSync`: the `network_halt`
+  exchange, retry 10 s doubling to 5 min.
+- `plugins/hub/network_halt.py`: `HaltFile(root, name="halt.json")`.
+- `plugins/hub/relay_client.py`: `control` property; `network_id()` delegates
+  (bound id for networks founded alone after this change, `sha256(room)` else);
+  `accept_membership(..., control)` learns the block and applies only
+  `revocations_to_apply(protected={inviter, own key})`; the bare `revoked` list
+  is no longer applied (inviter refusal still logged).
+- `plugins/hub/network_members.py`: list v3 = v2 + `control`; send order 3, 2, 1;
+  `open_members` returns `(members, revoked, issued_at, control)`; the tick
+  digest includes `control.digest()` (control block + held halts + proposal
+  confirmation counts + chain heads).
+- `plugins/hub/relay_agent.py`: `network_halt` in the secure set and in the
+  stranger refusal; `make_halt_sync` started before config sync; closed on
+  shutdown; `hub_halt_snapshot/act/members`; `_admit_refusal` in
+  `_rpc_enrollment_offer` and `decide_enrollment_request` (accept only).
+- `plugins/hub/relay_commands.py`: `/connect revoke <device> [--here-only]`:
+  quorum check, signs a revocation record when network-wide, local-only when
+  confirmed.
+- `plugins/hub/enrollment_client.py`: proof carries `machine` (joiner's machine
+  key); the decision carries `network_control` `{founder, admission}`
+  (bootstrap only for the founder's first admitted machine); the joiner keeps
+  them after `join_invite`.
+- Tests: `tests/unit/test_network_control.py` (new, 17);
+  `tests/unit/test_network_members.py`: v3 version expectations, four tests
+  rewritten to the N1 rule (one device's revocation applies only there), new
+  `test_a_revocation_two_counting_machines_sign_reaches_every_member` (real
+  bridges, four machines, v3 lists end to end).
+
+### Verified
+
+- `KOLLAB_NO_KEYRING=1 uv run pytest -q tests/unit/test_network_members.py tests/unit/test_network_control.py tests/unit/test_network_halt.py tests/unit/test_network_halt_guard.py tests/unit/test_connect_command_fixes.py tests/unit/test_relay_enrollment.py`
+  -> 137 passed.
+- Related suites (connect, enrollment, hub enrollment, mesh, panels connect,
+  relay agent bridge, relay client, relay enrollment, network trust, tool
+  auto-enrollment): 678 passed, 136 subtests passed.
+- `uv run ruff check` on every touched file and those test files: clean.
+- Mutation check: 28 mutations of the new rule lines (network_control,
+  relay_client, network_members); 27 killed. Survivor: dropping `halts` from
+  `digest()` (a new halt also moves `heads`, so the digest still changes).
+  `plugins/hub/__pycache__` cleared after.
+
+### Not done
+
+- No live or tmux pass (by design for this slice; never run against real devices).
+- Enrollment recovery path (`recovery_request` at `enrollment_client.py:~3262`)
+  rebuilds the proof without `machine`: a join decided through recovery
+  carries the founder record but no admission; that machine then needs
+  `Confirm Machine` like a pre-release one.
+- A halt's `revoke` entries taken from another machine do not yet become
+  revocation records (only the issuing machine signs and applies them).
+- No unit test drives `relay_agent` routing of `network_halt` (stranger refusal,
+  secure set) or `hub_halt_*`; `make_halt_sync` start order vs config sync is
+  "started first", not "finished first".
+- `issuer asks members online for its latest order`: `halt_act` accepts
+  `peer_heads` in the payload but nothing collects them yet.
+- Pending revocations are listed in `halt_snapshot`; `Confirm Revoke` is
+  `halt_act("confirm_revoke", {"key"})`. No panel/CLI yet (steps 6-7).
+
+### Open risks
+
+- `halt.json` is read-modify-written by every daemon on the machine; two
+  folders merging at once can lose one write. Take `halt.lock` around it in slice B.
+- The v3 control block rides the one 24 KB member-list frame: capped at 24 rows
+  and 32 records per kind. Larger networks need paging.
+- A device founded alone before any member binds its id at the first
+  `admit_refusal`/`join_decision_fields` (code issue or decision). Devices with
+  accepted strangers but no members stay on `sha256(room)` (approvals non-empty).
+- Existing networks: until the founder issues a code or decides a join after
+  upgrade (which signs the founder record) and members confirm it, nobody but
+  the founder counts, so pre-release members can no longer issue codes, and no
+  revocation spreads network-wide. That is the spec, but it changes behaviour
+  people will notice on Marco's networks.
+- Protected set uses `{state.inviter, own folder key}`; the device record's
+  `primary` (relay_state `_load_device_primary`) is not added. Check whether it
+  can differ from the inviter.
+
+### Spec rules found wrong or open
+
+- `Revoke here only` applies only when the target counts and revoking it drops
+  the counting machines below two; revoking a non-counting device (or one on a
+  network that already has fewer than two) never asks. The literal text would
+  ask on every revoke of a pre-release network.
+- `Count Here` again (undo `Do Not Count Here`) has no signed record; each
+  machine speaks for its own opt-outs: what it sends replaces what others heard
+  about it, and others never re-add a machine's opt-out to that machine.

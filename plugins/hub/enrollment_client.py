@@ -1407,6 +1407,7 @@ async def _finish_destination_enrollment(
             raise EnrollmentProtocolError("invalid_response")
         _bind_issuer_name(commands, invite["key"], decision.get("issuer_device_name"))
         _bind_network_name(commands, decision.get("network_name"))
+        client.control.take_join(decision.get("network_control"))
         from .config_sync import record_join_floor
 
         record_join_floor(
@@ -1567,6 +1568,8 @@ async def _drive_destination_enrollment(
                         "phase": "proof",
                         "destination_key": record["destination_key"],
                         "proof_token": pairing_proof.token,
+                        # Kill switch: the issuer signs an admission naming it.
+                        "machine": _own_machine_hex(),
                     },
                 )
                 _store_destination_recovery(
@@ -1691,6 +1694,7 @@ async def _drive_destination_enrollment(
                                 "phase": "proof",
                                 "destination_key": record["destination_key"],
                                 "proof_token": pairing_proof.token,
+                                "machine": _own_machine_hex(),
                             },
                         )
                         _store_destination_recovery(
@@ -1869,6 +1873,13 @@ async def enroll_device(
         for secret in (envelope_key, verifier, code):
             if secret is not None:
                 secret.wipe()
+
+
+def _own_machine_hex() -> str:
+    """This machine's public key (``~/.kollab/device/root.key``), for the join proof."""
+    from .network_control import machine_key
+
+    return bytes(machine_key().verify_key).hex()
 
 
 def _require_shape(value: dict[str, Any], fields: set[str]) -> None:
@@ -3442,6 +3453,7 @@ class EnrollmentIssuer:
                     if not isinstance(proof["proof_token"], str) or len(proof["proof_token"]) > 8192:
                         return
                     proof_token = proof["proof_token"]
+                    destination_machine = proof.get("machine")
                     if offer.recovery_mode:
                         verified_proof = verify_pairing_proof(
                             challenge_token,
@@ -3707,6 +3719,7 @@ class EnrollmentIssuer:
                                 **self._issuer_device_name_field(),
                                 **self._network_name_field(),
                                 **self._config_floor_field(),
+                                **client.control.join_decision_fields(destination_machine),
                             },
                         )
                         envelope = encrypt_enrollment_envelope(offer.envelope_key, payload)

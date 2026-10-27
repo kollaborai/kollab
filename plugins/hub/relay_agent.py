@@ -39,6 +39,7 @@ from .local_directory import LocalAgentDirectory
 from .membership_runtime import MembershipContext, Memberships
 from .models import HubMessage, MessageScope
 from .network_attach import ATTACH_METHODS, AttachRefused, NetworkAttach
+from .network_control import HALT_METHOD, HaltSync
 from .network_members import METHOD as MEMBERS_METHOD
 from .network_members import MembershipSync
 from .relay_commands import RelayCommands
@@ -274,6 +275,7 @@ class RelayAgentBridge:
         self.secure_transport: SecureConversationTransport | None = None
         self.config_sync: ConfigSyncService | None = None
         self.membership_sync: MembershipSync | None = None
+        self.halt_sync: HaltSync | None = None
         self.network_attach: NetworkAttach | None = None
         self.peer_mesh = None
         self._next_peer_refresh = 0.0
@@ -938,6 +940,9 @@ class RelayAgentBridge:
                 self.commands.client, self.commands.client._store.key.encode()
             )
             self.commands.client.set_request_handler(self._receive)
+            # Halts first: a machine that comes back hears an active halt
+            # before any sealed config (spec "Reaching Offline Devices").
+            self.make_halt_sync().start()
             self.make_config_sync().start()
             self.make_membership_sync().start()
             self.network_attach = NetworkAttach(
@@ -1072,6 +1077,9 @@ class RelayAgentBridge:
         if self.membership_sync is not None:
             await self.membership_sync.close()
             self.membership_sync = None
+        if self.halt_sync is not None:
+            await self.halt_sync.close()
+            self.halt_sync = None
         if self.network_attach is not None:
             await self.network_attach.close()
             self.network_attach = None
@@ -1312,6 +1320,8 @@ class RelayAgentBridge:
         if source_agent != self.identity.agent_id:
             raise RelayError("only the active local issuer agent can decide requests")
         self._local_agent(source_agent)
+        if decision != "reject":
+            self._admit_refusal()
         try:
             return await self._ensure_enrollment_issuer().decide(
                 enrollment_id, decision=decision
@@ -1372,6 +1382,7 @@ class RelayAgentBridge:
         ):
             raise RelayError("invalid local enrollment offer")
         self._local_agent(params["agent_id"])
+        self._admit_refusal()
         return _safe_enrollment_offer_result(
             await self._ensure_enrollment_issuer().create_offer(params["domain"])
         )
@@ -1932,7 +1943,8 @@ class RelayAgentBridge:
             store = self._state()
         stranger = peer in store.state.links
         if stranger and (
-            method in {"peer.forward", "peer.exchange", MEMBERS_METHOD} or method in ATTACH_METHODS
+            method in {"peer.forward", "peer.exchange", MEMBERS_METHOD, HALT_METHOD}
+            or method in ATTACH_METHODS
         ):
             # A stranger reaches allowed agents only; it is not a network member.
             raise RelayError("peer is not part of this network")
@@ -1989,6 +2001,10 @@ class RelayAgentBridge:
             if self.membership_sync is None:
                 raise RelayError("network membership is unavailable")
             return await self.membership_sync.receive(peer, payload)
+        if method == HALT_METHOD:
+            if self.halt_sync is None:
+                raise RelayError("network halt is unavailable")
+            return await self.halt_sync.receive(peer, payload)
         if method == "message":
             message = validate_message(
                 payload,
@@ -2124,7 +2140,8 @@ class RelayAgentBridge:
 
     async def _receive_secure_application(self, peer, method, payload):
         if method not in {
-            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD
+            "message", "status", "cancel", "directory", "peer.exchange", "config_sync", MEMBERS_METHOD,
+            HALT_METHOD,
         } and method not in ATTACH_METHODS:
             raise RelayError("unsupported secure conversation operation")
         try:
@@ -2816,6 +2833,47 @@ class RelayAgentBridge:
             online=self._members_online,
         )
         return self.membership_sync
+
+    def make_halt_sync(self) -> HaltSync:
+        """Trades halt books with every member online (``network_halt``)."""
+        self.halt_sync = HaltSync(
+            client=self.commands.client,
+            transport=self.secure_transport,
+            online=self._members_online,
+        )
+        return self.halt_sync
+
+    # The three calls the halt panels use (spec "The Halt Listener"); the
+    # listener (slice B) serves the same names over its own links.
+    def _network_control(self):
+        if self.commands is None:
+            raise RelayError("this folder does not run its network; ask its owner")
+        return self.commands.client.control
+
+    async def hub_halt_snapshot(self) -> dict:
+        return self._network_control().halt_snapshot(set(self._members_online()))
+
+    async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
+        from .network_halt import HaltError
+
+        try:
+            result = self._network_control().halt_act(action, payload)
+        except HaltError as error:
+            raise RelayError(str(error)) from None
+        if self.halt_sync is not None:
+            self.halt_sync._delivered.clear()  # send the change to every member now
+            self.halt_sync._retry_at.clear()
+        return result
+
+    async def hub_halt_members(self) -> list[dict]:
+        return self._network_control().halt_members()
+
+    def _admit_refusal(self) -> None:
+        """Only a counting machine adds a device (spec "Counting Machines")."""
+        if self.commands is not None:
+            refusal = self.commands.client.control.admit_refusal()
+            if refusal:
+                raise RelayError(refusal)
 
     def _members_online(self) -> dict[str, str]:
         """Members reachable now: on the relay roster, or by a signed locator."""

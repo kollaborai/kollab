@@ -698,9 +698,9 @@ def in_scope(folder: str, scopes: Iterable[str | list[str]]) -> bool:
 class HaltFile:
     """``~/.kollab/private/halt.json``: 0600, never written through a link."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, name: str = "halt.json"):
         self.dir = root / "private"
-        self.path = self.dir / "halt.json"
+        self.path = self.dir / name
 
     def read(self) -> dict[str, Any]:
         try:
@@ -709,7 +709,7 @@ class HaltFile:
             return {"networks": {}, "stopped": []}
         with os.fdopen(fd, "rb") as fh:
             if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) & 0o077:
-                raise HaltError("halt.json is readable by others")
+                raise HaltError(f"{self.path.name} is readable by others")
             return json.loads(fh.read(4 << 20) or b"{}")
 
     def write(self, data: dict[str, Any]) -> None:

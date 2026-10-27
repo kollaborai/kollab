@@ -626,6 +626,12 @@ What the build settled that the text above left open:
   foreground path (`execute_foreground`) is marked again by `ShellExecutor`.
 - A revocation naming a protected device's machine key (primary or inviter)
   spares every folder key of that machine, not only the protected one.
+- Slice A wiring (`plugins/hub/network_control.py`): member lists are version 3
+  (`kollab-network-members-v3\n`, v2 plus a `control` block); the join proof
+  carries `machine`, the decision `network_control` `{founder, admission}`.
+  `Revoke here only` is asked only when the target counts and revoking it
+  leaves fewer than two counting machines. `Count Here` has no record: a
+  machine's own list replaces what others heard about its opt-outs.
 
 ### TUI and Web UI (R16, R3-F7, R3-F8, R3-F14)
 

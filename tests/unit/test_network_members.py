@@ -171,16 +171,16 @@ async def test_a_vouch_is_an_approval_not_a_grant(chain):
 
 
 @pytest.mark.asyncio
-async def test_revoking_a_device_drops_it_on_every_member(chain):
+async def test_one_devices_revocation_applies_there_and_does_not_spread_alone(chain):
+    """N1: a revocation spreads only once two counting machines sign it."""
     a, b, c, nodes, _wire = chain
     await sync(nodes)
 
     a.client.revoke(c.key, announce=True)
-    assert c.key not in approved(a)
+    assert c.key not in approved(a) and c.key in a.client.state.revoked
     await sync(nodes)
 
-    assert c.key not in approved(b)
-    assert c.key in b.client.state.revoked and c.key in a.client.state.revoked
+    assert c.key in approved(b) and c.key not in b.client.state.revoked
     assert a.key in approved(b)  # the rest of the network is untouched
 
 
@@ -216,19 +216,20 @@ async def test_one_members_revocation_never_cuts_a_device_off_from_its_primary(c
 
 
 @pytest.mark.asyncio
-async def test_the_primarys_own_revocation_still_applies(chain):
+async def test_a_primary_dropping_a_member_orphans_it_without_revoking_it(chain):
     a, b, c, nodes, _wire = chain
     await sync(nodes)
 
     b.client.revoke(a.key, announce=True)  # C's primary drops A
     await sync(nodes)
 
-    assert a.key not in approved(c) and a.key in c.client.state.revoked
+    # A's only vouch at C was B's, so it goes; one machine's word is no revocation.
+    assert a.key not in approved(c) and a.key not in c.client.state.revoked
     assert b.key in approved(c)
 
 
 @pytest.mark.asyncio
-async def test_a_peers_revocation_of_an_ordinary_member_still_applies(tmp_path):
+async def test_a_peers_bare_revocation_of_an_ordinary_member_is_not_applied(tmp_path):
     wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c", "srv-d")
     a, b, c, d = nodes
     joined(a, b)
@@ -236,11 +237,10 @@ async def test_a_peers_revocation_of_an_ordinary_member_still_applies(tmp_path):
     joined(a, d)
     await sync(nodes, rounds=5)
 
-    # B is neither D's primary nor the voucher: one member's word drops it at D.
+    # One member's bare word is not a revocation (N1): B stays at D.
     d.client.accept_membership(c.key, [], [b.key])
 
-    assert b.key not in approved(d) and b.key in d.client.state.revoked
-    assert approved(d) == {a.key, c.key}
+    assert b.key in approved(d) and b.key not in d.client.state.revoked
     await close_net(wire, nodes)
 
 
@@ -259,8 +259,7 @@ async def test_revoking_a_device_also_drops_those_only_it_vouched_for(tmp_path):
     assert approved(a) == {d.key}  # C went with B: its only vouch at A came from B
     await sync(nodes, rounds=5)
 
-    assert approved(d) == {a.key}  # D dropped B, then C, whom only B and A had named
-    assert b.key in d.client.state.revoked
+    assert b.key not in d.client.state.revoked  # A's word alone revokes nothing at D
     await close_net(wire, nodes)
 
 
@@ -576,9 +575,9 @@ async def test_a_device_that_reads_only_v1_still_interoperates(tmp_path):
     joined(a, c)
     seen_by_b = be_a_v1_device(b)
 
-    # New to old: A offers v2, B refuses it, A sends v1 at once and B takes it.
+    # New to old: A offers v3 and v2, B refuses them, A sends v1 at once and B takes it.
     await sync((a,), rounds=1)
-    assert seen_by_b == [2, 1]
+    assert seen_by_b == [3, 2, 1]
     assert c.key in approved(b) and c.key in b.client.state.vouched_by
     assert a.bridge.membership_sync._v1_only == {b.key: b.client._session_id}
     # New to new is v2 alone, and nothing falls back.
@@ -595,7 +594,7 @@ async def test_a_device_that_reads_only_v1_still_interoperates(tmp_path):
     # While B's session lasts A sends it v1 alone: a revocation reaches it.
     a.client.revoke(c.key, announce=True)
     await sync((a,), rounds=1)
-    assert seen_by_b == [2, 1, 1]
+    assert seen_by_b == [3, 2, 1, 1]
     assert c.key not in approved(b)
 
     # B upgrades: its first dated list sets the mark, and its v1 lists stop being heard.
@@ -620,7 +619,7 @@ async def test_a_refusal_that_is_not_about_the_version_costs_one_more_send_and_a
         await a.bridge.membership_sync.tick()
     finally:
         a.bridge.secure_transport.request = send
-    assert sent == [2, 1]  # both offered, neither taken
+    assert sent == [3, 2, 1]  # every version offered, none taken
     assert not a.bridge.membership_sync._delivered and not a.bridge.membership_sync._v1_only
     assert a.bridge.membership_sync._failures == {b.key: 1}
 
@@ -654,3 +653,38 @@ async def test_a_busy_device_is_read_again_and_the_others_stay_listed(tmp_path, 
         assert "srv-c" in rows and rows["srv-c"]["current_tool"] is None
     finally:
         await close_net(wire, nodes)
+
+
+@pytest.mark.asyncio
+async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_path):
+    """Kill switch slice A: v3 lists carry the records; two counting machines revoke."""
+    from plugins.hub.network_control import NetworkControl
+
+    wire, nodes = await make_net(tmp_path, "mac", "srv-b", "srv-c", "srv-d")
+    a, b, c, d = nodes
+    for node in nodes:  # one network, four machines
+        node.client.state.room = a.client.state.room
+        node.client._network_control = NetworkControl(
+            node.client, machine=SigningKey.generate(), root=tmp_path / f"machine-{node.name}"
+        )
+    a.client.control.found()  # alone: a new network, founder bound into the id
+    for joiner in (b, c, d):
+        joined(a, joiner)
+        joiner.client.control.take_join(
+            a.client.control.join_decision_fields(joiner.client.control.machine_hex)["network_control"]
+        )
+    await sync(nodes, rounds=5)
+    b.client.control.halt_act("confirm_machine", {"machine": c.client.control.machine_hex})
+    await sync(nodes, rounds=5)
+    assert len(c.client.control.view().counting) == 3
+
+    a.client.control.sign_revocation(d.key)
+    a.client.revoke(d.key, announce=True)
+    await sync(nodes, rounds=5)
+    assert d.key not in c.client.state.revoked  # one counting machine's word revokes nothing
+    b.client.control.sign_revocation(d.key)
+    b.client.revoke(d.key, announce=True)
+    await sync(nodes, rounds=5)
+    assert d.key not in approved(c) and d.key in c.client.state.revoked
+    assert d.key in c.client.control.revocations_to_apply()
+    await close_net(wire, nodes)

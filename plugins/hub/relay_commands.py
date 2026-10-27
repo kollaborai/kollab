@@ -1002,16 +1002,28 @@ class RelayCommands:
         if head == "status":
             return await self.format_status()
         if head == "revoke":
+            here_only = rest.endswith(" --here-only")
+            rest = rest.removesuffix(" --here-only").strip()
             if not rest:
-                return "usage: /connect revoke <device>"
+                return "usage: /connect revoke <device> [--here-only]"
             try:
                 key = await self._resolve_peer_key(rest)
             except ValueError as exc:
                 return f"connect: {exc}"
+            try:
+                # A revocation that leaves fewer than two counting machines
+                # stays on this machine, and only once the person says so.
+                network_wide = self.client.control.check_revoke(key, here_only=here_only)
+            except RelayError as exc:
+                return f"{exc}\nTo go ahead: /connect revoke {rest} --here-only"
             if key == self.client.state.inviter:
                 # Revoking the primary ends its say over this device's settings.
                 clear_managed_config(primary_key=key)
-            self.client.revoke(key, announce=True)  # every member drops it too
+            if network_wide:
+                # This machine's signed word; members apply it once a second
+                # counting machine signs the same (network_halt.revocations_to_apply).
+                self.client.control.sign_revocation(key)
+            self.client.revoke(key, announce=network_wide)  # refused here at once
             if self.agent_bridge is not None:
                 self.agent_bridge._state()
                 self.agent_bridge.store.revoke(self.client.state.room, key)
