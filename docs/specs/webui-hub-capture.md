@@ -120,6 +120,15 @@ its response shape must be stable enough for a later native event source.
 
 - The shared transcript includes user-authored text from bounded in-memory
   capture events and is sensitive; it omits tool arguments and reasoning.
+- Transcript and plain captures pass through `redact_secrets`
+  (`plugins/hub/capture.py`): private key blocks, `NAME=value` lines whose
+  name says key/secret/token/password/auth, and the log redactor's header and
+  provider-key patterns. Only `--raw` (terminal) capture is unredacted.
+- An `agent@device` target is captured through the network attach, so the
+  other device decides: a device of this network whose trust lets it open
+  that agent answers, a contact (a knock) never does. This is on by default;
+  `plugins.hub.disallow_cross_device_capture` turns it off on the capturing
+  device. The `hub_capture` tool is high risk and asks permission.
 - Do not include environment variables, access tokens, prompt secrets, or raw
   relay payloads in normalized records.
 - Escape text at the React rendering boundary; never inject captured text as HTML.

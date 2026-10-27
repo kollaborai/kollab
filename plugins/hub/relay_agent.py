@@ -640,10 +640,14 @@ class RelayAgentBridge:
             raise RelayError("ambiguous agent@device")
         return matches[0]["address"]
 
-    async def attach(self, handle: str) -> str:
-        """A one-shot local socket to agent@device's own socket (network_attach.py)."""
+    async def attach(self, handle: str, *, quiet: bool = False) -> str:
+        """A one-shot local socket to agent@device's own socket (network_attach.py).
+
+        ``quiet`` is a capture: the other device posts no open/close line.
+        """
         # The open waits on the other computer: one secure request, up to 30 s.
-        reply = await self._owner_call("relay.attach", {"handle": handle}, timeout=55)
+        params = {"handle": handle, "quiet": True} if quiet else {"handle": handle}
+        reply = await self._owner_call("relay.attach", params, timeout=55)
         if reply.get("refused"):
             raise AttachRefused(reply["refused"])
         return reply["socket_path"]
@@ -664,7 +668,9 @@ class RelayAgentBridge:
                 "this network: message its agents, opening them needs a join code"
             }
         try:
-            path = await self.network_attach.open(address.key, address.agent_id, parsed[0])
+            path = await self.network_attach.open(
+                address.key, address.agent_id, parsed[0], quiet=params.get("quiet") is True
+            )
         except AttachRefused as refusal:
             # An answer, not a failure: the other computer's own words (who may
             # open its agents, the command that allows it). A window that does not

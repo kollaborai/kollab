@@ -20,6 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from kollabor.hub_env import hub_disabled_by_env, hub_solo_by_env
@@ -41,6 +42,7 @@ from .capture import (
     normalize_text,
     paginate,
     plain_text,
+    redact_secrets,
     render_transcript,
 )
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
@@ -768,6 +770,7 @@ class HubPlugin(BasePlugin):
                     "bridge_user_id": "",
                     "bridge_poll_interval": 2,
                     "bridge_target_agent": "",
+                    "disallow_cross_device_capture": False,
                     "email_enabled": False,
                     "email_imap_host": "imap.gmail.com",
                     "email_address": "",
@@ -834,6 +837,16 @@ class HubPlugin(BasePlugin):
                         "Keep hub state per project (presence, vaults, "
                         "sockets). Agents in other projects stay invisible. "
                         "Requires restart."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Disallow Cross-Device Capture",
+                    "config_path": "plugins.hub.disallow_cross_device_capture",
+                    "help": (
+                        "Refuse capturing agent@device from here. Off: your "
+                        "network's devices capture as their trust allows; "
+                        "contacts never can"
                     ),
                 },
                 {
@@ -1871,19 +1884,24 @@ class HubPlugin(BasePlugin):
             "hub_cron_delete", self._handle_hub_cron_delete_tool
         )
 
-        # hub_capture (self-closing, optional lines/format attributes)
+        # hub_capture (self-closing, optional lines/format/raw attributes)
         def _extract_hub_capture(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "cap_name": attrs.get("name", "").strip(),
                 "cap_lines": attrs.get("lines") or "50",
                 "cap_format": (attrs.get("format") or "").strip().lower(),
+                **({"raw": attrs["raw"].lower() == "true"} if "raw" in attrs else {}),
             }
 
         cap_pat = tag_pattern(
             "hub_capture",
             required={"name": "some"},
-            valid={"lines": r"\d+", "format": r"(?:terminal|plain|json)"},
+            valid={
+                "lines": r"\d+",
+                "format": r"(?:terminal|plain|json)",
+                "raw": r"(?:true|false)",
+            },
             end="/>",
         )
         response_parser.register_plugin_tag(
@@ -12248,17 +12266,24 @@ class HubPlugin(BasePlugin):
         format: str = "terminal",
         max_chars: Any = None,
         cursor: Any = None,
+        socket_path_override: str | None = None,
     ) -> _CaptureOutcome:
-        """Capture output directly from a live hub peer via its socket."""
-        if not peer.socket_path:
+        """Capture output directly from a live hub peer via its socket.
+
+        ``socket_path_override`` is a socket the network attach opened to an
+        agent on another device; it is dialed as is.
+        """
+        if socket_path_override:
+            dial_target, dial_auth = socket_path_override, None
+        elif not peer.socket_path:
             if self._presence:
                 self._presence.cleanup_agent(peer)
             message = f"agent '{peer.identity}' has no socket path, cleaned up"
             return _CaptureOutcome(message, error=message)
-
-        dial_target, dial_auth = self._resolve_dial_target(
-            peer.identity, peer.socket_path
-        )
+        else:
+            dial_target, dial_auth = self._resolve_dial_target(
+                peer.identity, peer.socket_path
+            )
         if format != "terminal":
             payload, capture_error = await AgentMessenger.request_capture(
                 dial_target,
@@ -12309,7 +12334,7 @@ class HubPlugin(BasePlugin):
         older peers may still answer with bare lines, normalized here too.
         """
         if not isinstance(payload, dict):
-            return str(payload or f"no recent output from '{identity}'")
+            return redact_secrets(str(payload or f"no recent output from '{identity}'"))
         text = str(payload.get("text") or "")
         if not text.strip():
             lines = payload.get("lines")
@@ -12321,11 +12346,11 @@ class HubPlugin(BasePlugin):
             next_cursor = payload.get("next_cursor")
             suffix = f", next_cursor={next_cursor}" if next_cursor else ""
             text += f"\n... (truncated{suffix})"
-        return text
+        return redact_secrets(text)
 
     @staticmethod
     def _remote_target_refusal(target: Any) -> str | None:
-        """capture, spawn and stop stay local; a remote handle is refused with
+        """spawn, stop and wake stay local; a remote handle is refused with
         a hint to message that agent instead (constitution section 7)."""
         target = str(target or "").strip()
         if parse_handle(target) is None:
@@ -12639,10 +12664,14 @@ class HubPlugin(BasePlugin):
         *,
         capture_format: str = "json",
     ) -> _CaptureOutcome:
-        """Capture one validated target/line request without textual argument parsing."""
-        refusal = self._remote_target_refusal(target)
-        if refusal:
-            return _CaptureOutcome(refusal, error=refusal)
+        """Capture one validated target/line request without textual argument parsing.
+
+        An agent@device target goes through the network attach: only a device
+        of this network whose trust lets it open that agent answers; a contact
+        (a knock) never does.
+        """
+        if parse_handle(target) is not None:
+            return await self._capture_remote(target, lines, capture_format)
         target_for_orchestrator = target
         if target.lower() != "all":
             own_identity = self._identity.identity if self._identity else ""
@@ -12687,7 +12716,9 @@ class HubPlugin(BasePlugin):
         if getattr(result, "success", True) is False:
             error = str(getattr(result, "error", None) or message)
             return _CaptureOutcome(message, error=error)
-        if capture_format == "json":
+        if capture_format == "plain":
+            message = redact_secrets(message)
+        elif capture_format == "json":
             message = render_transcript(
                 message,
                 identity=target,
@@ -12696,10 +12727,41 @@ class HubPlugin(BasePlugin):
             )
         return _CaptureOutcome(message)
 
+    async def _capture_remote(
+        self, target: str, lines: int, capture_format: str
+    ) -> _CaptureOutcome:
+        """Capture agent@device over a network attach the other device allows."""
+        config = getattr(self, "config", None)
+        if config is not None and config.get(
+            "plugins.hub.disallow_cross_device_capture", False
+        ):
+            message = (
+                "cross-device capture is off here "
+                "(plugins.hub.disallow_cross_device_capture)"
+            )
+            return _CaptureOutcome(message, error=message)
+        relay = getattr(self, "_relay_agent", None)
+        if relay is None:
+            message = "not on a network: cannot capture agents on other devices"
+            return _CaptureOutcome(message, error=message)
+        try:
+            socket_path = await relay.attach(target, quiet=True)
+        except Exception as exc:  # AttachRefused, RelayError, transport: the reason is the answer
+            message = f"capture of {target} refused: {exc}"
+            return _CaptureOutcome(message, error=message)
+        peer = SimpleNamespace(identity=target, socket_path=socket_path)
+        return await self._capture_peer_output(
+            peer,
+            lines,
+            format=capture_format,
+            max_chars=10_000 if capture_format == "json" else None,
+            socket_path_override=socket_path,
+        )
+
     async def _handle_capture_command(
         self, rest: str, *, capture_format: str = "json"
     ) -> str:
-        """Handle /hub capture <identity|name|all> [lines] [--raw].
+        """Handle /hub capture <identity|name|agent@device|all> [lines] [--raw].
 
         Hub identities use the shared transcript renderer by default; --raw
         preserves the terminal capture path. Tool callers use `_capture_target`
@@ -12707,7 +12769,7 @@ class HubPlugin(BasePlugin):
         """
         args = rest.split() if rest.strip() else []
         if not args:
-            return "usage: /hub capture <identity|name|all> [lines] [--raw]"
+            return "usage: /hub capture <identity|name|agent@device|all> [lines] [--raw]"
         if "--raw" in args:
             capture_format = "terminal"
             args = [arg for arg in args if arg != "--raw"]
@@ -15101,7 +15163,7 @@ class HubPlugin(BasePlugin):
 
         return {"network": network, "device": device, "trust": trust, "agents": agents}
 
-    async def _handle_network_attach_request(self, to: str) -> str:
+    async def _handle_network_attach_request(self, to: str, *, quiet: bool = False) -> str:
         """Answer a local `network_attach`: a one-shot socket to agent@device.
 
         The web UI opens an agent on another computer through this
@@ -15116,7 +15178,8 @@ class HubPlugin(BasePlugin):
             relay = getattr(self, "_relay_agent", None)
         if relay is None or not hasattr(relay, "attach"):
             raise ValueError("opening agents from the network is not available on this build")
-        return await relay.attach(format_handle(*handle))
+        handle_text = format_handle(*handle)
+        return await (relay.attach(handle_text, quiet=True) if quiet else relay.attach(handle_text))
 
     async def _handle_network_send_request(
         self, to: str, content: str, wait_seconds: int

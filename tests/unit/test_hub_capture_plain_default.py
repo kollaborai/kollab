@@ -158,7 +158,8 @@ class TestCaptureCommandTranscriptDefault(unittest.TestCase):
         plugin = _make_plugin()
         result = _run(plugin._handle_capture_command(""))
         self.assertEqual(
-            result, "usage: /hub capture <identity|name|all> [lines] [--raw]"
+            result,
+            "usage: /hub capture <identity|name|agent@device|all> [lines] [--raw]",
         )
 
 

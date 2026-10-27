@@ -115,7 +115,14 @@ joining through them) and of the ones it revoked. A member approves a device
 that a member it already approved names, on the same network; the relay path
 and the mesh path use that one set. Revoking a device drops it on every member,
 and drops devices only it named. A revoked device stays out until a person on a
-member accepts it again. Approval is not a grant: `agents` and `manual` trust
+member accepts it again. One exception: a device never revokes its own primary
+(the inviter whose join code it used, `inviter` in the relay state) on another
+member's list, so one compromised device cannot cut the network off from its
+primary. Only a person on that device revokes it (`/connect revoke`); the
+primary's own revocations, and a member's revocation of any other device, apply
+as before. A second member agreeing was the alternative; it needs per-voucher
+claim state, and a lost primary is rare enough to revoke on each device by hand.
+Approval is not a grant: `agents` and `manual` trust
 work exactly as before. Accepted strangers, below, are not members.
 
 **Member lists are dated.** A list is signed by the device that sends it, one

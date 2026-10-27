@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
+  redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
+  shows them. The `hub_capture` tool asks permission (#340).
+- Capture works across devices: `agent@device` on one of this network's
+  devices is captured through the network attach, as that device's trust
+  allows. A contact's agents (a knock) are never capturable.
+  `plugins.hub.disallow_cross_device_capture` (off by default) turns
+  cross-device capture off on this device (#340).
+- A capture is a read: the device running the captured agent no longer posts
+  "opened ... from the network" and "closed ..." lines for it (it logs the
+  capture instead). Opening an agent as a chat still posts them (#340).
+
+### Fixed
+- Web UI help is a hover, not a link: the "Learn about profiles", "Learn more
+  about workspaces" and PhoneLink "How It Works" links are gone. Hovering
+  Manage Profiles, the workspace picker's Use button or PhoneLink's connection
+  line shows a small info icon, and after a moment a card says what it does.
+  On a touch screen the icon is always shown and a tap on it opens the card.
+  The cards open below their control so they never cover the text they explain.
+  The sidebar's Learn button still opens the Learn topics.
+- Voice in the web UI with no speech model yet no longer says to look in
+  Settings: it says "Voice needs a speech model on this computer." as a plain
+  notice, with an "Install speech model (2.5 GB, one time)" button that selects
+  Parakeet v3 for this device and starts voice again, which downloads it. On a
+  Mac without Apple silicon it says voice needs an Apple silicon Mac.
+- With an ACP profile, input from agent and skill generation and other
+  internal callers goes through ACP admission instead of the native queue; an
+  unavailable ACP is refused. Agent and skill generation, which need the
+  native tools, say so and keep the form open (#340).
+
 ## [0.18.5] - 2026-10-26
 
 ### Fixed

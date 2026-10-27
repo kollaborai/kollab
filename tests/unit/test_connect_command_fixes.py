@@ -475,7 +475,10 @@ async def test_capture_stop_and_spawn_refuse_a_remote_target_with_a_hint():
     hub = HubPlugin.__new__(HubPlugin)
     expected = "not allowed on a remote device; ask infra@home-server to do it"
 
-    assert await hub._handle_capture_command("infra@home-server 20") == expected
+    # Capture goes cross-device through the network attach (#340); with no
+    # network it says so instead of refusing like stop and spawn.
+    hub._relay_agent = None
+    assert "not on a network" in await hub._handle_capture_command("infra@home-server 20")
     assert await hub._handle_stop_command("infra@home-server") == expected
     assert await hub._handle_spawn_command("infra@home-server check the tunnel") == expected
     assert (
