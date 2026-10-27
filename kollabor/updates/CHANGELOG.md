@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Network kill switch: `kollab --hub halt` stops every agent on every device
+  of your network; resume and network-wide revoke need two machines that count
+  (`kollab --hub resume --confirm`). Also `/connect halt|resume` and Settings →
+  Network → Halt and Resume. Agents and skills are never touched
+  (`docs/features/network-kill-switch.md`, #349).
+
 ### Security
 - Hub capture (`/hub capture`, `kollab --hub capture`, the `hub_capture` tool)
   redacts private keys, `NAME=secret` lines and auth headers; only `--raw`
