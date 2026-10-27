@@ -680,3 +680,48 @@ Image `kollab-killswitch:dev` (rebuilt, without fixes 1-6); network `ks-net`.
 Running, started with `--rm` (stop them with `docker stop`): `ks2-relay`,
 `ks2-m1`, `ks2-m2`, `ks2-m3`, `ks2-m4`. Stopped from D1, need the container
 remove subcommand: `ks-relay`, `ks-m1`, `ks-m2`, `ks-m3`.
+
+## Review fixes F1
+
+Files: `plugins/hub/network_halt.py`, `network_control.py`, tests
+`test_network_halt.py` (now 66) and `test_network_control.py` (now 25), spec
+section "Counting Machines". Each test written before its fix (first run of the
+new core tests: 5 failed; control tests: 16 failed before wiring), then every
+fixed line mutated and killed (14 mutations, script kept in the session
+scratchpad).
+
+- B1 one machine inventing a counting machine: `Roster.member_folders` (relay
+  members + own folder) filters rows, so non-member folders have no binding and
+  sign nothing; a chain must end at the founder or the machine is `Chain
+  unknown` (two confirmations). Wired in `NetworkControl.roster()`.
+- B2 founder takeover: `learn` no longer sets the founder. Only `found()` and
+  the join decision (`take_join`) do; heard records become
+  `founder_candidates`. The network id therefore never moves after first use.
+  Test derives the roster from the original id (not the attacker's).
+- S3 `HaltBook.take` refuses a halt where `halt_allowed(view)` is false.
+- S4 founder candidates (list) + `confirm_founder {"founder": prefix}`;
+  `bootstrap_picks` list, the core counts only a founder-signed one.
+- M2 `no_count` gated on `held()`. M3 opt-outs/revocations applied before the
+  confirmation loop.
+- R2-2 rebinding a folder: member rows carry `bind_sig`, the folder key's own
+  signature over (network, machine). Checked in the core and in `learn`.
+- R2-3 forged `supersedes`: `HaltBook.owners` (hash -> issuer) and `claims`;
+  `sup` is marked seen only when it is that issuer's own order, otherwise kept as
+  a claim that bites only the same issuer's copy. `next_supersedes` drops a peer
+  head known to be another issuer's.
+- R2-4 junk eviction: records verified and deduped by (signer, subject) before
+  storage; 32 per signer, 512 per kind; the wire sends the machine's own
+  records first. Signing past 32 refuses with a plain line.
+
+Not fixed / limits:
+- A peer head for an order this book has never seen cannot be checked (it is
+  only a parent claim now, so the worst case is a forked chain, not a
+  suppressed halt).
+- A malicious inviter can hand a joiner a wrong founder record in the join
+  decision (the join code is the trust root). Wire rows are capped by the 24 KB
+  frame (24 rows, 32 records per kind per message); real paging is still open.
+- With two founder candidates the panel's one-click `Confirm Founder` sends no
+  key and is refused with the fingerprints; `connect.py` needs a picker for
+  that (`founder_candidates` is in the snapshot).
+- `network_members.py` / join request wire fields do not yet carry `bind_sig`
+  from the join request (join request wiring is still step 1 above).

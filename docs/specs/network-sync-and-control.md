@@ -239,6 +239,20 @@ counting machines:
   say-so once the network has two counting machines.
 - Counting is visible to every member (it is in the member list), so every
   machine can check whether a signature counts.
+- Review fixes F1 (what a member list row must satisfy before it counts):
+  - the folder key is an approved relay member of this network;
+  - the folder key itself signed its binding to the machine key
+    (`kollab-folder-bind-v1\n` + network id + machine key), beside the machine's
+    folder-machine signature, so no other member can rebind a folder;
+  - every admitter in the chain is a member machine and the chain ends at the
+    founder. A machine whose chain does not (a stranger admitter, a cycle) is
+    `Chain unknown` and needs two outside confirmations, never one;
+  - a machine that opted out or is revoked confirms nobody;
+  - a founder record heard from a member list is only a candidate; the founder
+    is set at `Start a New Network` or by the join decision, a person
+    names one with `Confirm Founder`, and the network id never changes after;
+  - a halt is refused on receipt where fewer than two machines count;
+  - a halt's `supersedes` retires only the same issuer's own earlier order.
 - Opting out: a machine's person can withdraw this machine from counting on a
   network (`Do Not Count Here`, a record signed by its machine key). It takes
   effect only while no halt from that network is active, so it cannot be used

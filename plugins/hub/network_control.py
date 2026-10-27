@@ -37,11 +37,18 @@ RECORD_LISTS = ("confirmations", "opt_outs", "revocations", "inviter_claims", "j
 # ponytail: the member list is one 24 KB frame; 24 rows and 32 records per kind
 # fit beside 64 members. Page the control block when networks grow past that.
 MAX_ROWS = 24
-MAX_RECORDS = 32
+MAX_RECORDS = 32  # per kind on the wire; own records go first
+# Stored per kind: every verified record, deduped by (signer, subject). One signer
+# may hold at most MAX_PER_SIGNER, so junk is dropped unsigned and a flood from one
+# machine cannot push out another machine's records.
+MAX_STORED = 512
+MAX_PER_SIGNER = 32
+RECORDS_FULL = "This device already signed {n} {kind}; no more fit on this network."
+MAX_PICKS = 8
 HALT_RETRY_START = 10.0
 HALT_RETRY_MAX = 300.0
 REQUEST_SECONDS = 15.0
-ROW_FIELDS = ("folder", "name", "machine", "folder_sig", "admission")
+ROW_FIELDS = ("folder", "name", "machine", "folder_sig", "admission", "bind_sig")
 
 
 def machine_key(root: Path | None = None) -> SigningKey:
@@ -53,6 +60,22 @@ def machine_key(root: Path | None = None) -> SigningKey:
 
 def _hex(key: SigningKey) -> str:
     return bytes(key.verify_key).hex()
+
+
+def _record_check(kind: str, r: dict, net: str) -> tuple[str, tuple[str, ...]] | None:
+    """(signer machine or folder, dedupe key) when ``r`` is a validly signed record of ``kind``."""
+    if kind == "confirmations":
+        return (r["by"], (r["by"], r["machine"])) if nh.machine_confirmation_ok(r, net) else None
+    if kind == "revocations":
+        return (r["machine"], (r["machine"], r["revoked"])) if nh.revocation_ok(r, net) else None
+    domain, who = {
+        "opt_outs": (nh.NO_COUNT_DOMAIN, "machine"),
+        "inviter_claims": (nh.INVITER_CLAIM_DOMAIN, "machine"),
+        "join_records": (nh.JOIN_RECORD_DOMAIN, "inviter"),
+    }[kind]
+    if r.get("network") != net or not nh._signed_ok(domain, r, who):
+        return None
+    return r[who], (r[who], str(r.get("machine")))
 
 
 def _is_key(value: Any) -> bool:
@@ -137,6 +160,7 @@ class NetworkControl:
             "machine": self.machine_hex,
             "folder_sig": nh.sign_folder_machine(self.machine, self.network_id(), folder),
             "admission": self._fresh().get("admission"),
+            "bind_sig": nh.sign_folder_binding(self.client._store.key, self.network_id(), self.machine_hex),
         }
 
     def rows(self) -> dict[str, dict]:
@@ -163,6 +187,8 @@ class NetworkControl:
             inviter_claims=list(data.get("inviter_claims", [])),
             join_records=list(data.get("join_records", [])),
             bootstrap_pick=data.get("bootstrap_pick"),
+            bootstrap_picks=list(data.get("bootstrap_picks", [])),
+            member_folders=set(self.client.members()) | {self.client.public_key},
         )
 
     def view(self) -> nh.Counting:
@@ -226,6 +252,11 @@ class NetworkControl:
         self.save()
 
     def _take_founder(self, founder: Any) -> bool:
+        """Hold a founder record. Only a join decision or ``found`` sets it (never a member list).
+
+        Heard from a member list it is a candidate (``_candidate``), never the
+        founder: that is what keeps any member from renaming the network id.
+        """
         data = self._fresh()
         if data.get("founder"):
             return data["founder"] == founder
@@ -240,6 +271,20 @@ class NetworkControl:
             return True
         return False
 
+    def _candidate(self, rec: Any) -> None:
+        """Remember a founder record heard from a member; a person or the inviter accepts one."""
+        data = self._fresh()
+        if data.get("founder") or not nh._signed_ok(nh.FOUNDER_DOMAIN, rec, "founder"):
+            return
+        if rec.get("network") != self.network_id():
+            return
+        cands = data.setdefault("founder_candidates", [])
+        if all(c["founder"] != rec["founder"] for c in cands) and len(cands) < MAX_PICKS:
+            cands.append(rec)
+
+    def _adopt(self, rec: dict) -> None:
+        self._fresh().update(founder=rec, room_bound=False, founder_confirmed=rec["founder"])
+
     # ------------------------------------------------------------ member lists
 
     def wire(self) -> dict[str, Any]:
@@ -247,9 +292,23 @@ class NetworkControl:
         return {
             "founder": data.get("founder"),
             "members": list(self.rows().values())[:MAX_ROWS],
-            "bootstrap_pick": data.get("bootstrap_pick"),
-            **{k: list(data.get(k, []))[-MAX_RECORDS:] for k in RECORD_LISTS},
+            "bootstrap_picks": self._picks()[:MAX_PICKS],
+            **{k: self._wire_records(k) for k in RECORD_LISTS},
         }
+
+    def _picks(self) -> list[dict]:
+        data = self._fresh()
+        own = [data["bootstrap_pick"]] if data.get("bootstrap_pick") else []
+        return own + list(data.get("bootstrap_picks", []))
+
+    def _wire_records(self, kind: str) -> list[dict]:
+        """This machine's own signatures first, so they always travel; then the newest."""
+        net = self.network_id()
+        mine = {self.machine_hex, self.client.public_key}
+        have = list(self._fresh().get(kind, []))
+        own = [r for r in have if (_record_check(kind, r, net) or ("",))[0] in mine]
+        rest = [r for r in have if r not in own]
+        return (own + rest[::-1])[:MAX_RECORDS]
 
     def digest(self) -> str:
         book = self.halt_book()
@@ -266,7 +325,7 @@ class NetworkControl:
         if not isinstance(control, dict):
             return
         data = self._fresh()
-        self._take_founder(control.get("founder"))
+        self._candidate(control.get("founder"))
         net = self.network_id()
         own = self.client.public_key
         members = data.setdefault("members", {})
@@ -276,19 +335,34 @@ class NetworkControl:
             row = {k: row.get(k) for k in ROW_FIELDS}
             if not (_is_key(row["folder"]) and isinstance(row["name"], str)):
                 continue
-            if nh.folder_machine_ok(net, row["folder"], row["machine"], row["folder_sig"]):
+            if nh.folder_machine_ok(net, row["folder"], row["machine"], row["folder_sig"]) and nh.folder_binding_ok(
+                net, row["folder"], row["machine"], row["bind_sig"]
+            ):
                 if row["admission"] is not None and not isinstance(row["admission"], dict):
                     row["admission"] = None
                 members[row["folder"]] = row
         for name in RECORD_LISTS:
             have = data.setdefault(name, [])
-            sigs = {r.get("sig") for r in have}
             incoming = control.get(name)
+            checked = {id(r): _record_check(name, r, net) for r in have}
+            known = {c[1] for c in checked.values() if c}
+            per_signer: dict[str, int] = {}
+            for c in checked.values():
+                if c:
+                    per_signer[c[0]] = per_signer.get(c[0], 0) + 1
             for r in incoming[:MAX_RECORDS] if isinstance(incoming, list) else []:
-                if isinstance(r, dict) and isinstance(r.get("sig"), str) and r["sig"] not in sigs:
-                    have.append(r)
-                    sigs.add(r["sig"])
-            del have[:-MAX_RECORDS]
+                try:
+                    c = _record_check(name, r, net) if isinstance(r, dict) else None
+                except (KeyError, TypeError):
+                    c = None
+                if c is None or c[1] in known:
+                    continue  # unsigned junk and repeats are dropped before they take a slot
+                if per_signer.get(c[0], 0) >= MAX_PER_SIGNER or len(have) >= MAX_STORED:
+                    logger.warning("network control: %s from one signer over the cap; refused", name)
+                    continue
+                have.append(r)
+                known.add(c[1])
+                per_signer[c[0]] = per_signer.get(c[0], 0) + 1
         # A machine speaks for its own opt-out: what it sends now replaces what
         # was heard about it, so `Count Here` again reaches every member it meets.
         speaker = members.get(voucher, {}).get("machine")
@@ -301,14 +375,28 @@ class NetworkControl:
             data["opt_outs"] = [r for r in data["opt_outs"] if r.get("machine") != speaker] + [
                 r for r in sent if isinstance(r, dict) and r.get("machine") == speaker
             ]
-        pick = control.get("bootstrap_pick")
-        if data.get("bootstrap_pick") is None and isinstance(pick, dict):
-            data["bootstrap_pick"] = pick
+        # Picks are candidates: the rules count only one the founder signed.
+        picks = data.setdefault("bootstrap_picks", [])
+        heard = control.get("bootstrap_picks")
+        for pick in heard[:MAX_PICKS] if isinstance(heard, list) else []:
+            if (
+                isinstance(pick, dict)
+                and pick.get("network") == net
+                and nh._signed_ok(nh.ADMISSION_DOMAIN, pick, "admitter")
+                and all(p.get("sig") != pick.get("sig") for p in picks)
+                and len(picks) < MAX_PICKS
+            ):
+                picks.append(pick)
         # A machine whose inviter's machine key is the founder's accepts it unasked.
-        founder = (data.get("founder") or {}).get("founder")
-        inviter_row = members.get(self.client.state.inviter) or {}
-        if founder and not data.get("founder_confirmed") and inviter_row.get("machine") == founder:
-            data["founder_confirmed"] = founder
+        inviter_machine = (members.get(self.client.state.inviter) or {}).get("machine")
+        if inviter_machine and not data.get("founder_confirmed"):
+            held = data.get("founder")
+            if held and held.get("founder") == inviter_machine:
+                data["founder_confirmed"] = inviter_machine
+            elif not held:
+                for cand in data.get("founder_candidates", []):
+                    if cand["founder"] == inviter_machine:
+                        self._adopt(cand)
         self.save()
 
     def _own_opt_outs(self) -> list[dict]:
@@ -335,7 +423,15 @@ class NetworkControl:
             orders=self.halt_book().halts.values(),
         )
 
+    def _room_for(self, kind: str, label: str, signer: str) -> None:
+        """Refuse clearly instead of dropping silently when one signer has used its slots."""
+        net = self.network_id()
+        n = sum(1 for r in self._fresh().get(kind, []) if (_record_check(kind, r, net) or ("",))[0] == signer)
+        if n >= MAX_PER_SIGNER:
+            raise nh.HaltError(RECORDS_FULL.format(n=n, kind=label))
+
     def sign_revocation(self, key: str) -> None:
+        self._room_for("revocations", "revocations", self.machine_hex)
         rec = nh.revocation(self.client._store.key, self.machine, self.network_id(), key, int(time.time()))
         self._fresh().setdefault("revocations", []).append(rec)
         self.save()
@@ -475,7 +571,10 @@ class NetworkControl:
             "me": self.machine_hex,
             "founder": view.founder,
             # the founder key a person can accept with `Confirm Founder`, "" when accepted or none
-            "founder_unaccepted": "" if view.founder else str((data.get("founder") or {}).get("founder") or ""),
+            "founder_unaccepted": ""
+            if view.founder
+            else str((data.get("founder") or (data.get("founder_candidates") or [{}])[0]).get("founder") or ""),
+            "founder_candidates": [c["founder"] for c in data.get("founder_candidates", [])],
             "revocation_signers": {k: sorted(ms) for k, ms in good.items() if len(ms) < 2},
             "bootstrap_open": view.founder == self.machine_hex
             and not (data.get("bootstrap_pick") or data.get("bootstrap_issued")),
@@ -577,12 +676,23 @@ class NetworkControl:
             machine = payload.get("machine")
             if not _is_key(machine) or not nh.may_confirm_machine(view, me, machine):
                 raise nh.HaltError("this machine cannot confirm that machine")
+            self._room_for("confirmations", "confirmations", me)
             data.setdefault("confirmations", []).append(nh.machine_confirmation(self.machine, net, machine))
         elif action == "confirm_founder":
-            founder = (data.get("founder") or {}).get("founder")
-            if not founder:
-                raise nh.HaltError("no founder record yet")
-            data["founder_confirmed"] = founder
+            held = data.get("founder")
+            named = str(payload.get("founder") or "")
+            if held:
+                if named and not held["founder"].startswith(named):
+                    raise nh.HaltError("that is not the founder this machine holds")
+                data["founder_confirmed"] = held["founder"]
+            else:
+                cands = [c for c in data.get("founder_candidates", []) if c["founder"].startswith(named)]
+                if len(cands) != 1:
+                    keys = ", ".join(c["founder"][:12] for c in data.get("founder_candidates", []))
+                    raise nh.HaltError(
+                        "no founder record yet" if not keys else f"name the founder (one of: {keys})"
+                    )
+                self._adopt(cands[0])
         elif action == "make_bootstrap":
             machine = payload.get("machine")
             if view.founder != me:
@@ -593,7 +703,7 @@ class NetworkControl:
                 raise nh.HaltError("pick another member machine")
             data["bootstrap_pick"] = nh.admission(self.machine, net, machine, bootstrap=True)
         elif action == "no_count":
-            if book.active():
+            if book.held():
                 raise nh.HaltError("a machine cannot stop counting while a halt is active")
             rec = nh.no_count_record(self.machine, net)
             data.setdefault("opt_outs", []).append(rec)

@@ -33,6 +33,7 @@ from nacl.signing import SigningKey, VerifyKey
 from .relay_state import KEY
 
 FOLDER_MACHINE_DOMAIN = b"kollab-folder-machine-v1\n"
+FOLDER_BIND_DOMAIN = b"kollab-folder-bind-v1\n"
 FOUNDER_DOMAIN = b"kollab-founder-v1\n"
 ADMISSION_DOMAIN = b"kollab-admission-v1\n"
 MACHINE_CONFIRM_DOMAIN = b"kollab-machine-confirm-v1\n"
@@ -106,6 +107,15 @@ def sign_folder_machine(machine: SigningKey, network: str, folder: str) -> str:
 
 def folder_machine_ok(network: str, folder: str, machine: str, sig: str) -> bool:
     return _verify(machine, FOLDER_MACHINE_DOMAIN + network.encode() + b"\n" + folder.encode(), sig)
+
+
+def sign_folder_binding(folder: SigningKey, network: str, machine: str) -> str:
+    """The folder key's own consent to sit on ``machine`` (R2-2): no one else can bind it."""
+    return _sign(folder, FOLDER_BIND_DOMAIN + network.encode() + b"\n" + machine.encode())
+
+
+def folder_binding_ok(network: str, folder: str, machine: str, sig: Any) -> bool:
+    return _verify(folder, FOLDER_BIND_DOMAIN + network.encode() + b"\n" + machine.encode(), sig)
 
 
 def _signed(domain: bytes, key: SigningKey, record: dict[str, Any]) -> dict[str, Any]:
@@ -183,6 +193,7 @@ class Member:
     machine: str
     folder_sig: str
     admission: dict[str, Any] | None = None
+    bind_sig: str = ""  # the folder key's signature over (network, machine)
 
 
 @dataclass
@@ -201,6 +212,9 @@ class Roster:
     inviter_claims: list[dict[str, Any]] = field(default_factory=list)
     join_records: list[dict[str, Any]] = field(default_factory=list)
     bootstrap_pick: dict[str, Any] | None = None  # founder-signed admission, bootstrap=True
+    bootstrap_picks: list[dict[str, Any]] = field(default_factory=list)  # heard picks; only a founder-signed one counts
+    # Folder keys that are approved relay members. None = the core tests' unfiltered roster.
+    member_folders: set[str] | None = None
 
 
 @dataclass
@@ -249,8 +263,14 @@ def count_machines(roster: Roster) -> Counting:
     machines: set[str] = set()
     admitter: dict[str, str] = {}
     bootstrap_claims: set[str] = set()
+    approved = roster.member_folders
     for m in roster.members:
-        if not folder_machine_ok(net, m.folder, m.machine, m.folder_sig):
+        if approved is not None and m.folder not in approved:
+            continue  # not a relay member: its signatures and rows count for nothing
+        if not (
+            folder_machine_ok(net, m.folder, m.machine, m.folder_sig)
+            and folder_binding_ok(net, m.folder, m.machine, m.bind_sig)
+        ):
             continue  # a folder key no machine signed for is nobody's
         bindings[m.folder] = m.machine
         machines.add(m.machine)
@@ -258,10 +278,10 @@ def count_machines(roster: Roster) -> Counting:
             admitter.setdefault(m.machine, m.admission["admitter"])
             if m.admission.get("bootstrap") and m.admission["admitter"] == founder:
                 bootstrap_claims.add(m.machine)
-    pick = roster.bootstrap_pick
-    if pick is not None and _admission_ok(pick, net, str(pick.get("machine"))):
-        if pick.get("bootstrap") and pick["admitter"] == founder and pick["machine"] in machines:
-            bootstrap_claims.add(pick["machine"])
+    for pick in [roster.bootstrap_pick, *roster.bootstrap_picks]:
+        if pick is not None and _admission_ok(pick, net, str(pick.get("machine"))):
+            if pick.get("bootstrap") and pick["admitter"] == founder and pick["machine"] in machines:
+                bootstrap_claims.add(pick["machine"])
     # Only one machine is ever the bootstrap; two claims mean none (fail closed).
     bootstrap = next(iter(bootstrap_claims)) if len(bootstrap_claims) == 1 else ""
 
@@ -295,10 +315,15 @@ def count_machines(roster: Roster) -> Counting:
         cur = first.get(machine, "")
         while cur and cur not in out and cur != machine:
             out.append(cur)
+            if cur == founder:
+                break  # the chain ends at the founder
             cur = admitter.get(cur, "")
         return out
 
     chains = {m: chain(m) for m in machines}
+    for m in machines - {founder}:
+        if not chains[m] or chains[m][-1] != founder:
+            unknown.add(m)  # a chain that never reaches the founder proves nothing
     outside: dict[str, set[str]] = {}
     for m in machines:
         excluded = {m, *chains[m]}
@@ -317,17 +342,17 @@ def count_machines(roster: Roster) -> Counting:
         if machine_confirmation_ok(r, net):
             confirms.setdefault(r["machine"], set()).add(r["by"])
 
+    # Opt-outs and revocations apply before the loop: their confirmations count for nothing.
     counting = {m for m in (founder, bootstrap) if m and m in machines | {founder}}
-    counting -= revoked
+    counting -= revoked | opted_out
     changed = True
     while changed:  # confirmations by counting machines can make more count
         changed = False
-        for m in machines - counting - revoked:
+        for m in machines - counting - revoked - opted_out:
             valid = {c for c in confirms.get(m, ()) if c in counting and c not in outside[m]}
             if len(valid) >= (2 if m in unknown else 1):
                 counting.add(m)
                 changed = True
-    counting -= opted_out
     if founder and founder not in machines:
         chains.setdefault(founder, [])
     return Counting(founder, counting, chains, unknown, bindings, net, revoked)
@@ -457,6 +482,8 @@ class HaltBook:
         self.resumes: dict[str, dict] = dict(data.get("resumes", {}))
         self.lifted: set[str] = set(data.get("lifted", []))  # by an effective resume
         self.local_lifts: set[str] = set(data.get("local_lifts", []))
+        self.owners: dict[str, str] = dict(data.get("owners", {}))  # order hash -> issuer folder
+        self.claims: dict[str, str] = dict(data.get("claims", {}))  # named parent -> issuer that named it
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -468,6 +495,8 @@ class HaltBook:
             "resumes": self.resumes,
             "lifted": sorted(self.lifted),
             "local_lifts": sorted(self.local_lifts),
+            "owners": self.owners,
+            "claims": self.claims,
         }
 
     def active(self) -> dict[str, dict]:
@@ -507,12 +536,18 @@ class HaltBook:
             return TakeResult(False, "issuer is revoked")
         if order["action"] == "resume" and h in self.proposals:
             return self._merge_confirmations(h, order, view)
-        if h in self.seen:
+        if h in self.seen or self.claims.get(h) == issuer:
             return TakeResult(False, "already seen")
+        if order["action"] == "halt" and not halt_allowed(view):
+            return TakeResult(False, "fewer than two counting machines here")
         self.seen.add(h)
         sup = order.get("supersedes")
         if sup:
-            self.seen.add(sup)  # a late copy of the superseded order is refused
+            if self.owners.get(sup) == issuer:
+                self.seen.add(sup)  # a late copy of the issuer's own superseded order is refused
+            else:
+                self.claims[sup] = issuer  # only bites if sup turns out to be this issuer's own
+        self.owners[h] = issuer
         self._note_head(issuer, h, sup)
         if order["action"] == "halt":
             self.halts[h] = _body(order, "confirmations") | {"sig": order["sig"]}
@@ -572,8 +607,11 @@ class HaltBook:
                 del self.proposals[h]
 
     def next_supersedes(self, issuer: str, peer_heads: Iterable[str]) -> str | None:
-        """The issuer's chain head, learned from peers when halt.json was lost."""
-        heads = {h for h in (self.heads.get(issuer), *peer_heads) if h}
+        """The issuer's chain head, learned from peers when halt.json was lost.
+
+        A head known to be another issuer's order is dropped; an unknown one is kept.
+        """
+        heads = {h for h in (self.heads.get(issuer), *peer_heads) if h and self.owners.get(h, issuer) == issuer}
         parents = set(self.parents.values())
         newest = sorted(h for h in heads if h not in parents)
         return newest[0] if newest else (min(heads) if heads else None)

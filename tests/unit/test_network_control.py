@@ -370,3 +370,112 @@ async def test_another_counting_machine_seen_since_the_halt_is_remembered(three)
     await link.syncs[f.client.public_key].tick()  # b gets the halt
     await link.syncs[b.client.public_key].tick()  # b sees f online since it
     assert b.halt_snapshot(set())["others_online_since_halt"] is True
+
+
+# ------------------------------------------------ review fixes F1
+
+
+def _row(folder_key: SigningKey, machine_key: SigningKey, net: str, name: str, admission=None, *, bind_with=None):
+    mk = _hex(machine_key)
+    fk = _hex(folder_key)
+    return {
+        "folder": fk,
+        "name": name,
+        "machine": mk,
+        "folder_sig": nh.sign_folder_machine(machine_key, net, fk),
+        "bind_sig": nh.sign_folder_binding(bind_with or folder_key, net, mk),
+        "admission": admission,
+    }
+
+
+def test_a_row_for_a_non_member_folder_cannot_count_even_if_a_counting_machine_confirms_it(three):
+    """B1: b invents F, lists it (admitted by a stranger Z), confirms it. F is no relay member."""
+    f, b, _c = three
+    net = f.network_id()
+    fake_folder, fake_machine, z = SigningKey.generate(), SigningKey.generate(), SigningKey.generate()
+    row = _row(fake_folder, fake_machine, net, "fake", nh.admission(z, net, _hex(fake_machine)))
+    conf = nh.machine_confirmation(b.machine, net, _hex(fake_machine))
+    f.learn(b.client.public_key, {**b.wire(), "members": [*b.wire()["members"], row], "confirmations": [conf]})
+    view = f.view()
+    assert not view.counts(_hex(fake_machine)) and view.machine_of(_hex(fake_folder)) == ""
+    f.client.state.approvals.append(_hex(fake_folder))  # even a member: Z never reaches the founder
+    assert not f.view().counts(_hex(fake_machine))
+
+
+def test_a_member_cannot_make_itself_founder_or_move_the_network_id(three, tmp_path):
+    """B2 on a pre-release network: the first founder record to arrive must not win."""
+    f, _b, _c = three
+    legacy = hashlib.sha256(bytes.fromhex(ROOM)).hexdigest()
+    v = machine(tmp_path, "v", inviter="ee" * 32)
+    x = machine(tmp_path, "x")
+    x.found()  # x signs a founder record bound to itself
+    assert x.network_id() != legacy
+    v.learn(x.client.public_key, x.wire())
+    assert v.network_id() == legacy and not v.data.get("founder") and v.view().founder == ""
+    meet(f, v)  # the real founder's (bound) record changes nothing either
+    assert v.network_id() == legacy
+    # and on a network that already has its founder, the id and founder stay put
+    original = f.network_id()
+    f.learn(x.client.public_key, x.wire())
+    assert f.network_id() == original and f.view().founder == f.machine_hex
+
+
+def test_a_founder_claim_and_a_bootstrap_pick_cannot_lock_out_the_real_ones(tmp_path):
+    """S4: a lying candidate first; the person names the right fingerprint; the real pick still counts."""
+    f = machine(tmp_path, "f")
+    f.client.state.approvals.append("ee" * 32)
+    f.found()
+    legacy = f.network_id()
+    m = machine(tmp_path, "m", inviter="ee" * 32)
+    liar = machine(tmp_path, "liar")
+    liar.data["founder"] = nh.founder_record(liar.machine, legacy)
+    m.learn(liar.client.public_key, {"founder": liar.data["founder"]})
+    meet(f, m)
+    assert m.view().founder == ""  # two candidates: nothing counts until a person names one
+    with pytest.raises(nh.HaltError, match="name the founder"):
+        m.halt_act("confirm_founder")
+    m.halt_act("confirm_founder", {"founder": f.machine_hex})
+    assert m.view().founder == f.machine_hex
+    fake = nh.admission(liar.machine, legacy, m.machine_hex, bootstrap=True)
+    m.learn(liar.client.public_key, {"bootstrap_picks": [fake]})  # the lying pick arrives first
+    f.halt_act("make_bootstrap", {"machine": m.machine_hex})
+    meet(f, m)
+    assert m.view().counting == {f.machine_hex, m.machine_hex}
+
+
+def test_a_member_cannot_rebind_another_members_folder_to_its_own_machine(three):
+    """R2-2: the machine signs any folder key; the folder key's own consent is what binds it."""
+    f, b, c = three
+    net = f.network_id()
+    row = _row(b.client._store.key, c.machine, net, "b", bind_with=c.client._store.key)
+    f.learn(c.client.public_key, {"members": [row]})
+    assert f.view().machine_of(b.client.public_key) == b.machine_hex and f.view().counts(b.machine_hex)
+
+
+def test_junk_records_do_not_evict_real_ones_and_forty_honest_confirmations_all_stay(three):
+    """R2-4: unsigned junk is dropped before storage; honest records are kept per signer, not by arrival."""
+    f, b, _c = three
+    net = f.network_id()
+    real = nh.machine_confirmation(b.machine, net, "ab" * 32)
+    f.learn(b.client.public_key, {"confirmations": [real]})
+    junk = [{"sig": f"{i:0128x}", "machine": "cd" * 32, "by": "ef" * 32, "network": net} for i in range(100)]
+    for chunk in range(0, 100, 20):
+        f.learn(b.client.public_key, {"confirmations": junk[chunk : chunk + 20]})
+    assert f.data["confirmations"] == [real]
+    honest = [nh.machine_confirmation(SigningKey.generate(), net, "ab" * 32) for _ in range(40)]
+    for chunk in range(0, 40, 20):
+        f.learn(b.client.public_key, {"confirmations": honest[chunk : chunk + 20]})
+    assert len(f.data["confirmations"]) == 41
+    assert real in f.data["confirmations"]
+
+
+def test_no_count_after_a_local_lift_is_still_refused(three):
+    """M2: `resume --local` must not open the opt-out while the halt is held network-wide."""
+    f, b, c = three
+    f.halt_act("halt", {"reason": "x"})
+    meet(f, b, c)
+    b.halt_merge(f.halt_payload())
+    b.halt_act("resume_local")
+    assert not b.halt_book().active() and b.halt_book().held()
+    with pytest.raises(nh.HaltError, match="while a halt is active"):
+        b.halt_act("no_count")

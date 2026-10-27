@@ -52,6 +52,7 @@ class Net:
                 m.mk,
                 nh.sign_folder_machine(m.key, self.id, m.fk(folder)),
                 admission,
+                nh.sign_folder_binding(m.folders[folder], self.id, m.mk),
             )
         )
         return m
@@ -591,3 +592,115 @@ def test_a_halts_revoke_entry_counts_as_its_issuers_revocation(net):
 def test_non_hex_room_binds_no_founder(net):
     net.roster.room = "not-hex"
     assert net.view().founder == ""
+
+
+# ------------------------------------------------ review fixes F1 (B1, S3, M3)
+
+
+def _members_only(n: Net) -> None:
+    n.roster.member_folders = {x.folder for x in n.roster.members}
+
+
+def test_an_admitter_from_outside_the_network_makes_no_counting_machine(net):
+    """B1: F signs its own folder binding, a non-member Z admits it, prod confirms."""
+    z, f = M("z"), M("f")
+    net.join(f, nh.admission(z.key, net.id, f.mk))  # Z has no row, is not a member
+    net.confirm(net.prod, f)
+    _members_only(net)
+    view = net.view()
+    assert f.mk in view.unknown and f.mk not in view.counting
+    net.confirm(net.founder, f)  # two outside confirmations still count it
+    assert net.view().counts(f.mk)
+
+
+def test_a_machine_whose_folder_is_not_a_relay_member_does_not_count(net):
+    f = net.admit(net.founder, "f")
+    net.confirm(net.prod, f)
+    _members_only(net)
+    assert net.view().counts(f.mk)
+    net.roster.member_folders.discard(f.fk())
+    view = net.view()
+    assert not view.counts(f.mk) and view.machine_of(f.fk()) == ""
+    order = nh.make_order(f.folders[0], f.key, net.id, "resume", lifts=["ab" * 32])
+    assert nh.resume_signers(order, view) == (set(), {f.mk})
+
+
+def test_a_chain_that_does_not_end_at_the_founder_needs_two_confirmations(net):
+    a, b = M("a"), M("b")
+    net.join(a, nh.admission(b.key, net.id, a.mk))
+    net.join(b, nh.admission(a.key, net.id, b.mk))  # a cycle that never reaches the founder
+    net.confirm(net.prod, a)
+    _members_only(net)
+    view = net.view()
+    assert a.mk in view.unknown and not view.counts(a.mk)
+
+
+def test_the_chained_admission_still_counts(net):
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)
+    d = net.admit(c, "d")
+    net.confirm(net.prod, d)
+    _members_only(net)
+    view = net.view()
+    assert view.counts(d.mk) and d.mk not in view.unknown and view.chains[d.mk] == [c.mk, net.founder.mk]
+
+
+def test_a_halt_is_refused_where_fewer_than_two_machines_count():
+    n = Net()  # the founder alone
+    book = nh.HaltBook(n.id)
+    order = nh.make_order(n.founder.folders[0], n.founder.key, n.id, "halt")
+    res = book.take(order, n.view(), is_member=n.member)
+    assert not res.taken and "two" in res.reason and not book.halts
+
+
+def test_an_opted_out_machine_confirms_nobody(net):
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)
+    net.roster.opt_outs.append(nh.no_count_record(net.prod.key, net.id))
+    assert not net.view().counts(c.mk)  # prod's lone confirmation no longer counts
+    net.roster.opt_outs.clear()
+    assert net.view().counts(c.mk)
+
+
+def test_a_forged_supersedes_cannot_suppress_another_issuers_halt(net):
+    """R2-3: M names X (the founder's halt) as its parent; X must still be taken."""
+    x = halt(net.founder, net)
+    xh = nh.order_hash(x)
+    forged = halt(net.prod, net, supersedes=xh)
+    book = nh.HaltBook(net.id)
+    assert book.take(forged, net.view(), is_member=net.member).taken
+    assert xh not in book.seen
+    assert book.take(x, net.view(), is_member=net.member).taken and xh in book.halts
+    own = halt(net.prod, net)
+    own2 = halt(net.prod, net, supersedes=nh.order_hash(own), reason="2")
+    b2 = nh.HaltBook(net.id)
+    b2.take(own, net.view(), is_member=net.member)
+    b2.take(own2, net.view(), is_member=net.member)
+    assert b2.take(own, net.view(), is_member=net.member).reason == "already seen"
+    b3 = nh.HaltBook(net.id)  # the claim made first still bites that issuer's own parent
+    b3.take(own2, net.view(), is_member=net.member)
+    assert b3.take(own, net.view(), is_member=net.member).reason == "already seen"
+
+
+def test_peer_heads_naming_another_issuers_order_are_ignored(net):
+    x = halt(net.founder, net)
+    book = nh.HaltBook(net.id)
+    book.take(x, net.view(), is_member=net.member)
+    assert book.next_supersedes(net.prod.fk(), [nh.order_hash(x)]) is None
+
+
+def test_an_opted_out_machine_stays_out_even_with_a_valid_confirmation(net):
+    c = net.admit(net.founder, "c")
+    net.confirm(net.prod, c)
+    net.roster.opt_outs.append(nh.no_count_record(c.key, net.id))
+    assert not net.view().counts(c.mk)
+
+
+def test_a_binding_the_folder_key_did_not_sign_is_ignored(net):
+    thief = M("thief")
+    row = nh.Member(
+        net.prod.fk(), "x", thief.mk, nh.sign_folder_machine(thief.key, net.id, net.prod.fk()), None,
+        nh.sign_folder_binding(thief.folders[0], net.id, thief.mk),  # signed by the wrong folder key
+    )
+    net.roster.members = [x for x in net.roster.members if x.folder != net.prod.fk()] + [row]
+    assert net.view().machine_of(net.prod.fk()) == ""
