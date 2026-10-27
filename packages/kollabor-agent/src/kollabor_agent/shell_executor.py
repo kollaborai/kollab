@@ -15,9 +15,40 @@ import platform
 import signal
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+# Kill switch F11: [pid, start] of every tool shell this agent started, newest last. Presence carries it so
+# a halt also stops what a shell backgrounded (`cmd &`, nohup) after the shell itself exited. Listeners
+# (the hub's presence publish) run on every record, so the entry is on disk before the command runs far.
+MAX_TOOL_SHELLS = 64
+TOOL_SHELLS: List[List[float]] = []
+TOOL_SHELL_LISTENERS: List[Callable[[], None]] = []
+
+
+def _group_alive(pid: int) -> bool:
+    """The shell or anything left in its process group still runs (a tool shell leads its group)."""
+    for check in (os.kill, os.killpg):
+        try:
+            check(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def record_tool_shell(pid: int, started: float) -> None:
+    """Remember a tool shell; drop entries whose shell and group are gone, keep the newest 64."""
+    kept = [e for e in TOOL_SHELLS if _group_alive(int(e[0]))]
+    TOOL_SHELLS[:] = (kept + [[pid, started]])[-MAX_TOOL_SHELLS:]
+    for listener in list(TOOL_SHELL_LISTENERS):
+        try:
+            listener()
+        except Exception as e:  # presence is best effort; the command still runs
+            logger.debug(f"tool shell listener failed: {e}")
 
 
 @dataclass
@@ -142,6 +173,9 @@ class ShellExecutor:
                 self._current_process = await self._create_unix_process(
                     command, cwd, env
                 )
+            pid = getattr(self._current_process, "pid", None)
+            if not self._is_windows and isinstance(pid, int):
+                record_tool_shell(pid, start_time)
 
             try:
                 stdout, stderr = await asyncio.wait_for(

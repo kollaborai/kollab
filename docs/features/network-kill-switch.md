@@ -29,6 +29,10 @@ machine confirms). The halt screens say which machines count.
 - Stops every kollab process of this install on each member machine, including
   the daemon that ran the command, but not the web UI engine or the bare
   `kollab --hub halt` you typed.
+- Also stops what those agents started from their terminal tool, including jobs
+  left running after the command finished (`cmd &`, `nohup`, `( ... ) &`,
+  `npm run dev &`). Your own terminals, tmux, screen and ssh sessions are left
+  alone.
 - A halt from a network where this machine counts covers the whole machine.
   A machine that does not want that should use `Do Not Count Here`.
 - A device that is offline halts as soon as it reconnects to a member that
@@ -57,3 +61,17 @@ Two compromised counting machines can lift any halt. Code running as you on a
 counting machine can do what you can do there. A machine kept away from every
 member that holds a halt stays running. Processes of other OS users and
 renamed processes are not reached. See the spec's "Limits We Accept".
+
+What an agent started can still outlive a halt when it:
+
+- left its process session and cleared its environment (`setsid` with
+  `env -i`), or detached a system program the same way;
+- started a tmux, screen or zellij session (the halt never touches those, so
+  your own are safe);
+- handed work to the system: `launchctl`, `cron`, `at`, `osascript`, or a
+  service manager.
+
+Stop those by hand. The terminal-tool refusal (`halt`, `resume` and `revoke`
+from an agent's tool) guards against an agent's own shell by accident. It is
+not a wall against another program running as you, which can edit the halt
+files directly. Containing that needs a sandbox.

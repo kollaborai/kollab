@@ -171,7 +171,7 @@ def caller_refusal(pid: int | None) -> str:
     (``nc``, ``zsh``), so an env check alone lets ``nc -U halt.sock`` from a tool shell through. An unknown
     caller, or one already gone, is refused (fail closed).
     """
-    from .network_halt import GUARD_REFUSAL, TOOL_SHELL_VARS, ancestors, read_process
+    from .network_halt import GUARD_REFUSAL, TOOL_SHELL_VARS, caller_chain, read_process
 
     if not pid or pid < 0:
         return GUARD_REFUSAL
@@ -181,19 +181,26 @@ def caller_refusal(pid: int | None) -> str:
         return GUARD_REFUSAL
     except PermissionError:
         pass
-    chain = ancestors(pid)
+    rows = caller_chain(pid)
+    if rows is None:  # F11/NEW-3: ps failed or a link is missing: the chain cannot be cleared
+        return GUARD_REFUSAL
+    chain = {p for p, _uid in rows}
     try:
         agent_pids = {int(a.get("pid") or 0) for a in _live_agents()}
     except Exception:  # presence unreadable: the chain cannot be cleared
         return GUARD_REFUSAL
     if (chain - {pid}) & agent_pids:
         return GUARD_REFUSAL
-    for p in chain:
+    for p, uid in rows:
         try:
             proc = read_process(p, with_cwd=False)
         except (OSError, ValueError):
             proc = None
-        if proc is not None and any(proc.env.get(v) for v in TOOL_SHELL_VARS):
+        if proc is None:
+            if uid == os.getuid():  # a process of this user whose environment cannot be read: fail closed
+                return GUARD_REFUSAL
+            continue  # another user's (login, sshd, sudo): an agent's tag cannot be cleared or set there
+        if any(proc.env.get(v) for v in TOOL_SHELL_VARS):
             return GUARD_REFUSAL
     return ""
 
@@ -686,6 +693,28 @@ def process_tree() -> dict[int, tuple[int, int, int]]:
     return tree
 
 
+def process_info() -> dict[int, tuple[float, str]]:
+    """pid -> (start time, command) for every process of this user (F11: pid-reuse and multiplexer checks)."""
+    info: dict[int, tuple[float, str]] = {}
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,lstart=,comm="],
+            capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return info
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 6 or not parts[0].isdigit():
+            continue
+        try:
+            start = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+        except (ValueError, OverflowError):
+            continue
+        info[int(parts[0])] = (start, parts[6] if len(parts) > 6 else "")
+    return info
+
+
 def candidate_pids() -> list[int]:
     """Every same-user process: a tool child (a CLI, a dev server, a nohup job) rarely names kollab."""
     return sorted(process_table())
@@ -715,6 +744,7 @@ async def sweep(
     install=None,
     waiters: Iterable[int] = (),
     tree: dict[int, tuple[int, int, int]] | None = None,
+    info: dict[int, tuple[float, str]] | None = None,
 ) -> list[tuple[dict, bool, str]]:
     """Stop what a halt stops here (``select_sweep``), each with ``stop``.
 
@@ -742,6 +772,8 @@ async def sweep(
         agent_pids=[int(a["pid"]) for a in in_scope_agents if a.get("pid")],
         protect=protect,
         tree=tree,
+        tool_shells=[e for a in in_scope_agents for e in (a.get("tool_shells") or []) if isinstance(e, list)],
+        info=info,
     )
     by_pid = {int(a.get("pid") or 0): a for a in in_scope_agents}
     records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
@@ -985,8 +1017,9 @@ class HaltListener:
         scopes = active_scopes(read_halt(self.root))
         # injected process lists (tests) get no live tree: a real ps would name real processes
         tree = None if self._processes else process_tree()
+        info = None if self._processes else process_info()
         results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
-                              waiters=waiter_pids(self.root), tree=tree)
+                              waiters=waiter_pids(self.root), tree=tree, info=info)
         stopped = [
             {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
             for r, ok, _ in results if ok

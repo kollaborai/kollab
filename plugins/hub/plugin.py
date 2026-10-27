@@ -1234,6 +1234,10 @@ class HubPlugin(BasePlugin):
 
         # Start presence + clean up orphan sockets from past crashes
         self._presence = PresenceManager(self._identity)
+        # kill switch F11: a new tool shell lands in presence at once, before it can background and exit
+        from kollabor_agent.shell_executor import TOOL_SHELL_LISTENERS
+
+        TOOL_SHELL_LISTENERS[:] = [self._presence.publish]
         PresenceManager.cleanup_stale_sockets()
         self._presence.startup_scan()
 
@@ -15627,6 +15631,9 @@ class HubPlugin(BasePlugin):
             await self._socket_server.stop()
 
         if self._presence:
+            from kollabor_agent.shell_executor import TOOL_SHELL_LISTENERS
+
+            TOOL_SHELL_LISTENERS[:] = []  # a late tool shell must not write the removed presence back
             self._presence.remove()
 
         if self._election:
