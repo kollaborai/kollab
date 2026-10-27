@@ -167,7 +167,8 @@ def test_an_existing_network_keeps_its_id_and_confirms_the_founder(tmp_path):
         f.halt_act("make_bootstrap", {"machine": direct.machine_hex})  # once
 
 
-def test_revocations_apply_on_two_counting_machines_and_spare_the_inviter(three, tmp_path):
+def test_revocations_apply_on_two_counting_machines_and_spare_the_inviter(three, tmp_path, monkeypatch):
+    monkeypatch.setattr(nh, "REVOKE_SETTLE", 0)  # F12: settled at once here
     f, b, c = three
     d = machine(tmp_path, "d")
     join(f, d)
@@ -749,7 +750,8 @@ def _trade_halt_books(*controls):
                     b.halt_merge(a.halt_payload())
 
 
-def test_revocation_quorum_completes_over_the_halt_exchange(three, tmp_path):
+def test_revocation_quorum_completes_over_the_halt_exchange(three, tmp_path, monkeypatch):
+    monkeypatch.setattr(nh, "REVOKE_SETTLE", 0)  # F12: settled at once here
     """D6: a halted network trades halt books only, and a revocation still reaches two signatures."""
     f, b, c = three
     d = machine(tmp_path, "d")

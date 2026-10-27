@@ -656,7 +656,10 @@ async def test_a_busy_device_is_read_again_and_the_others_stay_listed(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_path):
+async def test_a_revocation_two_counting_machines_sign_reaches_every_member(tmp_path, monkeypatch):
+    from plugins.hub import network_halt
+
+    monkeypatch.setattr(network_halt, "REVOKE_SETTLE", 0)  # F12: settled at once here
     """Kill switch slice A: v3 lists carry the records; two counting machines revoke."""
     from plugins.hub import network_halt as nh
     from plugins.hub.network_control import NetworkControl

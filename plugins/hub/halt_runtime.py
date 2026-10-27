@@ -693,25 +693,42 @@ def process_tree() -> dict[int, tuple[int, int, int]]:
     return tree
 
 
-def process_info() -> dict[int, tuple[float, str]]:
-    """pid -> (start time, command) for every process of this user (F11: pid-reuse and multiplexer checks)."""
-    info: dict[int, tuple[float, str]] = {}
+def _etime_seconds(text: str) -> int | None:
+    """``ps -o etime`` ([[dd-]hh:]mm:ss) as seconds; None when it is not one."""
+    days, _, rest = text.rpartition("-")
+    parts = rest.split(":")
+    if not (days == "" or days.isdigit()) or not 2 <= len(parts) <= 3 or not all(x.isdigit() for x in parts):
+        return None
+    seconds = 0
+    for x in parts:
+        seconds = seconds * 60 + int(x)
+    return seconds + int(days or 0) * 86400
+
+
+def process_info() -> dict[int, tuple[float, str, str]]:
+    """pid -> (start time, command, tty) for every process of this user (F11: pid reuse; F12: terminals).
+
+    F12: the start is now minus the elapsed time (``etime``), an epoch second, so a wall clock that
+    repeats an hour (the end of daylight saving time) cannot reorder starts the way ``lstart`` read as
+    local time does. ``command`` is ps's name and can be forged; nothing trusts it for a decision.
+    """
+    info: dict[int, tuple[float, str, str]] = {}
     try:
         out = subprocess.run(
-            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,lstart=,comm="],
+            ["/bin/ps", "-U", str(os.getuid()), "-o", "pid=,tty=,etime=,comm="],
             capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError):
         return info
+    now = time.time()
     for line in out.stdout.splitlines():
-        parts = line.split(None, 6)
-        if len(parts) < 6 or not parts[0].isdigit():
+        parts = line.split(None, 3)
+        if len(parts) < 3 or not parts[0].isdigit():
             continue
-        try:
-            start = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
-        except (ValueError, OverflowError):
+        elapsed = _etime_seconds(parts[2])
+        if elapsed is None:
             continue
-        info[int(parts[0])] = (start, parts[6] if len(parts) > 6 else "")
+        info[int(parts[0])] = (float(int(now) - elapsed), parts[3] if len(parts) > 3 else "", parts[1])
     return info
 
 
@@ -752,30 +769,42 @@ async def sweep(
     ``procs`` are ``Proc`` rows already read; ``protect`` holds the listener,
     the issuing CLI and its ancestors.
     """
-    from .network_halt import Install, _cli_args, in_scope, select_sweep
+    from .network_halt import Install, _cli_args, in_scope, pid_ok, select_sweep, shell_rows
 
     install = install or Install.current()
     protect = set(protect) | {int(w) for w in waiters}
-    protect |= {int(a.get("pid") or 0) for a in agents if a.get("state") == "halted"}
+    # F12/NEW-4: presence is a file anything running as the user can write: a record with an odd pid,
+    # project or tool_shells is skipped (its kollab is still found by its command line), never fatal
+    agents = [a for a in agents if isinstance(a, dict)]
+    protect |= {a["pid"] for a in agents if a.get("state") == "halted" and pid_ok(a.get("pid"))}
     # a presence pid is only stopped while it is still a kollab of this install (a pid is reused after a crash)
-    kollab_pids = {p.pid for p in procs if _cli_args(p, install) is not None}
-    in_scope_agents = [
-        a for a in agents
-        if a.get("state") != "halted" and int(a.get("pid") or 0) not in protect
-        and int(a.get("pid") or 0) in kollab_pids
-        and in_scope(str(a.get("project") or "/nonexistent-folder"), scopes)
-    ]
+    kollab_pids = set()
+    for p in procs:
+        try:
+            if _cli_args(p, install) is not None:
+                kollab_pids.add(p.pid)
+        except Exception:  # noqa: BLE001
+            continue
+    in_scope_agents = []
+    for a in agents:
+        try:
+            pid = a.get("pid")
+            if (a.get("state") != "halted" and pid_ok(pid) and pid not in protect and pid in kollab_pids
+                    and in_scope(str(a.get("project") or "/nonexistent-folder"), scopes)):
+                in_scope_agents.append(a)
+        except Exception:  # noqa: BLE001
+            logger.warning("halt sweep: skipped an unreadable presence record")
     chosen = select_sweep(
         procs,
         install=install,
         scopes=scopes,
-        agent_pids=[int(a["pid"]) for a in in_scope_agents if a.get("pid")],
+        agent_pids=[a["pid"] for a in in_scope_agents],
         protect=protect,
         tree=tree,
-        tool_shells=[e for a in in_scope_agents for e in (a.get("tool_shells") or []) if isinstance(e, list)],
+        tool_shells=[row for a in in_scope_agents for row in shell_rows(a.get("tool_shells"), a["pid"])],
         info=info,
     )
-    by_pid = {int(a.get("pid") or 0): a for a in in_scope_agents}
+    by_pid = {a["pid"]: a for a in in_scope_agents}
     records = [by_pid.get(p.pid) or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd} for p in chosen]
     results = await asyncio.gather(*(stop(r) for r in records))
     return [(r, ok, msg) for r, (ok, msg) in zip(records, results)]
@@ -807,6 +836,56 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
             os.kill(pid, sig)
 
     return kill
+
+
+async def fallback_stop(
+    scopes: list, agents: list, procs: list, protect: Iterable[int], *, install=None, grace: float = 3.0
+) -> list[tuple[dict, bool, str]]:
+    """F12/NEW-4: the sweep threw, so stop the in-scope agents by pid: SIGTERM, then SIGKILL after ``grace``.
+
+    The agents come from presence and from the kollab command lines already read; nothing they started
+    is chased here (that is what failed). Every step is guarded on its own.
+    """
+    from .network_halt import Install, _cli_args, _never_swept, in_scope, pid_ok
+
+    install = install or Install.current()
+    protect = set(protect) | {os.getpid()}
+    machine = "machine" in scopes
+    targets: dict[int, dict] = {}
+    for a in agents:
+        try:
+            pid = a.get("pid")
+            if not pid_ok(pid) or pid in protect or a.get("state") == "halted":
+                continue
+            if machine or in_scope(str(a.get("project") or "/nonexistent-folder"), scopes):
+                targets[pid] = a
+        except Exception:  # noqa: BLE001
+            continue
+    for p in procs:
+        try:
+            args = _cli_args(p, install)
+            if p.pid in protect or p.pid in targets or args is None or _never_swept(args, p):
+                continue
+            if machine or in_scope(p.cwd, scopes):
+                targets[p.pid] = {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd}
+        except Exception:  # noqa: BLE001
+            continue
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(_alive(p) for p in targets):
+        await asyncio.sleep(0.05)
+    for pid in targets:
+        if _alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    await asyncio.sleep(0.05)
+    return [(rec, True, f"stopped {rec.get('identity', pid)} (by pid)") for pid, rec in targets.items()]
 
 
 def _alive(pid: int) -> bool:
@@ -848,6 +927,7 @@ class HaltListener:
         self._hold_until = time.monotonic() + grace
         self.links: dict[str, Any] = {}  # network id -> HaltLink
         self.folders: dict[str, set[str]] = {}  # network id -> folders seen here
+        self.held: dict[str, Any] = {}  # F12: network id -> scope this listener holds, kept in memory too
         self._lock_fd: int | None = None
         self._server: asyncio.AbstractServer | None = None
         self._done = asyncio.Event()
@@ -906,17 +986,51 @@ class HaltListener:
         except (OSError, ValueError, AttributeError, TypeError) as error:
             logger.warning("halt listener: halt.json unreadable (%s); nothing is lifted", type(error).__name__)
             return  # the halt holds; the file may come back
+        data = self._restore_scopes(data)
         for net in list((data.get("scopes") or {})):
             book = (data.get("networks") or {}).get(net)
+            if book is None and net in self.held:
+                continue  # F12: the record was lost (halt.json deleted): hold until a member sends it back
             if not _book_active(net, book):
                 await self.hand_back(net)
         if not (read_halt_held(self.root).get("scopes") or {}) and time.monotonic() >= self._hold_until:
             self._done.set()
 
+    def _restore_scopes(self, data: dict[str, Any]) -> dict[str, Any]:
+        """F12: a halt this listener holds stays in halt.json even when the file was deleted or rewritten.
+
+        D7 found ``rm halt.json`` released a halted machine: the link's exchange wrote the halt back
+        without its scope, the listener then saw nothing to hold and exited. A scope missing for a
+        network this listener holds is written back from memory unless its book is known and no longer
+        active (lifted, or ``resume --local``), so a missing file fails closed.
+        """
+        scopes = data.get("scopes") if isinstance(data.get("scopes"), dict) else {}
+        books = data.get("networks") if isinstance(data.get("networks"), dict) else {}
+        lost = {
+            net: scope for net, scope in self.held.items()
+            if net not in scopes and (books.get(net) is None or _book_active(net, books.get(net)))
+        }
+        if not lost:
+            return data
+        logger.warning("halt listener: halt.json lost the scope of %d held network(s); writing it back", len(lost))
+
+        def restore(fresh: dict) -> None:
+            fresh.setdefault("scopes", {}).update({n: v for n, v in lost.items() if n not in fresh["scopes"]})
+            folders = fresh.setdefault("folders", {})
+            for net in lost:
+                folders[net] = sorted(set(folders.get(net) or []) | self.folders.get(net, set()))
+
+        update_halt(restore, self.root)
+        try:
+            return read_halt(self.root)
+        except (OSError, ValueError, AttributeError, TypeError):
+            return {**data, "scopes": {**scopes, **lost}}
+
     async def _reopen_links(self) -> None:
         """A listener started by a waiter after a reboot takes the links again."""
         data = read_halt_held(self.root)
         for net, scope in (data.get("scopes") or {}).items():
+            self.held[net] = scope
             if isinstance(scope, list) and scope:
                 self.folders.setdefault(net, set()).update(scope)
             # a machine-wide scope names no folder: reopen from the hand-off folders recorded with it
@@ -1004,6 +1118,8 @@ class HaltListener:
         if isinstance(scope, list) and not scope:
             scope = "machine"  # F7: an empty folder list is malformed, so it holds the machine
 
+        self.held[net] = scope
+
         def record(data: dict) -> None:
             data.setdefault("scopes", {})[net] = scope
             seen = set(data.setdefault("folders", {}).get(net, []))
@@ -1013,13 +1129,20 @@ class HaltListener:
         protect = {os.getpid(), *(int(p) for p in order.get("protect") or [] if str(p).isdigit()),
                    *waiter_pids(self.root)}
         stop = self._stop or _default_stop(protect, self.root)
-        procs = self._processes() if self._processes else _read_candidates()
         scopes = active_scopes(read_halt(self.root))
-        # injected process lists (tests) get no live tree: a real ps would name real processes
-        tree = None if self._processes else process_tree()
-        info = None if self._processes else process_info()
-        results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
-                              waiters=waiter_pids(self.root), tree=tree, info=info)
+        procs: list = []
+        sweep_error = ""
+        try:
+            procs = self._processes() if self._processes else _read_candidates()
+            # injected process lists (tests) get no live tree: a real ps would name real processes
+            tree = None if self._processes else process_tree()
+            info = None if self._processes else process_info()
+            results = await sweep(scopes, agents=agents, procs=procs, stop=stop, protect=protect,
+                                  waiters=waiter_pids(self.root), tree=tree, info=info)
+        except Exception as error:  # noqa: BLE001 - F12/NEW-4: the agents still stop
+            sweep_error = f"{type(error).__name__}: {error}"[:200]
+            logger.exception("halt listener: sweep failed; stopping agents by pid")
+            results = await fallback_stop(scopes, agents, procs, protect | waiter_pids(self.root))
         stopped = [
             {"identity": r.get("identity", "?"), "folder": r.get("project", ""), "service": bool(r.get("service"))}
             for r, ok, _ in results if ok
@@ -1031,7 +1154,10 @@ class HaltListener:
 
         update_halt(note, self.root)
         await self.open_links(net)
-        return {"ok": True, "stopped": [m for _, _, m in results], "count": len(stopped)}
+        reply = {"ok": True, "stopped": [m for _, _, m in results], "count": len(stopped)}
+        if sweep_error:
+            reply["sweep_error"] = sweep_error
+        return reply
 
     def _remember_folder(self, folder: str) -> None:
         for net in self._networks_of(folder):
@@ -1078,6 +1204,8 @@ class HaltListener:
                     return
             await link.close()  # releases the relay-owner lock
         if mark:
+            self.held.pop(net, None)
+
             def lift(data: dict) -> None:
                 (data.get("scopes") or {}).pop(net, None)
 
@@ -1434,6 +1562,13 @@ async def _act(folder: str, control, action: str, payload: dict, root: Path | No
     if listener_running(root):
         reply = await sock_call({"op": "act", "folder": folder, "action": action, "payload": payload}, root)
         if not reply.get("ok"):
+            if action == "resume_local" and not reply.get("error"):
+                # F12 (D7): the listener lifted the halt and exited before it answered; say what happened
+                if not folder_halted(folder, read_halt_held(root)):
+                    from .network_halt import LOCAL_RESUME_LINE
+
+                    return {"ok": True, "line": LOCAL_RESUME_LINE}
+                raise RuntimeError("The halt listener closed without an answer; this folder is still halted.")
             raise RuntimeError(reply.get("error") or "the halt listener refused")
         return reply
     return await _via_owner(folder, control, action, root, payload)

@@ -62,16 +62,29 @@ counting machine can do what you can do there. A machine kept away from every
 member that holds a halt stays running. Processes of other OS users and
 renamed processes are not reached. See the spec's "Limits We Accept".
 
-What an agent started can still outlive a halt when it:
+What a halt stops: the kollab agents on every member machine, their tool
+shells, and the plain background jobs those shells left behind (`nohup`,
+`( ... ) &`, `disown`, `npm run dev &`). One odd presence file (NaN, junk, a
+forged row) never stops the halt: the agents are still stopped by pid.
 
-- left its process session and cleared its environment (`setsid` with
-  `env -i`), or detached a system program the same way;
-- started a tmux, screen or zellij session (the halt never touches those, so
-  your own are safe);
-- handed work to the system: `launchctl`, `cron`, `at`, `osascript`, or a
-  service manager.
+What survives a halt (stop these by hand):
 
-Stop those by hand. The terminal-tool refusal (`halt`, `resume` and `revoke`
-from an agent's tool) guards against an agent's own shell by accident. It is
-not a wall against another program running as you, which can edit the halt
-files directly. Containing that needs a sandbox.
+- anything an agent starts inside tmux, screen or zellij (the halt never
+  touches them, so yours are safe too);
+- a daemon that forks and calls `setsid` with a scrubbed or unreadable
+  environment (`ssh -fN`, `setsid env -i ...`);
+- background work started by ACP adapters, MCP servers and config hooks once
+  the process that started them died;
+- leftovers of an agent that already exited or restarted before the halt;
+- jobs handed to launchd, cron, at, osascript or a service manager;
+- on Linux, background jobs reparented to `systemd --user` are stopped only
+  when they carry the agent's tag; untagged ones survive.
+
+A revocation that two counting machines sign applies on every machine two
+minutes after its second signature, so crossing revocations reach one answer
+everywhere; one delivered later than that can still split.
+
+Lifting a halt from an agent's terminal tool is refused. That refusal guards
+against an agent's own shell by accident; it is not a wall against another
+program running as you, which can edit the halt files directly. Containing
+that needs a sandbox.

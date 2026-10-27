@@ -188,6 +188,10 @@ class MembershipSync:
 
     async def tick(self) -> None:
         client = self._client
+        try:  # F12: a revocation applies once settled (REVOKE_SETTLE), not only when a list arrives
+            client.control.apply_revocations()
+        except Exception as error:
+            logger.warning("network members: revocations not applied (%s)", type(error).__name__)
         members, revoked = client.membership()
         # Halts, proposals, chain heads and the control records join the digest,
         # so any change to them resends the list.

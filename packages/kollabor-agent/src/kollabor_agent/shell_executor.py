@@ -43,7 +43,8 @@ def _group_alive(pid: int) -> bool:
 def record_tool_shell(pid: int, started: float) -> None:
     """Remember a tool shell; drop entries whose shell and group are gone, keep the newest 64."""
     kept = [e for e in TOOL_SHELLS if _group_alive(int(e[0]))]
-    TOOL_SHELLS[:] = (kept + [[pid, started]])[-MAX_TOOL_SHELLS:]
+    # F12: the third field is the shell's parent at record time (this agent); the halt checks it
+    TOOL_SHELLS[:] = (kept + [[pid, started, os.getpid()]])[-MAX_TOOL_SHELLS:]
     for listener in list(TOOL_SHELL_LISTENERS):
         try:
             listener()

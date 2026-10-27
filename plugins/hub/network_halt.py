@@ -18,11 +18,14 @@ import ctypes
 import ctypes.util
 import hashlib
 import json
+import logging
+import math
 import os
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -31,6 +34,8 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
 from .relay_state import KEY
+
+logger = logging.getLogger(__name__)
 
 FOLDER_MACHINE_DOMAIN = b"kollab-folder-machine-v1\n"
 FOLDER_BIND_DOMAIN = b"kollab-folder-bind-v1\n"
@@ -773,28 +778,39 @@ def revocation_ok(record: Any, network: str) -> bool:
     )
 
 
+REVOKE_SETTLE = 120  # seconds a revocation waits after its second signature before any machine applies it
+
+
 def revocations_to_apply(
-    records: Iterable[dict], view: Counting, *, protected: Iterable[str] = (), orders: Iterable[dict] = ()
+    records: Iterable[dict],
+    view: Counting,
+    *,
+    protected: Iterable[str] = (),
+    orders: Iterable[dict] = (),
+    recount: Callable[[set[str]], Counting] | None = None,
+    now: float | None = None,
 ) -> set[str]:
     """Keys whose revocation this machine applies on other machines' word.
 
-    ``protected`` holds this device's primary and the folder key that admitted
-    it (PR #346's ``state.inviter``): never revoked on any peer's word.
-    A key naming a machine key revokes every folder key bound to it.
-    ``orders`` are halts this machine took: each ``revoke`` entry counts as a
-    revocation record from the order's issuer (spec "Data").
+    F12/NEW-2: the answer is a pure function of the signed records (and the clock): ``view`` is the
+    roster before any revocation, never what this machine already applied, and keys are taken in one
+    order every machine computes alike, by the time their second signer signed (``issued_at``), then
+    key. Each key needs two counting machines other than its target, counted after the keys before it
+    are gone (``recount(removed)`` recounts the roster without them), and is skipped when it would
+    leave fewer than two counting machines. A key applies only ``REVOKE_SETTLE`` seconds after its
+    second signature, so crossing revocations (B+C -> A, A+B -> C) that reach machines in different
+    orders are all in hand before either is applied. ``protected`` (this device's primary and the
+    folder key that admitted it) only stops this machine applying a key; the order is unchanged.
+    A key naming a machine key revokes every folder key bound to it. ``orders`` are halts this
+    machine took: each ``revoke`` entry counts as a revocation record from the order's issuer.
     """
-    protected = set(protected)
-    for folder, machine in view.folder_machine.items():
-        if folder in protected:
-            protected.add(machine)
-    signers: dict[str, set[str]] = {}
+    now = time.time() if now is None else now
+    signed: dict[str, dict[str, int]] = {}  # key -> signing machine -> earliest issued_at
     for r in records:
-        if not revocation_ok(r, view.network):
+        if not revocation_ok(r, view.network) or view.machine_of(r["by"]) != r["machine"]:
             continue
-        if view.machine_of(r["by"]) != r["machine"]:
-            continue
-        signers.setdefault(r["revoked"], set()).add(r["machine"])
+        mine = signed.setdefault(r["revoked"], {})
+        mine[r["machine"]] = min(_stamp(r), mine.get(r["machine"], _stamp(r)))
     for order in orders:
         if not order_ok(order, view.network) or order.get("action") != "halt":
             continue
@@ -802,23 +818,32 @@ def revocations_to_apply(
             continue
         for key in order["revoke"]:
             if isinstance(key, str) and KEY.fullmatch(key):
-                signers.setdefault(key, set()).add(order["machine"])
+                mine = signed.setdefault(key, {})
+                mine[order["machine"]] = min(_stamp(order), mine.get(order["machine"], _stamp(order)))
+
+    def counting(removed: set[str]) -> set[str]:
+        return set(recount(removed).counting) if recount else view.counting - removed
+
+    ready = sorted((sorted(t.values())[1], key) for key, t in signed.items() if len(t) >= 2)
     out: set[str] = set()
-    # F11/NEW-2: one deterministic pass that remembers what it already revoked, so two crossing revocations
-    # (B+C -> A and A+B -> C) cannot both apply and leave fewer than two counting machines
     removed: set[str] = set()
-    for key in sorted(signers):
-        machines = signers[key]
-        target_machine = view.machine_of(key) or key
-        gone = view.revoked | removed
-        good = {m for m in machines if view.counts(m) and m != target_machine and m not in gone}
-        if len(good) < 2 or key in protected or target_machine in protected:
+    for second, key in ready:
+        if second + REVOKE_SETTLE > now:
+            break  # not settled: neither it nor anything signed later applies yet
+        target = view.machine_of(key) or key
+        if target in removed:
+            out.add(key)
             continue
-        # a machine revoked in this pass no longer signs, so two counting machines always remain
-        removed.add(target_machine)
+        now_counting = counting(removed)
+        good = {m for m in signed[key] if m in now_counting and m != target}
+        if len(good) < 2 or len(counting(removed | {target})) < 2:
+            continue
+        removed.add(target)
         out.add(key)
-        out.update(f for f, m in view.folder_machine.items() if m == target_machine)
-    return out - protected
+        out.update(f for f, m in view.folder_machine.items() if m == target)
+    guarded = set(protected)
+    guarded |= {m for f, m in view.folder_machine.items() if f in guarded}
+    return {k for k in out if k not in guarded and (view.machine_of(k) or k) not in guarded}
 
 
 def revoke_leaves_quorum(view: Counting, target: str) -> bool:
@@ -1035,78 +1060,136 @@ def select_sweep(
     agent_pids: Iterable[int] = (),
     protect: Iterable[int] = (),
     tree: dict[int, tuple[int, int, int]] | None = None,
-    tool_shells: Iterable[tuple[int, float]] = (),
-    info: dict[int, tuple[float, str]] | None = None,
+    tool_shells: Iterable[tuple] = (),
+    info: dict[int, tuple] | None = None,
 ) -> list[Proc]:
     """Processes a halt stops on this machine (section 1, step 3).
 
     ``agent_pids`` are the in-scope agents from presence; ``protect`` holds
     the listener, the caller and its ancestors. ``tool_shells`` are the
-    (pid, start) pairs those agents recorded in presence; ``info`` is
-    pid -> (start time, command) from ``ps`` (F11).
+    (pid, start, owning agent pid) rows of those agents (``shell_rows``);
+    ``info`` is pid -> (start time, command, tty) from ``ps`` (F11, F12).
+    F12: one odd process or row is skipped, never the whole sweep.
     """
     procs = list(procs)
     machine_wide = "machine" in scopes
     protected = set(protect)
+    agent_set = {p for p in agent_pids if pid_ok(p)}
     chosen: dict[int, Proc] = {}
     for p in procs:
-        if p.pid in protected:
-            continue
-        if p.pid in set(agent_pids):
-            chosen[p.pid] = p
-            continue
-        args = _cli_args(p, install)
-        if args is None or _never_swept(args, p):
-            continue
-        if machine_wide or in_scope(p.cwd, scopes):
-            chosen[p.pid] = p
+        try:
+            if p.pid in protected:
+                continue
+            if p.pid in agent_set:
+                chosen[p.pid] = p
+                continue
+            args = _cli_args(p, install)
+            if args is None or _never_swept(args, p):
+                continue
+            if machine_wide or in_scope(p.cwd, scopes):
+                chosen[p.pid] = p
+        except Exception as e:  # noqa: BLE001 - one unreadable process never stops the halt
+            logger.warning("halt sweep: skipped pid %r (%s)", getattr(p, "pid", "?"), type(e).__name__)
     # R6-2/F10: an env tag (KOLLAB_AGENT_PID, KOLLAB_OWNER_PID) is never trusted on its own: a tagged orphan
     # (ssh -fN, nohup) or a multiplexer pane (tmux, screen, zellij, abduco, dtach) is not the agent's. Only
     # its ppid descendants are swept (below); with no process tree (ps failed) nothing tagged-only is.
     if tree:
         known = {p.pid: p for p in procs}
-        for pid in _tree_members(set(chosen), tree, protected):
-            if pid in chosen:
-                continue
-            p = known.get(pid) or Proc(pid, tree[pid][0], [], {}, "")
-            args = _cli_args(p, install)
-            if args is not None and _never_swept(args, p):
-                continue
-            if args is None and any(Path(a).name == "kollab" or "kollabor_cli_main" in a for a in p.argv[:3]):
-                continue  # another install's kollab is never ours to stop
-            chosen[pid] = p
-        info = info or {}
-        agents = set(agent_pids) & set(chosen)
-        for pid in _backgrounded(agents, tree, info, protected, tool_shells, known):
-            if pid in chosen:
-                continue
-            p = known.get(pid) or Proc(pid, tree[pid][0], [], {}, "")
-            args = _cli_args(p, install)
-            if args is not None and _never_swept(args, p):
-                continue
-            if args is None and any(Path(a).name == "kollab" or "kollabor_cli_main" in a for a in p.argv[:3]):
-                continue
-            chosen[pid] = p
+        agents = agent_set & set(chosen)
+        extra = _tree_members(set(chosen), tree, protected) | _backgrounded(
+            agents, tree, info or {}, protected, tool_shells, known
+        )
+        for pid in extra:
+            try:
+                if pid in chosen:
+                    continue
+                p = known.get(pid) or Proc(pid, tree[pid][0], [], {}, "")
+                args = _cli_args(p, install)
+                if args is not None and _never_swept(args, p):
+                    continue
+                if args is None and any(Path(a).name == "kollab" or "kollabor_cli_main" in a for a in p.argv[:3]):
+                    continue  # another install's kollab is never ours to stop
+                chosen[pid] = p
+            except Exception as e:  # noqa: BLE001
+                logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
     return list(chosen.values())
 
 
 MULTIPLEXERS = frozenset({"tmux", "screen", "zellij", "abduco", "dtach"})
+# F12: login and session programs a forged presence row could name; never swept from a recorded row
+SESSION_PROGRAMS = frozenset({"sshd", "sshd-session", "login", "launchd", "systemd", "init", "su", "sudo"})
+SYSTEM_BIN_DIRS = frozenset({"/bin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/opt/homebrew/bin",
+                             "/opt/local/bin", "/snap/bin", "/home/linuxbrew/.linuxbrew/bin",
+                             "/lib/systemd", "/usr/lib/systemd"})
+PACKAGE_TREES = ("/opt/homebrew/Cellar/", "/usr/local/Cellar/", "/home/linuxbrew/.linuxbrew/Cellar/",
+                 "/nix/store/", "/opt/local/")
 REUSE_SLACK = 5  # seconds between recording a tool shell and the kernel starting it
+MAX_SHELL_ROWS = 256  # rows read from one presence record; the agent keeps 64
+PID_MAX = 1 << 22  # Linux's ceiling (macOS stops at 99999)
+NO_TTY = frozenset({"", "?", "??", "-"})
 
 
-def _is_mux(pid: int, info: dict[int, tuple[float, str]], known: dict[int, Proc]) -> bool:
-    names = [info.get(pid, (0.0, ""))[1], *(known[pid].argv[:1] if pid in known else [])]
-    return any(Path(n.split(":")[0].strip()).name.lower() in MULTIPLEXERS for n in names if n)
+def pid_ok(value: Any) -> bool:
+    """A real pid: an int (not a bool, float or string) above init and below every OS's ceiling."""
+    return type(value) is int and 1 < value < PID_MAX
 
 
-def _mux_line(pid: int, tree: dict[int, tuple[int, int, int]], info, known) -> bool:
-    """``pid`` or any ancestor is a multiplexer (tmux, screen, zellij, abduco, dtach): a person's pane."""
-    seen: set[int] = set()
-    while pid > 1 and pid not in seen:
-        if _is_mux(pid, info, known):
+def _time_ok(value: Any) -> bool:
+    if type(value) is int:  # compared as an int: a huge one never reaches float()
+        return 0 <= value < 10**11
+    return type(value) is float and math.isfinite(value) and 0 <= value < 1e11
+
+
+def shell_rows(entries: Any, owner: Any) -> list[tuple[int, float, int]]:
+    """F12/NEW-4: one agent's presence ``tool_shells`` as (pid, start, owner) rows; the rest is dropped.
+
+    The value comes from a file anything running as the user can write, and ``json`` reads NaN and
+    Infinity: only ``[pid, start]`` or ``[pid, start, ppid]`` with a real pid, a finite start and, when
+    given, the agent itself as the parent (a tool shell is the agent's child) is kept, at most
+    ``MAX_SHELL_ROWS`` of them.
+    """
+    out: list[tuple[int, float, int]] = []
+    if not isinstance(entries, list) or not pid_ok(owner):
+        return out
+    for e in entries[:MAX_SHELL_ROWS]:
+        if not isinstance(e, list) or len(e) not in (2, 3) or not pid_ok(e[0]) or not _time_ok(e[1]):
+            continue
+        if len(e) == 3 and not (pid_ok(e[2]) and e[2] == owner):
+            continue
+        out.append((e[0], float(e[1]), owner))
+    return out
+
+
+def exe_path(pid: int) -> str:
+    """The executable ``pid`` runs (``/proc/<pid>/exe``, macOS ``proc_pidpath``), never its argv[0].
+
+    F12: ``exec -a tmux sleep`` names itself tmux in ps; the kernel's path does not. "" when unreadable.
+    """
+    try:
+        if sys.platform.startswith("linux"):
+            return os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+        if sys.platform == "darwin":
+            buf = ctypes.create_string_buffer(4096)
+            n = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath(int(pid), buf, 4096)
+            return buf.value.decode(errors="replace") if n > 0 else ""
+    except (OSError, ValueError, TypeError, OverflowError):
+        return ""
+    return ""
+
+
+def _system_program(path: str, names: frozenset[str]) -> bool:
+    """``path`` is one of ``names`` installed by the system or a package manager (not a renamed copy)."""
+    if not path:
+        return False
+    real = os.path.realpath(path)
+    for cand in {path, real}:
+        p = Path(cand)
+        if p.name.lower() not in names:
+            continue
+        if str(p.parent) in SYSTEM_BIN_DIRS:
             return True
-        seen.add(pid)
-        pid = tree.get(pid, (0, 0, 0))[0]
+        if cand.startswith(PACKAGE_TREES) and p.parent.name in ("bin", "sbin"):
+            return True
     return False
 
 
@@ -1122,9 +1205,9 @@ def _sid(pid: int, tree: dict[int, tuple[int, int, int]]) -> int:
 def _backgrounded(
     agents: set[int],
     tree: dict[int, tuple[int, int, int]],
-    info: dict[int, tuple[float, str]],
+    info: dict[int, tuple],
     protected: set[int],
-    tool_shells: Iterable[tuple[int, float]],
+    tool_shells: Iterable[tuple],
     known: dict[int, Proc],
 ) -> set[int]:
     """F11: what the stopped agents backgrounded and left behind once their tool shell exited.
@@ -1132,40 +1215,83 @@ def _backgrounded(
     1. A process in the group or session of a recorded tool shell (tool shells are session leaders, so
        ``cmd &``, ``nohup``, ``disown`` and ``( ... ) &`` stay in it), started no earlier than that shell
        (a pid reused since is not ours).
-    2. An orphan (ppid 1) whose readable environment names a stopped agent in ``KOLLAB_AGENT_PID`` and
-       that started after that agent.
-    A multiplexer server or anything under one, and every group or session holding a protected pid, is
-    left alone; a process with no known start time is never chosen.
+    2. An orphan (ppid 1, or a Linux ``systemd --user`` subreaper) whose readable environment names a
+       stopped agent in ``KOLLAB_AGENT_PID`` and that started after that agent.
+    F12: a row counts only for the agent that wrote it, recorded no earlier than that agent started; a
+    recorded shell still alive must be that agent's child (a forged row names a login shell, whose
+    parent is a terminal). Never chosen: a protected pid, every group or session
+    holding one, anything with a controlling terminal (a person's shell; tool shells have none), a
+    login or session program, a multiplexer server or anything under one (judged by the real
+    executable), and anything with no known start time.
     """
-    unsafe = {tree[p][1] for p in protected if p in tree} | {_sid(p, tree) for p in protected if p in tree}
+    guard = set(protected)  # the listener, the halting CLI and its ancestors, waiters
+    unsafe: set[int] = set()
+    for p in protected:
+        if p in tree:
+            unsafe |= {tree[p][1], _sid(p, tree)}
+    exes: dict[int, str] = {}
+
+    def exe(pid: int) -> str:
+        if pid not in exes:
+            have = known[pid].exe if pid in known else ""
+            exes[pid] = have or exe_path(pid)
+        return exes[pid]
+
     shells: dict[int, float] = {}
-    for entry in tool_shells:
+    for row in tool_shells:
         try:
-            pid, start = int(entry[0]), float(entry[1])
-        except (TypeError, ValueError, IndexError):
+            pid, start, owner = row
+            if not (pid_ok(pid) and pid_ok(owner) and _time_ok(start)) or owner not in agents or owner not in info:
+                continue
+            if pid in guard or pid in unsafe or start + 1 < info[owner][0]:
+                continue  # recorded before its agent started: not a tool shell of it
+            if pid in info:
+                if info[pid][0] > start + REUSE_SLACK:
+                    continue  # that pid is alive again as a later process: the shell's group is gone
+                if tree.get(pid, (0, 0, 0))[0] != owner:
+                    continue  # a live tool shell is its agent's child; anything else was named by a forged row
+            shells[pid] = min(start, shells.get(pid, start))
+        except (TypeError, ValueError, OverflowError, KeyError):
             continue
-        if pid <= 1 or pid in protected or pid in unsafe:
-            continue
-        if pid in info and int(info[pid][0]) > int(start) + REUSE_SLACK:
-            continue  # that pid is alive again as a later process: the shell's group is gone, the entry stale
-        shells[pid] = min(start, shells.get(pid, start))
+
+    def spared(pid: int) -> bool:
+        tty = info[pid][2] if len(info[pid]) > 2 else ""
+        if tty not in NO_TTY or _system_program(exe(pid), SESSION_PROGRAMS):
+            return True
+        seen: set[int] = set()
+        cur = pid
+        while cur > 1 and cur not in seen:
+            if _system_program(exe(cur), MULTIPLEXERS):
+                return True
+            seen.add(cur)
+            cur = tree.get(cur, (0, 0, 0))[0]
+        return False
+
+    def orphan(ppid: int) -> bool:
+        if ppid == 1:
+            return True
+        # Linux systemd --user is a subreaper: orphans land on it, not on pid 1
+        return ppid in tree and tree[ppid][0] <= 1 and _system_program(exe(ppid), frozenset({"systemd"}))
+
     out: set[int] = set()
     for pid, (ppid, pg, _sid_) in tree.items():
-        if pid in protected or pid not in info:
-            continue
-        started = info[pid][0]
-        hit = False
-        if shells:
-            sid = _sid(pid, tree)
-            for key in (pg, sid):
-                if key in shells and int(started) >= int(shells[key]):
-                    hit = True
-        if not hit and ppid == 1 and pid in known:
-            tag = known[pid].env.get("KOLLAB_AGENT_PID", "")
-            owner = int(tag) if tag.isdigit() else 0
-            hit = owner in agents and owner in info and started >= info[owner][0]
-        if hit and not _mux_line(pid, tree, info, known):
-            out.add(pid)
+        try:
+            if pid in guard or pid in unsafe or pid not in info:
+                continue
+            started = info[pid][0]
+            hit = False
+            if shells:
+                for key in (pg, _sid(pid, tree)):
+                    if key in shells and key not in unsafe and int(started) >= int(shells[key]):
+                        hit = True
+            if not hit and pid in known and orphan(ppid):
+                tag = known[pid].env.get("KOLLAB_AGENT_PID", "")
+                owner = int(tag) if tag.isdigit() and len(tag) < 9 else 0
+                hit = owner in agents and owner in info and started >= info[owner][0]
+            if hit and not spared(pid):
+                out.add(pid)
+        except Exception as e:  # noqa: BLE001 - one odd process never stops the sweep
+            logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
     return out
 
 
@@ -1217,27 +1343,45 @@ def ancestors(pid: int) -> set[int]:
     return out
 
 
+PROC = Path("/proc")
+
+
+def _proc_row(pid: int) -> tuple[int, int] | None:
+    """(ppid, uid) of ``pid`` from ``/proc`` (Linux), None when it cannot be read."""
+    try:
+        ppid = int((PROC / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        for line in (PROC / str(pid) / "status").read_text().splitlines():
+            if line.startswith("Uid:"):
+                return ppid, int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def caller_chain(pid: int) -> list[tuple[int, int]] | None:
     """F11/NEW-3: ``pid`` and its ancestors as (pid, uid), nearest first; None when the chain cannot be read.
 
     Unlike ``ancestors`` a failed ``ps`` or a missing link is not read as "no parent": the caller check
-    fails closed on it.
+    fails closed on it. F12: where there is no ``ps`` (a slim Linux image) the chain is read from
+    ``/proc``; with neither it is refused.
     """
+    rows: dict[int, tuple[int, int]] = {}
     try:
         out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,uid="], capture_output=True, text=True, timeout=5)
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and all(x.isdigit() for x in parts):
+                rows[int(parts[0])] = (int(parts[1]), int(parts[2]))
     except (OSError, subprocess.SubprocessError):
-        return None
-    rows: dict[int, tuple[int, int]] = {}
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 3 and all(x.isdigit() for x in parts):
-            rows[int(parts[0])] = (int(parts[1]), int(parts[2]))
+        rows = {}
+    look: Callable[[int], tuple[int, int] | None] = rows.get if rows else _proc_row
     chain: list[tuple[int, int]] = []
     cur = pid
     for _ in range(64):
-        if cur not in rows:
+        row = look(cur)
+        if row is None:
             return None
-        ppid, uid = rows[cur]
+        ppid, uid = row
         chain.append((cur, uid))
         if ppid <= 1:
             return chain

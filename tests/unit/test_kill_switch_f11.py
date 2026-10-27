@@ -47,11 +47,12 @@ def _group(pgid: int) -> set[int]:
     return {int(a) for a, b in (line.split() for line in out.splitlines()) if int(b) == pgid}
 
 
-def _select(agent: subprocess.Popen, shells, procs=()):
+def _select(agent: subprocess.Popen, shells, procs=(), tree=None):
     me = nh.Proc(agent.pid, os.getpid(), ["/opt/this-install/bin/kollab"], {}, "/work")
+    rows = [(pid, start, agent.pid) for pid, start in shells]  # F12: each row names the agent that wrote it
     return {p.pid for p in nh.select_sweep(
         [me, *procs], install=INSTALL, scopes=["machine"], agent_pids=[agent.pid],
-        protect=nh.ancestors(os.getpid()), tree=hr.process_tree(), tool_shells=shells, info=hr.process_info(),
+        protect=nh.ancestors(os.getpid()), tree=tree or hr.process_tree(), tool_shells=rows, info=hr.process_info(),
     )}
 
 
@@ -160,8 +161,12 @@ def test_pid_reuse_guard(real):
     assert other.pid not in _select(real["agent"], [(other.pid, born - 100)])
     # the group started before the record: a pid recorded later cannot own it
     assert other.pid not in _select(real["agent"], [(other.pid, born + 100)])
-    # sanity: a matching record does take it, so the two lines above are the guard at work
-    assert other.pid in _select(real["agent"], [(other.pid, born)])
+    # F12: a live recorded pid that is not the agent's child is a forged row
+    assert other.pid not in _select(real["agent"], [(other.pid, born)])
+    # sanity: a matching record of a live child of the agent does take it, so the lines above are the guards
+    tree = hr.process_tree()
+    tree[other.pid] = (real["agent"].pid, *tree[other.pid][1:])
+    assert other.pid in _select(real["agent"], [(other.pid, born)], tree=tree)
 
 
 def test_no_process_tree_sweeps_nothing_recorded_or_tagged():
@@ -176,7 +181,7 @@ def test_tagged_orphan_needs_a_start_after_the_agent_and_no_multiplexer():
     agent = nh.Proc(100, 50, ["/opt/this-install/bin/kollab"], {}, "/work")
     early = nh.Proc(130, 1, ["python"], {"KOLLAB_AGENT_PID": "100"}, "/w")
     late = nh.Proc(140, 1, ["python"], {"KOLLAB_AGENT_PID": "100"}, "/w")
-    srv = nh.Proc(150, 1, ["/opt/homebrew/bin/tmux"], {"KOLLAB_AGENT_PID": "100"}, "/w")
+    srv = nh.Proc(150, 1, ["/opt/homebrew/bin/tmux"], {"KOLLAB_AGENT_PID": "100"}, "/w", "/opt/homebrew/bin/tmux")
     under = nh.Proc(161, 1, ["python"], {"KOLLAB_AGENT_PID": "100"}, "/w")
     tree = {50: (1, 50, 50), 100: (50, 100, 50), 130: (1, 130, 130), 140: (1, 140, 140), 150: (1, 150, 150),
             160: (150, 160, 160), 161: (1, 161, 161)}
@@ -215,12 +220,12 @@ def test_tool_shells_are_recorded_pruned_capped_and_published(monkeypatch):
     live = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
     try:
         se.record_tool_shell(live.pid, 2.0)
-        assert se.TOOL_SHELLS == [[live.pid, 2.0]] and calls == [1, 1]  # the dead shell's group is gone
+        assert se.TOOL_SHELLS == [[live.pid, 2.0, os.getpid()]] and calls == [1, 1]  # the dead shell's group is gone
         for i in range(100):
             se.record_tool_shell(live.pid, float(i))
         assert len(se.TOOL_SHELLS) == se.MAX_TOOL_SHELLS
         me = AgentRuntime(name="lapis", identity="lapis", agent_id="a1").to_presence_dict()
-        assert me["tool_shells"][-1] == [live.pid, 99.0] and len(me["tool_shells"]) == se.MAX_TOOL_SHELLS
+        assert me["tool_shells"][-1] == [live.pid, 99.0, os.getpid()] and len(me["tool_shells"]) == se.MAX_TOOL_SHELLS
         peer = AgentRuntime(name="ruby", identity="ruby", agent_id="a2", pid=1).to_presence_dict()
         assert peer["tool_shells"] == []  # only this process's own shells
     finally:
@@ -272,6 +277,7 @@ def test_new_3_a_caller_chain_that_cannot_be_read_is_refused(monkeypatch):
         raise OSError("no ps")
 
     monkeypatch.setattr(nh.subprocess, "run", broken)
+    monkeypatch.setattr(nh, "PROC", nh.Path("/nonexistent-proc"))  # F12: and no /proc to fall back on
     assert hr.caller_refusal(os.getpid()) == nh.GUARD_REFUSAL
 
 

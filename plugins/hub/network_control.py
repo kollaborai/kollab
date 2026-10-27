@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import time
@@ -574,11 +575,20 @@ class NetworkControl:
         return protected
 
     def revocations_to_apply(self) -> set[str]:
+        # F12/NEW-2: judged from the roster before any revocation (revoked folders still listed, none
+        # applied), so what this machine already applied, and in which order it heard, changes nothing
+        roster = self.roster()
+        roster.member_folders = (roster.member_folders or set()) | set(self.client.state.revoked)
+
+        def recount(removed: set[str]) -> nh.Counting:
+            return nh.count_machines(dataclasses.replace(roster, revoked_machines=set(removed)))
+
         return nh.revocations_to_apply(
             self._fresh().get("revocations", []),
-            self.view(),
+            recount(set()),
             protected=self._protected(),
             orders=self.halt_book().halts.values(),
+            recount=recount,
         )
 
     def apply_revocations(self) -> None:
@@ -960,6 +970,10 @@ class HaltSync:
 
     async def tick(self) -> None:
         control = self._client.control
+        try:  # F12: a revocation applies once settled (REVOKE_SETTLE), also while the network is halted
+            control.apply_revocations()
+        except Exception as error:
+            logger.warning("halt sync: revocations not applied (%s)", type(error).__name__)
         online = self._online()
         control.note_online(online)
         for key in self._client.members():
