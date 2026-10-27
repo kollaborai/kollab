@@ -45,7 +45,7 @@ POLL_SECONDS = 2.0  # same cadence as the terminal form (connect_altview._POLL_S
 _RECEIPT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
 _READ_ONLY_NOTE = (
     "Another window on this computer runs the network. "
-    "This view shows what is known and offers no actions."
+    "This view shows what is known; only Halt and Resume works here."
 )
 _UNAVAILABLE = "The agent network is unavailable in this daemon."
 _SCOPE_NOTE = "This device's agent network."
@@ -157,6 +157,14 @@ class ConnectPanel:
                 **({"copyable": True} if contact_route else {}),
             },
         ]
+        try:
+            halt_snap, halt_names = await _halt_data(ctx)
+            panel["summary"].append({"label": "Network State", "value": halt_state_line(halt_snap, halt_names)})
+        except Exception as exc:  # noqa: BLE001 - an older daemon or no halt control yet
+            logger.debug("connect: halt state unavailable: %s", type(exc).__name__)
+        # before the read-only return: read-only chats reach Halt and Resume too (R3-F8)
+        halt_action = {"id": "halt", "label": "Halt and Resume"}
+        panel["toolbar_actions"] = [halt_action]
         if snap.get("read_only"):
             panel["notice"] = _READ_ONLY_NOTE
             panel["read_only"] = True  # the engine asks the folder's network owner instead
@@ -191,6 +199,7 @@ class ConnectPanel:
         panel["toolbar_actions"] = [
             {"id": "new_code", "label": "New Join Code"},
             {"id": "knocks", "label": "Knocks"},
+            halt_action,
         ]
         panel["controls"] = [
             make_field(
@@ -213,7 +222,7 @@ class ConnectPanel:
             snap = await _writable_snapshot(ctx)
             offer = await ctx.hub_enrollment_offer(snap["domain"] or DEFAULT_DOMAIN)
             if offer.get("status") != "offered":
-                return error_result("Could not create a join code.")
+                return error_result(offer.get("reason") or "Could not create a join code.")
             expires = float(offer["expires_at"])
             return ok_result(
                 "One-device join code created.",
@@ -230,6 +239,8 @@ class ConnectPanel:
             return ok_result(open=await PANELS["connect-join"].describe(ctx, {}))
         if action == "knocks":
             return ok_result(open=await PANELS["connect-knocks"].describe(ctx, {}))
+        if action == "halt":
+            return ok_result(open=await PANELS["connect-halt"].describe(ctx, {}))
         raise unknown_action(self.name, action)
 
     async def _decide(self, ctx: Any, decision: str, payload: dict) -> dict:
@@ -493,7 +504,337 @@ class ConnectKnocksPanel:
         return ok_result(text[:1].upper() + text[1:] + ".", panel=fresh)
 
 
+# ----------------------------------------------------------------- halt
+# Spec: docs/specs/network-sync-and-control.md "TUI and Web UI". Both panels
+# use only ctx.hub_halt_snapshot(), ctx.hub_halt_act() and ctx.hub_halt_members(),
+# so the network owner, the halt listener (halt.sock) and the engine's
+# session-less route can all serve them.
+
+HALT_UNAVAILABLE = "The halt screen is unavailable right now."
+ONE_MACHINE_NOTE = "Halt needs a second machine that can confirm a resume."
+NOT_COUNTING_NOTE = "This machine does not count yet, so it cannot confirm a resume or a revocation."
+PROPOSED_LINE = (
+    "Resume proposed. A person on another machine confirms it: "
+    "/connect resume there, or Settings → Network → Confirm Resume."
+)
+
+
+def _when(seconds: Any) -> str:
+    try:
+        return time.strftime("%b %d %H:%M", time.localtime(int(seconds)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "an unknown time"
+
+
+class _Names:
+    """Device names for machine and folder keys, from ``hub_halt_members()``."""
+
+    def __init__(self, members: list[dict]):
+        self.by_machine: dict[str, str] = {}
+        self.by_folder: dict[str, str] = {}
+        for row in members:
+            name = str(row.get("name") or "")
+            if row.get("machine"):
+                self.by_machine.setdefault(row["machine"], name)
+            if row.get("folder"):
+                self.by_folder[row["folder"]] = name
+        self.members = members
+
+    def machine(self, key: str) -> str:
+        return self.by_machine.get(key) or (key[:8] if key else "another machine")
+
+    def folder(self, key: str) -> str:
+        return self.by_folder.get(key) or (key[:8] if key else "another device")
+
+
+def halt_state_line(snap: dict, names: _Names) -> str:
+    """``Running`` or ``Halted by <device> at <time> (their clock): <reason>``."""
+    active = sorted(snap.get("active") or [], key=lambda o: o.get("issued_at", 0))
+    if not active:
+        return "Running"
+    newest = active[-1]
+    line = f"Halted by {names.machine(newest.get('machine', ''))} at {_when(newest.get('issued_at'))} (their clock)"
+    reason = _quote(newest.get("reason") or "")
+    if reason:
+        line += f": {reason}"
+    if len(active) > 1:
+        line += f" (and {len(active) - 1} more)"
+    return line
+
+
+async def _halt_data(ctx: Any) -> tuple[dict, _Names]:
+    snap = await ctx.hub_halt_snapshot()
+    members = await ctx.hub_halt_members()
+    if not isinstance(snap, dict) or not isinstance(members, list):
+        raise ValueError("bad halt snapshot")
+    return snap, _Names([m for m in members if isinstance(m, dict)])
+
+
+class ConnectHaltPanel:
+    """Halt and Resume: active halts, resume proposals, revocations, machines."""
+
+    name = "connect-halt"
+    kind = "picker"
+
+    async def describe(self, ctx: Any, params: dict) -> dict:
+        panel = _picker(self.name, "Halt and Resume")
+        try:
+            snap, names = await _halt_data(ctx)
+        except Exception as exc:  # noqa: BLE001 - no network owner and no listener
+            logger.debug("connect-halt: snapshot unavailable: %s", type(exc).__name__)
+            panel["notice"] = HALT_UNAVAILABLE
+            return panel
+        me = snap.get("me", "")
+        counts = bool(snap.get("counts"))
+        halted = bool(snap.get("active"))
+        online = [names.folder(k) for k in snap.get("members_online") or []]
+        panel["summary"] = [
+            {"label": "Network State", "value": halt_state_line(snap, names)},
+            {"label": "This Machine", "value": "Counts" if counts else "Does not count yet"},
+            {"label": "Online Now", "value": ", ".join(online) or "None"},
+        ]
+        counting = {m["machine"] for m in names.members if m.get("counts") and m.get("machine")}
+        notes: list[str] = []
+        if not snap.get("halt_allowed"):
+            notes.append(ONE_MACHINE_NOTE)
+        if not counts:
+            notes.append(NOT_COUNTING_NOTE)
+        rows: list[dict] = []
+        reasons = {o["hash"]: o.get("reason") or "no reason given" for o in snap.get("active") or []}
+        own_open = False
+        for prop in snap.get("proposals") or []:
+            signers = [m for m in prop.get("signers") or [] if m]
+            mine = prop.get("machine") == me
+            own_open = own_open or mine
+            lifts = "; ".join(_quote(reasons.get(h, h[:8])) for h in prop.get("lifts") or []) or "nothing"
+            signed = ", ".join(
+                f"{names.machine(m)} ({'counts' if m in counting else 'does not count'})" for m in signers
+            )
+            detail = [f"Lifts: {lifts}", f"Signed: {signed}"]
+            detail += [
+                f"{names.machine(m)}'s confirmation does not count: "
+                f"{names.machine(m)} does not count on this network."
+                for m in signers[1:] if m not in counting
+            ]
+            if mine:
+                detail.append(f"Waiting for a second machine to confirm. Online: {', '.join(online) or 'none'}.")
+            actions = []
+            if mine:
+                actions.append("withdraw")
+            elif counts and me not in signers:
+                actions.append("confirm_resume")
+            rows.append({
+                "id": f"proposal:{prop['hash']}",
+                "label": f"Resume proposed by {names.machine(prop.get('machine', ''))}",
+                "detail": " · ".join(detail),
+                "group": "Resume Proposals",
+                "actions": actions,
+            })
+        signers_of = snap.get("revocation_signers") or {}
+        for key in snap.get("pending_revocations") or []:
+            by = signers_of.get(key) or []
+            who = ", ".join(names.machine(m) for m in by) or "another machine"
+            rows.append({
+                "id": f"revoke:{key}",
+                "label": f"{names.folder(key)} revoked by {who}, waiting for a second machine",
+                "detail": "",
+                "group": "Pending Revocations",
+                "actions": ["confirm_revoke"] if counts and me not in by else [],
+            })
+        my_name = names.by_machine.get(me, "")
+        for machine in snap.get("unconfirmed_machines") or []:
+            row = next((m for m in names.members if m.get("machine") == machine), {})
+            founder = names.by_machine.get(snap.get("founder", ""), "")
+            if row.get("chain_unknown") or not row.get("chain"):
+                chain_text = "Chain unknown"
+            else:
+                chain_text = " ← ".join(
+                    [names.machine(machine)]
+                    + [f"{n} (founder)" if n and n == founder else n for n in row["chain"]]
+                )
+            outside = my_name not in (row.get("chain") or [])
+            rows.append({
+                "id": f"machine:{machine}",
+                "label": names.machine(machine),
+                "detail": chain_text,
+                "group": "Unconfirmed Machines",
+                "actions": ["confirm_machine"] if counts and machine != me and outside else [],
+            })
+        if snap.get("founder_unaccepted"):
+            key = snap["founder_unaccepted"]
+            rows.append({
+                "id": "founder:",
+                "label": f"Founder {names.machine(key)}",
+                "detail": f"fingerprint {key[:16]}",
+                "group": "Founder",
+                "actions": ["confirm_founder"],
+            })
+        if snap.get("bootstrap_open"):
+            for m in names.members:
+                if m.get("machine") and m["machine"] != me and not m.get("revoked"):
+                    rows.append({
+                        "id": f"bootstrap:{m['machine']}",
+                        "label": m.get("name") or m["machine"][:8],
+                        "detail": "The second machine that counts, so a resume can be confirmed.",
+                        "group": "Bootstrap Machine",
+                        "actions": ["make_bootstrap"],
+                    })
+        for row in rows:
+            row.setdefault("current", False)
+            row.setdefault("badges", [])
+        panel["rows"] = rows
+        panel["row_actions"] = [
+            {"id": "confirm_resume", "label": "Confirm Resume", "confirm": True},
+            {"id": "withdraw", "label": "Withdraw", "confirm": True},
+            {"id": "confirm_revoke", "label": "Confirm Revoke", "confirm": True},
+            {"id": "confirm_machine", "label": "Confirm Machine", "confirm": True},
+            {"id": "confirm_founder", "label": "Confirm Founder", "confirm": True},
+            {"id": "make_bootstrap", "label": "Make Bootstrap Machine", "confirm": True},
+        ]
+        toolbar = []
+        if snap.get("halt_allowed"):
+            toolbar.append({"id": "halt_new", "label": "Halt Network…"})
+        if halted and not own_open:
+            toolbar.append({"id": "propose_resume", "label": "Propose Resume"})
+        if not halted and counts and not snap.get("opted_out"):
+            toolbar.append({"id": "no_count", "label": "Do Not Count Here", "confirm": True})
+        if not halted and snap.get("opted_out"):
+            toolbar.append({"id": "count", "label": "Count Here"})
+        # ponytail: "online now" stands in for "online since the halt"; nothing records the latter yet
+        others_online = any(
+            names.by_folder.get(k) is not None
+            and any(m.get("folder") == k and m.get("machine") in counting and m.get("machine") != me
+                    for m in names.members)
+            for k in snap.get("members_online") or []
+        )
+        if halted and not others_online:
+            toolbar.append({"id": "resume_local", "label": "Resume Here Only", "confirm": True})
+        panel["toolbar_actions"] = toolbar
+        if not rows and not halted:
+            notes.append("No halt, proposal or revocation is waiting.")
+        panel["notice"] = " ".join(notes)
+        return panel
+
+    _ROW_ACTIONS = {
+        "proposal": ("confirm_resume", "withdraw"),
+        "revoke": ("confirm_revoke",),
+        "machine": ("confirm_machine",),
+        "founder": ("confirm_founder",),
+        "bootstrap": ("make_bootstrap",),
+    }
+    _PAYLOAD_KEY = {"proposal": "hash", "revoke": "key", "machine": "machine", "bootstrap": "machine"}
+    _TOOLBAR = ("propose_resume", "no_count", "count", "resume_local")
+
+    async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        if action == "halt_new":
+            return ok_result(open=await PANELS["connect-halt-new"].describe(ctx, {}))
+        if action in self._TOOLBAR:
+            args: dict = {}
+        else:
+            kind, _, key = str(payload.get("id") or "").partition(":")
+            if action not in self._ROW_ACTIONS.get(kind, ()):
+                raise unknown_action(self.name, action)
+            args = {self._PAYLOAD_KEY[kind]: key} if kind in self._PAYLOAD_KEY else {}
+        try:
+            outcome = await ctx.hub_halt_act(action, args)
+        except Exception as exc:  # noqa: BLE001 - halt errors are operator-safe text
+            return error_result(_sentence(str(exc)), panel=await self.describe(ctx, {}))
+        return ok_result(_halt_message(action, outcome or {}), panel=await self.describe(ctx, {}))
+
+
+def _sentence(text: str) -> str:
+    text = text.strip() or "Try again"
+    text = text[:1].upper() + text[1:]
+    return text if text.endswith((".", "?", "!")) else text + "."
+
+
+def _halt_message(action: str, outcome: dict) -> str:
+    if action == "propose_resume":
+        return PROPOSED_LINE
+    if action == "confirm_resume":
+        lifted = outcome.get("lifted") or []
+        if lifted:
+            return f"Resume confirmed: lifts {len(lifted)} halt{'s' if len(lifted) != 1 else ''}."
+        return "Confirmation recorded. Waiting for a second machine that counts."
+    if action == "resume_local":
+        return str(outcome.get("line") or "Lifted on this machine only.")
+    return {
+        "withdraw": "Proposal withdrawn.",
+        "confirm_revoke": "Revocation confirmed.",
+        "confirm_machine": "Machine confirmed.",
+        "confirm_founder": "Founder accepted.",
+        "make_bootstrap": "Bootstrap machine picked.",
+        "no_count": "This machine no longer counts here.",
+        "count": "This machine counts here again.",
+        "halt": "Network halted.",
+    }.get(action, "Done.")
+
+
+class ConnectHaltNewPanel:
+    """Halt Network…: a reason and, optionally, one device to revoke with it."""
+
+    name = "connect-halt-new"
+    kind = "form"
+
+    async def describe(self, ctx: Any, params: dict) -> dict:
+        try:
+            snap, names = await _halt_data(ctx)
+        except Exception:  # noqa: BLE001
+            snap, names = {}, _Names([])
+        options = ["none"] + [
+            m["folder"] for m in names.members
+            if m.get("folder") and m.get("machine") != snap.get("me") and not m.get("revoked")
+        ]
+        labels = {"none": "None", **{k: names.folder(k) for k in options[1:]}}
+        form = {
+            "panel": self.name,
+            "kind": self.kind,
+            "title": "Halt Network",
+            "scope_note": (
+                "Stops every agent on every machine of this network "
+                "until a person on two machines resumes it."
+            ),
+            "sections": [
+                {
+                    "id": "halt",
+                    "title": "Halt Network",
+                    "fields": [
+                        make_field("reason", "text_input", "Reason", value="",
+                                   help="Shown on every machine with the halt."),
+                        make_field("revoke", "dropdown", "Also Revoke", value="none", options=options,
+                                   option_labels=labels,
+                                   help="A device to remove from the network with this halt."),
+                    ],
+                }
+            ],
+            "actions": [{"id": "halt", "label": "Halt Network", "confirm": True}],
+            "save_targets": {},
+            # live without edits (FormPanel enables the button when a context is set)
+            "context": {"network": snap.get("network", "")},
+        }
+        if snap and not snap.get("halt_allowed"):
+            form["notice"] = ONE_MACHINE_NOTE
+        return form
+
+    async def act(self, ctx: Any, action: str, payload: dict) -> dict:
+        if action != "halt":
+            raise unknown_action(self.name, action)
+        changes = payload.get("changes") if isinstance(payload.get("changes"), dict) else payload
+        reason = " ".join(str(changes.get("reason") or "").split())[:200]
+        revoke = str(changes.get("revoke") or "none")
+        args: dict = {"reason": reason}
+        if revoke != "none":
+            args["revoke"] = [revoke]
+        try:
+            await ctx.hub_halt_act("halt", args)
+        except Exception as exc:  # noqa: BLE001
+            return error_result(_sentence(str(exc)))
+        return ok_result("Network halted.", open=await PANELS["connect-halt"].describe(ctx, {}))
+
+
 PANELS = {
     panel.name: panel
-    for panel in (ConnectPanel(), ConnectJoinPanel(), ConnectKnocksPanel())
+    for panel in (
+        ConnectPanel(), ConnectJoinPanel(), ConnectKnocksPanel(), ConnectHaltPanel(), ConnectHaltNewPanel()
+    )
 }

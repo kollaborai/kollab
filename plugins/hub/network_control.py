@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 CONTROL_FILE = "network_control.json"
 HALT_METHOD = "network_halt"
-ADMIT_REFUSAL = "Only a machine that counts on {network} can add a device. Ask on {machine}."
+ADMIT_REFUSAL = "Only your main device can add new devices. Make the code on {machine}."
 REVOKE_HERE_ONLY = (
     "Revoke here only: {device} stays a member on the other machines, and this "
     "network can no longer lift a halt with two machines."
@@ -423,8 +423,9 @@ class NetworkControl:
     def halt_snapshot(self, online: set[str] | None = None) -> dict[str, Any]:
         view = self.view()
         book = self.halt_book()
+        data = self._fresh()
         good: dict[str, set[str]] = {}
-        for r in self._fresh().get("revocations", []):
+        for r in data.get("revocations", []):
             if nh.revocation_ok(r, view.network) and view.machine_of(r["by"]) == r["machine"]:
                 good.setdefault(r["revoked"], set()).add(r["machine"])
         applied = set(self.client.state.revoked)
@@ -438,9 +439,24 @@ class NetworkControl:
                 for h, o in sorted(book.active().items())
             ],
             "proposals": [
-                {"hash": h, "machine": o["machine"], "confirmations": len(o.get("confirmations", []))}
+                {
+                    "hash": h,
+                    "machine": o["machine"],
+                    "confirmations": len(o.get("confirmations", [])),
+                    "lifts": list(o.get("lifts", [])),
+                    "signers": [o["machine"]] + [c.get("machine", "") for c in o.get("confirmations", [])],
+                }
                 for h, o in sorted(book.proposals.items())
             ],
+            # slice C: what the halt panels need to pick actions (spec "TUI and Web UI")
+            "me": self.machine_hex,
+            "founder": view.founder,
+            # the founder key a person can accept with `Confirm Founder`, "" when accepted or none
+            "founder_unaccepted": "" if view.founder else str((data.get("founder") or {}).get("founder") or ""),
+            "revocation_signers": {k: sorted(ms) for k, ms in good.items() if len(ms) < 2},
+            "bootstrap_open": view.founder == self.machine_hex
+            and not (data.get("bootstrap_pick") or data.get("bootstrap_issued")),
+            "opted_out": bool(data.get("own_opt_outs")),
             "pending_revocations": sorted(k for k, ms in good.items() if len(ms) < 2 and k not in applied)
             + sorted(k for k, ms in good.items() if len(ms) < 2 and k in applied),
             "unconfirmed_machines": sorted(machines - view.counting - view.revoked),

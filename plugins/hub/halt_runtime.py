@@ -404,60 +404,45 @@ def _waiter_presence(argv: list[str], folder: str, root: Path | None) -> tuple[P
 # ------------------------------------------------------- interactive view
 
 
-def render_view(snapshot: dict) -> list[str]:
-    lines = []
-    active = snapshot.get("active") or []
-    if active:
-        for h in active:
-            lines.append(f"Network State: Halted by {h.get('device') or h['machine'][:8]}: {h.get('reason') or ''}")
-    else:
-        lines.append("Network State: Running")
-    lines.append(f"This Machine: {'counts' if snapshot.get('counts') else 'does not count yet'}")
-    online = snapshot.get("members_online") or []
-    lines.append(f"Online Now: {', '.join(online) if online else 'none'}")
-    for p in snapshot.get("proposals") or []:
-        lines.append(f"Resume proposed {p['hash'][:8]} ({p.get('confirmations', 0)} confirmations)")
-    for k in snapshot.get("pending_revocations") or []:
-        lines.append(f"{k[:8]} revoked, waiting for a second machine")
-    lines.append("")
-    lines.append("c Confirm Resume   p Propose Resume   Esc exit")
-    return lines
-
-
 def run_interactive(folder: str, *, root: Path | None = None, read_key: Callable[[], str] | None = None) -> int:
-    """The halted interactive launch: no model, the connect-halt state over ``halt.sock``.
+    """The halted interactive launch: no model, the connect-halt view over ``halt.sock``.
 
-    ponytail: plain text and three keys; slice C builds the real TUI view.
+    Drives the same ``HaltScreen`` the TUI's Connect screen opens with `h`
+    (plugins/altview/connect_halt_altview.py), printed, since no app runs here.
     """
+    from plugins.altview.connect_halt_altview import HaltScreen, halt_view_lines
+
+    from .halt_context import HaltContext
+
     try:
         data = read_halt(root)
     except (OSError, ValueError):
         data = {}
     print(halted_line(data))
     read_key = read_key or _read_key
+    start_listener(root)
+    screen = HaltScreen(HaltContext(folder, root))
+    names = {"\x1b": "Escape", "": "Escape", "\r": "Enter", "\n": "Enter", "\x7f": "Backspace"}
 
-    async def call(req: dict) -> dict:
-        if not await wait_for_listener(root, timeout=5.0):
-            return {"error": "the halt listener is not running"}
-        return await sock_call(req, root)
+    async def step(name: str, char: str) -> bool:
+        await wait_for_listener(root, timeout=5.0)
+        try:
+            done = await screen.key(name, char) if name or char else False
+            await screen.load()
+        except Exception as exc:  # noqa: BLE001 - operator-safe halt text
+            screen.message = str(exc)
+            done = False
+        return done
 
+    asyncio.run(step("", ""))
     while True:
-        snap = asyncio.run(call({"op": "describe", "folder": folder}))
-        if snap.get("error"):
-            print(snap["error"])
-        for line in render_view(snap.get("snapshot") or {}):
+        for line in halt_view_lines(screen, 100):
             print(line)
         key = read_key()
-        if key in ("\x1b", "q", ""):
+        name = names.get(key, "")
+        if name == "Escape" and screen.reason is None:
             return 0
-        action = None
-        if key == "p":
-            action = ("propose_resume", {})
-        elif key == "c" and (snap.get("snapshot") or {}).get("proposals"):
-            action = ("confirm_resume", {"hash": snap["snapshot"]["proposals"][0]["hash"]})
-        if action:
-            reply = asyncio.run(call({"op": "act", "folder": folder, "action": action[0], "payload": action[1]}))
-            print(reply.get("error") or reply.get("line") or "done")
+        asyncio.run(step(name, "" if name else key))
 
 
 def _read_key() -> str:

@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from .context import ContextListSnapshot, ConversationContext
-from .interface import StateService, enrollment_result
+from .interface import StateService, enrollment_result, offer_failure
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
@@ -860,6 +860,8 @@ class RemoteStateService(StateService):
             {"domain": domain},
             timeout=max(self._timeout, 90.0),
         )
+        if isinstance(result, dict) and result.get("reason"):
+            return offer_failure(result)  # a refusal the person can act on (#355)
         if not isinstance(result, dict) or result.get("error"):
             raise ValueError("daemon connect offer failed")
         offer_id = result.get("offer_id")

@@ -17,6 +17,7 @@ import { relayDetachedTouches } from "@/components/shell/touch-relay";
 import { sidebarAgentKey } from "@/components/shell/hidden-agents";
 import type { HiddenAgents } from "@/hooks/use-hidden-agents";
 import type { SidebarOrder } from "@/hooks/use-sidebar-order";
+import { HaltedLine } from "@/components/shell/HaltedLine";
 import { buildLocalOrderRows, groupByFolder, orderedDevices, reorderDevicesWithinNetwork, reorderWithinFolder, orderKey, workspaceName } from "@/components/shell/sidebar-order";
 import { WorkspacePicker } from "@/components/shell/WorkspacePicker";
 import { HoverHelp } from "@/components/ui/hover-help";
@@ -649,6 +650,7 @@ export function AppSidebar({
           onOpenChange={(open) => fold("local", open)}
         >
           <SidebarGroupContent>
+              <HaltedLine api={api} folder={workspacePath.trim()} onOpen={onSettings} />
               {folderGroups.map((group) => (
                 <Fragment key={group.folder || "-"}>
                   <div className="text-muted-foreground flex h-7 items-center gap-2 px-2.5 text-xs" title={group.folder}>

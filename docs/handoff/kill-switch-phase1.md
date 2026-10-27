@@ -298,3 +298,96 @@ Uncommitted, on `main`'s working tree; the coordinating session commits.
 - `/connect halt|resume` cannot use the TTY guard: they run inside the daemon
   (stdin `/dev/null`) and `source_agent` names the session's agent, not a
   model. Guarded by the HIGH risk pattern; the CLI keeps the TTY/tool-shell guard.
+
+## Slice C (handoff step 7): the screens, plus issue #355
+
+Uncommitted, on `main`'s working tree; the coordinating session commits.
+Own hunks in files other agents had already edited (only `PanelHost.tsx`):
+session scratchpad `slice-c-own-hunks.patch` (`git apply --cached --check` passes).
+
+### Files
+
+- `kollabor/panels/connect.py`: `ConnectHaltPanel` (`connect-halt`, picker) and
+  `ConnectHaltNewPanel` (`connect-halt-new`, form with `context`), only the three
+  `hub_halt_*` calls. Summary `Network State` / `This Machine` / `Online Now`;
+  rows for open proposals (lifts with reasons, signers and which count, the
+  "does not count" line, proposer's waiting line), pending revocations
+  (`<device> revoked by <device>, waiting for a second machine`), unconfirmed
+  machines (`prod ← mac (founder)` / `Chain unknown`), `Confirm Founder`,
+  `Make Bootstrap Machine`; every row action `confirm: true`; inapplicable
+  actions left out, notice says why (`Halt needs a second machine...`).
+  `ConnectPanel`: `Network State` summary row and `Halt and Resume` toolbar
+  action before the read-only return (read-only note reworded: "only Halt and
+  Resume works here"). `new_code` shows the offer's `reason` (#355).
+- `plugins/hub/halt_context.py` (new): `HaltContext(folder)`: `halt.sock` when the
+  listener holds the folder (falls back when it answers "no halted network
+  holds that folder"), else the folder's relay owner over its hub socket via
+  `connect_proxy` ops `halt_snapshot|halt_members|halt_act`.
+- `plugins/hub/plugin.py`: those three `connect_proxy` ops (errors come back as
+  `halt_error` text); Connect screen gets `on_halt` (pushes
+  `ConnectHaltAltView`) and `on_network_state`; `_offer_failed()` adds the
+  admit refusal as `reason` (#355).
+- `plugins/hub/network_control.py`: `halt_snapshot` adds `me`, `founder`,
+  `founder_unaccepted` (key), `bootstrap_open`, `opted_out`,
+  `revocation_signers`, and per proposal `lifts` + `signers`. `ADMIT_REFUSAL`
+  is now `Only your main device can add new devices. Make the code on {machine}.`
+  (spec line 226 still quotes the old text: amend it).
+- `kollabor/state/interface.py` `offer_failure()`; `local.py`, `handlers.py`,
+  `remote.py` pass `reason` through (never exception text). `local.py` also
+  gets `hub_halt_snapshot/act/members` (over `HaltContext` for its folder).
+- `packages/kollabor-engine/.../routes/panels.py` + `server.py`: session-less
+  `GET /network/halt/{panel}`, `POST /network/halt/{panel}/actions/{action}`,
+  `folder` query (absolute existing dir), only the two halt panels, global
+  engine auth middleware, `no-store`.
+- TUI: `plugins/altview/connect_halt_altview.py` (new): `HaltScreen` (keys:
+  up/down, Enter = the row's action, second Enter confirms; `n` Halt Network
+  with typed reason, `p` Propose Resume, `l` Resume Here Only, `o` count/no
+  count; Esc) and `ConnectHaltAltView`. `connect_altview.py`: `network state`
+  row, `h halt and resume` key (also in read-only windows), refusal reason in
+  the join code row. `halt_runtime.run_interactive` now drives `HaltScreen`
+  (dead `render_view` removed).
+- Web: `api.ts` `SESSIONLESS_PANELS` + `haltFolder` + `panelPath` (getPanel /
+  panelAction switch) + `haltPanel(folder)`; `PanelHost.tsx` sets
+  `api.haltFolder` from the chat's workspace; `FormPanel.tsx` honors `confirm`
+  (`components/panels/confirm.ts`); `PickerList.tsx` toolbar actions honor
+  `confirm`; `components/shell/HaltedLine.tsx` + `halted-line.ts` (sidebar
+  line above the agent list in `AppSidebar.tsx`, polled every 15 s, plain
+  text + icon, rows untouched).
+- `frontend/dist` rebuilt (`npm run build`; dist is gitignored, nothing to commit).
+- Tests: `tests/unit/test_panels_connect_halt.py` (new, 14),
+  `test_panels_connect.py` (3 expectations updated), engine
+  `tests/test_panels_routes.py` (+1), frontend `tests/halt-panels.test.ts`
+  (node:test, 4).
+
+### Verified
+
+- `KOLLAB_NO_KEYRING=1 uv run pytest -q` on the halt/connect/enrollment/engine
+  route suites: 325 passed; `tests/unit -k "state or handlers or enrollment or
+  attach or panel or altview"`: 1131 passed after the fixes, then
+  `test_altview_registration.py` + new file 43 passed.
+- `ruff check` clean on every touched file (plugin.py: only pre-existing E501s).
+- `node --test tests/halt-panels.test.ts tests/panel-summary.test.ts`: 12 pass;
+  `tsc --noEmit`: clean; `npm run build`: built.
+
+### Not done
+
+- Visual proof NOT done: no isolated engine run, no screenshots at
+  390/820/desktop, no tmux capture, no ui-slop-review. Stopped at the token cap.
+- Waiter chat line in the web chat: the waiter's `_StatusSocket` already
+  answers with the line (slice B); the engine/web never reads `state: halted`
+  to show it in a chat. Not built.
+- The sidebar link opens Settings (`onSettings`), not the Halt and Resume tab
+  directly, and with no chat open Settings may not open (PanelHost needs a
+  session). Spec wants the session-less tab from the sidebar.
+- `Resume Here Only` uses "no other counting machine online now", not "since
+  the halt" (nothing records the latter). `ponytail:` comment in connect.py.
+- `connect-halt-new` sets `notice`, which `FormPanel` does not render.
+- `Not restarted: lapis (~/dev/kollab)` after resume is not shown anywhere.
+
+### Risks
+
+- `HaltContext` for a daemon that owns its folder calls its own hub socket
+  (`connect_proxy` to itself); fine on asyncio, one extra hop.
+- `WorkspaceRelayOwner(folder)` creates that folder's private state dir when
+  the engine route asks about a folder that never ran a network.
+- `api.haltFolder` is set during PanelHost render (shared mutable field).

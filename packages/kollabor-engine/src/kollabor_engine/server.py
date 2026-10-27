@@ -323,6 +323,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     # Mount routes
     from .routes.mcp import router as mcp_router
     from .routes.messages import router as messages_router
+    from .routes.panels import network_router as halt_panels_router
     from .routes.panels import router as panels_router
     from .routes.permissions import router as permissions_router
     from .routes.profiles import router as profiles_router
@@ -335,6 +336,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(profiles_router)
     app.include_router(mcp_router)
     app.include_router(panels_router, dependencies=opens)
+    app.include_router(halt_panels_router)
 
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router

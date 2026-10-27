@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldRenderer, type Draft } from "./FieldRenderer";
+import { confirmStep } from "./confirm";
 import { titleCase } from "./panel-model";
 
 function matches(field: PanelField, q: string): boolean {
@@ -52,6 +53,18 @@ export function FormPanel({
   onAction: (action: PanelAction, target: string | null) => void;
 }) {
   const [query, setQuery] = useState("");
+  // An action with `confirm` asks for a second click, as PickerList's row actions do.
+  const [armed, setArmed] = useState<string | null>(null);
+  const fire = (action: PanelAction, target: string | null) => {
+    const key = `${action.id}:${target ?? ""}`;
+    if (confirmStep(armed, key, action.confirm) === "arm") {
+      setArmed(key);
+      window.setTimeout(() => setArmed((now) => (now === key ? null : now)), 4000);
+      return;
+    }
+    setArmed(null);
+    onAction(action, target);
+  };
   const q = query.trim().toLowerCase();
   const sections = useMemo(
     () => filterSections(panel.sections ?? [], q),
@@ -148,11 +161,21 @@ export function FormPanel({
               >
                 <Button
                   type="button"
-                  variant={target === "global" ? "outline" : "default"}
+                  variant={
+                    armed === `${action.id}:${target ?? ""}`
+                      ? "destructive"
+                      : target === "global"
+                        ? "outline"
+                        : "default"
+                  }
                   disabled={busy || (dirtyCount === 0 && !panel.context)}
-                  onClick={() => onAction(action, target)}
+                  onClick={() => fire(action, target)}
                 >
-                  {busy ? "Saving…" : buttonLabel(action, target)}
+                  {busy
+                    ? "Saving…"
+                    : armed === `${action.id}:${target ?? ""}`
+                      ? `Confirm ${buttonLabel(action, target)}`
+                      : buttonLabel(action, target)}
                 </Button>
                 {target && paths[target] ? (
                   <span

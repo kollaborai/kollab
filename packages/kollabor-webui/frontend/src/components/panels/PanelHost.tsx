@@ -193,6 +193,8 @@ export function PanelHost({
 }) {
   const isMobile = useIsMobile();
   const sessionId = session.session_id;
+  // the session-less halt panels (SESSIONLESS_PANELS) ask about this chat's folder
+  if (session.workspace) api.haltFolder = session.workspace;
   // The Prompts tab renders fully client-side against the prompt-section API.
   const promptsApi = useMemo(() => new PromptsApi(api), [api]);
   const [tabs, setTabs] = useState<TabMap>(freshTabs);

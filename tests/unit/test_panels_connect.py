@@ -104,7 +104,7 @@ async def test_describe_shows_the_snapshot_and_never_mints_a_code():
     assert [(r["id"], r["label"]) for r in panel["rows"]] == [("abc123", "new-box")]
     assert "ab12…ef01" in panel["rows"][0]["detail"]
     assert ids(panel["row_actions"]) == ["accept", "reject"]
-    assert ids(panel["toolbar_actions"]) == ["new_code", "knocks"]
+    assert ids(panel["toolbar_actions"]) == ["new_code", "knocks", "halt"]
     # contract: a control posts {path: value} to its action; a row action reads payload_key
     assert [(c["path"], c["action"]) for c in panel["controls"]] == [("level", "trust"), ("name", "rename")]
     assert [a["payload_key"] for a in panel["row_actions"]] == ["enrollment_id", "enrollment_id"]
@@ -134,7 +134,7 @@ async def test_no_network_offers_the_two_guide_choices_and_read_only_offers_none
     assert panel["summary"] == []  # a stale route cannot survive leaving the network
     read_only = Hub({**SNAP, "read_only": True, "contact_route": ""})
     panel = await CONNECT.describe(read_only, {})
-    assert panel["notice"] and not panel["row_actions"] and not panel["toolbar_actions"]
+    assert panel["notice"] and not panel["row_actions"] and ids(panel["toolbar_actions"]) == ["halt"]
     assert panel["read_only"] is True  # the engine routes to the folder's owner on this
     assert next(row for row in panel["summary"] if row["label"] == "Knocks Address") == {
         "label": "Knocks Address", "value": "Unavailable",
@@ -308,7 +308,7 @@ async def test_the_knocks_panel_says_when_knocks_are_unavailable():
 
 
 def test_registry_lists_the_three_network_panels():
-    assert set(connect_panel.PANELS) == {"connect", "connect-join", "connect-knocks"}
+    assert set(connect_panel.PANELS) == {"connect", "connect-join", "connect-knocks", "connect-halt", "connect-halt-new"}
     assert get_panel("connect-knocks") is KNOCKS and get_panel("connect-join") is JOIN
 
 

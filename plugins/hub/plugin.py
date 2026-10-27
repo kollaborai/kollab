@@ -11057,6 +11057,17 @@ class HubPlugin(BasePlugin):
             )
         if op == "offer":
             return await self._run_connect_enrollment_offer(str(args.get("domain", "")))
+        if op in ("halt_snapshot", "halt_members", "halt_act"):
+            # The halt panels' three context methods (plugins/hub/halt_context.py).
+            relay = self._relay_agent
+            try:
+                if op == "halt_snapshot":
+                    return await relay.hub_halt_snapshot()
+                if op == "halt_members":
+                    return await relay.hub_halt_members()
+                return await relay.hub_halt_act(str(args.get("action", "")), args.get("payload") or {})
+            except Exception as exc:  # RelayError/HaltError text is operator-safe
+                return {"halt_error": str(exc) or "the halt call failed"}
         raise ValueError("unknown connect operation")
 
     def _relay_owned_elsewhere(self) -> bool:
@@ -11685,6 +11696,21 @@ class HubPlugin(BasePlugin):
 
             stack_mgr = self._altview_stack()
 
+            from kollabor.panels.connect import _halt_data, halt_state_line
+            from plugins.altview.connect_halt_altview import ConnectHaltAltView
+
+            from .halt_context import HaltContext
+
+            halt_ctx = HaltContext(
+                str(getattr(getattr(self, "_relay_agent", None), "workspace", None) or os.getcwd())
+            )
+
+            async def network_state() -> str:
+                return halt_state_line(*(await _halt_data(halt_ctx)))
+
+            async def open_halt() -> None:
+                await stack_mgr.push(ConnectHaltAltView(halt_ctx))
+
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says
             # and offers nothing else.
@@ -11698,6 +11724,8 @@ class HubPlugin(BasePlugin):
                     code_only=code_only,
                     snapshot=None if code_only else read_only,
                     note=CONNECT_OWNED_ELSEWHERE if read_only is not None else "",
+                    on_halt=None if code_only else open_halt,
+                    on_network_state=None if code_only else network_state,
                     guide=guide,
                 ),
                 "connect-code" if code_only else "connect-screen",
@@ -11792,6 +11820,21 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
+    def _offer_failed(self) -> dict[str, str]:
+        """A failed offer, with the network's refusal line when that is why (#355).
+
+        The line comes from this machine's state, never from exception text.
+        """
+        reason = ""
+        try:
+            commands = getattr(self._relay_agent, "commands", None)
+            if commands is not None:
+                reason = commands.client.control.admit_refusal()
+        except Exception:
+            reason = ""
+        failed = {"error": "connect offer could not be created"}
+        return {**failed, "reason": reason} if reason else failed
+
     async def _run_connect_enrollment_offer(self, domain: str) -> dict[str, str]:
         """Create a one-device enrollment offer in the owning relay daemon."""
         ok, offered = await self._connect_via_owner("offer", {"domain": domain})
@@ -11813,9 +11856,9 @@ class HubPlugin(BasePlugin):
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
         except Exception:
-            return {"error": "connect offer could not be created"}
+            return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
-            return {"error": "connect offer could not be created"}
+            return self._offer_failed()
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")

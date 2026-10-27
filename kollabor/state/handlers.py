@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from .interface import enrollment_result
+from .interface import enrollment_result, offer_failure
 from .local import LocalStateService
 
 logger = logging.getLogger(__name__)
@@ -562,7 +562,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
             # The offer code is deliberately excluded from errors and logs.
             return {"error": "connect offer could not be created"}
         if not isinstance(result, dict) or result.get("error"):
-            return {"error": "connect offer could not be created"}
+            return offer_failure(result)
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
