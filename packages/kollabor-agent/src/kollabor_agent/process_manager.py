@@ -320,6 +320,8 @@ class SubprocessStrategy(SpawnStrategy):
         env = request.env
         if env is None:
             env = self._filter_env(os.environ.copy())
+        # Accident guard: every spawned child is a tool child (see shell_executor).
+        env = {**env, "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": str(os.getpid())}
 
         try:
             proc = subprocess.Popen(

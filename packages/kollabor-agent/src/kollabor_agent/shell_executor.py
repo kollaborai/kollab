@@ -118,6 +118,9 @@ class ShellExecutor:
         # Filter sensitive environment variables
         if env is None:
             env = self._filter_env(os.environ.copy())
+        # Accident guard (network-sync-and-control.md section 1): set on every
+        # tool child, after the filter, whether the caller passed env or not.
+        env = {**env, "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": str(os.getpid())}
 
         try:
             # Voice-originated commands pass argv sequences and never enter a
