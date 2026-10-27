@@ -75,6 +75,8 @@ export function FormPanel({
   const dirtyCount = Object.keys(draft).length;
   // Short forms (an edit form) open flat; the long config list starts collapsed.
   const small = (panel.sections?.length ?? 0) <= 2;
+  // An action form (a context, one section: Halt Network) is two fields, not a settings list: no search, no section header.
+  const flat = Boolean(panel.context) && panel.sections?.length === 1;
   const actions = panel.actions ?? [];
   const paths = panel.save_targets ?? {};
 
@@ -85,7 +87,7 @@ export function FormPanel({
             row apart and a row of scrolled settings showed above the search; the 1px shadow in the box's own
             colour covers that row. */}
         <div className="bg-background sticky top-0 z-10 flex flex-col gap-1 pt-3 pb-3 shadow-[0_-1px_0_var(--color-background)]">
-          <div className="relative">
+          <div className={flat ? "hidden" : "relative"}>
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
             <Input
               type="search"
@@ -107,6 +109,22 @@ export function FormPanel({
           {sections.map((section) => {
             const changed = section.fields.filter((f) => f.path in draft).length;
             const failed = section.fields.some((f) => f.path in errors);
+            if (flat) {
+              return (
+                <div key={section.id} className="px-3">
+                  {section.fields.map((field) => (
+                    <FieldRenderer
+                      key={field.path}
+                      field={field}
+                      draft={draft}
+                      error={errors[field.path]}
+                      disabled={busy}
+                      onChange={onDraftChange}
+                    />
+                  ))}
+                </div>
+              );
+            }
             return (
               <details
                 key={section.id}
@@ -150,7 +168,9 @@ export function FormPanel({
         <p className="text-muted-foreground text-xs sm:pt-2" aria-live="polite">
           {dirtyCount
             ? `${dirtyCount} unsaved change${dirtyCount === 1 ? "" : "s"}`
-            : "No unsaved changes"}
+            : flat
+              ? ""
+              : "No unsaved changes"}
         </p>
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
           {actions.flatMap((action) =>

@@ -1379,7 +1379,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 md:hidden">
                 <SidebarTrigger className="-ml-1" />
-                <span className="min-w-0 truncate text-sm font-semibold">{activeSession.name || activeSession.identity}</span>
+                <span className="min-w-0 truncate text-sm font-semibold capitalize">{activeSession.name || activeSession.identity}</span>
               </ShellHeader>
               <WaiterChat line={activeSession.halted} onOpen={() => {
                 api.haltFolder = activeSession.workspace ?? "";

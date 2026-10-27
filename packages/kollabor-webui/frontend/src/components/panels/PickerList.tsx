@@ -244,7 +244,7 @@ export function PickerList({
         </section>
       ))}
 
-      {!groups.length && !emptyGroups.length ? (
+      {!groups.length && !emptyGroups.length && (q || emptyText || !panel.notice) ? (
         <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
           {q ? "Nothing matches your search." : emptyText || "Nothing to show here yet."}
         </p>

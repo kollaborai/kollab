@@ -11709,7 +11709,7 @@ class HubPlugin(BasePlugin):
                 return halt_state_line(*(await _halt_data(halt_ctx)))
 
             async def open_halt() -> None:
-                await stack_mgr.push(ConnectHaltAltView(halt_ctx))
+                await stack_mgr.push(ConnectHaltAltView(halt_ctx), "connect-halt")
 
             # Another window owns the relay: a code, a request and a decision
             # all live there, so this screen shows what the shared state says

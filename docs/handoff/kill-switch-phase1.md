@@ -547,3 +547,43 @@ containers `ks-relay`, `ks-m1`, `ks-m2`, `ks-m3` (no `--rm`), `ks-m4` (`--rm`).
 A Bash hook in this session refuses container removal, so the remaining
 objects are listed in the slice D final report; the README now starts every
 container with `--rm`.
+
+## Slice C3: visual proof
+
+Uncommitted on `main`. Shots and TUI text captures: `<session scratchpad>/slice-c3-shots/`
+(desktop 1280x800, 820, 390; `tui-*.txt`). Stack: throwaway HOME, engine 7434,
+web 8081 on the built dist, a test double for the halt listener (canned snapshot,
+no halt/sweep ran), and a `sitecustomize` that fakes the Connect snapshot so the
+folder looks like it is on a network. All stopped, ports free, HOME removed.
+
+### Overflow (scrollWidth / innerWidth)
+
+820: sidebar 820/820, Network root 820/820, Halt and Resume 820/820, Halt Network form 820/820, not halted 820/820, waiter chat 820/820.
+390: waiter chat 390/390, session-less Halt and Resume 390/390, form 390/390, Network root 390/390, not halted 390/390.
+
+### Fixes
+
+- `FormPanel.tsx`: a form with a `context` and one section (Halt Network) shows its two
+  fields flat: no search box, no repeated section header with count, no "No unsaved changes".
+- `PickerList.tsx`: no "Nothing to show here yet." box under a panel notice.
+- `App.tsx`: waiter chat header capitalized (was `peridot`, sidebar said `Peridot`).
+- `plugins/hub/plugin.py`: BUG, `h` on the TUI Connect screen did nothing
+  (`AltViewStackManager.push() missing session_name`); now `push(..., "connect-halt")`.
+- `plugins/altview/connect_altview.py`: `network state` label was 13 chars in a 13 column
+  (`network stateHalted ...`); `_block` pads to `len(label)+1`. Value sits one column right of the others (nit).
+
+### Slop review (own pass on the shots, skill rules)
+
+Fixed: search box and repeated header on Halt Network, empty-state box, lowercase waiter name.
+No pills, accent bars, shadows, emoji or commas in headings seen. Nits left: Halt Network dialog subtitle runs 3 lines at 390; `Do Not Count Here` wording; `network state` row jog in the TUI.
+Not checked: light theme (all shots dark), a read-only window (needs a second window owning the relay), `Resume Here Only` row, `Confirm` armed state.
+
+### Not done / found
+
+- TUI after `h` then Esc on the Connect screen: a stray `❯` input prompt overwrote the `join code` row (tui-4). Reopening `h` showed the old halted snapshot while the double said clear (tui-5); not diagnosed.
+- TUI read-only window capture: needs a second window that loses the relay lock; not faked.
+- Desktop `desktop-5-not-halted-before.jpg` predates the empty-state fix (820-5 is after).
+
+### Files changed this slice
+
+`packages/kollabor-webui/frontend/src/components/panels/FormPanel.tsx`, `.../PickerList.tsx`, `.../src/App.tsx` (1 line), `plugins/hub/plugin.py` (1 line), `plugins/altview/connect_altview.py` (1 line). Checked: `git diff --stat` showed only these hunks in the last three.

@@ -809,7 +809,7 @@ def _fit(text: str, width: int) -> str:
 def _block(label: str, values: list[str], width: int) -> list[str]:
     """`label` on the first row, blank label under it, values in one column."""
     return [
-        _fit(" " + (label if index == 0 else "").ljust(_LABEL_WIDTH) + value, width)
+        _fit(" " + (label if index == 0 else "").ljust(max(_LABEL_WIDTH, len(label) + 1)) + value, width)
         for index, value in enumerate(values)
     ]
 
