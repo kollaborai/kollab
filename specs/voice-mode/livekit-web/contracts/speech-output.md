@@ -44,7 +44,10 @@ a safety boundary. If no `spoken_text` is present, a deterministic formatter
 creates it from visible text without modifying `display_text`.
 
 Formatter rules: remove Markdown/decorative symbols, spell numbers and common
-slang as spoken words, and preserve meaning. `SpeechAdapter` is the sole
+slang as spoken words, and preserve meaning. The formatter is
+`kollabor_voice.spoken_form.spoken_form` (backslash escapes, field tags, the
+bracketed voice context lines and markup removed; arrows said as "to"/"from").
+`SpeechEngine.stream` applies it again, so no TTS path can skip it. `SpeechAdapter` is the sole
 component that calls `SpeechEngine.stream`, streams TTS frames, and cancels audio.
 
 ## RESPONSE / PUBLICATION ORDER
