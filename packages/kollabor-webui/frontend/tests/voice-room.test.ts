@@ -252,3 +252,10 @@ test("only a page served from this computer can reach the voice room", async () 
   assert.ok(["localhost", "127.0.0.1", "[::1]"].every(roomReachable));
   assert.ok(!["10.0.0.7", "kollabor.ai", "192.168.1.20"].some(roomReachable));
 });
+
+test("the Parakeet setup error, and only it, offers the Install button", async () => {
+  const { needsParakeet } = await import("../src/voice/room-state.ts");
+  assert.ok(needsParakeet("Voice in the web UI needs Parakeet v3 to hear you, and it is not set up on this computer."));
+  assert.ok(!needsParakeet("Voice in the web UI needs Parakeet v3, which runs only on an Apple silicon Mac."));
+  assert.ok(!needsParakeet(null));
+});

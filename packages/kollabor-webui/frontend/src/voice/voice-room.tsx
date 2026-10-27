@@ -1,13 +1,14 @@
-import { SquareIcon } from "lucide-react";
-import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { Download, SquareIcon } from "lucide-react";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 import type { EngineApi } from "../api";
 import type { VoiceMode } from "../voice-mode";
 import { createLiveKitRoom } from "./livekit-room";
 import { VoiceRoomController } from "./room-controller";
-import { isActive, isInterrupting, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
+import { isActive, isInterrupting, needsParakeet, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
 import { voiceApi } from "./voice-api";
 
-type Ctx = { controller: VoiceRoomController; sessionId: string };
+type Ctx = { api: EngineApi; controller: VoiceRoomController; sessionId: string };
 const VoiceRoomContext = createContext<Ctx | null>(null);
 
 /** One LiveKit voice room for the open chat; leaving the chat stops it. */
@@ -21,7 +22,7 @@ export function VoiceRoomProvider({
   children: ReactNode;
 }) {
   const value = useMemo(
-    () => ({ controller: new VoiceRoomController(voiceApi(api), createLiveKitRoom), sessionId }),
+    () => ({ api, controller: new VoiceRoomController(voiceApi(api), createLiveKitRoom), sessionId }),
     [api, sessionId],
   );
   useEffect(() => () => void value.controller.stop("session_switch"), [value]);
@@ -57,6 +58,41 @@ const LABEL: Record<string, string> = {
   degraded: "Degraded",
   error: "Error",
 };
+
+/**
+ * Select Parakeet v3 for this device (the same save as Settings → Voice), then
+ * start voice again: that start downloads and installs it.
+ */
+function InstallParakeetButton({ ctx }: { ctx: Ctx }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const install = async () => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      const saved = await ctx.api.panelAction(ctx.sessionId, "voice", "save", {
+        target: "device",
+        changes: { stt_engine: "parakeet" },
+      });
+      if (!saved.ok) throw new Error(saved.errors?.stt_engine ?? saved.message ?? "Could not select Parakeet v3.");
+      void ctx.controller.start(ctx.sessionId, null);
+    } catch (reason) {
+      setFailed(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <Button type="button" size="xs" disabled={busy} onClick={() => void install()}>
+        <Download aria-hidden="true" />
+        {busy ? "Installing…" : "Install Parakeet v3"}
+      </Button>
+      <span>Downloads 2.5 GB once, then voice starts.</span>
+      {failed ? <span className="text-destructive">{failed}</span> : null}
+    </div>
+  );
+}
 
 const seconds = (ms: number | null) => (ms == null ? null : `${(ms / 1000).toFixed(1)}s`);
 
@@ -165,6 +201,7 @@ export function VoiceRoomBar() {
           {room.error}
         </div>
       ) : null}
+      {!active && needsParakeet(room.error) ? <InstallParakeetButton ctx={ctx} /> : null}
       {active && notice ? (
         <div role="note" data-slot="aui_voice-room-remote">
           {notice}

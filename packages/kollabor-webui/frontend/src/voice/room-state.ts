@@ -147,3 +147,6 @@ export function reduceVoiceEvent(s: VoiceRoomState, e: VoiceEventEnvelope): Voic
       return { ...s, cursor };
   }
 }
+
+/** The engine's "Parakeet is not set up" error (speech_adapter.map_readiness): offer Install. */
+export const needsParakeet = (error: string | null) => !!error?.includes("needs Parakeet v3 to hear you");

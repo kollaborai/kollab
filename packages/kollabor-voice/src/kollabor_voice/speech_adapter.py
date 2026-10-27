@@ -96,10 +96,19 @@ def map_readiness(status: dict) -> SpeechReadiness:
         # Never claim Parakeet when Whisper would run.
         if stt.get("state") == "loading":
             return SpeechReadiness("starting", str(stt.get("detail", "")))
+        from .speech_settings import apple_silicon
+
+        if not apple_silicon():
+            return SpeechReadiness(
+                "error",
+                "Voice in the web UI needs Parakeet v3, which runs only on an "
+                "Apple silicon Mac.",
+            )
+        # The web UI keys its Install Parakeet v3 button on this sentence (voice-room.tsx).
         return SpeechReadiness(
             "error",
-            "Voice in the web UI transcribes with Parakeet v3. Choose it as the "
-            "Transcription Engine in Settings > Voice, then turn voice on again.",
+            "Voice in the web UI needs Parakeet v3 to hear you, and it is not "
+            "set up on this computer.",
             retryable=True,
         )
     if stt.get("state") == "error" or tts.get("state") == "error":
