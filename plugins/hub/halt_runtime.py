@@ -133,7 +133,16 @@ def clear_malformed_halt(root: Path | None = None) -> str:
             hf.read()
             return ""
         except OSError:
-            return ""
+            if not (hf.path.is_dir() and not hf.path.is_symlink()):
+                return ""
+            # F14: a directory named halt.json holds every folder and never reads; the typed resume --local
+            # is the person's confirmation, so move it aside and start an empty book
+            bad = hf.path.with_name(hf.path.name + ".bad")
+            if bad.exists() or bad.is_symlink():
+                bad = hf.path.with_name(f"{hf.path.name}.bad.{time.time_ns()}")
+            os.replace(hf.path, bad)
+            hf.write({"networks": {}, "stopped": []})
+            return f"halt.json was a directory; kept as {bad.name} and started an empty one."
         except (ValueError, AttributeError, TypeError):
             pass
         try:
@@ -893,8 +902,9 @@ async def fallback_stop(
                 if not pid_ok(p.pid) or p.pid in protect or args is None or _never_swept(args, p):
                     continue
                 rec = by_pid.get(p.pid)
-                folder = str((rec or {}).get("project") or p.cwd or "/nonexistent-folder")
-                if machine or in_scope(folder, scopes) or in_scope(p.cwd or "/nonexistent-folder", scopes):
+                # F14: scope by the process's own folder; presence's project is writable by anything of
+                # this user, so it never pulls an out-of-scope kollab in. No folder: machine scope only.
+                if machine or (p.cwd and in_scope(p.cwd, scopes)):
                     targets[p.pid] = rec or {"identity": f"pid {p.pid}", "pid": p.pid, "project": p.cwd}
             except Exception:  # noqa: BLE001
                 continue
@@ -911,7 +921,7 @@ async def fallback_stop(
             name = rec.get("identity", pid)
             if not _running(pid):
                 out.append((rec, True, f"stopped {name} (by pid)"))
-            elif starts[pid] is not None and identify(pid) == starts[pid]:
+            elif starts[pid] is not None and _same_start(identify(pid), starts[pid]):
                 try:
                     os.kill(pid, signal.SIGKILL)
                     out.append((rec, True, f"stopped {name} (by pid, SIGKILL)"))
@@ -924,6 +934,13 @@ async def fallback_stop(
         logger.exception("halt listener: fallback stop failed")
         out.append(({"identity": "fallback"}, False, f"fallback stop failed: {type(error).__name__}"))
     return out
+
+
+def _same_start(now: float | None, before: float) -> bool:
+    """F14: ``ps`` start times of one process drift by a second between reads; allow ``REUSE_SLACK``."""
+    from .network_halt import REUSE_SLACK
+
+    return now is not None and abs(now - before) <= REUSE_SLACK
 
 
 def _alive(pid: int) -> bool:
@@ -1185,6 +1202,8 @@ class HaltListener:
         net, scope, folder = order.get("network"), order.get("scope"), order.get("folder")
         if not isinstance(net, str) or not (scope == "machine" or isinstance(scope, list)):
             return {"ok": False, "error": "invalid hand-off"}
+        if isinstance(scope, list) and not all(isinstance(f, str) for f in scope):
+            scope = "machine"  # F14: a malformed folder list holds the machine, never raises
         # a sweep needs a halt recorded in this network's book (halt_act or a merged peer order)
         book = ((read_halt_held(self.root).get("networks") or {}).get(net))
         active = _book_active_hashes(net, book)
@@ -1235,9 +1254,10 @@ class HaltListener:
         procs: list = []
         sweep_error = ""
         try:
+            # F14: read the process table before anything that can fail, so the fallback judges it all
+            procs = self._processes() if self._processes else _read_candidates()
             if stop is None:
                 raise RuntimeError("no way to stop an agent")
-            procs = self._processes() if self._processes else _read_candidates()
             # injected process lists (tests) get no live tree: a real ps would name real processes
             tree = None if self._processes else process_tree()
             info = None if self._processes else process_info()

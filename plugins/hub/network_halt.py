@@ -779,6 +779,7 @@ def revocation_ok(record: Any, network: str) -> bool:
 
 
 REVOKE_SETTLE = 120  # seconds after THIS machine first held two signatures for a key before it applies it
+REVOKE_PAIR = 120  # F14: a lone signature older than this (on THIS machine's clock) never pairs again
 
 
 def revocations_to_apply(
@@ -800,10 +801,14 @@ def revocations_to_apply(
     target, counted after the keys before it are gone (``recount(removed)``), and is skipped when it
     would leave fewer than two counting machines.
 
-    ``seen`` (optional, kept by the caller) maps a key to when THIS machine first held two signatures
-    for it, by its own clock; a key applies only ``REVOKE_SETTLE`` seconds after that, and a key that
-    has not settled holds back every key after it, so crossing revocations that reach a machine within
-    the window in any order or batch give one answer. Without ``seen`` nothing waits.
+    F14: ``seen`` (optional, kept by the caller) maps ``"<key>|<machine>"`` to when THIS machine first
+    held that signature, by its own clock. A key completes when a signature arrives within
+    ``REVOKE_PAIR`` of an earlier one; a lone signature older than that is stale and never pairs
+    again, so an old one-signature record cannot be revived later to flip an outcome. Keys are taken by
+    completion time; keys completing within ``REVOKE_SETTLE`` of each other form one batch ordered by
+    key, so crossing revocations that reach a machine within the window in any order give one answer.
+    A batch applies once its last completion is ``REVOKE_SETTLE`` old and holds back every later batch.
+    Without ``seen`` nothing waits and every key is one batch ordered by key.
     ``protected`` (this device's primary and the folder key that admitted it) only stops this machine
     applying a key; the order is unchanged. A key naming a machine key revokes every folder key bound
     to it. ``orders`` are halts this machine took: each ``revoke`` entry counts as a revocation record
@@ -827,15 +832,30 @@ def revocations_to_apply(
     def counting(removed: set[str]) -> set[str]:
         return set(recount(removed).counting) if recount else view.counting - removed
 
-    ready = sorted(key for key, t in signed.items() if len(t) >= 2)
-    if seen is not None:
-        for key in ready:
-            seen.setdefault(key, now)
+    done: dict[str, float] = {}  # key -> when it completed here
+    for key, machines in signed.items():
+        if seen is None:
+            if len(machines) >= 2:
+                done[key] = 0.0
+            continue
+        times = sorted(seen.setdefault(f"{key}|{m}", now) for m in machines)
+        pairs = [b for a, b in zip(times, times[1:]) if b - a <= REVOKE_PAIR]
+        if pairs:
+            done[key] = pairs[0]
+    batches: list[list[str]] = []
+    for key in sorted(done, key=lambda k: (done[k], k)):
+        if batches and done[key] - done[batches[-1][-1]] <= REVOKE_SETTLE:
+            batches[-1].append(key)
+        else:
+            batches.append([key])
+    ready: list[str] = []
+    for batch in batches:
+        if seen is not None and done[batch[-1]] + REVOKE_SETTLE > now:
+            break  # not settled here: neither this batch nor any later one applies yet
+        ready += sorted(batch)
     out: set[str] = set()
     removed: set[str] = set()
     for key in ready:
-        if seen is not None and seen[key] + REVOKE_SETTLE > now:
-            break  # not settled here: neither it nor any key after it applies yet
         target = view.machine_of(key) or key
         if target in removed:
             out.add(key)
@@ -1247,8 +1267,6 @@ def _backgrounded(
         return exes[pid]
 
     shells: dict[int, float] = {}
-    dead_owner: dict[int, int] = {}  # F13: a recorded shell that has exited -> the agent that recorded it
-    live_shells: dict[int, set[int]] = {}  # agent -> its recorded shells still alive as its children
     for row in tool_shells:
         try:
             pid, start, owner = row
@@ -1261,11 +1279,9 @@ def _backgrounded(
                     continue  # that pid is alive again as a later process: the shell's group is gone
                 if tree.get(pid, (0, 0, 0))[0] != owner:
                     continue  # a live tool shell is its agent's child; anything else was named by a forged row
-                live_shells.setdefault(owner, set()).add(pid)
-            elif pid in shells and pid in dead_owner and dead_owner[pid] != owner:
-                continue  # two agents claim one dead shell: at least one row is forged, the first stays
-            else:
-                dead_owner[pid] = owner
+            # F14: a dead shell's group or session is taken whole (F12's rule). F13 asked for a tag or a
+            # parent chain, but macOS hides /bin/* and /usr/bin/* env and orphans sit at pid 1, so every
+            # `nohup sleep &` survived. A forged row needs a same-user writer, already out of scope.
             shells[pid] = min(start, shells.get(pid, start))
         except (TypeError, ValueError, OverflowError, KeyError):
             continue
@@ -1294,7 +1310,6 @@ def _backgrounded(
         return int(tag) if tag.isdigit() and len(tag) < 9 else 0
 
     out: set[int] = set()
-    pending: dict[int, int] = {}  # F13: in a dead shell's group or session -> the agent that recorded it
     for pid, (ppid, pg, _sid_) in tree.items():
         try:
             if pid in guard or pid in unsafe or pid not in info:
@@ -1304,10 +1319,7 @@ def _backgrounded(
             if shells:
                 for key in (pg, _sid(pid, tree)):
                     if key in shells and key not in unsafe and int(started) >= int(shells[key]):
-                        if key in dead_owner:
-                            pending.setdefault(pid, dead_owner[key])
-                        else:
-                            hit = True
+                        hit = True
             if not hit and pid in known and orphan(ppid):
                 owner = tag_of(pid)
                 hit = owner in agents and owner in info and started >= info[owner][0]
@@ -1315,32 +1327,6 @@ def _backgrounded(
                 out.add(pid)
         except Exception as e:  # noqa: BLE001 - one odd process never stops the sweep
             logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
-    # F13: a row naming a group or session whose leader already exited cannot be checked against the
-    # agent's children, so a forged one could name anyone's leftovers. Such a member is taken only when
-    # its readable env tag names that agent, or its parent chain reaches a pid known to be that agent's
-    # (the agent, its live tool shells, or a member already taken this way).
-    mine = {owner: {owner, *live_shells.get(owner, ())} for owner in set(pending.values())}
-    grew = True
-    while grew:
-        grew = False
-        for pid, owner in list(pending.items()):
-            try:
-                ok = tag_of(pid) == owner
-                cur, seen = tree[pid][0], {pid}
-                while not ok and cur > 1 and cur not in seen:
-                    ok = cur in mine[owner]
-                    seen.add(cur)
-                    cur = tree.get(cur, (0, 0, 0))[0]
-                if not ok:
-                    continue
-                del pending[pid]
-                mine[owner].add(pid)
-                grew = True
-                if not spared(pid):
-                    out.add(pid)
-            except Exception as e:  # noqa: BLE001
-                pending.pop(pid, None)
-                logger.warning("halt sweep: skipped pid %r (%s)", pid, type(e).__name__)
     return out
 
 

@@ -584,8 +584,8 @@ class NetworkControl:
         def recount(removed: set[str]) -> nh.Counting:
             return nh.count_machines(dataclasses.replace(roster, revoked_machines=set(removed)))
 
-        # F13/NEW-2a: the settle window runs on this machine's clock from when it first held two
-        # signatures for a key, never on a signer's issued_at
+        # F13/F14: the settle window runs on this machine's clock from when it first held each
+        # signature ("<key>|<machine>"), never on a signer's issued_at
         seen = self._fresh().setdefault("revoke_seen", {})
         if not isinstance(seen, dict) or not all(type(v) in (int, float) and math.isfinite(v) for v in seen.values()):
             seen = self._fresh()["revoke_seen"] = {}

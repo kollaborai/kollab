@@ -161,7 +161,8 @@ def test_two_field_rows_are_rejected():
 
 
 def test_forged_row_naming_a_dead_leader_takes_only_the_agents_own():
-    """Group 200's leader exited: its members are taken only by the agent's tag or a parent chain through one."""
+    """Group 200's leader exited. F14 restores F12: every member started after the shell is taken, tagged or not
+    (macOS hides /bin/* env, so a tag rule let every `nohup sleep &` escape)."""
     agent = nh.Proc(100, 50, ["/opt/this-install/bin/kollab"], {}, "/work")
     tree = {50: (1, 50, 50), 100: (50, 100, 50), 201: (77, 200, 200), 202: (77, 200, 200), 203: (202, 200, 200),
             204: (77, 200, 200), 205: (204, 200, 200)}
@@ -171,14 +172,13 @@ def test_forged_row_naming_a_dead_leader_takes_only_the_agents_own():
              nh.Proc(204, 77, ["py"], {"KOLLAB_AGENT_PID": "999"}, "/w")]
     got = {p.pid for p in nh.select_sweep(procs, install=INSTALL, scopes=["machine"], agent_pids=[100],
                                           protect=set(), tree=tree, tool_shells=[(200, 1000.5, 100)], info=info)}
-    # 201: untagged, its parent is not the agent's; 204/205: another agent's tag
-    assert got == {100, 202, 203}
+    assert got == {100, 201, 202, 203, 204, 205}
 
 
 @posix_only
 def test_a_dead_shells_untagged_child_is_taken_through_a_tagged_parent(tmp_path):
-    """Real processes: the tool shell exits; its python (tagged, env readable) and that python's /bin/sleep child
-    (env hidden on macOS) are both taken; an untagged sleep left in the same group is not."""
+    """Real processes: the tool shell exits; its python (tagged), that python's /bin/sleep child (env hidden on
+    macOS) and an untagged python left in the same group are all taken (F14)."""
     agent = subprocess.Popen(["/bin/sleep", "120"])
     time.sleep(1.1)
     pidfile = tmp_path / "py.pid"
@@ -205,7 +205,7 @@ def test_a_dead_shells_untagged_child_is_taken_through_a_tagged_parent(tmp_path)
             [me, *procs], install=INSTALL, scopes=["machine"], agent_pids=[agent.pid],
             protect=nh.ancestors(os.getpid()), tree=hr.process_tree(), tool_shells=[(shell.pid, t0, agent.pid)],
             info=hr.process_info())}
-        assert {py, child} <= got and not untagged & got
+        assert group <= got
     finally:
         for pid in started:
             try:
@@ -323,7 +323,8 @@ def test_control_keeps_first_seen_on_its_own_clock(tmp_path, monkeypatch):
     clock = [5_000_000.0]
     monkeypatch.setattr(nh.time, "time", lambda: clock[0])
     assert f.revocations_to_apply() == set()
-    assert NetworkControl(f.client, machine=f.machine).data["revoke_seen"] == {dk: 5_000_000.0}  # persisted
+    kept = NetworkControl(f.client, machine=f.machine).data["revoke_seen"]  # persisted, one per signature (F14)
+    assert len(kept) == 2 and all(k.startswith(dk + "|") and v == 5_000_000.0 for k, v in kept.items())
     clock[0] += nh.REVOKE_SETTLE
     assert dk in f.revocations_to_apply()
 

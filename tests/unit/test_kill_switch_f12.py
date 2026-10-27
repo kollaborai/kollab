@@ -351,7 +351,7 @@ def test_new_2_a_revocation_waits_for_the_settle_window():
     recount = _recount(net)
     seen: dict = {}  # F13: counted from when this machine first held both signatures, not from issued_at
     assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000, seen=seen) == set()
-    assert seen == {d.fk(): 7000}
+    assert sorted(seen.values()) == [7000, 7000] and all(k.startswith(d.fk() + "|") for k in seen)
     assert nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE - 1,
                                    seen=seen) == set()
     assert d.fk() in nh.revocations_to_apply(recs, recount(set()), recount=recount, now=7000 + nh.REVOKE_SETTLE,
