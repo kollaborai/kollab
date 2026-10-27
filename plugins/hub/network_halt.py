@@ -1021,22 +1021,6 @@ def _never_swept(args: list[str], proc: Proc) -> bool:
     return False
 
 
-def _is_tmux(proc: Proc) -> bool:
-    return bool(proc.argv) and Path(proc.argv[0]).name.lower().startswith(("tmux", "screen"))
-
-
-def _under_multiplexer(pid: int, known: dict[int, Proc], tree: dict[int, tuple[int, int, int]]) -> bool:
-    """R6-2: a tmux/screen server is an ancestor, so this is a pane Marco opened, whatever env tag it inherited."""
-    cur = tree.get(pid, (0, 0, 0))[0]
-    for _ in range(64):
-        if cur <= 1 or cur not in tree:
-            return False
-        if cur in known and _is_tmux(known[cur]):
-            return True
-        cur = tree[cur][0]
-    return False
-
-
 def select_sweep(
     procs: Iterable[Proc],
     *,
@@ -1055,7 +1039,6 @@ def select_sweep(
     machine_wide = "machine" in scopes
     protected = set(protect)
     chosen: dict[int, Proc] = {}
-    stopped_agents: set[str] = {str(p) for p in agent_pids}
     for p in procs:
         if p.pid in protected:
             continue
@@ -1067,22 +1050,9 @@ def select_sweep(
             continue
         if machine_wide or in_scope(p.cwd, scopes):
             chosen[p.pid] = p
-    stopped_agents |= {str(pid) for pid in chosen}
-    known_procs = {p.pid: p for p in procs}
-
-    for p in procs:
-        if p.pid in chosen or p.pid in protected or _is_tmux(p):
-            continue
-        # KOLLAB_AGENT_PID: a tool shell's children; KOLLAB_OWNER_PID: a /terminal pane (it keeps no tool-shell tag)
-        tag = p.env.get("KOLLAB_AGENT_PID", "") or p.env.get("KOLLAB_OWNER_PID", "")
-        if tag and tag in stopped_agents:
-            # R6-2: the tag is inherited by whatever a tool shell starts (a default tmux server's later panes);
-            # a pane under a multiplexer is trusted only when it is also the agent's own ppid descendant
-            if tree and _under_multiplexer(p.pid, known_procs, tree) and p.pid not in _ppid_closure(
-                set(chosen), tree, protected
-            ):
-                continue
-            chosen[p.pid] = p
+    # R6-2/F10: an env tag (KOLLAB_AGENT_PID, KOLLAB_OWNER_PID) is never trusted on its own: a tagged orphan
+    # (ssh -fN, nohup) or a multiplexer pane (tmux, screen, zellij, abduco, dtach) is not the agent's. Only
+    # its ppid descendants are swept (below); with no process tree (ps failed) nothing tagged-only is.
     if tree:
         known = {p.pid: p for p in procs}
         for pid in _tree_members(set(chosen), tree, protected):

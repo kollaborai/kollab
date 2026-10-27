@@ -7,10 +7,12 @@ A real-child test spawns its own throwaway `sleep` and kills it itself.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -65,14 +67,35 @@ def test_sweep_reaches_a_tool_child_with_no_kollab_in_its_command_line(tmp_path)
     sleeper = [py, "-c", "import time; time.sleep(60)"]
     assert "kollab" not in " ".join(sleeper)
     (tmp_path / "kollabor").mkdir()
-    (tmp_path / "main.py").write_text("import time; time.sleep(60)")
-    agent = subprocess.Popen([py, str(tmp_path / "main.py")], cwd=tmp_path, start_new_session=True)
-    tool = subprocess.Popen(
-        sleeper,
-        cwd=tmp_path,
-        start_new_session=True,
-        env={**os.environ, "KOLLAB_TOOL_SHELL": "1", "KOLLAB_AGENT_PID": str(agent.pid)},
+    # the agent starts the tool child itself (F10: a tool child is found by its parent chain, not its tag)
+    (tmp_path / "main.py").write_text(
+        "import os, subprocess, sys, time\n"
+        f"t = subprocess.Popen({sleeper!r}, start_new_session=True,\n"
+        "    env={**os.environ, 'KOLLAB_TOOL_SHELL': '1', 'KOLLAB_AGENT_PID': str(os.getpid())})\n"
+        "print(t.pid, flush=True)\n"
+        "time.sleep(60)\n"
     )
+    agent = subprocess.Popen([py, str(tmp_path / "main.py")], cwd=tmp_path, start_new_session=True,
+                             stdout=subprocess.PIPE, text=True)
+
+    class _Tool:  # the agent's child: signalled and polled by pid, never waited on here
+        pid = int(agent.stdout.readline())
+
+        def wait(self, timeout=None):
+            deadline = time.monotonic() + (timeout or 0)
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(self.pid, 0)
+                except ProcessLookupError:
+                    return 0
+                time.sleep(0.05)
+            return None
+
+        def kill(self):
+            with contextlib.suppress(OSError):
+                os.kill(self.pid, 9)
+
+    tool = _Tool()
     try:
         assert os.getpgid(tool.pid) == tool.pid != os.getpgid(agent.pid)
         install = nh.Install(prefix=sys.base_prefix)
@@ -88,14 +111,14 @@ def test_sweep_reaches_a_tool_child_with_no_kollab_in_its_command_line(tmp_path)
         asyncio.run(hr.sweep(
             [[str(tmp_path)]], procs=procs, stop=stop, protect={os.getpid()},
             agents=[{"identity": "x", "pid": agent.pid, "project": str(tmp_path)}],
-            install=nh.Install(prefix=sys.base_prefix),
+            install=nh.Install(prefix=sys.base_prefix), tree=hr.process_tree(),
         ))
         assert tool.pid in stopped and agent.pid in stopped
         assert tool.wait(timeout=5) is not None
     finally:
-        for c in (agent, tool):
-            c.kill()
-            c.wait()
+        tool.kill()
+        agent.kill()
+        agent.wait()
 
 
 # ---------------------------------------------------------------- S1

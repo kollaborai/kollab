@@ -48,7 +48,8 @@ def test_r6_2_an_agent_started_tool_child_with_the_tag_is_still_swept():
     child = nh.Proc(120, 100, ["python", "srv.py"], {"KOLLAB_AGENT_PID": "100"}, "/work")
     orphan = nh.Proc(130, 1, ["python", "srv.py"], {"KOLLAB_AGENT_PID": "100"}, "/work")  # setsid daemon
     tree = {100: (50, 100, 50), 120: (100, 120, 120), 130: (1, 130, 130)}
-    assert _sweep(tree, [agent, child, orphan]) == {100, 120, 130}
+    # F10: a tagged orphan is no longer trusted on the tag alone (ssh -fN, nohup, a multiplexer server)
+    assert _sweep(tree, [agent, child, orphan]) == {100, 120}
 
 
 def test_r6_3_resume_local_clears_only_after_the_act_and_never_a_good_book(tmp_path, monkeypatch):

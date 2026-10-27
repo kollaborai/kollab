@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import fcntl
 import json
 import logging
@@ -119,8 +120,9 @@ def read_halt_held(root: Path | None = None) -> dict[str, Any]:
 def clear_malformed_halt(root: Path | None = None) -> str:
     """F7/R6-3: ``resume --local`` on a halt.json that cannot be read.
 
-    A transient OSError touches nothing. A book whose only defect is an odd scope keeps everything else (the odd
-    scope entries are dropped). Anything else unparseable is kept as ``halt.json.bad`` and an empty one started.
+    A transient OSError touches nothing. A book whose only defect is an odd scope keeps everything else (F10: an
+    odd scope becomes ``"machine"``, so it still holds; dropping it would lift that network unconfirmed).
+    Anything else unparseable is kept as ``halt.json.bad`` and an empty one started.
     Returns "" when there was nothing to fix, else a line for the person.
     """
     from .network_halt import HaltFile
@@ -139,12 +141,13 @@ def clear_malformed_halt(root: Path | None = None) -> str:
             scopes = data["scopes"]
             if not all(isinstance(data.get(k, {}), dict) for k in ("scopes", "networks", "folders")):
                 raise ValueError
-            good = {n: v for n, v in scopes.items()
-                    if v == "machine" or (isinstance(v, list) and v and all(isinstance(r, str) for r in v))}
-            data["scopes"] = good
+            fixed = {n: v if v == "machine" or (isinstance(v, list) and v and all(isinstance(r, str) for r in v))
+                     else "machine" for n, v in scopes.items()}
+            odd = sum(fixed[n] is not scopes[n] for n in scopes)
+            data["scopes"] = fixed
             hf.write(data)
             hf.read()
-            return f"halt.json had {len(scopes) - len(good)} odd scope entries; dropped them, kept the rest."
+            return f"halt.json had {odd} odd scope entries; each now holds the whole machine, kept the rest."
         except OSError:
             return ""
         except (ValueError, KeyError, AttributeError, TypeError):
@@ -156,11 +159,68 @@ def clear_malformed_halt(root: Path | None = None) -> str:
     return f"halt.json could not be read; kept as {bad.name} and started an empty one."
 
 
+# F10/NEW-1: the process that asked for a control act, set by the socket that carried it (halt.sock, the hub
+# socket's connect_proxy); None means this process asked (a TUI's own /connect halt), 0 means unknown.
+HALT_CALLER: contextvars.ContextVar[int | None] = contextvars.ContextVar("halt_caller", default=None)
+
+
+def caller_refusal(pid: int | None) -> str:
+    """The refusal line when ``pid`` is, or descends from, an agent or its tool shell, else "".
+
+    Decided by the ppid chain, not by what the caller says: macOS hides the environment of system binaries
+    (``nc``, ``zsh``), so an env check alone lets ``nc -U halt.sock`` from a tool shell through. An unknown
+    caller, or one already gone, is refused (fail closed).
+    """
+    from .network_halt import GUARD_REFUSAL, TOOL_SHELL_VARS, ancestors, read_process
+
+    if not pid or pid < 0:
+        return GUARD_REFUSAL
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:  # gone before its chain could be read (send and exit): refuse
+        return GUARD_REFUSAL
+    except PermissionError:
+        pass
+    chain = ancestors(pid)
+    try:
+        agent_pids = {int(a.get("pid") or 0) for a in _live_agents()}
+    except Exception:  # presence unreadable: the chain cannot be cleared
+        return GUARD_REFUSAL
+    if (chain - {pid}) & agent_pids:
+        return GUARD_REFUSAL
+    for p in chain:
+        try:
+            proc = read_process(p, with_cwd=False)
+        except (OSError, ValueError):
+            proc = None
+        if proc is not None and any(proc.env.get(v) for v in TOOL_SHELL_VARS):
+            return GUARD_REFUSAL
+    return ""
+
+
+def peer_pid(sock: Any) -> int:
+    """The pid on the other end of a unix socket (LOCAL_PEERPID / SO_PEERCRED), 0 when it cannot be read."""
+    import socket
+    import struct
+
+    if sock is None or getattr(sock, "family", None) != socket.AF_UNIX:
+        return 0
+    try:
+        if sys.platform == "darwin":
+            return int(sock.getsockopt(0, 0x002))  # SOL_LOCAL, LOCAL_PEERPID
+        return int(struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0])
+    except (OSError, ValueError, struct.error):
+        return 0
+
+
 def tool_shell_refusal() -> str:
-    """The refusal line when this process runs inside an agent's tool shell, else ""."""
+    """The refusal line when the caller of a control act is an agent or its tool shell, else ""."""
     from .network_halt import GUARD_REFUSAL
 
-    return GUARD_REFUSAL if os.environ.get("KOLLAB_TOOL_SHELL") else ""
+    caller = HALT_CALLER.get()
+    if caller is None and os.environ.get("KOLLAB_TOOL_SHELL"):  # this process (the OS copy is its start env)
+        return GUARD_REFUSAL
+    return caller_refusal(os.getpid() if caller is None else caller)
 
 
 def update_halt(fn: Callable[[dict[str, Any]], Any], root: Path | None = None) -> Any:
@@ -690,7 +750,11 @@ async def sweep(
 
 
 def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
-    """``os.kill`` that takes the whole process group, unless it holds a protected pid."""
+    """``os.kill`` that takes the whole process group when ``pid`` leads it, unless it holds a protected pid.
+
+    F10/R6-1: a pid that does not lead its group (an agent in a login shell's or a launcher's group) is
+    signalled alone; its group belongs to someone else.
+    """
     protect = set(protect)
 
     def kill(pid: int, sig: int) -> None:
@@ -705,7 +769,7 @@ def group_kill(protect: Iterable[int]) -> Callable[[int, int], None]:
                 guarded.add(os.getpgid(p))
             except OSError:  # it died since the check
                 continue
-        if pgid > 1 and pgid != mine and pgid not in guarded:
+        if pgid == pid and pgid > 1 and pgid != mine and pgid not in guarded:
             os.killpg(pgid, sig)
         else:
             os.kill(pid, sig)
@@ -988,24 +1052,8 @@ class HaltListener:
 
 
 def _peer_is_tool_shell(writer: Any) -> bool:
-    """Whether the process on the other end of a halt.sock connection runs in an agent's tool shell."""
-    import socket
-    import struct
-
-    sock = writer.get_extra_info("socket")
-    if sock is None:
-        return False
-    try:
-        if sys.platform == "darwin":
-            pid = sock.getsockopt(0, 0x002)  # SOL_LOCAL, LOCAL_PEERPID
-        else:
-            pid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
-        from .network_halt import read_process
-
-        proc = read_process(int(pid), with_cwd=False)
-    except (OSError, ValueError, struct.error):
-        return False
-    return bool(proc and proc.env.get("KOLLAB_TOOL_SHELL"))
+    """Whether the caller on a halt.sock connection is an agent, its tool shell, or unknown (F10/NEW-1)."""
+    return bool(caller_refusal(peer_pid(writer.get_extra_info("socket"))))
 
 
 def _book_active_hashes(net: str, book: Any) -> set[str]:
@@ -1265,7 +1313,7 @@ async def cli_control(subcmd: str, rest: list[str], *, folder: str | None = None
     """``kollab --hub halt|resume``. Returns the exit code; prints the spec's lines."""
     from .network_halt import ancestors, network_control_refusal
 
-    refusal = network_control_refusal()
+    refusal = network_control_refusal() or tool_shell_refusal()  # F10: env, tty, then the ppid chain
     if refusal:
         print(refusal)
         return 1

@@ -514,8 +514,10 @@ def test_sweep_takes_agent_children_but_not_tmux(install):
     orphan = proc(43, ["claude"], env={"KOLLAB_AGENT_PID": "40"}, ppid=1)
     tmux = proc(44, ["tmux", "new"], env={"KOLLAB_AGENT_PID": "40"}, ppid=1)
     stranger = proc(45, ["vim"], env={"KOLLAB_AGENT_PID": "999"}, ppid=1)
-    got = nh.select_sweep([agent, child, grandchild, orphan, tmux, stranger], install=install, scopes=[["/work/a"]])
-    assert {p.pid for p in got} == {40, 41, 42, 43}
+    procs = [agent, child, grandchild, orphan, tmux, stranger]
+    tree = {p.pid: (p.ppid, p.pid, p.pid) for p in procs}
+    got = nh.select_sweep(procs, install=install, scopes=[["/work/a"]], tree=tree)
+    assert {p.pid for p in got} == {40, 41, 42}  # F10: the tag alone (orphan, tmux) is not trusted
 
 
 def test_presence_agents_are_swept_even_without_argv_match(install):
@@ -798,9 +800,10 @@ def test_terminal_session_processes_of_a_stopped_agent_are_swept(install):
     """/terminal panes carry KOLLAB_OWNER_PID (not the tool-shell tag, so a person's pane keeps its controls)."""
     py = f"{install.prefix}/bin/python"
     agent = proc(60, [py, "-m", "kollabor_cli_main"], ppid=1)
-    pane = proc(61, ["npm", "run", "dev"], env={"KOLLAB_OWNER_PID": "60"}, ppid=1)
+    pane = proc(61, ["npm", "run", "dev"], env={"KOLLAB_OWNER_PID": "60"}, ppid=60)  # a Popen child of the agent
     other = proc(62, ["npm", "run", "dev"], env={"KOLLAB_OWNER_PID": "999"}, ppid=1)
-    got = nh.select_sweep([agent, pane, other], install=install, scopes=[["/work/a"]])
+    tree = {p.pid: (p.ppid, p.pid, p.pid) for p in (agent, pane, other)}
+    got = nh.select_sweep([agent, pane, other], install=install, scopes=[["/work/a"]], tree=tree)
     assert {p.pid for p in got} == {60, 61}
 
 

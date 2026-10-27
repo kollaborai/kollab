@@ -86,9 +86,6 @@ KNOCK_ACTIONS = frozenset(
     }
 )
 LINK_RETRY_SECONDS = 60
-CONTROL_ACTIONS = frozenset(
-    {"halt", "propose_resume", "confirm_resume", "resume_local", "withdraw", "confirm_revoke"}
-)
 _CODE_GROUP = "[0-9A-HJKMNP-TV-Z]{4}"
 _SHORT_CODE_SHAPE = re.compile(rf"{_CODE_GROUP}-{_CODE_GROUP}(?:-{_CODE_GROUP}-{_CODE_GROUP}-{_CODE_GROUP})?\Z")
 _ENROLLMENT_ERRORS = {
@@ -2917,9 +2914,10 @@ class RelayAgentBridge:
 
     async def hub_halt_act(self, action: str, payload: dict | None = None) -> dict:
         from .halt_runtime import tool_shell_refusal
-        from .network_halt import HaltError, require_confirmed
+        from .network_halt import CONFIRMED_ACTIONS, HaltError, require_confirmed
 
-        if action in CONTROL_ACTIONS and tool_shell_refusal():  # an agent's shell never drives the controls
+        # F10/NEW-1: every act that needs a person (roster acts and counting included), judged by the caller
+        if action in CONFIRMED_ACTIONS and tool_shell_refusal():  # an agent's shell never drives the controls
             raise RelayError(tool_shell_refusal())
         payload = dict(payload or {})
         try:
