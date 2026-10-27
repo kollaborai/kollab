@@ -101,14 +101,12 @@ def map_readiness(status: dict) -> SpeechReadiness:
         if not apple_silicon():
             return SpeechReadiness(
                 "error",
-                "Voice in the web UI needs Parakeet v3, which runs only on an "
-                "Apple silicon Mac.",
+                "Voice needs an Apple silicon Mac to hear you.",
             )
-        # The web UI keys its Install Parakeet v3 button on this sentence (voice-room.tsx).
+        # The web UI keys its Install speech model button on this sentence (voice-room.tsx).
         return SpeechReadiness(
             "error",
-            "Voice in the web UI needs Parakeet v3 to hear you, and it is not "
-            "set up on this computer.",
+            "Voice needs a speech model on this computer.",
             retryable=True,
         )
     if stt.get("state") == "error" or tts.get("state") == "error":

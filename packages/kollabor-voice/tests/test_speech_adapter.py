@@ -74,11 +74,11 @@ def test_readiness_maps_download_progress_and_refuses_whisper():
     with patch("kollabor_voice.speech_settings.apple_silicon", return_value=True):
         refused = map_readiness(whisper)  # never claim Parakeet
     assert refused.state == "error" and refused.retryable
-    assert "needs Parakeet v3 to hear you" in refused.detail  # voice-room.tsx keys on it
+    assert "needs a speech model on this computer" in refused.detail  # voice-room.tsx keys on it
     with patch("kollabor_voice.speech_settings.apple_silicon", return_value=False):
         intel = map_readiness(whisper)
     assert intel.state == "error" and "Apple silicon" in intel.detail
-    assert "to hear you" not in intel.detail  # no Install button where it cannot run
+    assert "speech model" not in intel.detail  # no Install button where it cannot run
     downloading = {
         "state": "downloading",
         "detail": "parakeet / model.safetensors",

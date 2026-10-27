@@ -5,7 +5,7 @@ import type { EngineApi } from "../api";
 import type { VoiceMode } from "../voice-mode";
 import { createLiveKitRoom } from "./livekit-room";
 import { VoiceRoomController } from "./room-controller";
-import { isActive, isInterrupting, needsParakeet, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
+import { isActive, isInterrupting, needsSpeechModel, remoteNotice, roomReachable, type VoiceRoomState } from "./room-state";
 import { voiceApi } from "./voice-api";
 
 type Ctx = { api: EngineApi; controller: VoiceRoomController; sessionId: string };
@@ -63,7 +63,7 @@ const LABEL: Record<string, string> = {
  * Select Parakeet v3 for this device (the same save as Settings → Voice), then
  * start voice again: that start downloads and installs it.
  */
-function InstallParakeetButton({ ctx }: { ctx: Ctx }) {
+function InstallSpeechModelButton({ ctx }: { ctx: Ctx }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const install = async () => {
@@ -84,11 +84,10 @@ function InstallParakeetButton({ ctx }: { ctx: Ctx }) {
   };
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
-      <Button type="button" size="xs" disabled={busy} onClick={() => void install()}>
+      <Button type="button" size="sm" disabled={busy} title="Parakeet v3" onClick={() => void install()}>
         <Download aria-hidden="true" />
-        {busy ? "Installing…" : "Install Parakeet v3"}
+        {busy ? "Installing…" : "Install speech model (2.5 GB, one time)"}
       </Button>
-      <span>Downloads 2.5 GB once, then voice starts.</span>
       {failed ? <span className="text-destructive">{failed}</span> : null}
     </div>
   );
@@ -146,6 +145,8 @@ export function VoiceRoomBar() {
   const active = isActive(room);
   if (!active && !room.error) return null;
   const notice = remoteNotice(room);
+  // A fixable setup step reads as a notice with a button, not as a red error.
+  const setupStep = !active && needsSpeechModel(room.error);
   const interrupting = isInterrupting(room);
   const dl = room.download;
   const latency = latencyText(room);
@@ -165,7 +166,7 @@ export function VoiceRoomBar() {
             <SquareIcon className="size-3.5 fill-current" />
           </button>
         ) : null}
-        {active || room.error ? (
+        {active || (room.error && !setupStep) ? (
           <>
             <span className="shrink-0 font-medium text-foreground" data-slot="aui_voice-room-state">
               {interrupting ? "Interrupting" : (LABEL[room.state] ?? room.state)}
@@ -197,11 +198,17 @@ export function VoiceRoomBar() {
         </div>
       ) : null}
       {room.error ? (
-        <div role="alert" className="text-destructive">
-          {room.error}
-        </div>
+        setupStep ? (
+          <div role="note" data-slot="aui_voice-room-setup">
+            {room.error}
+          </div>
+        ) : (
+          <div role="alert" className="text-destructive">
+            {room.error}
+          </div>
+        )
       ) : null}
-      {!active && needsParakeet(room.error) ? <InstallParakeetButton ctx={ctx} /> : null}
+      {setupStep ? <InstallSpeechModelButton ctx={ctx} /> : null}
       {active && notice ? (
         <div role="note" data-slot="aui_voice-room-remote">
           {notice}

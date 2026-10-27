@@ -25,11 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about workspaces" and PhoneLink "How It Works" links are gone. Hovering
   Manage Profiles, the workspace picker's Use button or PhoneLink's connection
   line shows a small info icon, and after a moment a card says what it does.
+  On a touch screen the icon is always shown and a tap on it opens the card.
+  The cards open below their control so they never cover the text they explain.
   The sidebar's Learn button still opens the Learn topics.
-- Voice in the web UI that needs Parakeet v3 no longer says to look in
-  Settings: its message has an Install Parakeet v3 button that selects it for
-  this device and starts voice again, which downloads it. On a Mac without
-  Apple silicon it says Parakeet cannot run there.
+- Voice in the web UI with no speech model yet no longer says to look in
+  Settings: it says "Voice needs a speech model on this computer." as a plain
+  notice, with an "Install speech model (2.5 GB, one time)" button that selects
+  Parakeet v3 for this device and starts voice again, which downloads it. On a
+  Mac without Apple silicon it says voice needs an Apple silicon Mac.
 - With an ACP profile, input from agent and skill generation and other
   internal callers goes through ACP admission instead of the native queue; an
   unavailable ACP is refused. Agent and skill generation, which need the

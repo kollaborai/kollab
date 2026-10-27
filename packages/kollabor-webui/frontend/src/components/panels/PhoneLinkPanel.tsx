@@ -381,6 +381,8 @@ function DesktopPhoneLinkPanel({ api, onOpenNetwork }: PhoneLinkPanelProps) {
         ) : null}
         <HoverHelp
           className="text-muted-foreground text-xs"
+          side="bottom"
+          align="start"
           text="Your phone reaches this computer through your Kollab network. No VPN app or server setup is needed."
         >
           <span>Uses your Kollab connection.</span>

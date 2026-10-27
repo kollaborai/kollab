@@ -609,7 +609,7 @@ export function AppSidebar({
                 </div>
               ) : null}
               <div className="bg-foreground/[0.04] flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
-                <HoverHelp text="Opens your saved profiles. A profile picks the provider, model and endpoint a new session talks to.">
+                <HoverHelp side="bottom" align="start" text="Opens your saved profiles. A profile picks the provider, model and endpoint a new session talks to.">
                   <Button
                     type="button"
                     variant="ghost"

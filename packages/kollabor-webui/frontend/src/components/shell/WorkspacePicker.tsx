@@ -194,6 +194,7 @@ export function WorkspacePicker({
         {listing ? (
           <HoverHelp
             className="w-full"
+            side="bottom"
             text="New sessions start in this folder. Each folder keeps its own sessions and local agents."
           >
             <Button
